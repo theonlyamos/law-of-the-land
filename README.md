@@ -30,16 +30,25 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 ### Using Docker
 
 1. Clone the repository
-2. Build the Docker image:
+2. Create a `.env.local` file in the root directory with the necessary environment variables:
+   ```
+   GROUNDX_API_KEY=your_groundx_api_key
+   OPENAI_API_KEY=your_openai_api_key
+   OPENAI_BASE_URL=https://api.openai.com/v1
+   HELICONE_API_KEY=your_helicone_api_key
+   ```
+3. Build the Docker image:
    ```
    docker build -t law-of-the-land .
    ```
-3. Run the Docker container:
+4. Run the Docker container, passing in the environment variables:
    ```
-   docker run -p 3000:3000 law-of-the-land
+   docker run -p 3000:3000 --env-file .env.local law-of-the-land
    ```
 
 The app will be available at `http://localhost:3000`.
+
+Note: Make sure to replace the placeholder values in the `.env` file with your actual API keys and URLs. Never commit this file to version control.
 
 ## Contributing
 
