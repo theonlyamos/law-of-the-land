@@ -14,7 +14,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 - **Frontend**: Next.js, React, TypeScript
 - **Styling**: Tailwind CSS
 - **AI Integration**: OpenAI API, GroundX API
-- **Deployment**: [Add deployment platform information]
+- **Deployment**: [Pending...]
 
 ## Getting Started
 
