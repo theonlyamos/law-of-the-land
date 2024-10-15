@@ -14,14 +14,32 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 - **Frontend**: Next.js, React, TypeScript
 - **Styling**: Tailwind CSS
 - **AI Integration**: OpenAI API, GroundX API
+- **Runtime**: Bun
+- **Containerization**: Docker
 - **Deployment**: [Pending...]
 
 ## Getting Started
 
+### Local Development
+
 1. Clone the repository
-2. Install dependencies: `npm install`
+2. Install dependencies: `bun install`
 3. Set up environment variables (see `.env.local`)
-4. Run the development server: `npm run dev`
+4. Run the development server: `bun run dev`
+
+### Using Docker
+
+1. Clone the repository
+2. Build the Docker image:
+   ```
+   docker build -t law-of-the-land .
+   ```
+3. Run the Docker container:
+   ```
+   docker run -p 3000:3000 law-of-the-land
+   ```
+
+The app will be available at `http://localhost:3000`.
 
 ## Contributing
 
