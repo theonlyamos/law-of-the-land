@@ -24,8 +24,15 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 
 1. Clone the repository
 2. Install dependencies: `bun install`
-3. Set up environment variables (see `.env.local`)
-4. Run the development server: `bun run dev`
+3. Set up environment variables (see `.env.example`)
+4. Create a `.env.local` file in the root directory with the necessary environment variables:
+   ```
+   GROUNDX_API_KEY=your_groundx_api_key
+   OPENAI_API_KEY=your_openai_api_key
+   OPENAI_BASE_URL=https://api.openai.com/v1
+   HELICONE_API_KEY=your_helicone_api_key
+   ```
+5. Run the development server: `bun run dev`
 
 ### Using Docker
 
