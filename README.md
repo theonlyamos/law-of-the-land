@@ -20,7 +20,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 
 1. Clone the repository
 2. Install dependencies: `npm install`
-3. Set up environment variables (see `.env.example`)
+3. Set up environment variables (see `.env.local`)
 4. Run the development server: `npm run dev`
 
 ## Contributing
@@ -29,8 +29,11 @@ We welcome contributions to Law of the Land! Please see our [Contributing Guidel
 
 ## License
 
-[Add license information]
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Contact
 
-[Add contact information or links to project communication channels]
+- GitHub: [theonlyamos](https://github.com/theonlyamos)
+- Email: theonlyamos@gmail.com
+- LinkedIn: [Amos Amissah](https://www.linkedin.com/in/amos-amissah-1b4626178/)
+- Twitter: [@theonlyamos](https://twitter.com/theonlyamos)
