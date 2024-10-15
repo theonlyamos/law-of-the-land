@@ -30,6 +30,9 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 ### Using Docker
 
 1. Clone the repository
+   ```
+   git clone https://github.com/theonlyamos/law-of-the-land.git
+   ```
 2. Create a `.env.local` file in the root directory with the necessary environment variables:
    ```
    GROUNDX_API_KEY=your_groundx_api_key
