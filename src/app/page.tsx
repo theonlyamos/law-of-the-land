@@ -21,7 +21,6 @@ export default function Home() {
         body: JSON.stringify({ query }),
       })
       const data = await response.json()
-      console.log(data)
       setResult(data)
     } catch (error) {
       console.error('Error:', error)
