@@ -11,6 +11,9 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState<boolean>(false)
 
   const onSubmit = async () => {
+    if (query.length === 0) {
+      return
+    }
     setIsLoading(true)
     try {
       const response = await fetch('/api/search', {
