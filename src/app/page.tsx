@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useState } from "react"
 import ReactMarkdown from 'react-markdown'
+import Image from 'next/image'
+import logo from './logo-transparent.png'  // Import the logo
 
 export default function Home() {
   const [query, setQuery] = useState<string>("")
@@ -35,15 +37,29 @@ export default function Home() {
 
   return (
     <div className="container mx-auto">
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="grid w-full max-w-3xl gap-2">
+      <div className="flex flex-col items-center justify-center min-h-screen">
+        <div className="grid w-full max-w-3xl gap-4">
+          <div className="flex justify-center mb-4">
+            <Image
+              src={logo}
+              alt="Law of the Land Logo"
+              width={200}
+              height={200}
+              priority
+            />
+          </div>
           <Textarea 
             placeholder="Type your query here." 
             onChange={(e) => setQuery(e.target.value)}
             value={query}
             disabled={isLoading}
+            className="h-32 resize-none" // Increased height and disabled resize
           />
-          <Button onClick={onSubmit} disabled={isLoading}>
+          <Button 
+            onClick={onSubmit} 
+            disabled={isLoading}
+            className="h-12 text-lg" // Increased height and font size
+          >
             {isLoading ? 'Searching...' : 'Search'}
           </Button>
           {result && (
