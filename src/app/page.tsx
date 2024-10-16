@@ -5,7 +5,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { useState } from "react"
 import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
-import logo from './logo-transparent.png'  // Import the logo
+import logo from './logo-transparent.png'
 
 export default function Home() {
   const [query, setQuery] = useState<string>("")
@@ -53,12 +53,12 @@ export default function Home() {
             onChange={(e) => setQuery(e.target.value)}
             value={query}
             disabled={isLoading}
-            className="h-32 resize-none" // Increased height and disabled resize
+            className="h-32 resize-none"
           />
           <Button 
             onClick={onSubmit} 
             disabled={isLoading}
-            className="h-12 text-lg" // Increased height and font size
+            className="h-12 text-lg"
           >
             {isLoading ? 'Searching...' : 'Search'}
           </Button>
