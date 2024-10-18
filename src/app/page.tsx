@@ -52,7 +52,7 @@ export default function Home() {
       </div>
       <div className="flex flex-col items-center justify-center min-h-screen">
         <div className="grid w-full max-w-3xl gap-4">
-          <div className="flex justify-center mb-4">
+          <div className="flex justify-center">
             <Image
               src={logo}
               alt="Law of the Land Logo"
@@ -61,6 +61,9 @@ export default function Home() {
               priority
             />
           </div>
+          <p className="text-md mb-3">
+            Law of the Land is an AI-powered legal assistant that transforms complex laws and regulations into clear, understandable answers. Simply ask a question about your rights or local laws, and get accurate responses backed by official legal documents.
+          </p>
           <Textarea 
             placeholder="Type your query here." 
             onChange={(e) => setQuery(e.target.value)}
