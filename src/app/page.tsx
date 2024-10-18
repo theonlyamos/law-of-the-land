@@ -20,14 +20,8 @@ export default function Home() {
     setResult('')
     setIsLoading(true)
     try {
-      const response = await fetch('/api/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query }),
-      })
-      const data = await response.json()
+      const response = await fetch(`https://ht7tue.buildship.run/api-search?query=${query}`)
+      const data = await response.text()
       setResult(data)
     } catch (error) {
       console.error('Error:', error)

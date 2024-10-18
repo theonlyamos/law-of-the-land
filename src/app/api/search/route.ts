@@ -42,7 +42,7 @@ const ragSearch = async (query: string) => {
     return llmText
 }
 
-const callLLM = async (systemPrompt: string, userPrompt: string, model: string = "llama-3.1-70b-versatile") => {
+const callLLM = async (systemPrompt: string, userPrompt: string, model: string) => {
     const completion = await openai.chat.completions.create({
         model,
         messages: [
@@ -57,7 +57,7 @@ const callLLM = async (systemPrompt: string, userPrompt: string, model: string =
     return completion.choices[0].message.content
 }
 
-const checkIfSearchNeeded = async (context: string, query: string, model: string = "llama-3.1-70b-versatile") => {
+const checkIfSearchNeeded = async (context: string, query: string, model: string) => {
     const instruction = `
         You are an AI assistant tasked with determining if additional information from a web search is needed to answer a user's query.
         
@@ -107,7 +107,7 @@ const getAnswer = async (searchNeeded: string, context: string, query: string, m
     return await callLLM(instruction, query, model)
 }
 
-const enhanceQueryWithCountry = async (query: string, country: string, model: string = "llama-3.1-70b-versatile"): Promise<string> => {
+const enhanceQueryWithCountry = async (query: string, country: string, model: string): Promise<string> => {
     const instruction = `
         You are an AI assistant tasked with enhancing a user's query by incorporating a specific country context.
         
@@ -116,8 +116,6 @@ const enhanceQueryWithCountry = async (query: string, country: string, model: st
         2. Incorporate the country "${country}" into the query in a natural way.
         3. Rephrase the query to make it more specific and likely to retrieve relevant results.
         4. The enhanced query should be a single sentence or question.
-        
-        Original query: ${query}
         
         Respond ONLY with the enhanced query. Do not provide any other text or explanation.
     `;
@@ -132,7 +130,7 @@ export async function POST(request: Request) {
     const country = "Ghana"; // TODO: Make this dynamic based on user's location
 
     try {
-        const enhancedQuery = await enhanceQueryWithCountry(query, country);
+        const enhancedQuery = await enhanceQueryWithCountry(query, country, model);
         
         let llmText: string | undefined = await ragSearch(enhancedQuery)
 
