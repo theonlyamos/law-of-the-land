@@ -2,20 +2,22 @@
 
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { useState } from "react"
+import { useState, useCallback } from "react"
 import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
 import logo from './logo-transparent.png'
+import githubLogo from './github-mark.png'
 
 export default function Home() {
   const [query, setQuery] = useState<string>("")
   const [result, setResult] = useState<string>("")
   const [isLoading, setIsLoading] = useState<boolean>(false)
 
-  const onSubmit = async () => {
+  const onSubmit = useCallback(async () => {
     if (query.length === 0) {
       return
     }
+    setResult('')
     setIsLoading(true)
     try {
       const response = await fetch('/api/search', {
@@ -33,10 +35,27 @@ export default function Home() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [query])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      onSubmit();
+    }
+  }, [onSubmit]);
 
   return (
-    <div className="container mx-auto">
+    <div className="container mx-auto relative">
+      <div className="absolute top-4 right-4">
+        <a href="https://github.com/theonlyamos/law-of-the-land" target="_blank" rel="noopener noreferrer">
+          <Image
+            src={githubLogo}
+            alt="GitHub"
+            width={32}
+            height={32}
+          />
+        </a>
+      </div>
       <div className="flex flex-col items-center justify-center min-h-screen">
         <div className="grid w-full max-w-3xl gap-4">
           <div className="flex justify-center mb-4">
@@ -51,6 +70,7 @@ export default function Home() {
           <Textarea 
             placeholder="Type your query here." 
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
             value={query}
             disabled={isLoading}
             className="h-32 resize-none"
@@ -62,7 +82,15 @@ export default function Home() {
           >
             {isLoading ? 'Searching...' : 'Search'}
           </Button>
-          {result && (
+          {isLoading ? (
+            <div className="mt-4 p-4 w-full max-w-3xl bg-gray-100 rounded animate-pulse">
+              <div className="h-4 bg-gray-300 rounded w-3/4 mb-2"></div>
+              <div className="h-4 bg-gray-300 rounded w-1/2 mb-2"></div>
+              <div className="h-4 bg-gray-300 rounded w-5/6 mb-2"></div>
+              <div className="h-4 bg-gray-300 rounded w-2/3 mb-2"></div>
+              <div className="h-4 bg-gray-300 rounded w-3/4"></div>
+            </div>
+          ) : result && (
             <div className="mt-4 p-4 w-full max-w-3xl bg-gray-100 rounded prose">
               <ReactMarkdown>{result}</ReactMarkdown>
             </div>
