@@ -7,6 +7,7 @@
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind%20CSS-3.0+-38B2AC.svg?logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 [![Bun](https://img.shields.io/badge/Bun-1.0+-F9DC3E.svg?logo=bun&logoColor=black)](https://bun.sh/)
 [![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Buildship](https://img.shields.io/badge/Buildship-Serverless-FF6B6B.svg)](https://buildship.com/)
 
 Law of the Land is a legal information app that leverages Retrieval-Augmented Generation (RAG) technology to provide easy access to the laws and regulations of a country. By chunking and embedding legal documents such as constitutions, ordinances, and local laws, users can query the app to obtain clear, accurate information on what is allowed or prohibited. With its simple, user-friendly interface, the app aims to make legal knowledge more accessible to everyone.
 
@@ -16,6 +17,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 - **User-friendly Interface**: Simple and intuitive design for easy navigation and querying.
 - **Comprehensive Legal Database**: Includes various types of legal documents for thorough coverage.
 - **Real-time Updates**: Ensures the most current legal information is available to users.
+- **Backend**: Utilizes Buildship.app for efficient and scalable backend (No-code Backend Orchestration).
 
 ## Technology Stack
 
@@ -24,7 +26,8 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 - **AI Integration**: OpenAI API, GroundX API
 - **Runtime**: Bun
 - **Containerization**: Docker
-- **Deployment**: [Pending...]
+- **Backend**: Buildship.app (No-code Backend Orchestration)
+- **Deployment**: Deployed on vercel (Frontend) and Buildship (Backend) https://lawoftheland.vercel.app/
 
 ## Getting Started
 
@@ -65,6 +68,13 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
    ```
 
 The app will be available at `http://localhost:3000`.
+
+### Deploying to Buildship
+
+1. Sign up for a Buildship account at [buildship.com](https://buildship.com)
+2. Follow Buildship's documentation to set up your project
+3. Deploy your serverless function (`api-search.ts`) to Buildship
+4. Update the frontend code to use the Buildship function URL
 
 Note: Make sure to replace the placeholder values in the `.env` file with your actual API keys and URLs. Never commit this file to version control.
 
