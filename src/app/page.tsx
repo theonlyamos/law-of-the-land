@@ -20,7 +20,7 @@ export default function Home() {
     setResult('')
     setIsLoading(true)
     try {
-      const response = await fetch(`https://ht7tue.buildship.run/api-search?query=${query}`)
+      const response = await fetch(`/api/search?query=${encodeURIComponent(query)}`)
       const data = await response.text()
       setResult(data)
     } catch (error) {
