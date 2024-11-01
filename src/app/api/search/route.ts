@@ -1,35 +1,31 @@
-import { NextResponse } from 'next/server'
+// import { NextResponse } from 'next/server'
 import { Groundx } from "groundx-typescript-sdk"
-import { tavily } from "@tavily/core"
-import OpenAI from 'openai'
+// import { tavily } from "@tavily/core"
+import { GoogleGenerativeAI } from "@google/generative-ai"
 
 const groundx = new Groundx({
     apiKey: process.env.GROUNDX_API_KEY as string,
 })
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY as string,
-    baseURL: process.env.OPENAI_BASE_URL as string,
-    defaultHeaders: {'Helicone-Auth': `Bearer ${process.env.HELICONE_API_KEY}`}
-});
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY as string);
 
-const tavilySearch = async (query: string) => {
-    try {
-        const tvly = tavily({
-            apiKey: process.env.TAVILY_API_KEY as string
-    })
-    const response = await tvly.search(query, {
-      maxResults: 5, 
-      searchDepth: 'advanced', 
-      includeAnswer: true,
-    })
+// const tavilySearch = async (query: string) => {
+//     try {
+//         const tvly = tavily({
+//             apiKey: process.env.TAVILY_API_KEY as string
+//     })
+//     const response = await tvly.search(query, {
+//       maxResults: 5, 
+//       searchDepth: 'advanced', 
+//       includeAnswer: true,
+//     })
   
-        return response.answer
-    } catch (error) {
-        console.error('Error:', error)
-        return ""
-    }
-}
+//         return response.answer
+//     } catch (error) {
+//         console.error('Error:', error)
+//         return ""
+//     }
+// }
 
 const ragSearch = async (query: string) => {
     const response = await groundx.search.content({
@@ -42,25 +38,6 @@ const ragSearch = async (query: string) => {
     return llmText
 }
 
-const callLLM = async (systemPrompt: string, userPrompt: string, model: string, stream: boolean = false) => {
-    const completion = await openai.chat.completions.create({
-        model,
-        messages: [
-            {
-                "role": "system",
-                "content": systemPrompt
-            },
-            {"role": "user", "content": userPrompt},
-        ],
-        stream: stream
-    });
-
-    if (stream) {
-        return completion;
-    } else {
-        return (completion as OpenAI.Chat.Completions.ChatCompletion).choices[0].message.content;
-    }
-}
 
 // const checkIfSearchNeeded = async (context: string, query: string, model: string) => {
 //     const instruction = `
@@ -83,75 +60,6 @@ const callLLM = async (systemPrompt: string, userPrompt: string, model: string, 
 //     return await callLLM(instruction, query, model) as string
 // }
 
-async function getAnswer(searchNeeded: string, context: string, query: string, model: string = "llama-3.1-70b-versatile") {
-    if (searchNeeded.toLowerCase().trim() !== "no" && searchNeeded.toLowerCase().trim() !== "no.") {
-        const searchResults = await tavilySearch(searchNeeded)
-        
-        if (searchResults) {
-            context += `
-            
-            **Web Search Results:**
-            ${searchResults}
-            `
-        }
-    }
-
-    const instruction = `
-        You are a helpful virtual assistant that answers questions using the content below. 
-        Your task is to create detailed answers to the questions by combining
-        your understanding of the world with the content provided below.
-        Include section names and or article number references in your answer.
-        Do not hallucinate the references (section names and or article numbers)
-
-        Context:
-        =======
-        ${context}
-        =======
-    `;
-    return await callLLM(instruction, query, model) as string
-}
-
-async function* getAnswerStream(searchNeeded: string, context: string, query: string, model: string = "llama-3.1-70b-versatile") {
-    if (searchNeeded.toLowerCase().trim() !== "no" && searchNeeded.toLowerCase().trim() !== "no.") {
-        const searchResults = await tavilySearch(searchNeeded)
-        
-        if (searchResults) {
-            context += `
-            
-            **Web Search Results:**
-            ${searchResults}
-            `
-        }
-    }
-
-    const instruction = `
-        You are a helpful virtual assistant that answers questions using the content below. 
-        Your task is to create detailed answers to the questions by combining
-        your understanding of the world with the content provided below.
-        Include section names and or article number references in your answer.
-        Do not hallucinate the references (section names and or article numbers)
-
-        Context:
-        =======
-        ${context}
-        =======
-    `;
-
-    const stream = await openai.chat.completions.create({
-        model,
-        messages: [
-            { "role": "system", "content": instruction },
-            { "role": "user", "content": query },
-        ],
-        stream: true,
-    });
-
-    for await (const chunk of stream) {
-        if (chunk.choices[0]?.delta?.content) {
-            yield chunk.choices[0].delta.content;
-        }
-    }
-}
 
 // const enhanceQueryWithCountry = async (query: string, country: string, model: string): Promise<string> => {
 //     const instruction = `
@@ -173,10 +81,12 @@ async function* getAnswerStream(searchNeeded: string, context: string, query: st
 export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const query = searchParams.get('query') as string
-    const model = "llama-3.1-70b-versatile";
 
     try {
-        const llmText: string | undefined = await ragSearch(query)
+        const startTime = Date.now();
+        const llmText: string | undefined = await ragSearch(query);
+        const duration = (Date.now() - startTime) / 1000;
+        console.log(`RAG search took ${duration.toFixed(2)}s`);
 
         if (!llmText) {
             return new Response("Sorry, I couldn't find any information on that topic.", {
@@ -184,27 +94,60 @@ export async function GET(request: Request) {
             });
         }
 
-        // const stream = new ReadableStream({
-        //     async start(controller) {
-        //         const encoder = new TextEncoder();
-        //         for await (const chunk of getAnswerStream('No', llmText, query, model)) {
-        //             controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
-        //         }
-        //         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        //         controller.close();
-        //     },
-        // });
+        const stream = new ReadableStream({
+            async start(controller) {
+                const encoder = new TextEncoder();
+                
+                try {
+                    const geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash-002" });
+                    const instruction = `
+                        You are a helpful virtual assistant that answers questions using the content below. 
+                        Your task is to create detailed answers to the questions by combining
+                        your understanding of the world with the content provided below.
+                        Include section names and or article number references in your answer.
+                        Format your response in markdown.
+                        Use proper line breaks between paragraphs.
+                        Do not hallucinate the references (section names and or article numbers)
 
-        // return new Response(stream, {
-        //     headers: {
-        //         'Content-Type': 'text/event-stream',
-        //         'Cache-Control': 'no-cache',
-        //         'Connection': 'keep-alive',
-        //     },
-        // });
-        const answer = await getAnswer('No', llmText, query, model)
-        return new Response(answer, {
-            headers: { 'Content-Type': 'text/plain' },
+                        Context:
+                        =======
+                        ${llmText}
+                        =======
+                    `;
+                    
+                    const prompt = `${instruction}\n\nUser: ${query}`;
+                    const startGenTime = Date.now();
+                    const result = await geminiModel.generateContentStream(prompt);
+                    const genDuration = (Date.now() - startGenTime) / 1000;
+                    console.log(`Generation took ${genDuration.toFixed(2)}s`);
+                    
+                    for await (const chunk of result.stream) {
+                        if (chunk?.text()) {
+                            try {
+                                const formattedText = chunk.text().replace(/\n/g, '\\n');
+                                controller.enqueue(encoder.encode(`data: ${formattedText}\n\n`));
+                            } catch (err) {
+                                console.error('Error processing chunk:', err);
+                            }
+                        }
+                    }
+                    
+                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                } catch (error) {
+                    console.error('Streaming error:', error);
+                    controller.enqueue(encoder.encode(`data: Error generating response\n\n`));
+                } finally {
+                    controller.close();
+                }
+            },
+        });
+
+        return new Response(stream, {
+            headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            },
         });
     } catch (error) {
         console.error('Error:', error)
