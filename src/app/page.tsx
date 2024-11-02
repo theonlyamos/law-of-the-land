@@ -5,7 +5,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Send } from "lucide-react"
-import { useState, useCallback, useEffect, useRef } from "react"
+import { useState, useCallback, useEffect, useRef, Suspense } from "react"
 import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
 import logo from './logo-transparent.png'
@@ -17,7 +17,7 @@ interface Message {
   content: string
 }
 
-export default function Home() {
+function Chat() {
   const router = useRouter()
   const searchParams = useSearchParams()
   
@@ -259,5 +259,17 @@ export default function Home() {
         </>
       )}
     </div>
+  )
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div className="container mx-auto relative h-screen flex items-center justify-center">
+        <p>Loading...</p>
+      </div>
+    }>
+      <Chat />
+    </Suspense>
   )
 }
