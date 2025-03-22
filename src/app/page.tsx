@@ -10,22 +10,32 @@ import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
 import logo from './logo-transparent.png'
 import githubLogo from './github-mark.png'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { io, Socket } from "socket.io-client"
 
 interface Message {
+  id?: string
   role: 'user' | 'assistant'
   content: string
+  createdAt?: Date
+  updatedAt?: Date
 }
 
 function Chat() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
+  const socketRef = useRef<Socket | null>(null)
   
   const [query, setQuery] = useState<string>("")
   const [messages, setMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Load chat history from localStorage after initial render
+  useEffect(() => {
+    const saved = localStorage.getItem('chatHistory')
+    if (saved) {
+      setMessages(JSON.parse(saved))
+    }
+  }, [])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -36,92 +46,122 @@ function Chat() {
     scrollToBottom()
   }, [messages])
 
+  // Initialize Socket.IO connection
+  useEffect(() => {
+    const initSocket = async () => {
+      socketRef.current = io({
+        path: '/api/socketio'
+      })
+
+      socketRef.current.on('search:start', ({ query }) => {
+        setIsLoading(true)
+        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', content: query }])
+        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: '' }])
+        setQuery('')
+      })
+
+      socketRef.current.on('search:complete', ({ result }) => {
+        setIsLoading(false)
+        setMessages(prev => {
+          const newMessages = [...prev]
+          newMessages.pop()
+          newMessages.push({
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: result
+          } as Message)
+          localStorage.setItem('chatHistory', JSON.stringify(newMessages))
+          return newMessages
+        })
+      })
+
+      socketRef.current.on('search:error', ({ error }) => {
+        setIsLoading(false)
+        setMessages(prev => {
+          const newMessages = [...prev]
+          newMessages.pop()
+          newMessages.push({
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: error
+          } as Message)
+          localStorage.setItem('chatHistory', JSON.stringify(newMessages))
+          return newMessages
+        })
+      })
+
+      return () => {
+        if (socketRef.current) {
+          socketRef.current.disconnect()
+        }
+      }
+    }
+
+    initSocket()
+  }, [])
+
   const handleSearch = useCallback(async (searchQuery: string) => {
-    if (!searchQuery.trim()) return;
+    if (!searchQuery.trim()) return
     
-    router.push(`/?query=${encodeURIComponent(searchQuery)}`)
-    
-    setIsLoading(true);
-    setMessages(prev => [...prev, { role: 'user', content: searchQuery }]);
-    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-    setQuery('');
+    // router.push(`/?query=${encodeURIComponent(searchQuery)}`)
+    setMessages(prev => {
+      const newMessages = [...prev]
+      const userMessage = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: searchQuery
+      } as Message
+
+      const loaderMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: '...'
+      } as Message
+
+      newMessages.push(userMessage, loaderMessage)
+      
+      localStorage.setItem('chatHistory', JSON.stringify(newMessages))
+      return newMessages
+    })
 
     try {
-        const response = await fetch(`https://ht7tue.buildship.run/api-search?query=${encodeURIComponent(searchQuery)}`);
-        const data = await response.text();
-        setMessages(prev => {
-            const newMessages = [...prev];
-            const lastMessage = newMessages[newMessages.length - 1];
-            if (lastMessage && lastMessage.role === 'assistant') {
-                lastMessage.content = data;
-            }
-            return newMessages;
-        });
-        setIsLoading(false);
-        // eventSource.onmessage = (event) => {
-        //     const data = event.data;
-        //     if (data === '[DONE]') {
-        //         eventSource.close();
-        //         setIsLoading(false);
-        //         return;
-        //     }
-        //     const formattedData = data.replace(/\\n/g, '\n');
-        //     let count = 0;
-        //     setMessages(prev => {
-        //         const newMessages = [...prev];
-        //         const lastMessage = newMessages[newMessages.length - 1];
-        //         count++;
-        //         if (lastMessage && lastMessage.role === 'assistant' && count === 1) {
-        //             lastMessage.content += formattedData;
-        //         }
-        //         return newMessages;
-        //     });
-        // };
-
-        // eventSource.onerror = (error) => {
-        //     console.error('EventSource error:', error);
-        //     eventSource.close();
-        //     setIsLoading(false);
-        //     setMessages(prev => {
-        //       const newMessages = [...prev];
-        //       const lastMessage = newMessages[newMessages.length - 1];
-        //       if (lastMessage && lastMessage.role === 'assistant') {
-        //         lastMessage.content = 'An error occurred while processing your request.';
-        //       }
-        //       return newMessages;
-        //     });
-        // };
-
-        // return () => {
-        //     eventSource.close();
-        // };
+      // First emit the search:start event
+      socketRef.current?.emit('search:start', { query: searchQuery })
+      
+      // Then emit the search request
+      socketRef.current?.emit('search:request', {
+        query: searchQuery,
+        messages: messages.slice(-10)
+      })
     } catch (error) {
-        console.error('Error:', error);
-        setIsLoading(false);
-        setMessages(prev => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
-          if (lastMessage && lastMessage.role === 'assistant') {
-            lastMessage.content = 'An error occurred while processing your request.';
-          }
-          return newMessages;
-        });
+      console.error('Error:', error)
+      setIsLoading(false)
+      setMessages(prev => {
+        const newMessages = [...prev]
+        newMessages.pop()
+        newMessages.push({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: 'An error occurred while processing your request.'
+        } as Message)
+        localStorage.setItem('chatHistory', JSON.stringify(newMessages))
+        return newMessages
+      })
     }
-  }, [router]);
+  }, [messages])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSearch(query);
+      setQuery('');
     }
   }, [query, handleSearch]);
 
-  useEffect(() => {
-    const urlQuery = searchParams.get('query')
-    if (urlQuery) {
-      handleSearch(urlQuery)
-    }
-  }, [])
+  const clearHistory = useCallback(() => {
+    setMessages([]);
+    localStorage.removeItem('chatHistory');
+  }, []);
 
   return (
     <div className="container mx-auto relative h-screen flex flex-col"> 
@@ -140,6 +180,12 @@ function Chat() {
           </div>
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={clearHistory}
+            className="text-sm text-gray-500 hover:text-gray-700"
+          >
+            Clear History
+          </button>
           <a href="https://github.com/theonlyamos/law-of-the-land" target="_blank" rel="noopener noreferrer">
             <Image
               src={githubLogo}

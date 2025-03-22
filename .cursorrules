@@ -1,0 +1,4 @@
+- Use bun for package management
+- Use tailwindcss for styling
+- Use shadcn/ui for components
+- use axios for api calls
