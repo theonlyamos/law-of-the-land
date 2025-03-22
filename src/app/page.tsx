@@ -11,6 +11,7 @@ import Image from 'next/image'
 import logo from './logo-transparent.png'
 import githubLogo from './github-mark.png'
 import { io, Socket } from "socket.io-client"
+import axios from 'axios'
 
 interface Message {
   id?: string
@@ -103,7 +104,6 @@ function Chat() {
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return
     
-    // router.push(`/?query=${encodeURIComponent(searchQuery)}`)
     setMessages(prev => {
       const newMessages = [...prev]
       const userMessage = {
@@ -128,10 +128,15 @@ function Chat() {
       // First emit the search:start event
       socketRef.current?.emit('search:start', { query: searchQuery })
       
-      // Then emit the search request
+      // Get RAG context first
+      const { data: searchData } = await axios.post('/api/search', { query: searchQuery })
+      const context = searchData.result
+      
+      // Then emit the search request with context
       socketRef.current?.emit('search:request', {
         query: searchQuery,
-        messages: messages.slice(-10)
+        messages: messages.slice(-10),
+        context
       })
     } catch (error) {
       console.error('Error:', error)
@@ -225,9 +230,9 @@ function Chat() {
               />
               <Button 
                 onClick={() => handleSearch(query)} 
-                disabled={isLoading}
+                disabled={isLoading || !query.trim()}
                 size="icon"
-                className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8"
+                className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
                 <span className="sr-only">Send message</span>
@@ -292,10 +297,10 @@ function Chat() {
                 rows={1}
               />
               <Button 
-                onClick={() => handleSearch(query)} 
-                disabled={isLoading}
+                onClick={() => {handleSearch(query); setQuery('')}} 
+                disabled={isLoading || !query.trim()}
                 size="icon"
-                className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8"
+                className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
                 <span className="sr-only">Send message</span>
