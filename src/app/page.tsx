@@ -10,7 +10,6 @@ import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
 import logo from './logo-transparent.png'
 import githubLogo from './github-mark.png'
-import { io, Socket } from "socket.io-client"
 import axios from 'axios'
 
 interface Message {
@@ -22,8 +21,6 @@ interface Message {
 }
 
 function Chat() {
-  const socketRef = useRef<Socket | null>(null)
-  
   const [query, setQuery] = useState<string>("")
   const [messages, setMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState<boolean>(false)
@@ -46,60 +43,6 @@ function Chat() {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
-
-  // Initialize Socket.IO connection
-  useEffect(() => {
-    const initSocket = async () => {
-      socketRef.current = io({
-        path: '/api/socketio'
-      })
-
-      socketRef.current.on('search:start', ({ query }) => {
-        setIsLoading(true)
-        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', content: query }])
-        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: '' }])
-        setQuery('')
-      })
-
-      socketRef.current.on('search:complete', ({ result }) => {
-        setIsLoading(false)
-        setMessages(prev => {
-          const newMessages = [...prev]
-          newMessages.pop()
-          newMessages.push({
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: result
-          } as Message)
-          localStorage.setItem('chatHistory', JSON.stringify(newMessages))
-          return newMessages
-        })
-      })
-
-      socketRef.current.on('search:error', ({ error }) => {
-        setIsLoading(false)
-        setMessages(prev => {
-          const newMessages = [...prev]
-          newMessages.pop()
-          newMessages.push({
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: error
-          } as Message)
-          localStorage.setItem('chatHistory', JSON.stringify(newMessages))
-          return newMessages
-        })
-      })
-
-      return () => {
-        if (socketRef.current) {
-          socketRef.current.disconnect()
-        }
-      }
-    }
-
-    initSocket()
-  }, [])
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return
@@ -125,18 +68,28 @@ function Chat() {
     })
 
     try {
-      // First emit the search:start event
-      socketRef.current?.emit('search:start', { query: searchQuery })
-      
-      // Get RAG context first
+      // First get RAG context
       const { data: searchData } = await axios.post('/api/search', { query: searchQuery })
       const context = searchData.result
       
-      // Then emit the search request with context
-      socketRef.current?.emit('search:request', {
+      // Then get the chat response
+      const { data: chatData } = await axios.post('/api/chat', {
         query: searchQuery,
         messages: messages.slice(-10),
         context
+      })
+
+      setIsLoading(false)
+      setMessages(prev => {
+        const newMessages = [...prev]
+        newMessages.pop()
+        newMessages.push({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: chatData.result
+        } as Message)
+        localStorage.setItem('chatHistory', JSON.stringify(newMessages))
+        return newMessages
       })
     } catch (error) {
       console.error('Error:', error)
