@@ -1,10 +1,9 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Send } from "lucide-react"
+import { Menu } from "lucide-react"
 import { useState, useCallback, useEffect, useRef, Suspense } from "react"
 import ReactMarkdown from 'react-markdown'
 import Image from 'next/image'
@@ -12,6 +11,7 @@ import logo from './logo-transparent.png'
 import githubLogo from './github-mark.png'
 import axios from 'axios'
 import { Sidebar } from "@/components/ui/sidebar"
+import { ChatInput } from "@/components/ui/chat-input"
 
 interface Message {
   id?: string
@@ -54,6 +54,7 @@ function Chat() {
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSession, setActiveSession] = useState<string | undefined>()
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -77,6 +78,20 @@ function Chat() {
       }
     }
   }, [])
+
+  // Effect to handle initial sidebar state based on screen size
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth >= 768) { // md breakpoint
+        setIsSidebarOpen(true);
+      } else {
+        setIsSidebarOpen(false);
+      }
+    };
+    handleResize(); // Set initial state
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -227,24 +242,48 @@ function Chat() {
     setQuery(question);
     handleSearch(question);
     setQuery(''); // Clear the textarea after submitting
+    if (window.innerWidth < 768) setIsSidebarOpen(false); // Close sidebar on mobile after action
   }, [handleSearch]);
 
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarOpen(prev => !prev);
+  }, []);
+
   return (
-    <div className="container mx-auto relative h-screen flex"> 
+    <div className="container mx-auto relative h-screen flex overflow-hidden"> 
       {/* Sidebar */}
       <Sidebar
         sessions={sessions}
         activeSession={activeSession}
-        onSessionSelect={handleSessionSelect}
-        onNewSession={handleNewSession}
-        onDeleteSession={handleDeleteSession}
+        isOpen={isSidebarOpen}
+        onSessionSelect={(sessionId) => {
+          handleSessionSelect(sessionId);
+          if (window.innerWidth < 768) setIsSidebarOpen(false); // Close sidebar on mobile after selection
+        }}
+        onNewSession={() => {
+          handleNewSession();
+          if (window.innerWidth < 768) setIsSidebarOpen(false); // Close sidebar on mobile
+        }}
+        onDeleteSession={handleDeleteSession} // Assuming delete doesn't need to close sidebar immediately or handled internally
+        onClose={() => setIsSidebarOpen(false)}
       />
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className={`flex-1 flex flex-col transition-all duration-300 ease-in-out {
+        isSidebarOpen && window.innerWidth >= 768 ? 'md:ml-64' : 'ml-0'
+      }`}>
         {/* Header */}
         <div className="flex items-center justify-between gap-4 p-4 border-b">
           <div className="flex items-center gap-4">
+            {/* Hamburger menu for mobile */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleSidebar}
+              className="md:hidden h-8 w-8" // Hidden on medium screens and up
+            >
+              <Menu className="h-5 w-5" />
+            </Button>
             <Image
               src={logo}
               alt="Law of the Land Logo"
@@ -275,6 +314,7 @@ function Chat() {
               src={logo}
               alt="Law of the Land Logo"
               width={120}
+              className="md:w-40" // Slightly larger logo on desktop empty state
               priority
             />
             <p className="max-w-md mt-2 text-center text-gray-500 mb-8">
@@ -289,7 +329,7 @@ function Chat() {
                   <Button
                     key={index}
                     variant="outline"
-                    className="justify-start text-left h-auto py-2 px-4"
+                    className="justify-start text-left h-auto py-2 px-4 text-sm md:text-base"
                     onClick={() => handleSuggestedQuestion(question)}
                   >
                     {question}
@@ -300,26 +340,14 @@ function Chat() {
             
             {/* Input area for empty state */}
             <div className="w-full max-w-2xl">
-              <div className="relative flex items-center">
-                <Textarea 
-                  placeholder="Type your question here... (Press Enter to send)" 
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  value={query}
-                  disabled={isLoading}
-                  className="resize-none pr-14 min-h-[56px] max-h-[200px] scrollbar-hide"
-                  rows={1}
-                />
-                <Button 
-                  onClick={() => handleSearch(query)} 
-                  disabled={isLoading || !query.trim()}
-                  size="icon"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
-                  <span className="sr-only">Send message</span>
-                </Button>
-              </div>
+              <ChatInput 
+                query={query}
+                onQueryChange={setQuery}
+                onSearch={() => handleSearch(query)}
+                onKeyDown={handleKeyDown}
+                isLoading={isLoading}
+                rows={4}
+              />
             </div>
           </div>
         ) : (
@@ -329,17 +357,17 @@ function Chat() {
                 {messages.map((message, index) => (
                   <div
                     key={index}
-                    className={`flex gap-3 ${
+                    className={`flex gap-2 md:gap-3 ${
                       message.role === 'user' ? 'justify-end' : 'justify-start'
                     }`}
                   >
                     {message.role === 'assistant' && (
-                      <Avatar>
+                      <Avatar className="w-8 h-8 md:w-10 md:h-10">
                         <AvatarFallback>AI</AvatarFallback>
                       </Avatar>
                     )}
                     <div
-                      className={`rounded-lg p-4 max-w-[80%] ${
+                      className={`rounded-lg p-3 md:p-4 max-w-[85%] md:max-w-[80%] ${
                         message.role === 'user'
                           ? 'bg-primary text-primary-foreground'
                           : 'bg-gray-100 dark:bg-gray-800 text-foreground'
@@ -354,7 +382,7 @@ function Chat() {
                       )}
                     </div>
                     {message.role === 'user' && (
-                      <Avatar>
+                      <Avatar className="w-8 h-8 md:w-10 md:h-10">
                         <AvatarFallback>ME</AvatarFallback>
                       </Avatar>
                     )}
@@ -366,30 +394,14 @@ function Chat() {
 
             {/* Input area for when messages exist */}
             <div className="p-4 border-t">
-              <div className="relative flex items-center">
-                <Textarea 
-                  placeholder="Type your question here... (Press Enter to send)" 
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  value={query}
-                  disabled={isLoading}
-                  className="resize-none pr-14 min-h-[56px] max-h-[200px] scrollbar-hide"
-                  rows={1}
-                  style={{
-                    scrollbarWidth: 'none',
-                    msOverflowStyle: 'none'
-                  }}
-                />
-                <Button 
-                  onClick={() => handleSearch(query)} 
-                  disabled={isLoading || !query.trim()}
-                  size="icon"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
-                  <span className="sr-only">Send message</span>
-                </Button>
-              </div>
+              <ChatInput 
+                query={query}
+                onQueryChange={setQuery}
+                onSearch={() => handleSearch(query)}
+                onKeyDown={handleKeyDown}
+                isLoading={isLoading}
+                rows={4}
+              />
             </div>
           </>
         )}
@@ -401,8 +413,13 @@ function Chat() {
 export default function Home() {
   return (
     <Suspense fallback={
-      <div className="container mx-auto relative h-screen flex items-center justify-center">
-        <p>Loading...</p>
+      <div className="container mx-auto relative h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center">
+          {/* You can use your logo here if you have it as a component or inline SVG */}
+          {/* <Image src={logo} alt="Loading Logo" width={100} height={100} /> */}
+          <p className="text-lg font-semibold mt-4">Loading Your Legal Assistant...</p>
+          <div className="mt-2 w-16 h-16 border-4 border-blue-500 border-dashed rounded-full animate-spin"></div>
+        </div>
       </div>
     }>
       <Chat />

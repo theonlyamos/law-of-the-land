@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Clock, MessageSquare, MessageSquarePlus, Trash2 } from "lucide-react";
+import { Clock, MessageSquare, MessageSquarePlus, Trash2, X } from "lucide-react";
 
 interface ChatSession {
   id: string;
@@ -13,12 +13,14 @@ interface ChatSession {
 interface SidebarProps {
   sessions: ChatSession[];
   activeSession?: string;
+  isOpen: boolean;
   onSessionSelect: (sessionId: string) => void;
   onNewSession: () => void;
   onDeleteSession: (sessionId: string) => void;
+  onClose: () => void;
 }
 
-export function Sidebar({ sessions, activeSession, onSessionSelect, onNewSession, onDeleteSession }: SidebarProps) {
+export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNewSession, onDeleteSession, onClose }: SidebarProps) {
   const formatTimestamp = (date: Date) => {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
@@ -36,18 +38,35 @@ export function Sidebar({ sessions, activeSession, onSessionSelect, onNewSession
   };
 
   return (
-    <div className="w-64 h-full border-r bg-background flex flex-col">
+    <div 
+      className={`
+        w-64 h-full border-r bg-background flex flex-col 
+        fixed md:static z-50 md:z-auto 
+        transform ${isOpen ? "translate-x-0" : "-translate-x-full"} 
+        md:translate-x-0 transition-transform duration-300 ease-in-out
+      `}
+    >
       <div className="p-4 border-b">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">Chat Sessions</h2>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onNewSession}
-            className="h-8 w-8"
-          >
-            <MessageSquarePlus className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onNewSession}
+              className="h-8 w-8"
+            >
+              <MessageSquarePlus className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onClose}
+              className="h-8 w-8 md:hidden ml-2"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
       
