@@ -91,9 +91,9 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
                   onClick={() => onSessionSelect(session.id)}
                 >
                   <MessageSquare className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1 text-left min-w-0">
+                  <div className="flex-1 text-left min-w-0 pr-8"> {/* Reserve space for delete button */}
                     <div className="font-medium truncate text-sm">{session.title}</div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1 pr-8"> {/* Reserve space for delete button */}
                       <Clock className="h-3 w-3 flex-shrink-0" />
                       <span className="truncate">{formatTimestamp(session.timestamp)}</span>
                     </div>
@@ -111,36 +111,30 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
                   <Trash2 className="h-3 w-3 text-destructive" />
                 </Button>
                 
-                {/* Delete Confirmation Dialog */}
+                {/* Delete Confirmation - Contained on right side */}
                 {deleteConfirm === session.id && (
-                  <div className="absolute inset-0 bg-background/95 backdrop-blur-sm flex items-center justify-center p-2 z-10">
-                    <div className="text-center">
-                      <AlertTriangle className="h-6 w-6 text-destructive mx-auto mb-2" />
-                      <p className="text-xs font-medium mb-2">Delete this conversation?</p>
-                      <div className="flex gap-1">
-                        <Button 
-                          size="sm" 
-                          variant="destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDeleteSession(session.id);
-                            setDeleteConfirm(null);
-                          }}
-                        >
-                          Delete
-                        </Button>
-                        <Button 
-                          size="sm" 
-                          variant="ghost"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteConfirm(null);
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
+                  <div className="absolute right-0 top-0 bottom-0 w-2/3 bg-background/95 backdrop-blur-sm flex items-center justify-center gap-1 pr-2 z-10 rounded-r-lg">
+                    <Button 
+                      size="sm" 
+                      variant="destructive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteSession(session.id);
+                        setDeleteConfirm(null);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      variant="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteConfirm(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
                   </div>
                 )}
               </div>
