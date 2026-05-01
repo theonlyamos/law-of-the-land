@@ -7,7 +7,7 @@ interface Message {
     content: string
 }
 
-const callLLM = async (instruction: string, query: string, model: string = "gemini-2.0-flash", history: Message[] = []) => {
+const callLLM = async (instruction: string, query: string, model: string = "gemini-3.1-flash-lite-preview", history: Message[] = []) => {
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY as string });
         const generationConfig = {
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
         
         Current query: ${query}`
 
-        const response = await callLLM(instruction, query, "gemini-2.0-flash", messages)
+        const response = await callLLM(instruction, query, "gemini-3.1-flash-lite-preview", messages)
 
         return NextResponse.json({ result: response })
     } catch (error) {

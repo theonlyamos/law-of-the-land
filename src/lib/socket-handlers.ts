@@ -7,7 +7,7 @@ interface Message {
     content: string
 }
 
-const callLLM = async (instruction: string, query: string, model: string = "gemini-2.0-flash", history: Message[] = []) => {
+const callLLM = async (instruction: string, query: string, model: string = "gemini-3.1-flash-lite-preview", history: Message[] = []) => {
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY as string });
         const generationConfig: GenerateContentConfig = {
@@ -64,7 +64,7 @@ export const handleSearchRequest = async (socket: Socket, data: { query: string,
         Current query: ${query}`
 
         // Generate the response using the existing callLLM function
-        const response = await callLLM(instruction, query, "gemini-2.0-flash", messages)
+        const response = await callLLM(instruction, query, "gemini-3.1-flash-lite-preview", messages)
 
         // Emit the search results
         socket.emit('search:complete', { result: response })
