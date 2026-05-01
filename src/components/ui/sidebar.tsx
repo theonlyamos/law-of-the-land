@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Clock, MessageSquare, MessageSquarePlus, Trash2, X } from "lucide-react";
+import { Clock, MessageSquare, MessageSquarePlus, Trash2, X, AlertTriangle } from "lucide-react";
+import { useState } from "react";
 
 interface ChatSession {
   id: string;
@@ -21,6 +22,8 @@ interface SidebarProps {
 }
 
 export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNewSession, onDeleteSession, onClose }: SidebarProps) {
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  
   const formatTimestamp = (date: Date) => {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
@@ -54,15 +57,15 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
               variant="ghost"
               size="icon"
               onClick={onNewSession}
-              className="h-8 w-8"
+              className="h-11 w-11"
             >
-              <MessageSquarePlus className="h-4 w-4" />
+              <MessageSquarePlus className="h-5 w-5" />
             </Button>
             <Button
               variant="ghost"
               size="icon"
               onClick={onClose}
-              className="h-8 w-8 md:hidden ml-2"
+              className="h-11 w-11 md:hidden ml-2"
             >
               <X className="h-4 w-4" />
             </Button>
@@ -102,11 +105,44 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
                   className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDeleteSession(session.id);
+                    setDeleteConfirm(session.id);
                   }}
                 >
                   <Trash2 className="h-3 w-3 text-destructive" />
                 </Button>
+                
+                {/* Delete Confirmation Dialog */}
+                {deleteConfirm === session.id && (
+                  <div className="absolute inset-0 bg-background/95 backdrop-blur-sm flex items-center justify-center p-2 z-10">
+                    <div className="text-center">
+                      <AlertTriangle className="h-6 w-6 text-destructive mx-auto mb-2" />
+                      <p className="text-xs font-medium mb-2">Delete this conversation?</p>
+                      <div className="flex gap-1">
+                        <Button 
+                          size="sm" 
+                          variant="destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteSession(session.id);
+                            setDeleteConfirm(null);
+                          }}
+                        >
+                          Delete
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          variant="ghost"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteConfirm(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             ))
           )}

@@ -40,12 +40,12 @@ export function ChatInput({
           scrollbarWidth: 'none'
         }}
       />
-      <Button
-        onClick={onSearch}
-        disabled={isLoading || !query.trim()}
-        size="icon"
-        className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
+<Button
+         onClick={onSearch}
+         disabled={isLoading || !query.trim()}
+         size="icon"
+         className="absolute right-2 top-1/2 -translate-y-1/2 h-11 w-11 disabled:opacity-50 disabled:cursor-not-allowed"
+       >
         <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
         <span className="sr-only">Send message</span>
       </Button>

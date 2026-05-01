@@ -134,7 +134,7 @@ function Chat() {
 const loaderMessage = {
          id: crypto.randomUUID(),
          role: 'assistant',
-         content: 'Searching legal database...'
+         content: '...'
        } as Message
 
       if (activeSession) {
@@ -251,7 +251,15 @@ newMessages.push({
 
   return (
     <div className="container mx-auto relative h-screen flex overflow-hidden"> 
-      {/* Sidebar */}
+      {/* Overlay for mobile sidebar */}
+       {isSidebarOpen && (
+         <div 
+           className="fixed inset-0 bg-background/80 backdrop-blur-sm z-40 md:hidden transition-opacity duration-300"
+           onClick={toggleSidebar}
+         />
+       )}
+       
+       {/* Sidebar */}
       <Sidebar
         sessions={sessions}
         activeSession={activeSession}
@@ -276,14 +284,14 @@ newMessages.push({
         <div className="flex items-center justify-between gap-4 p-4 border-b">
           <div className="flex items-center gap-4">
             {/* Hamburger menu for mobile */}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={toggleSidebar}
-              className="md:hidden h-8 w-8" // Hidden on medium screens and up
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
+<Button
+               variant="ghost"
+               size="icon"
+               onClick={toggleSidebar}
+               className="md:hidden h-11 w-11" // 44x44px for mobile accessibility
+             >
+               <Menu className="h-5 w-5" />
+             </Button>
             <Image
               src={logo}
               alt="Law of the Land Logo"
@@ -371,17 +379,25 @@ newMessages.push({
                          </Avatar>
                        )}
                        <div
-                         className={`rounded-lg p-3 md:p-4 max-w-[75%] lg:max-w-[65%] ${
+                         className={`rounded-lg p-3 md:p-4 max-w-[75%] lg:max-w-[65%] shadow-sm ${
                            message.role === 'user'
                              ? 'bg-primary text-primary-foreground'
                              : 'bg-muted text-foreground'
                          }`}
                        >
-                         {message.role === 'assistant' ? (
-                           <div className="text-sm leading-relaxed markdown-content">
-                             <ReactMarkdown>{message.content || '...'}</ReactMarkdown>
-                           </div>
-                         ) : (
+{message.role === 'assistant' ? (
+                         <div className="text-sm leading-relaxed markdown-content">
+                           {message.content === '...' ? (
+                             <div className="flex gap-1 p-2">
+                               <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:0ms]" />
+                               <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:150ms]" />
+                               <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:300ms]" />
+                             </div>
+                           ) : (
+                             <ReactMarkdown>{message.content}</ReactMarkdown>
+                           )}
+                         </div>
+                       ) : (
                            <p className="text-sm leading-relaxed">{message.content}</p>
                          )}
                        </div>
