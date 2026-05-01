@@ -2,6 +2,9 @@
 
 import { useEffect } from 'react'
 import Link from 'next/link'
+import { Button } from '@/components/ui/button'
+import Image from 'next/image'
+import logo from './logo-transparent.png'
 
 export default function Error({
   error,
@@ -16,21 +19,29 @@ export default function Error({
   }, [error])
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen">
-      <h1 className="text-4xl font-bold mb-4">500 - Something went wrong!</h1>
-      <p className="text-xl mb-8">We&apos;re sorry, but there was an internal server error.</p>
-      <button
-        onClick={
-          // Attempt to recover by trying to re-render the segment
-          () => reset()
-        }
-        className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mr-4"
-      >
-        Try again
-      </button>
-      <Link href="/" className="text-blue-500 hover:underline">
-        Go back to home
-      </Link>
+    <div className="flex flex-col items-center justify-center min-h-screen gap-6 px-4">
+      <Image
+        src={logo}
+        alt="Law of the Land Logo"
+        width={80}
+        priority
+      />
+      <div className="text-center">
+        <h1 className="text-4xl font-bold mb-4">Something went wrong!</h1>
+        <p className="text-xl text-muted-foreground mb-8">
+          We're sorry, but there was an internal error. Please try again.
+        </p>
+      </div>
+      <div className="flex gap-4">
+        <Button onClick={() => reset()}>
+          Try again
+        </Button>
+        <Button variant="outline" asChild>
+          <Link href="/">
+            Go back home
+          </Link>
+        </Button>
+      </div>
     </div>
   )
 }

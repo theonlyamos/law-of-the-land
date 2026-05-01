@@ -3,11 +3,11 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Check } from "lucide-react";
 
 const tiers = [
-  {
-    name: "Basic",
-    id: "basic",
-    price: { monthly: "$9", yearly: "$90" },
-    description: "Perfect for individuals seeking legal information",
+{
+     name: "Basic",
+     id: "basic",
+     price: { monthly: "$9", yearly: "$90" },
+     description: "For individuals who need quick legal answers",
     features: [
       "Up to 50 queries per month",
       "Basic legal document search",
@@ -19,11 +19,11 @@ const tiers = [
     ],
     featured: false,
   },
-  {
-    name: "Pro",
-    id: "pro",
-    price: { monthly: "$29", yearly: "$290" },
-    description: "Best for legal professionals and businesses",
+{
+     name: "Pro",
+     id: "pro",
+     price: { monthly: "$29", yearly: "$290" },
+     description: "For lawyers and businesses with frequent legal research needs",
     features: [
       "Unlimited queries",
       "Advanced legal document search",
@@ -38,11 +38,11 @@ const tiers = [
     ],
     featured: true,
   },
-  {
-    name: "Enterprise",
-    id: "enterprise",
-    price: { monthly: "Custom", yearly: "Custom" },
-    description: "For organizations requiring advanced legal research capabilities",
+{
+     name: "Enterprise",
+     id: "enterprise",
+     price: { monthly: "Custom", yearly: "Custom" },
+     description: "For organizations with advanced legal research and compliance needs",
     features: [
       "Everything in Pro",
       "Custom AI model fine-tuning",
@@ -68,9 +68,9 @@ export default function PricingPage() {
           <p className="mt-2 text-4xl font-bold tracking-tight sm:text-5xl">
             Choose your legal research plan
           </p>
-          <p className="mt-6 text-lg leading-8 text-muted-foreground">
-            Access AI-powered legal information with our flexible pricing plans. All plans include a 14-day free trial.
-          </p>
+<p className="mt-6 text-lg leading-8 text-muted-foreground">
+             Choose a plan that fits your legal research needs. All plans include a 14-day free trial.
+           </p>
         </div>
         <div className="isolate mx-auto mt-16 grid max-w-md grid-cols-1 gap-y-8 sm:mt-20 lg:mx-0 lg:max-w-none lg:grid-cols-3 lg:gap-x-8">
           {tiers.map((tier) => (

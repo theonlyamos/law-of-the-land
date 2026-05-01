@@ -70,6 +70,6 @@ export const handleSearchRequest = async (socket: Socket, data: { query: string,
         socket.emit('search:complete', { result: response })
     } catch (error) {
         console.error('Search error:', error)
-        socket.emit('search:error', { error: 'An error occurred while processing your request.' })
+        socket.emit('search:error', { error: 'Sorry, something went wrong. Please try again.' })
     }
 } 

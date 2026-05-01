@@ -47,8 +47,8 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
       `}
     >
       <div className="p-4 border-b">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Chat Sessions</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Conversations</h2>
           <div className="flex items-center">
             <Button
               variant="ghost"
@@ -71,46 +71,41 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
       </div>
       
       <ScrollArea className="flex-1">
-        <div className="p-2 space-y-1">
+        <div className="p-3 space-y-1">
           {sessions.length === 0 ? (
             <div className="text-center text-muted-foreground py-4">
-              No chat sessions yet
+              No conversations yet. Start a new chat to get started.
             </div>
           ) : (
-            sessions.map((session) => (
+            sessions.map((session, index) => (
               <div
                 key={session.id}
-                className="group relative"
+                className={`group relative border-b border-border/50 last:border-b-0 pb-1 ${index > 0 ? 'pt-1' : ''}`}
               >
                 <Button
                   variant={activeSession === session.id ? "secondary" : "ghost"}
-                  className="w-full justify-start gap-2 h-auto py-2 px-3"
+                  className="w-full justify-start gap-2 h-auto py-3 px-4"
                   onClick={() => onSessionSelect(session.id)}
                 >
-                  <MessageSquare className="h-4 w-4 flex-shrink-0" />
+                  <MessageSquare className="h-4 w-4 flex-shrink-0 mt-0.5" />
                   <div className="flex-1 text-left min-w-0">
-                    <div className="font-medium truncate">{session.title}</div>
-                    <div className="text-xs text-muted-foreground truncate">
-                      {session.lastMessage}
-                    </div>
+                    <div className="font-medium truncate text-sm">{session.title}</div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                       <Clock className="h-3 w-3 flex-shrink-0" />
                       <span className="truncate">{formatTimestamp(session.timestamp)}</span>
-                      <span>•</span>
-                      <span>{session.messageCount} messages</span>
                     </div>
                   </div>
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDeleteSession(session.id);
                   }}
                 >
-                  <Trash2 className="h-4 w-4 text-destructive" />
+                  <Trash2 className="h-3 w-3 text-destructive" />
                 </Button>
               </div>
             ))
@@ -119,4 +114,4 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
       </ScrollArea>
     </div>
   );
-} 
+}

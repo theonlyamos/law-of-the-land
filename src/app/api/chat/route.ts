@@ -68,9 +68,9 @@ export async function POST(request: Request) {
         return NextResponse.json({ result: response })
     } catch (error) {
         console.error('Chat error:', error)
-        return NextResponse.json(
-            { error: 'An error occurred while processing your request.' },
-            { status: 500 }
-        )
+return NextResponse.json(
+             { error: 'We couldn\'t process your request. Please try again.' },
+             { status: 500 }
+         )
     }
 } 

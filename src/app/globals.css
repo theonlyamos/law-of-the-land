@@ -27,6 +27,8 @@
   --color-chart-3: hsl(var(--chart-3));
   --color-chart-4: hsl(var(--chart-4));
   --color-chart-5: hsl(var(--chart-5));
+  
+  --radius: 0.5rem; /* Base radius: 8px */
 }
 
 :root {
@@ -99,5 +101,61 @@ body {
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+  }
+  
+  /* Custom markdown content styling */
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3 {
+    font-weight: 600;
+    margin-top: 1em;
+    margin-bottom: 0.5em;
+  }
+  
+  .markdown-content h1 { font-size: 1.25em; }
+  .markdown-content h2 { font-size: 1.125em; }
+  .markdown-content h3 { font-size: 1em; }
+  
+  .markdown-content p {
+    margin-bottom: 0.75em;
+  }
+  
+  .markdown-content ul,
+  .markdown-content ol {
+    margin-left: 1.5em;
+    margin-bottom: 0.75em;
+  }
+  
+  .markdown-content li {
+    margin-bottom: 0.25em;
+  }
+  
+  .markdown-content a {
+    color: hsl(var(--primary));
+    text-decoration: underline;
+  }
+  
+  .markdown-content strong {
+    font-weight: 600;
+  }
+  
+  .markdown-content code {
+    background-color: hsl(var(--muted));
+    padding: 0.125em 0.25em;
+    border-radius: 0.25rem;
+    font-size: 0.875em;
+  }
+  
+  .markdown-content pre {
+    background-color: hsl(var(--muted));
+    padding: 1em;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    margin-bottom: 0.75em;
+  }
+  
+  .markdown-content pre code {
+    background-color: transparent;
+    padding: 0;
   }
 }

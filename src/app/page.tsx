@@ -131,11 +131,11 @@ function Chat() {
     let newMessages: Message[] = []
     setMessages(prev => {
       newMessages = [...prev]
-      const loaderMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: '...'
-      } as Message
+const loaderMessage = {
+         id: crypto.randomUUID(),
+         role: 'assistant',
+         content: 'Searching legal database...'
+       } as Message
 
       if (activeSession) {
         newMessages.push(userMessage, loaderMessage)
@@ -192,11 +192,11 @@ function Chat() {
       setMessages(prev => {
         newMessages = [...prev]
         newMessages.pop()
-        newMessages.push({
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: 'An error occurred while processing your request.'
-        } as Message)
+newMessages.push({
+           id: crypto.randomUUID(),
+           role: 'assistant',
+           content: 'Sorry, something went wrong. Please try again or rephrase your question.'
+         } as Message)
         return newMessages
       })
     }
@@ -292,7 +292,7 @@ function Chat() {
             />
             <div>
               <h1 className="text-xl font-bold">Law of the Land</h1>
-              <p className="text-sm text-gray-500">AI-powered legal assistant</p>
+              <p className="text-sm text-muted-foreground">Your AI legal research assistant</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -317,10 +317,9 @@ function Chat() {
               className="md:w-40" // Slightly larger logo on desktop empty state
               priority
             />
-            <p className="max-w-md mt-2 text-center text-gray-500 mb-8">
-              Law of the Land transforms complex laws and regulations into clear, understandable answers. 
-              Ask a question about your rights or local laws to get started.
-            </p>
+<p className="max-w-md mt-2 text-center text-muted-foreground mb-8">
+               Get clear answers about your legal rights and local laws. Ask a question to get started.
+             </p>
             
             {/* Suggested Questions */}
             <div className="w-full max-w-2xl mb-8">
@@ -352,45 +351,51 @@ function Chat() {
           </div>
         ) : (
           <>
-            <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
-              <div className="space-y-4">
-                {messages.map((message, index) => (
-                  <div
-                    key={index}
-                    className={`flex gap-2 md:gap-3 ${
-                      message.role === 'user' ? 'justify-end' : 'justify-start'
-                    }`}
-                  >
-                    {message.role === 'assistant' && (
-                      <Avatar className="w-8 h-8 md:w-10 md:h-10">
-                        <AvatarFallback>AI</AvatarFallback>
-                      </Avatar>
-                    )}
-                    <div
-                      className={`rounded-lg p-3 md:p-4 max-w-[85%] md:max-w-[80%] ${
-                        message.role === 'user'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-gray-100 dark:bg-gray-800 text-foreground'
-                      }`}
-                    >
-                      {message.role === 'assistant' ? (
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <ReactMarkdown>{message.content || '...'}</ReactMarkdown>
-                        </div>
-                      ) : (
-                        <p>{message.content}</p>
-                      )}
-                    </div>
-                    {message.role === 'user' && (
-                      <Avatar className="w-8 h-8 md:w-10 md:h-10">
-                        <AvatarFallback>ME</AvatarFallback>
-                      </Avatar>
-                    )}
-                  </div>
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
-            </ScrollArea>
+<ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
+               <div className="space-y-4">
+                 {messages.map((message, index) => {
+                   // Calculate if we need extra margin for speaker change
+                   const prevRole = index > 0 ? messages[index - 1].role : null;
+                   const isNewSpeaker = prevRole && prevRole !== message.role;
+                   
+                   return (
+                     <div
+                       key={index}
+                       className={`flex gap-2 md:gap-3 ${
+                         message.role === 'user' ? 'justify-end' : 'justify-start'
+                       } ${isNewSpeaker ? 'mt-6' : ''}`}
+                     >
+                       {message.role === 'assistant' && (
+                         <Avatar className="w-8 h-8 md:w-10 md:h-10">
+                           <AvatarFallback>AI</AvatarFallback>
+                         </Avatar>
+                       )}
+                       <div
+                         className={`rounded-lg p-3 md:p-4 max-w-[75%] lg:max-w-[65%] ${
+                           message.role === 'user'
+                             ? 'bg-primary text-primary-foreground'
+                             : 'bg-muted text-foreground'
+                         }`}
+                       >
+                         {message.role === 'assistant' ? (
+                           <div className="text-sm leading-relaxed markdown-content">
+                             <ReactMarkdown>{message.content || '...'}</ReactMarkdown>
+                           </div>
+                         ) : (
+                           <p className="text-sm leading-relaxed">{message.content}</p>
+                         )}
+                       </div>
+                       {message.role === 'user' && (
+                         <Avatar className="w-8 h-8 md:w-10 md:h-10">
+                           <AvatarFallback>ME</AvatarFallback>
+                         </Avatar>
+                       )}
+                     </div>
+                   );
+                 })}
+                 <div ref={messagesEndRef} />
+               </div>
+             </ScrollArea>
 
             {/* Input area for when messages exist */}
             <div className="p-4 border-t">
@@ -417,8 +422,8 @@ export default function Home() {
         <div className="flex flex-col items-center">
           {/* You can use your logo here if you have it as a component or inline SVG */}
           {/* <Image src={logo} alt="Loading Logo" width={100} height={100} /> */}
-          <p className="text-lg font-semibold mt-4">Loading Your Legal Assistant...</p>
-          <div className="mt-2 w-16 h-16 border-4 border-blue-500 border-dashed rounded-full animate-spin"></div>
+          <p className="text-lg font-semibold mt-4">Loading your legal assistant...</p>
+          <div className="mt-2 w-16 h-16 border-4 border-primary border-dashed rounded-full animate-spin"></div>
         </div>
       </div>
     }>

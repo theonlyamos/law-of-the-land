@@ -15,9 +15,9 @@ export async function POST(request: Request) {
         })
 
         const llmText: string | undefined = response.data.search.text;
-        return NextResponse.json({ result: llmText || "No relevant context found for query" })
+        return NextResponse.json({ result: llmText || "No relevant legal information found for your question." })
     } catch (error) {
         console.error('Error:', error)
-        return NextResponse.json({ error: "No relevant context found for query" }, { status: 500 })
+        return NextResponse.json({ error: "We couldn't find relevant legal information for your question." }, { status: 500 })
     }
 } 
