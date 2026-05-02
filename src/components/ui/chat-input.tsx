@@ -22,7 +22,7 @@ export function ChatInput({
   onSearch,
   onKeyDown,
   isLoading,
-  placeholder = "Type your question here... (Press Enter to send)",
+  placeholder = "Ask a follow-up… Enter to send, Shift+Enter for a new line",
   rows = 1, // Default to 1, can be overridden
   className
 }: ChatInputProps) {
@@ -47,7 +47,7 @@ export function ChatInput({
          className="absolute right-2 top-1/2 -translate-y-1/2 h-11 w-11 disabled:opacity-50 disabled:cursor-not-allowed"
        >
         <Send className={`h-5 w-5 ${isLoading ? 'animate-pulse' : ''}`} />
-        <span className="sr-only">Send message</span>
+        <span className="sr-only">Send question</span>
       </Button>
     </div>
   );

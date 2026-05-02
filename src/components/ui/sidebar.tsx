@@ -1,63 +1,68 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Clock, MessageSquare, MessageSquarePlus, Trash2, X, AlertTriangle } from "lucide-react";
+import type { ChatSession } from "@/lib/chat-sessions";
+import { Clock, MessageSquare, MessageSquarePlus, Trash2, X } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
-
-interface ChatSession {
-  id: string;
-  title: string;
-  lastMessage: string;
-  timestamp: Date;
-  messageCount: number;
-}
 
 interface SidebarProps {
   sessions: ChatSession[];
   activeSession?: string;
   isOpen: boolean;
-  onSessionSelect: (sessionId: string) => void;
+  onAfterSessionNavigate?: () => void;
   onNewSession: () => void;
   onDeleteSession: (sessionId: string) => void;
   onClose: () => void;
 }
 
-export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNewSession, onDeleteSession, onClose }: SidebarProps) {
+export function Sidebar({
+  sessions,
+  activeSession,
+  isOpen,
+  onAfterSessionNavigate,
+  onNewSession,
+  onDeleteSession,
+  onClose,
+}: SidebarProps) {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  
+
   const formatTimestamp = (date: Date) => {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-    
+
     if (days === 0) {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } else if (days === 1) {
-      return 'Yesterday';
-    } else if (days < 7) {
-      return date.toLocaleDateString([], { weekday: 'long' });
-    } else {
-      return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
+    if (days === 1) {
+      return "Yesterday";
+    }
+    if (days < 7) {
+      return date.toLocaleDateString([], { weekday: "long" });
+    }
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
   return (
-    <div 
+    <div
       className={`
-        w-64 h-full border-r bg-background flex flex-col 
-        fixed md:static z-50 md:z-auto 
-        transform ${isOpen ? "translate-x-0" : "-translate-x-full"} 
-        md:translate-x-0 transition-transform duration-300 ease-in-out
+        flex h-full min-h-0 w-64 min-w-64 flex-col border-r bg-background
+        fixed z-50 transform transition-transform duration-300 ease-in-out
+        md:static md:z-auto
+        ${isOpen ? "translate-x-0" : "-translate-x-full"}
+        md:translate-x-0
       `}
     >
-      <div className="p-4 border-b">
+      <div className="border-b p-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Conversations</h2>
+          <h2 className="text-lg font-semibold">Chats</h2>
           <div className="flex items-center">
             <Button
               variant="ghost"
               size="icon"
               onClick={onNewSession}
               className="h-11 w-11"
+              aria-label="Start a new chat"
             >
               <MessageSquarePlus className="h-5 w-5" />
             </Button>
@@ -65,57 +70,64 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
               variant="ghost"
               size="icon"
               onClick={onClose}
-              className="h-11 w-11 md:hidden ml-2"
+              className="ml-2 h-11 w-11 md:hidden"
+              aria-label="Close chat list"
             >
               <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
       </div>
-      
-      <ScrollArea className="flex-1">
-        <div className="p-3 space-y-1">
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="space-y-1 p-3">
           {sessions.length === 0 ? (
-            <div className="text-center text-muted-foreground py-4">
-              No conversations yet. Start a new chat to get started.
+            <div className="py-4 text-center text-muted-foreground">
+              No saved chats yet. Use the + button to start one.
             </div>
           ) : (
             sessions.map((session, index) => (
               <div
                 key={session.id}
-                className={`group relative border-b border-border/50 last:border-b-0 pb-1 ${index > 0 ? 'pt-1' : ''}`}
+                className={`group relative border-b border-border/50 pb-1 last:border-b-0 ${index > 0 ? "pt-1" : ""}`}
               >
                 <Button
+                  asChild
                   variant={activeSession === session.id ? "secondary" : "ghost"}
-                  className="w-full justify-start gap-2 h-auto py-3 px-4"
-                  onClick={() => onSessionSelect(session.id)}
+                  className="h-auto w-full min-w-0 justify-start gap-2 px-4 py-3"
                 >
-                  <MessageSquare className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1 text-left min-w-0 pr-8"> {/* Reserve space for delete button */}
-                    <div className="font-medium truncate text-sm">{session.title}</div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1 pr-8"> {/* Reserve space for delete button */}
-                      <Clock className="h-3 w-3 flex-shrink-0" />
-                      <span className="truncate">{formatTimestamp(session.timestamp)}</span>
+                  <Link
+                    href={`/${session.id}`}
+                    onClick={() => onAfterSessionNavigate?.()}
+                  >
+                    <MessageSquare className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="min-w-0 flex-1 pr-10 text-left">
+                      <div className="truncate text-sm font-medium">{session.title}</div>
+                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                        <Clock className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{formatTimestamp(session.timestamp)}</span>
+                      </div>
                     </div>
-                  </div>
+                  </Link>
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label={`Delete chat: ${session.title}`}
                   onClick={(e) => {
                     e.stopPropagation();
+                    e.preventDefault();
                     setDeleteConfirm(session.id);
                   }}
                 >
                   <Trash2 className="h-3 w-3 text-destructive" />
                 </Button>
-                
-                {/* Delete Confirmation - Contained on right side */}
+
                 {deleteConfirm === session.id && (
-                  <div className="absolute right-0 top-0 bottom-0 w-2/3 bg-background/95 backdrop-blur-sm flex items-center justify-center gap-1 pr-2 z-10 rounded-r-lg">
-                    <Button 
-                      size="sm" 
+                  <div  className="absolute right-0 top-0 bottom-0 z-10 flex w-2/3 items-center justify-center gap-1 rounded-r-lg bg-background/95 pr-2 backdrop-blur-sm">
+                    <Button
+                      size="sm"
                       variant="destructive"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -123,17 +135,17 @@ export function Sidebar({ sessions, activeSession, isOpen, onSessionSelect, onNe
                         setDeleteConfirm(null);
                       }}
                     >
-                      Delete
+                      Delete chat
                     </Button>
-                    <Button 
-                      size="sm" 
+                    <Button
+                      size="sm"
                       variant="ghost"
                       onClick={(e) => {
                         e.stopPropagation();
                         setDeleteConfirm(null);
                       }}
                     >
-                      Cancel
+                      Keep
                     </Button>
                   </div>
                 )}

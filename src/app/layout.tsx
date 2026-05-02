@@ -18,7 +18,7 @@ const geistMono = localFont({
 
 export const metadata: Metadata = {
   title: "Law of the Land",
-  description: "Easy access to legal information powered by AI",
+  description: "Ask questions in plain language and get answers grounded in a legal document library.",
   icons: {
     icon: '/favicon.ico',
   },
@@ -35,7 +35,7 @@ export default function RootLayout({
         <nav className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
           <div className="container mx-auto flex items-center justify-between h-16 px-4">
             <Link href="/" className="flex items-center gap-2">
-              <Image src={logo} alt="Law of the Land" width={80} priority />
+              <Image src={logo} alt="Law of the Land — home" width={80} priority />
             </Link>
             <div className="flex items-center gap-4">
               <Link href="/pricing" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
@@ -44,11 +44,11 @@ export default function RootLayout({
             </div>
           </div>
         </nav>
-        <div className="flex-1">
+        <div className="flex flex-1 min-h-0 flex-col">
           {children}
         </div>
         <div className="text-center text-xs text-muted-foreground py-3 px-4 border-t">
-          This AI assistant provides general legal information, not legal advice. Consult a qualified attorney for specific legal matters.
+          General information from public legal sources, not legal advice for your case. For decisions that affect your rights or obligations, talk to a qualified attorney.
         </div>
       </body>
     </html>

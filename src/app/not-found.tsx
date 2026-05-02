@@ -15,12 +15,12 @@ export default function NotFound() {
       <div className="text-center">
         <h1 className="text-4xl font-bold mb-4">Page not found</h1>
         <p className="text-xl text-muted-foreground mb-8">
-          Oops! The page you're looking for doesn't exist.
+          That address is not valid, or the page was removed. Use the link below to return to the assistant.
         </p>
       </div>
       <Button variant="default" asChild>
         <Link href="/">
-          Go back home
+          Return to assistant
         </Link>
       </Button>
     </div>
