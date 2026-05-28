@@ -1,21 +1,29 @@
 "use client";
 
 import { LandingPage } from "@/components/landing-page";
-import { loadChatSessions, type ChatSession } from "@/lib/chat-sessions";
+import type { ChatSession } from "@/lib/chat-sessions";
+import { api } from "@/convex/_generated/api";
+import { useConvexAuth, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 
 function LandingShell() {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [savedChats, setSavedChats] = useState<ChatSession[]>([]);
+  const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
+  const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
 
-  useEffect(() => {
-    const refresh = () => setSavedChats(loadChatSessions());
-    refresh();
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, []);
+  const savedChats = useMemo<ChatSession[]>(() => {
+    if (!sessionsData) return [];
+    return sessionsData.map((session) => ({
+      id: session.id,
+      title: session.title,
+      lastMessage: session.lastMessage,
+      timestamp: new Date(session.timestamp),
+      messageCount: session.messageCount,
+      messages: [],
+    }));
+  }, [sessionsData]);
 
   const resumeChat = useCallback(
     (chatId: string) => {
@@ -29,10 +37,17 @@ function LandingShell() {
     (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+
+      if (!isAuthenticated) {
+        const id = crypto.randomUUID();
+        router.push(`/signin?redirect=${encodeURIComponent(`/${id}?q=${encodeURIComponent(trimmed)}`)}`);
+        return;
+      }
+
       const id = crypto.randomUUID();
       router.push(`/${id}?q=${encodeURIComponent(trimmed)}`);
     },
-    [router]
+    [isAuthenticated, router]
   );
 
   const handleKeyDown = useCallback(
@@ -53,9 +68,10 @@ function LandingShell() {
         onSearch={() => goToChat(query)}
         onPickSuggested={goToChat}
         onKeyDown={handleKeyDown}
-        isLoading={false}
+        isLoading={authLoading}
         savedChats={savedChats}
         onResumeChat={resumeChat}
+        isAuthenticated={isAuthenticated}
       />
     </div>
   );

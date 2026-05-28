@@ -2,6 +2,10 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import localFont from "next/font/local";
 import Image from "next/image";
+import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
+import { AuthSessionBootstrap } from "@/components/auth/auth-session-bootstrap";
+import { UserNav } from "@/components/auth/user-nav";
+import { ConvexClientProvider } from "@/components/providers/convex-client-provider";
 import logo from "./logo-transparent.png";
 import "./globals.css";
 
@@ -20,7 +24,7 @@ export const metadata: Metadata = {
   title: "Law of the Land",
   description: "Ask questions in plain language and get answers grounded in a legal document library.",
   icons: {
-    icon: '/favicon.ico',
+    icon: "/favicon.ico",
   },
 };
 
@@ -30,27 +34,35 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
-      <body className="antialiased flex flex-col min-h-screen">
-        <nav className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="container mx-auto flex items-center justify-between h-16 px-4">
-            <Link href="/" className="flex items-center gap-2">
-              <Image src={logo} alt="Law of the Land — home" width={80} priority />
-            </Link>
-            <div className="flex items-center gap-4">
-              <Link href="/pricing" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
-                Pricing
-              </Link>
+    <ConvexAuthNextjsServerProvider>
+      <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+        <body className="flex min-h-screen flex-col antialiased">
+          <ConvexClientProvider>
+            <AuthSessionBootstrap />
+            <nav className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+              <div className="container mx-auto flex h-16 items-center justify-between px-4">
+                <Link href="/" className="flex items-center gap-2">
+                  <Image src={logo} alt="Law of the Land — home" width={80} priority />
+                </Link>
+                <div className="flex items-center gap-4">
+                  <Link
+                    href="/pricing"
+                    className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    Pricing
+                  </Link>
+                  <UserNav />
+                </div>
+              </div>
+            </nav>
+            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+            <div className="border-t px-4 py-3 text-center text-xs text-muted-foreground">
+              General information from public legal sources, not legal advice for your case. For decisions
+              that affect your rights or obligations, talk to a qualified attorney.
             </div>
-          </div>
-        </nav>
-        <div className="flex flex-1 min-h-0 flex-col">
-          {children}
-        </div>
-        <div className="text-center text-xs text-muted-foreground py-3 px-4 border-t">
-          General information from public legal sources, not legal advice for your case. For decisions that affect your rights or obligations, talk to a qualified attorney.
-        </div>
-      </body>
-    </html>
+          </ConvexClientProvider>
+        </body>
+      </html>
+    </ConvexAuthNextjsServerProvider>
   );
 }

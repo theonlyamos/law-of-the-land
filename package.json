@@ -4,9 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:convex": "convex dev",
+    "dev:all": "bun run dev:convex & bun run dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "convex:codegen": "convex codegen"
   },
   "dependencies": {
     "@google/genai": "^1.51.0",

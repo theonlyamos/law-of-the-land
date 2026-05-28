@@ -10,22 +10,29 @@ import Image from "next/image";
 import Link from "next/link";
 import axios from "axios";
 import { useRouter } from "next/navigation";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import type { ChatSession, Message } from "@/lib/chat-sessions";
-import { loadChatSessions, saveChatSessions } from "@/lib/chat-sessions";
+import { api } from "@/convex/_generated/api";
 import logo from "@/app/logo-transparent.png";
 import githubLogo from "@/app/github-mark.png";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
 
-function emptySession(chatId: string): ChatSession {
+function toSidebarSession(session: {
+  id: string;
+  title: string;
+  lastMessage: string;
+  timestamp: number;
+  messageCount: number;
+}): ChatSession {
   return {
-    id: chatId,
-    title: "New chat",
-    lastMessage: "",
-    timestamp: new Date(),
-    messageCount: 0,
+    id: session.id,
+    title: session.title,
+    lastMessage: session.lastMessage,
+    timestamp: new Date(session.timestamp),
+    messageCount: session.messageCount,
     messages: [],
   };
 }
@@ -37,14 +44,26 @@ interface ChatWorkspaceProps {
 
 export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   const router = useRouter();
+  const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
+  const ensuredRef = useRef<Set<string>>(new Set());
+
+  const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
+  const sessionData = useQuery(
+    api.chats.getByExternalId,
+    isAuthenticated ? { externalId: chatId } : "skip"
+  );
+  const ensureSession = useMutation(api.chats.ensure);
+  const replaceMessages = useMutation(api.chats.replaceMessages);
+  const removeSession = useMutation(api.chats.remove);
+
+  const sessions = (sessionsData ?? []).map(toSidebarSession);
 
   useEffect(() => {
     const handleResize = () => {
@@ -60,19 +79,24 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   }, []);
 
   useEffect(() => {
-    const list = loadChatSessions();
-    let session = list.find((s) => s.id === chatId);
-    let nextList = list;
+    if (!isAuthenticated || authLoading) return;
+    if (ensuredRef.current.has(chatId)) return;
 
-    if (!session) {
-      session = emptySession(chatId);
-      nextList = [session, ...list];
-      saveChatSessions(nextList);
-    }
+    ensuredRef.current.add(chatId);
+    void ensureSession({ externalId: chatId });
+  }, [authLoading, chatId, ensureSession, isAuthenticated]);
 
-    setSessions(nextList);
-    setMessages(session.messages);
-  }, [chatId]);
+  useEffect(() => {
+    if (!sessionData) return;
+    setMessages(
+      sessionData.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
+      }))
+    );
+  }, [sessionData]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -82,6 +106,24 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
     scrollToBottom();
   }, [messages]);
 
+  const persistMessages = useCallback(
+    async (nextMessages: Message[], meta: { title?: string; lastMessage: string }) => {
+      await replaceMessages({
+        externalId: chatId,
+        title: meta.title,
+        lastMessage: meta.lastMessage,
+        messageCount: nextMessages.length,
+        messages: nextMessages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          clientId: message.id,
+          createdAt: message.createdAt?.getTime(),
+        })),
+      });
+    },
+    [chatId, replaceMessages]
+  );
+
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       const trimmed = searchQuery.trim();
@@ -90,27 +132,24 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
       setQuery("");
       setIsLoading(true);
 
-      const targetSessionId = chatId;
       const priorForApi = messages.slice(-10);
 
-      const userMessage = {
+      const userMessage: Message = {
         id: crypto.randomUUID(),
-        role: "user" as const,
+        role: "user",
         content: trimmed,
+        createdAt: new Date(),
       };
 
-      setMessages((prev) => {
-        const newMessages = [
-          ...prev,
-          userMessage,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant" as const,
-            content: "...",
-          },
-        ];
-        return newMessages;
-      });
+      setMessages((prev) => [
+        ...prev,
+        userMessage,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "...",
+        },
+      ]);
 
       try {
         const { data: searchData } = await axios.post("/api/search", { query: trimmed });
@@ -125,29 +164,22 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
         setMessages((prev) => {
           const next = [...prev];
           next.pop();
-          next.push({
+          const assistantMessage: Message = {
             id: crypto.randomUUID(),
             role: "assistant",
             content: chatData.result,
+            createdAt: new Date(),
+          };
+          next.push(assistantMessage);
+
+          const isFirstUserTurn = priorForApi.length === 0;
+          void persistMessages(next, {
+            title: isFirstUserTurn
+              ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
+              : undefined,
+            lastMessage: chatData.result,
           });
-          setSessions((sprev) => {
-            const updated = sprev.map((session) => {
-              if (session.id !== targetSessionId) return session;
-              const isFirstUserTurn = priorForApi.length === 0;
-              return {
-                ...session,
-                title: isFirstUserTurn
-                  ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
-                  : session.title,
-                lastMessage: chatData.result,
-                messageCount: next.length,
-                messages: next,
-                timestamp: new Date(),
-              };
-            });
-            saveChatSessions(updated);
-            return updated;
-          });
+
           return next;
         });
       } catch (error) {
@@ -167,7 +199,7 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
         setIsLoading(false);
       }
     },
-    [chatId, isLoading, messages]
+    [isLoading, messages, persistMessages]
   );
 
   useEffect(() => {
@@ -175,16 +207,15 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
     const q = initialQuery.trim();
     const key = `${chatId}|${q}`;
     if (processedBootstrap.current.has(key)) return;
-    processedBootstrap.current.add(key);
+    if (sessionData === undefined) return;
 
+    processedBootstrap.current.add(key);
     router.replace(`/${chatId}`, { scroll: false });
 
-    const list = loadChatSessions();
-    const session = list.find((s) => s.id === chatId);
-    if (session && session.messages.length > 0) return;
+    if (sessionData && sessionData.messages.length > 0) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [chatId, initialQuery, router, handleSearch]);
+  }, [chatId, handleSearch, initialQuery, router, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -204,28 +235,36 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   }, [router]);
 
   const handleDeleteSession = useCallback(
-    (sessionId: string) => {
-      const newSessions = loadChatSessions().filter((s) => s.id !== sessionId);
-      saveChatSessions(newSessions);
-      setSessions(newSessions);
+    async (sessionId: string) => {
+      await removeSession({ externalId: sessionId });
 
       if (sessionId !== chatId) return;
 
-      if (newSessions.length === 0) {
+      const remaining = sessions.filter((session) => session.id !== sessionId);
+      if (remaining.length === 0) {
         router.push("/");
       } else {
-        router.push(`/${newSessions[0].id}`);
+        router.push(`/${remaining[0].id}`);
       }
       if (typeof window !== "undefined" && window.innerWidth < 768) {
         setIsSidebarOpen(false);
       }
     },
-    [chatId, router]
+    [chatId, removeSession, router, sessions]
   );
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarOpen((prev) => !prev);
   }, []);
+
+  if (authLoading || sessionsData === undefined) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
+        <div className="h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
+        <p className="mt-4 text-lg font-semibold">Loading chat…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="container relative mx-auto flex min-h-0 flex-1 overflow-hidden">
@@ -246,7 +285,9 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
           }
         }}
         onNewSession={handleNewSession}
-        onDeleteSession={handleDeleteSession}
+        onDeleteSession={(sessionId) => {
+          void handleDeleteSession(sessionId);
+        }}
         onClose={() => setIsSidebarOpen(false)}
       />
 
@@ -294,7 +335,7 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
 
               return (
                 <div
-                  key={index}
+                  key={message.id ?? index}
                   className={`flex gap-2 md:gap-3 ${
                     message.role === "user" ? "justify-end" : "justify-start"
                   } ${isNewSpeaker ? "mt-6" : ""}`}
