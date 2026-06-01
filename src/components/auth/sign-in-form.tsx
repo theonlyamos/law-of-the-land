@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { useAuthActions } from "@convex-dev/auth/react";
+import { authClient } from "@/lib/auth-client";
 import { useConvexAuth } from "convex/react";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
@@ -10,7 +10,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 
 function SignInFormInner() {
-  const { signIn } = useAuthActions();
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -42,15 +41,25 @@ function SignInFormInner() {
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.set("email", email.trim());
-      formData.set("password", password);
-      formData.set("flow", step);
-      if (step === "signUp" && name.trim()) {
-        formData.set("name", name.trim());
+      if (step === "signIn") {
+        const result = await authClient.signIn.email({
+          email: email.trim(),
+          password,
+        });
+        if (result.error) {
+          throw new Error(result.error.message);
+        }
+      } else {
+        const result = await authClient.signUp.email({
+          email: email.trim(),
+          password,
+          name: name.trim() || email.trim(),
+        });
+        if (result.error) {
+          throw new Error(result.error.message);
+        }
       }
 
-      await signIn("password", formData);
       router.replace(redirectTo);
     } catch {
       setError(
@@ -67,7 +76,10 @@ function SignInFormInner() {
     setSubmitting(true);
     setError(null);
     try {
-      await signIn(provider, { redirectTo });
+      await authClient.signIn.social({
+        provider,
+        callbackURL: redirectTo,
+      });
     } catch {
       setError(`We could not start ${provider} sign-in. Confirm OAuth credentials are configured.`);
       setSubmitting(false);

@@ -1,52 +1,42 @@
-import GitHub from "@auth/core/providers/github";
-import Google from "@auth/core/providers/google";
-import { Password } from "@convex-dev/auth/providers/Password";
-import { convexAuth, type AuthProviderConfig } from "@convex-dev/auth/server";
-import { ConvexError } from "convex/values";
-import { z } from "zod";
+import { createClient, type GenericCtx } from "@convex-dev/better-auth";
+import { convex } from "@convex-dev/better-auth/plugins";
+import { betterAuth } from "better-auth/minimal";
+import { components } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+import authConfig from "./auth.config";
 
-const emailSchema = z.string().email();
+const siteUrl = process.env.SITE_URL!;
 
-const passwordProvider = Password({
-  profile(params) {
-    const email = emailSchema.parse(params.email);
-    const name = typeof params.name === "string" ? params.name.trim() : undefined;
-    return { email, ...(name ? { name } : {}) };
-  },
-  validatePasswordRequirements(password: string) {
-    if (
-      password.length < 8 ||
-      !/\d/.test(password) ||
-      !/[a-z]/.test(password) ||
-      !/[A-Z]/.test(password)
-    ) {
-      throw new ConvexError(
-        "Password must be at least 8 characters and include uppercase, lowercase, and a number."
-      );
-    }
-  },
-});
+export const authComponent = createClient<DataModel>(components.betterAuth);
 
-const providers: AuthProviderConfig[] = [passwordProvider];
+export const createAuth = (ctx: GenericCtx<DataModel>) => {
+  return betterAuth({
+    baseURL: siteUrl,
+    database: authComponent.adapter(ctx),
+    emailAndPassword: {
+      enabled: true,
+      requireEmailVerification: false,
+    },
+    socialProviders: {
+      ...(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET
+        ? {
+            github: {
+              clientId: process.env.GITHUB_CLIENT_ID,
+              clientSecret: process.env.GITHUB_CLIENT_SECRET,
+            },
+          }
+        : {}),
+      ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+        ? {
+            google: {
+              clientId: process.env.GOOGLE_CLIENT_ID,
+              clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+            },
+          }
+        : {}),
+    },
+    plugins: [convex({ authConfig })],
+  });
+};
 
-if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-  providers.push(
-    GitHub({
-      clientId: process.env.GITHUB_CLIENT_ID,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET,
-    })
-  );
-}
-
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  providers.push(
-    Google({
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    })
-  );
-}
-
-export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
-  providers,
-});
+export const { getAuthUser } = authComponent.clientApi();

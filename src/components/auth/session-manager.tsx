@@ -2,14 +2,21 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { useAuthActions } from "@convex-dev/auth/react";
-import { useMutation, useQuery } from "convex/react";
+import { authClient } from "@/lib/auth-client";
 import { Loader2, MonitorSmartphone, ShieldAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { api } from "@/convex/_generated/api";
+import { useCallback, useEffect, useState } from "react";
 
-function formatRelativeTime(timestamp: number) {
+type BetterAuthSession = {
+  id: string;
+  token: string;
+  userAgent?: string | null;
+  ipAddress?: string | null;
+  updatedAt: Date | string;
+};
+
+function formatRelativeTime(value: Date | string) {
+  const timestamp = typeof value === "string" ? new Date(value).getTime() : value.getTime();
   const diffMs = Date.now() - timestamp;
   const minutes = Math.floor(diffMs / 60000);
   if (minutes < 1) return "Just now";
@@ -20,44 +27,75 @@ function formatRelativeTime(timestamp: number) {
   return `${days}d ago`;
 }
 
+function parseDeviceLabel(userAgent?: string | null) {
+  if (!userAgent) return "Unknown device";
+  if (/iPhone|iPad|iPod/i.test(userAgent)) return "Apple mobile device";
+  if (/Android/i.test(userAgent)) return "Android device";
+  if (/Macintosh|Mac OS X/i.test(userAgent)) return "Mac";
+  if (/Windows/i.test(userAgent)) return "Windows PC";
+  if (/Linux/i.test(userAgent)) return "Linux device";
+  return "Web browser";
+}
+
 export function SessionManager() {
   const router = useRouter();
-  const { signOut } = useAuthActions();
-  const sessions = useQuery(api.sessions.listSessions);
-  const revokeSession = useMutation(api.sessions.revokeSession);
-  const revokeOtherSessions = useMutation(api.sessions.revokeOtherSessions);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<BetterAuthSession[]>([]);
+  const [currentSessionToken, setCurrentSessionToken] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyToken, setBusyToken] = useState<string | null>(null);
   const [revokingOthers, setRevokingOthers] = useState(false);
 
-  if (sessions === undefined) {
-    return (
-      <div className="flex min-h-[40vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  const handleRevoke = async (authSessionId: string, isCurrent: boolean) => {
-    setBusyId(authSessionId);
+  const loadSessions = useCallback(async () => {
+    setLoading(true);
     try {
-      const result = await revokeSession({ authSessionId: authSessionId as never });
-      if (result.signedOutCurrent) {
-        await signOut();
-        router.push("/signin");
-      }
+      const [sessionResult, listResult] = await Promise.all([
+        authClient.getSession(),
+        authClient.listSessions(),
+      ]);
+
+      setCurrentSessionToken(sessionResult.data?.session.token ?? null);
+      setSessions((listResult.data ?? []) as BetterAuthSession[]);
     } finally {
-      setBusyId(null);
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSessions();
+  }, [loadSessions]);
+
+  const handleRevoke = async (token: string, isCurrent: boolean) => {
+    setBusyToken(token);
+    try {
+      await authClient.revokeSession({ token });
+      if (isCurrent) {
+        await authClient.signOut();
+        router.push("/signin");
+        return;
+      }
+      await loadSessions();
+    } finally {
+      setBusyToken(null);
     }
   };
 
   const handleRevokeOthers = async () => {
     setRevokingOthers(true);
     try {
-      await revokeOtherSessions({});
+      await authClient.revokeOtherSessions();
+      await loadSessions();
     } finally {
       setRevokingOthers(false);
     }
   };
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[40vh] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="container mx-auto max-w-3xl px-4 py-10">
@@ -73,49 +111,52 @@ export function SessionManager() {
             <p className="text-sm text-muted-foreground">No active sessions found.</p>
           ) : (
             <div className="space-y-3">
-              {sessions.map((session) => (
-                <div
-                  key={session._id}
-                  className="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex items-start gap-3">
-                    <MonitorSmartphone className="mt-0.5 h-5 w-5 text-muted-foreground" />
-                    <div>
-                      <p className="font-medium">
-                        {session.deviceLabel}
-                        {session.isCurrent && (
-                          <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
-                            Current
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        Last active {formatRelativeTime(session.lastActiveAt)}
-                        {session.ipAddress ? ` · ${session.ipAddress}` : ""}
-                      </p>
+              {sessions.map((session) => {
+                const isCurrent = session.token === currentSessionToken;
+                return (
+                  <div
+                    key={session.id}
+                    className="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="flex items-start gap-3">
+                      <MonitorSmartphone className="mt-0.5 h-5 w-5 text-muted-foreground" />
+                      <div>
+                        <p className="font-medium">
+                          {parseDeviceLabel(session.userAgent)}
+                          {isCurrent && (
+                            <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                              Current
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Last active {formatRelativeTime(session.updatedAt)}
+                          {session.ipAddress ? ` · ${session.ipAddress}` : ""}
+                        </p>
+                      </div>
                     </div>
-                  </div>
 
-                  {!session.isCurrent && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busyId === session.authSessionId}
-                      onClick={() => void handleRevoke(session.authSessionId, false)}
-                    >
-                      {busyId === session.authSessionId ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        "Revoke"
-                      )}
-                    </Button>
-                  )}
-                </div>
-              ))}
+                    {!isCurrent && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busyToken === session.token}
+                        onClick={() => void handleRevoke(session.token, false)}
+                      >
+                        {busyToken === session.token ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          "Revoke"
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
-          {sessions.some((session) => !session.isCurrent) && (
+          {sessions.some((session) => session.token !== currentSessionToken) && (
             <Button
               variant="destructive"
               disabled={revokingOthers}

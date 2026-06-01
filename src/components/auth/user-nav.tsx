@@ -1,16 +1,15 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { useAuthActions } from "@convex-dev/auth/react";
+import { authClient } from "@/lib/auth-client";
+import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useQuery } from "convex/react";
 import { Loader2, LogOut, Settings, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api } from "@/convex/_generated/api";
 
 export function UserNav() {
   const { isAuthenticated, isLoading } = useConvexAuth();
-  const { signOut } = useAuthActions();
   const router = useRouter();
   const user = useQuery(api.users.current, isAuthenticated ? {} : "skip");
 
@@ -44,7 +43,7 @@ export function UserNav() {
         size="sm"
         variant="outline"
         onClick={() => {
-          void signOut().then(() => router.push("/"));
+          void authClient.signOut().then(() => router.push("/"));
         }}
       >
         <LogOut className="mr-2 h-4 w-4" />

@@ -1,19 +1,14 @@
-import { getAuthUserId } from "@convex-dev/auth/server";
 import { query } from "./_generated/server";
-
-export { isAuthenticated } from "./auth";
+import { authComponent } from "./auth";
 
 export const current = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await getAuthUserId(ctx);
-    if (!userId) return null;
-
-    const user = await ctx.db.get(userId);
+    const user = await authComponent.safeGetAuthUser(ctx);
     if (!user) return null;
 
     return {
-      _id: user._id,
+      id: user._id,
       name: user.name ?? null,
       email: user.email ?? null,
       image: user.image ?? null,
@@ -24,7 +19,7 @@ export const current = query({
 export const viewer = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await getAuthUserId(ctx);
-    return userId !== null;
+    const user = await authComponent.safeGetAuthUser(ctx);
+    return user !== undefined;
   },
 });

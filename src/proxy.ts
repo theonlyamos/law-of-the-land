@@ -1,7 +1,5 @@
-import {
-  convexAuthNextjsMiddleware,
-  nextjsMiddlewareRedirect,
-} from "@convex-dev/auth/nextjs/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionCookie } from "better-auth/cookies";
 
 const UUID_V4_RE =
   /^\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -14,29 +12,24 @@ function isSettingsRoute(pathname: string) {
   return pathname === "/settings" || pathname.startsWith("/settings/");
 }
 
-export const proxy = convexAuthNextjsMiddleware(
-  async (request, { convexAuth }) => {
-    const isAuthenticated = await convexAuth.isAuthenticated();
-    const { pathname, search } = request.nextUrl;
+export async function proxy(request: NextRequest) {
+  const sessionCookie = getSessionCookie(request);
+  const { pathname, search } = request.nextUrl;
 
-    if (pathname === "/signin" && isAuthenticated) {
-      const redirectTo = request.nextUrl.searchParams.get("redirect") ?? "/";
-      return nextjsMiddlewareRedirect(request, redirectTo);
-    }
-
-    if ((isChatRoute(pathname) || isSettingsRoute(pathname)) && !isAuthenticated) {
-      const signInUrl = new URL("/signin", request.url);
-      signInUrl.searchParams.set("redirect", pathname + search);
-      return nextjsMiddlewareRedirect(request, signInUrl.pathname + signInUrl.search);
-    }
-  },
-  {
-    cookieConfig: {
-      maxAge: 60 * 60 * 24 * 30,
-    },
+  if (pathname === "/signin" && sessionCookie) {
+    const redirectTo = request.nextUrl.searchParams.get("redirect") ?? "/";
+    return NextResponse.redirect(new URL(redirectTo, request.url));
   }
-);
+
+  if ((isChatRoute(pathname) || isSettingsRoute(pathname)) && !sessionCookie) {
+    const signInUrl = new URL("/signin", request.url);
+    signInUrl.searchParams.set("redirect", pathname + search);
+    return NextResponse.redirect(signInUrl);
+  }
+
+  return NextResponse.next();
+}
 
 export const config = {
-  matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
+  matcher: ["/((?!.*\\..*|_next|api/auth).*)", "/", "/(api|trpc)(.*)"],
 };
