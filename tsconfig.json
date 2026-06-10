@@ -24,6 +24,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@/convex/*": [
+        "./convex/*"
       ]
     },
     "target": "ES2017"

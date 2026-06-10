@@ -1,7 +1,9 @@
 "use client";
 
 import { ChatWorkspace } from "@/components/chat/chat-workspace";
-import { isValidChatId, loadChatSessions } from "@/lib/chat-sessions";
+import { isValidChatId } from "@/lib/chat-sessions";
+import { api } from "@/convex/_generated/api";
+import { useConvexAuth, useQuery } from "convex/react";
 import { notFound, useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
@@ -12,6 +14,11 @@ function ChatPageInner() {
   const chatId = params.chatId as string;
   const searchParams = useSearchParams();
   const q = searchParams.get("q");
+  const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
+  const sessionData = useQuery(
+    api.chats.getByExternalId,
+    isAuthenticated ? { externalId: chatId } : "skip"
+  );
   const [access, setAccess] = useState<AccessState>("pending");
 
   useEffect(() => {
@@ -19,15 +26,25 @@ function ChatPageInner() {
       setAccess("bad");
       return;
     }
-    const sessions = loadChatSessions();
-    if (!sessions.some((s) => s.id === chatId) && !q?.trim()) {
+
+    if (authLoading) return;
+
+    if (!isAuthenticated) {
       setAccess("bad");
       return;
     }
-    setAccess("ok");
-  }, [chatId, q]);
 
-  if (access === "pending") {
+    if (sessionData === undefined) return;
+
+    if (!sessionData && !q?.trim()) {
+      setAccess("bad");
+      return;
+    }
+
+    setAccess("ok");
+  }, [authLoading, chatId, isAuthenticated, q, sessionData]);
+
+  if (access === "pending" || authLoading || (isAuthenticated && sessionData === undefined)) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
         <div className="h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
