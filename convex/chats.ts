@@ -61,6 +61,7 @@ export const getByExternalId = query({
       lastMessage: session.lastMessage,
       timestamp: session.updatedAt,
       messageCount: session.messageCount,
+      country: session.country ?? null,
       messages: messages
         .sort((a, b) => a.createdAt - b.createdAt)
         .map((message) => ({
@@ -76,6 +77,7 @@ export const getByExternalId = query({
 export const ensure = mutation({
   args: {
     externalId: v.string(),
+    country: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
@@ -96,6 +98,7 @@ export const ensure = mutation({
       lastMessage: "",
       messageCount: 0,
       updatedAt: Date.now(),
+      country: args.country,
     });
 
     return { id: args.externalId };
@@ -107,6 +110,7 @@ export const appendMessages = mutation({
     externalId: v.string(),
     title: v.optional(v.string()),
     lastMessage: v.string(),
+    country: v.optional(v.string()),
     messages: v.array(messageValidator),
   },
   handler: async (ctx, args) => {
@@ -127,6 +131,7 @@ export const appendMessages = mutation({
         lastMessage: args.lastMessage,
         messageCount: 0,
         updatedAt: Date.now(),
+        country: args.country,
       });
       session = (await ctx.db.get(sessionId))!;
     }

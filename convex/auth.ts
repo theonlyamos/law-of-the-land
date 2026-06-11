@@ -4,6 +4,7 @@ import { betterAuth } from "better-auth/minimal";
 import { components } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
 import authConfig from "./auth.config";
+import { sendEmail } from "./lib/email";
 
 const siteUrl = process.env.SITE_URL!;
 
@@ -15,7 +16,23 @@ export const createAuth = (ctx: GenericCtx<DataModel>) => {
     database: authComponent.adapter(ctx),
     emailAndPassword: {
       enabled: true,
-      requireEmailVerification: false,
+      requireEmailVerification: true,
+    },
+    emailVerification: {
+      sendOnSignUp: true,
+      autoSignInAfterVerification: true,
+      sendVerificationEmail: async ({ user, url }) => {
+        await sendEmail({
+          to: user.email,
+          subject: "Verify your email — Law of the Land",
+          html: `
+            <p>Welcome to Law of the Land.</p>
+            <p>Confirm your email address to start asking legal questions and saving your chats:</p>
+            <p><a href="${url}">Verify my email</a></p>
+            <p>If you did not create this account, you can ignore this message.</p>
+          `,
+        });
+      },
     },
     socialProviders: {
       ...(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET

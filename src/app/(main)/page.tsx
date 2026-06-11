@@ -3,6 +3,7 @@
 import { LandingPage } from "@/components/landing-page";
 import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
+import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
@@ -11,6 +12,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 function LandingShell() {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  const [country, setCountry] = useState(DEFAULT_COUNTRY.code);
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
 
@@ -50,16 +52,17 @@ function LandingShell() {
       const trimmed = text.trim();
       if (!trimmed) return;
 
+      const id = crypto.randomUUID();
+      const chatUrl = `/${id}?q=${encodeURIComponent(trimmed)}&country=${country}`;
+
       if (!isAuthenticated) {
-        const id = crypto.randomUUID();
-        router.push(`/signin?redirect=${encodeURIComponent(`/${id}?q=${encodeURIComponent(trimmed)}`)}`);
+        router.push(`/signin?redirect=${encodeURIComponent(chatUrl)}`);
         return;
       }
 
-      const id = crypto.randomUUID();
-      router.push(`/${id}?q=${encodeURIComponent(trimmed)}`);
+      router.push(chatUrl);
     },
-    [isAuthenticated, router]
+    [country, isAuthenticated, router]
   );
 
   const handleKeyDown = useCallback(
@@ -88,6 +91,8 @@ function LandingShell() {
         savedChats={savedChats}
         onResumeChat={resumeChat}
         isAuthenticated={isAuthenticated}
+        country={country}
+        onCountryChange={setCountry}
       />
     </div>
   );

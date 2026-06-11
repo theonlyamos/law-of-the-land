@@ -24,6 +24,8 @@ function SignInFormInner() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [showResend, setShowResend] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -44,6 +46,8 @@ function SignInFormInner() {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
+    setNotice(null);
+    setShowResend(false);
 
     try {
       const result =
@@ -65,12 +69,38 @@ function SignInFormInner() {
               ? "We could not sign you in. Check your email and password, then try again."
               : "We could not create your account. Check the details and try again.")
         );
+        // Verification links expire after an hour — offer a fresh one.
+        setShowResend(/not verified/i.test(result.error.message ?? ""));
+        return;
+      }
+
+      if (step === "signUp") {
+        // Accounts must verify their email before signing in.
+        setStep("signIn");
+        setPassword("");
+        setNotice(
+          `We sent a verification link to ${email.trim()}. Open it, then sign in here.`
+        );
         return;
       }
 
       router.replace(redirectTo);
     } catch {
       setError("We could not reach the sign-in service. Check your connection and try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await authClient.sendVerificationEmail({ email: email.trim(), callbackURL: "/" });
+      setNotice(`We sent a new verification link to ${email.trim()}. Open it, then sign in here.`);
+      setShowResend(false);
+    } catch {
+      setError("We could not send the verification email. Try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -164,6 +194,15 @@ function SignInFormInner() {
               )}
             </div>
 
+            {notice && (
+              <p
+                role="status"
+                className="rounded-md border border-input bg-muted/50 px-3 py-2 text-sm text-foreground"
+              >
+                {notice}
+              </p>
+            )}
+
             {error && (
               <p
                 role="alert"
@@ -171,6 +210,18 @@ function SignInFormInner() {
               >
                 {error}
               </p>
+            )}
+
+            {showResend && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={submitting}
+                onClick={() => void handleResendVerification()}
+              >
+                Resend verification email
+              </Button>
             )}
 
             <Button type="submit" className="w-full" disabled={submitting}>
@@ -219,6 +270,7 @@ function SignInFormInner() {
                   onClick={() => {
                     setStep("signUp");
                     setError(null);
+                    setNotice(null);
                   }}
                 >
                   Create an account
@@ -233,6 +285,7 @@ function SignInFormInner() {
                   onClick={() => {
                     setStep("signIn");
                     setError(null);
+                    setNotice(null);
                   }}
                 >
                   Sign in

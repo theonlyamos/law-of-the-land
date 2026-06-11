@@ -24,7 +24,6 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 - **AI Integration**: Google Gemini (answers), GroundX (RAG document search)
 - **Database & Auth**: Convex + Better Auth
 - **Runtime**: Bun
-- **Containerization**: Docker
 - **Deployment**: Vercel (frontend) + Convex (backend) — https://lawoftheland.vercel.app/
 
 ## Getting Started
@@ -40,25 +39,18 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 4. Copy `.env.example` to `.env.local` and fill in the remaining values (GroundX, Google AI, Better Auth secret, optional OAuth credentials)
 5. Run the Convex dev server and the app together: `bun run dev:all` (or `bun run dev` if Convex is already running)
 
-### Using Docker
+The app will be available at `http://localhost:3000`. Never commit `.env.local` to version control.
 
-1. Create a `.env.local` file as described above
-2. Build the Docker image:
-   ```
-   docker build -t law-of-the-land .
-   ```
-3. Run the container:
-   ```
-   docker run -p 3000:3000 --env-file .env.local law-of-the-land
-   ```
+### Deployment
 
-The app will be available at `http://localhost:3000`.
-
-Note: Never commit `.env.local` to version control.
+The app deploys to Vercel from the `main` branch, with the build command
+`npx convex deploy --cmd 'bun run build'` so Convex functions and schema deploy
+before the frontend. See `.env.example` for which variables belong on Vercel
+versus the Convex dashboard.
 
 ## Contributing
 
-We welcome contributions to Law of the Land! Please see our [Contributing Guidelines](CONTRIBUTING.md) for more information.
+Issues and pull requests are welcome on [GitHub](https://github.com/theonlyamos/law-of-the-land).
 
 ## License
 

@@ -1,6 +1,9 @@
 import { Groundx } from "groundx-typescript-sdk"
+import { ConvexError } from "convex/values"
 import { NextResponse } from "next/server"
-import { isAuthenticated } from "@/lib/auth-server"
+import { api } from "@/convex/_generated/api"
+import { fetchAuthMutation, isAuthenticated } from "@/lib/auth-server"
+import { DEFAULT_COUNTRY, findCountry } from "@/lib/countries"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
 
 const MAX_QUERY_LENGTH = 4000
@@ -32,12 +35,42 @@ export async function POST(request: Request) {
             )
         }
 
+        const country =
+            body?.country === undefined || body?.country === null
+                ? DEFAULT_COUNTRY
+                : findCountry(typeof body.country === "string" ? body.country : null)
+        if (!country) {
+            return NextResponse.json(
+                { error: "That country is not supported yet." },
+                { status: 400 }
+            )
+        }
+
+        // Count this question against the user's daily quota.
+        try {
+            await fetchAuthMutation(api.usage.recordQuestion, {})
+        } catch (error) {
+            if (error instanceof ConvexError && (error.data as { code?: string })?.code === "QUOTA_EXCEEDED") {
+                const data = error.data as { limit: number; isPro: boolean }
+                return NextResponse.json(
+                    {
+                        error: data.isPro
+                            ? `You have reached today's fair-use limit of ${data.limit} questions. It resets tomorrow.`
+                            : `You have used your ${data.limit} free questions for today. Upgrade to Pro for more, or come back tomorrow.`,
+                        code: "quota",
+                    },
+                    { status: 402 }
+                )
+            }
+            throw error
+        }
+
         const groundx = new Groundx({
             apiKey: process.env.GROUNDX_API_KEY as string,
         })
 
         const response = await groundx.search.content({
-            id: 11833,
+            id: country.groundxBucketId,
             query
         })
 

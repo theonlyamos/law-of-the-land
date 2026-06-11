@@ -8,6 +8,7 @@ import { authClient } from "@/lib/auth-client";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
   Clock,
+  CreditCard,
   LogOut,
   MessageSquare,
   MessageSquarePlus,
@@ -231,6 +232,17 @@ export function Sidebar({
             {displayName}
           </span>
         </div>
+        <Button
+          asChild
+          variant="ghost"
+          className={`h-11 w-full justify-start gap-2 ${collapsibleRow}`}
+          title={collapsed ? "Billing" : undefined}
+        >
+          <Link href="/settings/billing" aria-label="Plan and billing">
+            <CreditCard className="h-4 w-4 shrink-0" />
+            <span className={collapsibleLabel}>Billing</span>
+          </Link>
+        </Button>
         <Button
           asChild
           variant="ghost"

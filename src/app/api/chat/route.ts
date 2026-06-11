@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { GoogleGenAI } from "@google/genai"
-import { isAuthenticated } from '@/lib/auth-server'
+import { api } from '@/convex/_generated/api'
+import { fetchAuthQuery, isAuthenticated } from '@/lib/auth-server'
 import { clientKey, rateLimit } from '@/lib/rate-limit'
 
 interface Message {
@@ -87,6 +88,15 @@ export async function POST(request: Request) {
             return NextResponse.json(
                 { error: 'You have sent several questions in a short time. Wait a minute, then try again.' },
                 { status: 429, headers: { 'Retry-After': String(limit.retryAfterSeconds) } }
+            )
+        }
+
+        // The search endpoint already counted this question; verify allowance only.
+        const allowance = await fetchAuthQuery(api.usage.checkAllowance, {})
+        if (!allowance.allowed) {
+            return NextResponse.json(
+                { error: 'You have reached your question limit for today. It resets tomorrow.', code: 'quota' },
+                { status: 402 }
             )
         }
 

@@ -11,6 +11,7 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
 import type { ChatSession, Message } from "@/lib/chat-sessions";
+import { COUNTRIES, DEFAULT_COUNTRY, findCountry } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
@@ -44,6 +45,11 @@ function answerErrorMessage(error: unknown): string {
     if (error.status === 401) {
       return "Your sign-in expired, so this question was not sent. Sign in again to continue.";
     }
+    if (error.status === 402) {
+      const base =
+        error.serverMessage ?? "You have reached your question limit for today.";
+      return `${base}\n\n[See plans and upgrade](/settings/billing)`;
+    }
     if (error.status === 429) {
       return (
         error.serverMessage ??
@@ -76,12 +82,17 @@ interface ChatWorkspaceProps {
   /** null renders the "new chat" composer; the chat is created on first send. */
   chatId: string | null;
   initialQuery: string | null;
+  /** Jurisdiction for a chat being created via ?country=; existing chats use their stored value. */
+  initialCountry?: string | null;
 }
 
-export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
+export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const [query, setQuery] = useState("");
+  const [selectedCountry, setSelectedCountry] = useState(
+    findCountry(initialCountry)?.code ?? DEFAULT_COUNTRY.code
+  );
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -102,6 +113,9 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
 
   const sessions = (sessionsData ?? []).map(toSidebarSession);
   const isChatLoading = chatId !== null && sessionData === undefined;
+  // Existing chats answer from the jurisdiction they were started in.
+  const chatCountry =
+    sessionData?.country ?? findCountry(initialCountry)?.code ?? selectedCountry;
 
   // Clear the previous conversation's state when switching chats so it never
   // flashes in (or leaks into the API history of) the next one.
@@ -127,8 +141,11 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
     if (ensuredRef.current.has(chatId)) return;
 
     ensuredRef.current.add(chatId);
-    void ensureSession({ externalId: chatId });
-  }, [authLoading, chatId, ensureSession, isAuthenticated]);
+    void ensureSession({
+      externalId: chatId,
+      country: findCountry(initialCountry)?.code,
+    });
+  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated]);
 
   useEffect(() => {
     if (!sessionData) return;
@@ -159,6 +176,7 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
           externalId: chatId,
           title: meta.title,
           lastMessage: meta.lastMessage,
+          country: chatCountry,
           messages: turnMessages.map((message) => ({
             role: message.role,
             content: message.content,
@@ -171,7 +189,7 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
         setSaveFailed(true);
       }
     },
-    [appendMessages, chatId]
+    [appendMessages, chatCountry, chatId]
   );
 
   const handleSearch = useCallback(
@@ -182,7 +200,9 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
       // New-chat mode: the chat page picks the question up from ?q= and runs it.
       if (!chatId) {
         setIsLoading(true);
-        router.push(`/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}`);
+        router.push(
+          `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&country=${selectedCountry}`
+        );
         return;
       }
 
@@ -209,7 +229,10 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
       ]);
 
       try {
-        const searchData = await postJson<{ result: string }>("/api/search", { query: trimmed });
+        const searchData = await postJson<{ result: string }>("/api/search", {
+          query: trimmed,
+          country: chatCountry,
+        });
 
         const chatData = await postJson<{ result: string }>("/api/chat", {
           query: trimmed,
@@ -247,7 +270,7 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
         setIsLoading(false);
       }
     },
-    [chatId, isLoading, messages, persistTurn, router]
+    [chatCountry, chatId, isLoading, messages, persistTurn, router, selectedCountry]
   );
 
   useEffect(() => {
@@ -359,6 +382,28 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
                 Ask about a law in plain language. Answers come from the legal document library and
                 cite the sections they are based on.
               </p>
+              {COUNTRIES.length > 1 && (
+                <div className="mx-auto mt-6 max-w-xs">
+                  <label
+                    htmlFor="new-chat-country"
+                    className="mb-1.5 block text-center text-xs font-medium uppercase tracking-wider text-muted-foreground"
+                  >
+                    Country
+                  </label>
+                  <select
+                    id="new-chat-country"
+                    value={selectedCountry}
+                    onChange={(event) => setSelectedCountry(event.target.value)}
+                    className="h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {COUNTRIES.map((country) => (
+                      <option key={country.code} value={country.code}>
+                        {country.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="mt-8">
                 <ChatInput
                   query={query}
