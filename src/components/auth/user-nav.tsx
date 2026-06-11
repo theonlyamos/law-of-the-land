@@ -43,7 +43,10 @@ export function UserNav() {
         size="sm"
         variant="outline"
         onClick={() => {
-          void authClient.signOut().then(() => router.push("/"));
+          void authClient
+            .signOut()
+            .then(() => router.push("/"))
+            .catch((error) => console.error("Sign out failed:", error));
         }}
       >
         <LogOut className="mr-2 h-4 w-4" />

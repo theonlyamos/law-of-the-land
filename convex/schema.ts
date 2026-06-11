@@ -18,5 +18,7 @@ export default defineSchema({
     content: v.string(),
     clientId: v.optional(v.string()),
     createdAt: v.number(),
-  }).index("by_session", ["sessionId"]),
+  })
+    .index("by_session", ["sessionId"])
+    .index("by_session_clientId", ["sessionId", "clientId"]),
 });

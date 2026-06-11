@@ -1,24 +1,59 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
 import { useState, useCallback, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
-import Image from "next/image";
-import Link from "next/link";
-import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
+import { PageLoader, Spinner } from "@/components/ui/spinner";
 import type { ChatSession, Message } from "@/lib/chat-sessions";
 import { api } from "@/convex/_generated/api";
-import logo from "@/app/logo-transparent.png";
-import githubLogo from "@/app/github-mark.png";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(response.status, data?.error);
+  }
+  return (await response.json()) as T;
+}
+
+class ApiError extends Error {
+  status: number;
+  serverMessage?: string;
+
+  constructor(status: number, serverMessage?: string) {
+    super(serverMessage ?? `Request failed with status ${status}`);
+    this.status = status;
+    this.serverMessage = serverMessage;
+  }
+}
+
+function answerErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401) {
+      return "Your sign-in expired, so this question was not sent. Sign in again to continue.";
+    }
+    if (error.status === 429) {
+      return (
+        error.serverMessage ??
+        "You have sent several questions in a short time. Wait a minute, then try again."
+      );
+    }
+    if (error.serverMessage) return error.serverMessage;
+  }
+  return "We could not finish that answer. Check your connection, wait a moment, and try again. If it keeps happening, try a shorter or simpler question.";
+}
 
 function toSidebarSession(session: {
   id: string;
@@ -38,7 +73,8 @@ function toSidebarSession(session: {
 }
 
 interface ChatWorkspaceProps {
-  chatId: string;
+  /** null renders the "new chat" composer; the chat is created on first send. */
+  chatId: string | null;
   initialQuery: string | null;
 }
 
@@ -48,8 +84,9 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
   const ensuredRef = useRef<Set<string>>(new Set());
@@ -57,29 +94,36 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
   const sessionData = useQuery(
     api.chats.getByExternalId,
-    isAuthenticated ? { externalId: chatId } : "skip"
+    isAuthenticated && chatId ? { externalId: chatId } : "skip"
   );
   const ensureSession = useMutation(api.chats.ensure);
-  const replaceMessages = useMutation(api.chats.replaceMessages);
+  const appendMessages = useMutation(api.chats.appendMessages);
   const removeSession = useMutation(api.chats.remove);
 
   const sessions = (sessionsData ?? []).map(toSidebarSession);
+  const isChatLoading = chatId !== null && sessionData === undefined;
+
+  // Clear the previous conversation's state when switching chats so it never
+  // flashes in (or leaks into the API history of) the next one.
+  useEffect(() => {
+    setMessages([]);
+    setQuery("");
+    setSaveFailed(false);
+  }, [chatId]);
 
   useEffect(() => {
-    const handleResize = () => {
-      if (window.innerWidth >= 768) {
-        setIsSidebarOpen(true);
-      } else {
-        setIsSidebarOpen(false);
+    if (!isMobileSidebarOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsMobileSidebarOpen(false);
       }
     };
-    handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isMobileSidebarOpen]);
 
   useEffect(() => {
-    if (!isAuthenticated || authLoading) return;
+    if (!chatId || !isAuthenticated || authLoading) return;
     if (ensuredRef.current.has(chatId)) return;
 
     ensuredRef.current.add(chatId);
@@ -106,28 +150,41 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
     scrollToBottom();
   }, [messages]);
 
-  const persistMessages = useCallback(
-    async (nextMessages: Message[], meta: { title?: string; lastMessage: string }) => {
-      await replaceMessages({
-        externalId: chatId,
-        title: meta.title,
-        lastMessage: meta.lastMessage,
-        messageCount: nextMessages.length,
-        messages: nextMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          clientId: message.id,
-          createdAt: message.createdAt?.getTime(),
-        })),
-      });
+  const persistTurn = useCallback(
+    async (turnMessages: Message[], meta: { title?: string; lastMessage: string }) => {
+      if (!chatId) return;
+      setSaveFailed(false);
+      try {
+        await appendMessages({
+          externalId: chatId,
+          title: meta.title,
+          lastMessage: meta.lastMessage,
+          messages: turnMessages.map((message) => ({
+            role: message.role,
+            content: message.content,
+            clientId: message.id,
+            createdAt: message.createdAt?.getTime(),
+          })),
+        });
+      } catch (error) {
+        console.error("Failed to save chat:", error);
+        setSaveFailed(true);
+      }
     },
-    [chatId, replaceMessages]
+    [appendMessages, chatId]
   );
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       const trimmed = searchQuery.trim();
       if (!trimmed || isLoading) return;
+
+      // New-chat mode: the chat page picks the question up from ?q= and runs it.
+      if (!chatId) {
+        setIsLoading(true);
+        router.push(`/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}`);
+        return;
+      }
 
       setQuery("");
       setIsLoading(true);
@@ -140,10 +197,10 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
         content: trimmed,
         createdAt: new Date(),
       };
+      const base = [...messages, userMessage];
 
-      setMessages((prev) => [
-        ...prev,
-        userMessage,
+      setMessages([
+        ...base,
         {
           id: crypto.randomUUID(),
           role: "assistant",
@@ -152,54 +209,45 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
       ]);
 
       try {
-        const { data: searchData } = await axios.post("/api/search", { query: trimmed });
-        const context = searchData.result;
+        const searchData = await postJson<{ result: string }>("/api/search", { query: trimmed });
 
-        const { data: chatData } = await axios.post("/api/chat", {
+        const chatData = await postJson<{ result: string }>("/api/chat", {
           query: trimmed,
           messages: priorForApi,
-          context,
+          context: searchData.result,
         });
 
-        setMessages((prev) => {
-          const next = [...prev];
-          next.pop();
-          const assistantMessage: Message = {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: chatData.result,
-            createdAt: new Date(),
-          };
-          next.push(assistantMessage);
+        const assistantMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: chatData.result,
+          createdAt: new Date(),
+        };
+        const next = [...base, assistantMessage];
+        setMessages(next);
 
-          const isFirstUserTurn = priorForApi.length === 0;
-          void persistMessages(next, {
-            title: isFirstUserTurn
-              ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
-              : undefined,
-            lastMessage: chatData.result,
-          });
-
-          return next;
+        const isFirstUserTurn = priorForApi.length === 0;
+        await persistTurn([userMessage, assistantMessage], {
+          title: isFirstUserTurn
+            ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
+            : undefined,
+          lastMessage: chatData.result,
         });
       } catch (error) {
         console.error("Error:", error);
-        setMessages((prev) => {
-          const next = [...prev];
-          next.pop();
-          next.push({
+        setMessages([
+          ...base,
+          {
             id: crypto.randomUUID(),
             role: "assistant",
-            content:
-              "We could not finish that answer. Check your connection, wait a moment, and try again. If it keeps happening, try a shorter or simpler question.",
-          });
-          return next;
-        });
+            content: answerErrorMessage(error),
+          },
+        ]);
       } finally {
         setIsLoading(false);
       }
     },
-    [isLoading, messages, persistMessages]
+    [chatId, isLoading, messages, persistTurn, router]
   );
 
   useEffect(() => {
@@ -228,10 +276,8 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
   );
 
   const handleNewSession = useCallback(() => {
-    router.push("/");
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setIsSidebarOpen(false);
-    }
+    router.push("/new");
+    setIsMobileSidebarOpen(false);
   }, [router]);
 
   const handleDeleteSession = useCallback(
@@ -246,132 +292,129 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
       } else {
         router.push(`/${remaining[0].id}`);
       }
-      if (typeof window !== "undefined" && window.innerWidth < 768) {
-        setIsSidebarOpen(false);
-      }
+      setIsMobileSidebarOpen(false);
     },
     [chatId, removeSession, router, sessions]
   );
 
-  const toggleSidebar = useCallback(() => {
-    setIsSidebarOpen((prev) => !prev);
-  }, []);
 
   if (authLoading || sessionsData === undefined) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
-        <div className="h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
-        <p className="mt-4 text-lg font-semibold">Loading chat…</p>
-      </div>
-    );
+    return <PageLoader label="Loading chat…" />;
   }
 
   return (
-    <div className="container relative mx-auto flex min-h-0 flex-1 overflow-hidden">
-      {isSidebarOpen && (
+    <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {isMobileSidebarOpen && (
         <div
+          aria-hidden
           className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm transition-opacity duration-300 md:hidden"
-          onClick={toggleSidebar}
+          onClick={() => setIsMobileSidebarOpen(false)}
         />
       )}
 
       <Sidebar
         sessions={sessions}
-        activeSession={chatId}
-        isOpen={isSidebarOpen}
-        onAfterSessionNavigate={() => {
-          if (typeof window !== "undefined" && window.innerWidth < 768) {
-            setIsSidebarOpen(false);
-          }
-        }}
+        activeSession={chatId ?? undefined}
+        isOpen={isMobileSidebarOpen}
+        collapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
+        onAfterSessionNavigate={() => setIsMobileSidebarOpen(false)}
         onNewSession={handleNewSession}
         onDeleteSession={(sessionId) => {
           void handleDeleteSession(sessionId);
         }}
-        onClose={() => setIsSidebarOpen(false)}
+        onClose={() => setIsMobileSidebarOpen(false)}
       />
 
-      <div
-        className={`flex min-h-0 min-w-0 flex-1 flex-col transition-all duration-300 ease-in-out ${
-          isSidebarOpen && typeof window !== "undefined" && window.innerWidth >= 768 ? "md:ml-64" : "ml-0"
-        }`}
-      >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="border-b">
-          <div className={`${THREAD_RAIL} flex items-center justify-between gap-4 py-4`}>
-            <div className="flex min-w-0 items-center gap-4">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={toggleSidebar}
-                className="h-11 w-11 shrink-0 md:hidden"
-              >
-                <Menu className="h-5 w-5" />
-              </Button>
-              <Link href="/" className="shrink-0">
-                <Image src={logo} alt="Law of the Land Logo" width={80} priority />
-              </Link>
-              <div className="min-w-0">
-                <h1 className="text-xl font-bold">Law of the Land</h1>
-                <p className="text-sm text-muted-foreground">Search and summarize laws in the library</p>
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-4">
-              <a
-                href="https://github.com/theonlyamos/law-of-the-land"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Image src={githubLogo} alt="GitHub" width={32} height={32} />
-              </a>
-            </div>
+          <div className={`${THREAD_RAIL} flex h-12 items-center gap-2`}>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setIsMobileSidebarOpen(true)}
+              className="-ml-2 h-11 w-11 shrink-0 md:hidden"
+              aria-label="Open chat list"
+              aria-expanded={isMobileSidebarOpen}
+            >
+              <Menu className="h-5 w-5" />
+            </Button>
+            <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
+              {isChatLoading ? "" : sessionData?.title ?? "New chat"}
+            </h1>
           </div>
         </div>
 
-        <ScrollArea className="min-h-0 flex-1" ref={scrollAreaRef}>
-          <div className={`${THREAD_RAIL} space-y-4 py-4`}>
+        {isChatLoading ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <Spinner />
+          </div>
+        ) : chatId === null ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-4">
+            <div className="w-full max-w-2xl py-8">
+              <h2 className="text-center text-2xl font-semibold tracking-tight sm:text-3xl">
+                What do you want to know?
+              </h2>
+              <p className="mx-auto mt-3 max-w-md text-center text-sm text-muted-foreground">
+                Ask about a law in plain language. Answers come from the legal document library and
+                cite the sections they are based on.
+              </p>
+              <div className="mt-8">
+                <ChatInput
+                  query={query}
+                  onQueryChange={setQuery}
+                  onSearch={() => void handleSearch(query)}
+                  onKeyDown={handleKeyDown}
+                  isLoading={isLoading}
+                  rows={3}
+                  placeholder="e.g. What are my rights as a tenant?"
+                />
+              </div>
+              <p className="mt-3 text-center text-xs text-muted-foreground">
+                General legal information, not legal advice. For decisions that affect your rights,
+                talk to a qualified attorney.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+        <ScrollArea className="min-h-0 flex-1">
+          <div className={`${THREAD_RAIL} flex flex-col py-8`}>
+            {messages.length === 0 && (
+              <div className="flex flex-col items-center gap-2 py-24 text-center">
+                <p className="text-lg font-medium">What do you want to know?</p>
+                <p className="max-w-sm text-sm text-muted-foreground">
+                  Ask about a law in plain language. Answers cite the sections of the legal text
+                  they come from.
+                </p>
+              </div>
+            )}
             {messages.map((message, index) => {
-              const prevRole = index > 0 ? messages[index - 1].role : null;
-              const isNewSpeaker = prevRole && prevRole !== message.role;
+              const isUser = message.role === "user";
 
               return (
                 <div
                   key={message.id ?? index}
-                  className={`flex gap-2 md:gap-3 ${
-                    message.role === "user" ? "justify-end" : "justify-start"
-                  } ${isNewSpeaker ? "mt-6" : ""}`}
+                  className={`flex min-w-0 ${
+                    isUser
+                      ? `justify-end ${index > 0 ? "mt-12" : ""}`
+                      : "justify-start mt-4"
+                  }`}
                 >
-                  {message.role === "assistant" && (
-                    <Avatar className="h-8 w-8 md:h-10 md:w-10">
-                      <AvatarFallback>AI</AvatarFallback>
-                    </Avatar>
-                  )}
-                  <div
-                    className={`max-w-[75%] rounded-lg p-3 shadow-sm md:p-4 lg:max-w-[65%] ${
-                      message.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted text-foreground"
-                    }`}
-                  >
-                    {message.role === "assistant" ? (
-                      <div className="markdown-content text-sm leading-relaxed">
-                        {message.content === "..." ? (
-                          <div className="flex gap-1 p-2">
-                            <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:0ms]" />
-                            <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:150ms]" />
-                            <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:300ms]" />
-                          </div>
-                        ) : (
-                          <ReactMarkdown>{message.content}</ReactMarkdown>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-sm leading-relaxed">{message.content}</p>
-                    )}
-                  </div>
-                  {message.role === "user" && (
-                    <Avatar className="h-8 w-8 md:h-10 md:w-10">
-                      <AvatarFallback>You</AvatarFallback>
-                    </Avatar>
+                  {isUser ? (
+                    <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground [overflow-wrap:anywhere] sm:max-w-[75%]">
+                      {message.content}
+                    </div>
+                  ) : message.content === "..." ? (
+                    <div className="flex gap-1 py-2" aria-label="Preparing answer">
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:0ms]" />
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:150ms]" />
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:300ms]" />
+                    </div>
+                  ) : (
+                    <div className="markdown-content min-w-0 text-sm leading-7">
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
                   )}
                 </div>
               );
@@ -382,6 +425,12 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
 
         <div className="border-t">
           <div className={`${THREAD_RAIL} py-4`}>
+            {saveFailed && (
+              <p role="alert" className="mb-2 text-sm text-muted-foreground">
+                The last answer is shown above but could not be saved to your account. It may be
+                missing when you return to this chat.
+              </p>
+            )}
             <ChatInput
               query={query}
               onQueryChange={setQuery}
@@ -389,9 +438,20 @@ export function ChatWorkspace({ chatId, initialQuery }: ChatWorkspaceProps) {
               onKeyDown={handleKeyDown}
               isLoading={isLoading}
               rows={4}
+              placeholder={
+                messages.length === 0
+                  ? "e.g. What are my rights as a tenant?"
+                  : undefined
+              }
             />
+            <p className="pt-2 text-center text-xs text-muted-foreground">
+              General legal information, not legal advice. For decisions that affect your rights,
+              talk to a qualified attorney.
+            </p>
           </div>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

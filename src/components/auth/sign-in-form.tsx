@@ -3,17 +3,21 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { authClient } from "@/lib/auth-client";
+import { safeRedirectPath } from "@/lib/redirect";
 import { useConvexAuth } from "convex/react";
 import { Loader2 } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 function SignInFormInner() {
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get("redirect") ?? "/";
+  // Signing in lands on the new-chat screen unless the user was sent here
+  // mid-action (e.g. asked a question while signed out).
+  const redirectTo = safeRedirectPath(searchParams.get("redirect"), "/new");
 
   const [step, setStep] = useState<"signIn" | "signUp">("signIn");
   const [name, setName] = useState("");
@@ -22,17 +26,18 @@ function SignInFormInner() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  if (isLoading) {
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      router.replace(redirectTo);
+    }
+  }, [isAuthenticated, isLoading, redirectTo, router]);
+
+  if (isLoading || isAuthenticated) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <Spinner />
       </div>
     );
-  }
-
-  if (isAuthenticated) {
-    router.replace(redirectTo);
-    return null;
   }
 
   const handlePasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -41,32 +46,31 @@ function SignInFormInner() {
     setError(null);
 
     try {
-      if (step === "signIn") {
-        const result = await authClient.signIn.email({
-          email: email.trim(),
-          password,
-        });
-        if (result.error) {
-          throw new Error(result.error.message);
-        }
-      } else {
-        const result = await authClient.signUp.email({
-          email: email.trim(),
-          password,
-          name: name.trim() || email.trim(),
-        });
-        if (result.error) {
-          throw new Error(result.error.message);
-        }
+      const result =
+        step === "signIn"
+          ? await authClient.signIn.email({
+              email: email.trim(),
+              password,
+            })
+          : await authClient.signUp.email({
+              email: email.trim(),
+              password,
+              name: name.trim() || email.trim(),
+            });
+
+      if (result.error) {
+        setError(
+          result.error.message ??
+            (step === "signIn"
+              ? "We could not sign you in. Check your email and password, then try again."
+              : "We could not create your account. Check the details and try again.")
+        );
+        return;
       }
 
       router.replace(redirectTo);
     } catch {
-      setError(
-        step === "signIn"
-          ? "We could not sign you in. Check your email and password, then try again."
-          : "We could not create your account. Use a valid email and a stronger password."
-      );
+      setError("We could not reach the sign-in service. Check your connection and try again.");
     } finally {
       setSubmitting(false);
     }
@@ -81,7 +85,9 @@ function SignInFormInner() {
         callbackURL: redirectTo,
       });
     } catch {
-      setError(`We could not start ${provider} sign-in. Confirm OAuth credentials are configured.`);
+      setError(
+        `We could not start ${provider === "github" ? "GitHub" : "Google"} sign-in. Try again, or use email and password.`
+      );
       setSubmitting(false);
     }
   };
@@ -144,6 +150,8 @@ function SignInFormInner() {
                 type="password"
                 autoComplete={step === "signIn" ? "current-password" : "new-password"}
                 required
+                minLength={8}
+                maxLength={128}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -151,13 +159,16 @@ function SignInFormInner() {
               />
               {step === "signUp" && (
                 <p className="text-xs text-muted-foreground">
-                  Use uppercase, lowercase, and a number.
+                  At least 8 characters.
                 </p>
               )}
             </div>
 
             {error && (
-              <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              >
                 {error}
               </p>
             )}
@@ -246,7 +257,7 @@ export function SignInForm() {
     <Suspense
       fallback={
         <div className="flex min-h-[50vh] items-center justify-center">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <Spinner />
         </div>
       }
     >

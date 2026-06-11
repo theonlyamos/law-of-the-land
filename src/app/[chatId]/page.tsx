@@ -1,6 +1,7 @@
 "use client";
 
 import { ChatWorkspace } from "@/components/chat/chat-workspace";
+import { PageLoader } from "@/components/ui/spinner";
 import { isValidChatId } from "@/lib/chat-sessions";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useQuery } from "convex/react";
@@ -21,7 +22,17 @@ function ChatPageInner() {
   );
   const [access, setAccess] = useState<AccessState>("pending");
 
+  // Re-validate when switching chats via the sidebar.
   useEffect(() => {
+    setAccess("pending");
+  }, [chatId]);
+
+  useEffect(() => {
+    // Decide once per chat on entry. The workspace strips ?q= and creates the
+    // session asynchronously, so re-evaluating here would reject the chat
+    // mid-creation.
+    if (access !== "pending") return;
+
     if (!isValidChatId(chatId)) {
       setAccess("bad");
       return;
@@ -42,35 +53,25 @@ function ChatPageInner() {
     }
 
     setAccess("ok");
-  }, [authLoading, chatId, isAuthenticated, q, sessionData]);
+  }, [access, authLoading, chatId, isAuthenticated, q, sessionData]);
 
-  if (access === "pending" || authLoading || (isAuthenticated && sessionData === undefined)) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
-        <div className="h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
-        <p className="mt-4 text-lg font-semibold">Loading chat…</p>
-      </div>
-    );
-  }
-
-  if (access === "bad") {
+  if (!isValidChatId(chatId) || access === "bad") {
     notFound();
   }
 
+  if (authLoading) {
+    return <PageLoader label="Loading chat…" />;
+  }
+
+  // While the chat's content loads, the workspace stays mounted and shows the
+  // loading state in the chat panel only.
   return <ChatWorkspace chatId={chatId} initialQuery={q} />;
 }
 
 export default function ChatPage() {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <Suspense
-        fallback={
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
-            <div className="h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
-            <p className="mt-4 text-lg font-semibold">Loading chat…</p>
-          </div>
-        }
-      >
+    <div className="flex h-dvh flex-col">
+      <Suspense fallback={<PageLoader label="Loading chat…" />}>
         <ChatPageInner />
       </Suspense>
     </div>

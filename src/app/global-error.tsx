@@ -1,9 +1,10 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
-import Image from 'next/image'
-import logo from './logo-transparent.png'
+import { useEffect } from 'react'
+import './globals.css'
 
+// Replaces the root layout when it crashes, so it must render its own
+// <html>/<body> and stay dependency-light.
 export default function GlobalError({
   error,
   reset,
@@ -11,23 +12,33 @@ export default function GlobalError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  useEffect(() => {
+    console.error(error)
+  }, [error])
+
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen gap-6 px-4">
-      <Image
-        src={logo}
-        alt="Law of the Land Logo"
-        width={80}
-        priority
-      />
-      <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">Something went wrong!</h1>
-        <p className="text-xl text-muted-foreground mb-4">
-          Error: {error.message}
-        </p>
-      </div>
-      <Button onClick={() => reset()}>
-        Try again
-      </Button>
-    </div>
+    <html lang="en">
+      <body className="antialiased">
+        <div className="flex min-h-screen flex-col items-center justify-center gap-6 px-4 text-center">
+          <div>
+            <h1 className="mb-4 text-4xl font-bold">Something went wrong</h1>
+            <p className="text-xl text-muted-foreground">
+              An unexpected error stopped the page. Your saved chats are not affected.
+            </p>
+            {error.digest && (
+              <p className="mt-2 text-sm text-muted-foreground">
+                Reference code: {error.digest}
+              </p>
+            )}
+          </div>
+          <button
+            onClick={() => reset()}
+            className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90"
+          >
+            Try again
+          </button>
+        </div>
+      </body>
+    </html>
   )
 }

@@ -1,17 +1,29 @@
 "use client";
 
 import { LandingPage } from "@/components/landing-page";
+import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
-import { Suspense, useCallback, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 function LandingShell() {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
+
+  // chats.list is sorted by most recent first. Signed-in users start a fresh
+  // conversation via /new, so the landing always forwards to the last chat.
+  const latestChatId = sessionsData?.[0]?.id ?? null;
+  const shouldRedirect = isAuthenticated && latestChatId !== null;
+
+  useEffect(() => {
+    if (shouldRedirect) {
+      router.replace(`/${latestChatId}`);
+    }
+  }, [latestChatId, router, shouldRedirect]);
 
   const savedChats = useMemo<ChatSession[]>(() => {
     if (!sessionsData) return [];
@@ -60,6 +72,10 @@ function LandingShell() {
     [query, goToChat]
   );
 
+  if (shouldRedirect || (isAuthenticated && sessionsData === undefined)) {
+    return <PageLoader label="Opening your last chat…" />;
+  }
+
   return (
     <div className="container relative mx-auto flex min-h-0 flex-1 flex-col overflow-hidden">
       <LandingPage
@@ -80,16 +96,7 @@ function LandingShell() {
 export default function Home() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Suspense
-        fallback={
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-background">
-            <div className="flex flex-col items-center">
-              <p className="mt-4 text-lg font-semibold">Starting Law of the Land…</p>
-              <div className="mt-2 h-16 w-16 animate-spin rounded-full border-4 border-dashed border-primary" />
-            </div>
-          </div>
-        }
-      >
+      <Suspense fallback={<PageLoader label="Starting Law of the Land…" />}>
         <LandingShell />
       </Suspense>
     </div>

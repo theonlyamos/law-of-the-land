@@ -1,11 +1,21 @@
 {
+  /* Typechecks Convex functions when running `convex dev`/`convex deploy`.
+   * The target/lib/module settings are required by Convex; "types": ["node"]
+   * makes process.env available (provided by the Convex runtime). */
   "compilerOptions": {
     "allowJs": true,
     "strict": true,
-    "moduleResolution": "Bundler",
-    "jsx": "react-jsx",
     "skipLibCheck": true,
-    "noEmit": true
+
+    "target": "ESNext",
+    "lib": ["ES2021", "dom"],
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
   },
-  "include": ["./**/*"]
+  "include": ["./**/*"],
+  "exclude": ["./_generated"]
 }

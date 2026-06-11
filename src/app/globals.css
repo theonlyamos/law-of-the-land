@@ -28,6 +28,7 @@
   --color-chart-3: hsl(var(--chart-3));
   --color-chart-4: hsl(var(--chart-4));
   --color-chart-5: hsl(var(--chart-5));
+  --color-brand: hsl(var(--brand));
   
   --radius: 0.5rem; /* Base radius: 8px */
   
@@ -37,6 +38,9 @@
 }
 
 :root {
+  color-scheme: light;
+  /* Gold drawn from the logo; darkened for contrast on light surfaces. */
+  --brand: 38 45% 38%;
   --background: 0 0% 100%;
   --foreground: 224 71.4% 4.1%;
   --card: 0 0% 100%;
@@ -64,7 +68,11 @@
   --radius: 0.5rem;
 }
 
+/* Dark theme follows the system preference; the .dark class is kept so a
+   manual toggle can opt in later without retheming. */
 .dark {
+  color-scheme: dark;
+  --brand: 40 55% 64%;
   --background: 224 71.4% 4.1%;
   --foreground: 210 20% 98%;
   --card: 224 71.4% 4.1%;
@@ -91,8 +99,49 @@
   --chart-5: 340 75% 55%;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --brand: 40 55% 64%;
+    --background: 224 71.4% 4.1%;
+    --foreground: 210 20% 98%;
+    --card: 224 71.4% 4.1%;
+    --card-foreground: 210 20% 98%;
+    --popover: 224 71.4% 4.1%;
+    --popover-foreground: 210 20% 98%;
+    --primary: 210 20% 98%;
+    --primary-foreground: 220.9 39.3% 11%;
+    --secondary: 215 27.9% 16.9%;
+    --secondary-foreground: 210 20% 98%;
+    --muted: 215 27.9% 16.9%;
+    --muted-foreground: 217.9 10.6% 64.9%;
+    --accent: 215 27.9% 16.9%;
+    --accent-foreground: 210 20% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 20% 98%;
+    --border: 215 27.9% 16.9%;
+    --input: 215 27.9% 16.9%;
+    --ring: 216 12.2% 83.9%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+  }
+}
+
 body {
-  font-family: var(--font-family);
+  font-family: var(--font-sans);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @utility text-balance {
@@ -103,12 +152,31 @@ body {
   * {
     border-color: hsl(var(--border));
   }
+
+  /* Tailwind v4 preflight sets cursor: default on buttons; restore pointer
+     for anything clickable. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
   }
   
   /* Custom markdown content styling */
+  .markdown-content {
+    overflow-wrap: break-word;
+  }
+
+  .markdown-content > :first-child {
+    margin-top: 0;
+  }
+
+  .markdown-content > :last-child {
+    margin-bottom: 0;
+  }
+
   .markdown-content h1,
   .markdown-content h2,
   .markdown-content h3 {

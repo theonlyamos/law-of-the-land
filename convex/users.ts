@@ -15,11 +15,3 @@ export const current = query({
     };
   },
 });
-
-export const viewer = query({
-  args: {},
-  handler: async (ctx) => {
-    const user = await authComponent.safeGetAuthUser(ctx);
-    return user !== undefined;
-  },
-});

@@ -9,3 +9,13 @@ export async function requireUserId(ctx: QueryCtx | MutationCtx): Promise<string
   }
   return user._id;
 }
+
+/**
+ * For queries: returns null instead of throwing so that subscriptions racing
+ * an auth change (e.g. sign-out) degrade to empty data instead of crashing
+ * the client into an error boundary.
+ */
+export async function optionalUserId(ctx: QueryCtx | MutationCtx): Promise<string | null> {
+  const user = await authComponent.safeGetAuthUser(ctx);
+  return user?._id ?? null;
+}

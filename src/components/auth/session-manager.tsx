@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { authClient } from "@/lib/auth-client";
 import { Loader2, MonitorSmartphone, ShieldAlert } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
@@ -42,11 +43,14 @@ export function SessionManager() {
   const [sessions, setSessions] = useState<BetterAuthSession[]>([]);
   const [currentSessionToken, setCurrentSessionToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [busyToken, setBusyToken] = useState<string | null>(null);
   const [revokingOthers, setRevokingOthers] = useState(false);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const [sessionResult, listResult] = await Promise.all([
         authClient.getSession(),
@@ -55,6 +59,8 @@ export function SessionManager() {
 
       setCurrentSessionToken(sessionResult.data?.session.token ?? null);
       setSessions((listResult.data ?? []) as BetterAuthSession[]);
+    } catch {
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -66,6 +72,7 @@ export function SessionManager() {
 
   const handleRevoke = async (token: string, isCurrent: boolean) => {
     setBusyToken(token);
+    setActionError(null);
     try {
       await authClient.revokeSession({ token });
       if (isCurrent) {
@@ -74,6 +81,8 @@ export function SessionManager() {
         return;
       }
       await loadSessions();
+    } catch {
+      setActionError("We could not revoke that session. Try again.");
     } finally {
       setBusyToken(null);
     }
@@ -81,9 +90,12 @@ export function SessionManager() {
 
   const handleRevokeOthers = async () => {
     setRevokingOthers(true);
+    setActionError(null);
     try {
       await authClient.revokeOtherSessions();
       await loadSessions();
+    } catch {
+      setActionError("We could not sign out the other devices. Try again.");
     } finally {
       setRevokingOthers(false);
     }
@@ -92,7 +104,27 @@ export function SessionManager() {
   if (loading) {
     return (
       <div className="flex min-h-[40vh] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <Spinner />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="container mx-auto max-w-3xl px-4 py-10">
+        <Card>
+          <CardHeader>
+            <CardTitle>Active sessions</CardTitle>
+            <CardDescription>
+              We could not load your sessions. Check your connection and try again.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="outline" onClick={() => void loadSessions()}>
+              Try again
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -107,6 +139,14 @@ export function SessionManager() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {actionError && (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+            >
+              {actionError}
+            </p>
+          )}
           {sessions.length === 0 ? (
             <p className="text-sm text-muted-foreground">No active sessions found.</p>
           ) : (

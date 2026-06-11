@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
-import { requireUserId } from "./lib/requireUser";
+import { optionalUserId, requireUserId } from "./lib/requireUser";
 
 const messageValidator = v.object({
   role: v.union(v.literal("user"), v.literal("assistant")),
@@ -13,7 +13,8 @@ const messageValidator = v.object({
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await requireUserId(ctx);
+    const userId = await optionalUserId(ctx);
+    if (!userId) return [];
 
     const sessions = await ctx.db
       .query("chatSessions")
@@ -37,7 +38,8 @@ export const getByExternalId = query({
     externalId: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
+    const userId = await optionalUserId(ctx);
+    if (!userId) return null;
 
     const session = await ctx.db
       .query("chatSessions")
@@ -100,12 +102,11 @@ export const ensure = mutation({
   },
 });
 
-export const replaceMessages = mutation({
+export const appendMessages = mutation({
   args: {
     externalId: v.string(),
     title: v.optional(v.string()),
     lastMessage: v.string(),
-    messageCount: v.number(),
     messages: v.array(messageValidator),
   },
   handler: async (ctx, args) => {
@@ -124,29 +125,25 @@ export const replaceMessages = mutation({
         externalId: args.externalId,
         title: args.title ?? "New chat",
         lastMessage: args.lastMessage,
-        messageCount: args.messageCount,
+        messageCount: 0,
         updatedAt: Date.now(),
       });
       session = (await ctx.db.get(sessionId))!;
-    } else {
-      await ctx.db.patch(session._id, {
-        title: args.title ?? session.title,
-        lastMessage: args.lastMessage,
-        messageCount: args.messageCount,
-        updatedAt: Date.now(),
-      });
     }
 
-    const existingMessages = await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-      .collect();
-
-    for (const message of existingMessages) {
-      await ctx.db.delete(message._id);
-    }
-
+    // Skip messages that were already saved (retries, double-submits).
+    let inserted = 0;
     for (const message of args.messages) {
+      if (message.clientId) {
+        const existing = await ctx.db
+          .query("messages")
+          .withIndex("by_session_clientId", (q) =>
+            q.eq("sessionId", session._id).eq("clientId", message.clientId)
+          )
+          .unique();
+        if (existing) continue;
+      }
+
       await ctx.db.insert("messages", {
         sessionId: session._id,
         role: message.role,
@@ -154,7 +151,15 @@ export const replaceMessages = mutation({
         clientId: message.clientId,
         createdAt: message.createdAt ?? Date.now(),
       });
+      inserted += 1;
     }
+
+    await ctx.db.patch(session._id, {
+      title: args.title ?? session.title,
+      lastMessage: args.lastMessage,
+      messageCount: session.messageCount + inserted,
+      updatedAt: Date.now(),
+    });
 
     return { id: session.externalId };
   },
