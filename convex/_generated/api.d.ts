@@ -9,10 +9,15 @@
  */
 
 import type * as admin_migrations from "../admin/migrations.js";
+import type * as admin_overview from "../admin/overview.js";
+import type * as admin_roles from "../admin/roles.js";
 import type * as auth from "../auth.js";
 import type * as chats from "../chats.js";
 import type * as http from "../http.js";
+import type * as lib_adminPermissions from "../lib/adminPermissions.js";
+import type * as lib_audit from "../lib/audit.js";
 import type * as lib_email from "../lib/email.js";
+import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
 import type * as polar from "../polar.js";
 import type * as usage from "../usage.js";
@@ -26,10 +31,15 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "admin/migrations": typeof admin_migrations;
+  "admin/overview": typeof admin_overview;
+  "admin/roles": typeof admin_roles;
   auth: typeof auth;
   chats: typeof chats;
   http: typeof http;
+  "lib/adminPermissions": typeof lib_adminPermissions;
+  "lib/audit": typeof lib_audit;
   "lib/email": typeof lib_email;
+  "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;
   polar: typeof polar;
   usage: typeof usage;

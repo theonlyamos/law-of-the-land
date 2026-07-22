@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { verifyAuthMigrationSnapshot } from "./migrations";
+import {
+  parseInitialSuperAdminIds,
+  verifyAuthMigrationSnapshot,
+} from "./migrations";
 
 const before = {
   component: "betterAuth" as const,
@@ -12,6 +15,14 @@ const before = {
 };
 
 describe("Better Auth migration preservation gate", () => {
+  it("normalizes the bootstrap allowlist without widening it", () => {
+    expect(parseInitialSuperAdminIds(" user-1, user-2, user-1, , ")).toEqual([
+      "user-1",
+      "user-2",
+    ]);
+    expect(parseInitialSuperAdminIds(undefined)).toEqual([]);
+  });
+
   it("accepts the same component and table counts", () => {
     expect(verifyAuthMigrationSnapshot(before, before)).toEqual(before);
   });

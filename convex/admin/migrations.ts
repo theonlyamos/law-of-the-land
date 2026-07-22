@@ -1,6 +1,13 @@
 import { v } from "convex/values";
 import { components } from "../_generated/api";
-import { internalQuery, type QueryCtx } from "../_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  type QueryCtx,
+} from "../_generated/server";
+import { authComponent } from "../auth";
+import { parseAdminRoles } from "../lib/adminPermissions";
+import { writeAdminRoles } from "./roles";
 
 const authTableCountsValidator = v.object({
   user: v.number(),
@@ -27,6 +34,27 @@ export type AuthMigrationSnapshot = {
 };
 
 const authTables = ["user", "session", "account", "verification"] as const;
+
+const MAX_INITIAL_SUPER_ADMINS = 100;
+
+export function parseInitialSuperAdminIds(value: string | undefined): string[] {
+  const userIds = [
+    ...new Set(
+      (value ?? "")
+        .split(",")
+        .map((userId) => userId.trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  if (userIds.length > MAX_INITIAL_SUPER_ADMINS) {
+    throw new Error(
+      `INITIAL_SUPER_ADMIN_IDS cannot contain more than ${MAX_INITIAL_SUPER_ADMINS} users`,
+    );
+  }
+
+  return userIds;
+}
 
 export function verifyAuthMigrationSnapshot(
   before: AuthMigrationSnapshot,
@@ -74,4 +102,40 @@ export const assertAuthMigrationSnapshot = internalQuery({
       args.before,
       await readAuthMigrationSnapshot(ctx),
     ),
+});
+
+export const bootstrapSuperAdmins = internalMutation({
+  args: {},
+  returns: v.object({
+    promoted: v.number(),
+    unchanged: v.number(),
+  }),
+  handler: async (ctx) => {
+    const allowlistedUserIds = parseInitialSuperAdminIds(
+      process.env.INITIAL_SUPER_ADMIN_IDS,
+    );
+    let promoted = 0;
+    let unchanged = 0;
+
+    for (const targetUserId of allowlistedUserIds) {
+      const target = await authComponent.getAnyUserById(ctx, targetUserId);
+      if (!target) {
+        throw new Error(`Allowlisted Better Auth user not found: ${targetUserId}`);
+      }
+      const currentRoles = parseAdminRoles(target.role);
+      const result = await writeAdminRoles(ctx, {
+        actorType: "system",
+        targetUserId,
+        roles: [...new Set([...currentRoles, "super_admin" as const])],
+        auditAction: "admin.bootstrap_super_admin",
+      });
+      if (result.changed) {
+        promoted += 1;
+      } else {
+        unchanged += 1;
+      }
+    }
+
+    return { promoted, unchanged };
+  },
 });

@@ -2,6 +2,20 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  auditEvents: defineTable({
+    actorType: v.union(v.literal("system"), v.literal("user")),
+    actorUserId: v.optional(v.string()),
+    action: v.string(),
+    targetType: v.string(),
+    targetId: v.string(),
+    metadata: v.record(
+      v.string(),
+      v.union(v.string(), v.number(), v.boolean(), v.null()),
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_targetType_and_targetId", ["targetType", "targetId"]),
   chatSessions: defineTable({
     userId: v.string(),
     externalId: v.string(),

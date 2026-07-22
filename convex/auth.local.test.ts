@@ -3,10 +3,16 @@ import { countRows } from "./betterAuth/countRows";
 import schema from "./betterAuth/schema";
 
 describe("local Better Auth schema", () => {
-  it("contains user, session, and Two Factor tables", () => {
+  it("contains Admin fields plus the session and Two Factor schema", () => {
     expect(schema.tables.user).toBeDefined();
     expect(schema.tables.session).toBeDefined();
     expect(schema.tables.twoFactor).toBeDefined();
+    expect(schema.tables.user.validator.fields.role).toBeDefined();
+    expect(schema.tables.user.validator.fields.banned).toBeDefined();
+    expect(schema.tables.user.validator.fields.twoFactorEnabled).toBeDefined();
+    expect(
+      schema.tables.session.validator.fields.impersonatedBy,
+    ).toBeDefined();
   });
 
   it("counts every row in a migration snapshot", async () => {
