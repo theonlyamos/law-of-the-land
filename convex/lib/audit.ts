@@ -1,4 +1,5 @@
 import type { MutationCtx } from "../_generated/server";
+import { writeAudit } from "../admin/audit";
 
 type AuditMetadataValue = string | number | boolean | null;
 
@@ -19,13 +20,16 @@ export async function appendAuditEvent(
   ctx: MutationCtx,
   event: AuditEventInput,
 ) {
-  return await ctx.db.insert("auditEvents", {
-    actorType: event.actorType,
-    actorUserId: event.actorUserId,
+  return await writeAudit(ctx, {
+    actorId: event.actorUserId ?? "system",
+    actorRoles: [],
     action: event.action,
     targetType: event.targetType,
     targetId: event.targetId,
+    outcome: "success",
+  }, {
+    actorType: event.actorType,
+    actorUserId: event.actorUserId,
     metadata: event.metadata ?? {},
-    createdAt: Date.now(),
   });
 }
