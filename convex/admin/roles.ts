@@ -51,18 +51,50 @@ type AdminUserPage = FunctionReturnType<
   typeof components.betterAuth.adminUsers.listPage
 >;
 
+type AdminUserPageFetcher = (paginationOpts: {
+  numItems: number;
+  cursor: string | null;
+}) => Promise<AdminUserPage>;
+
+// Ten 100-user pages support large auth tables while keeping this parent
+// mutation to a conservative fraction of Convex's transaction read limits.
+const SUPER_ADMIN_SCAN_BUDGET = {
+  pageSize: 100,
+  maxUsers: 1_000,
+  maxPages: 10,
+} as const;
+
+const SUPER_ADMIN_SCAN_LIMIT_ERROR =
+  "Unable to verify another active super administrator within the safety limit";
+
 async function hasAnotherActiveSuperAdmin(
   ctx: MutationCtx,
   excludedUserId: string,
+  fetchAdminUserPage: AdminUserPageFetcher = async (paginationOpts) =>
+    await ctx.runQuery(components.betterAuth.adminUsers.listPage, {
+      paginationOpts,
+    }),
 ): Promise<boolean> {
-  const pageSize = 100;
   let cursor: string | null = null;
+  let usersScanned = 0;
 
-  while (true) {
-    const result: AdminUserPage = await ctx.runQuery(
-      components.betterAuth.adminUsers.listPage,
-      { paginationOpts: { numItems: pageSize, cursor } },
-    );
+  for (
+    let pagesScanned = 0;
+    pagesScanned < SUPER_ADMIN_SCAN_BUDGET.maxPages;
+    pagesScanned += 1
+  ) {
+    const result = await fetchAdminUserPage({
+      numItems: Math.min(
+        SUPER_ADMIN_SCAN_BUDGET.pageSize,
+        SUPER_ADMIN_SCAN_BUDGET.maxUsers - usersScanned,
+      ),
+      cursor,
+    });
+    usersScanned += result.page.length;
+
+    if (usersScanned > SUPER_ADMIN_SCAN_BUDGET.maxUsers) {
+      throw new ConvexError(SUPER_ADMIN_SCAN_LIMIT_ERROR);
+    }
     if (
       result.page.some(
         (candidate) =>
@@ -75,8 +107,16 @@ async function hasAnotherActiveSuperAdmin(
     if (result.isDone) {
       return false;
     }
+    if (
+      usersScanned >= SUPER_ADMIN_SCAN_BUDGET.maxUsers ||
+      pagesScanned + 1 >= SUPER_ADMIN_SCAN_BUDGET.maxPages
+    ) {
+      throw new ConvexError(SUPER_ADMIN_SCAN_LIMIT_ERROR);
+    }
     cursor = result.continueCursor;
   }
+
+  throw new ConvexError(SUPER_ADMIN_SCAN_LIMIT_ERROR);
 }
 
 export async function writeAdminRoles(
@@ -88,6 +128,9 @@ export async function writeAdminRoles(
     roles: readonly AdminRole[];
     auditAction: string;
   },
+  dependencies: {
+    fetchAdminUserPage?: AdminUserPageFetcher;
+  } = {},
 ): Promise<{ changed: boolean; roles: AdminRole[] }> {
   const target = await authComponent.getAnyUserById(ctx, input.targetUserId);
   if (!target) {
@@ -104,7 +147,11 @@ export async function writeAdminRoles(
     isActiveSuperAdmin(target) &&
     currentRoles.includes("super_admin") &&
     !nextRoles.includes("super_admin") &&
-    !(await hasAnotherActiveSuperAdmin(ctx, target._id))
+    !(await hasAnotherActiveSuperAdmin(
+      ctx,
+      target._id,
+      dependencies.fetchAdminUserPage,
+    ))
   ) {
     throw new ConvexError("Cannot remove the last active super administrator");
   }

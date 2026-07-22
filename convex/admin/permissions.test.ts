@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { api, components, internal } from "../_generated/api";
 import { createAuthOptions } from "../auth";
 import authSchema from "../betterAuth/schema";
+import { writeAdminRoles } from "./roles";
 import {
   ADMIN_ROLES,
   betterAuthAdminRoles,
@@ -464,6 +465,62 @@ describe("admin permission registry", () => {
           roles: ["auditor"],
         }),
     ).resolves.toEqual({ changed: true, roles: ["auditor"] });
+  });
+
+  it("fails closed without role or audit writes when the alternate scan budget is exhausted", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+    let pageFetches = 0;
+
+    await expect(
+      t.run(async (ctx) =>
+        await writeAdminRoles(
+          ctx,
+          {
+            actorType: "user",
+            actorUserId: actor.userId,
+            targetUserId: actor.userId,
+            roles: ["auditor"],
+            auditAction: "admin.roles_changed",
+          },
+          {
+            fetchAdminUserPage: async (paginationOpts: {
+              numItems: number;
+              cursor: string | null;
+            }) => {
+              pageFetches += 1;
+              return {
+                page: Array.from(
+                  { length: paginationOpts.numItems },
+                  (_, index) => ({
+                    userId: `ordinary-${pageFetches}-${index}`,
+                    role: "user",
+                    twoFactorEnabled: false,
+                    banned: false,
+                    banExpires: null,
+                  }),
+                ),
+                isDone: false,
+                continueCursor: `page-${pageFetches}`,
+              };
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      "Unable to verify another active super administrator within the safety limit",
+    );
+
+    expect(pageFetches).toBe(10);
+    await expect(readAuthUser(t, actor.userId)).resolves.toMatchObject({
+      role: "super_admin",
+    });
+    await expect(
+      t.run(async (ctx) => await ctx.db.query("auditEvents").take(1)),
+    ).resolves.toHaveLength(0);
   });
 
   it("updates Better Auth roles and appends one immutable audit event", async () => {
