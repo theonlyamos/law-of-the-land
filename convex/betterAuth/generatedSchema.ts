@@ -39,6 +39,7 @@ export const tables = {
     userAgent: v.optional(v.union(v.null(), v.string())),
     userId: v.string(),
     impersonatedBy: v.optional(v.union(v.null(), v.string())),
+    adminTwoFactorVerifiedAt: v.optional(v.union(v.null(), v.number())),
   })
     .index("expiresAt", ["expiresAt"])
     .index("expiresAt_userId", ["expiresAt","userId"])

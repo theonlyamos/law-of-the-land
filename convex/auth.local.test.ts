@@ -13,6 +13,9 @@ describe("local Better Auth schema", () => {
     expect(
       schema.tables.session.validator.fields.impersonatedBy,
     ).toBeDefined();
+    expect(
+      schema.tables.session.validator.fields.adminTwoFactorVerifiedAt,
+    ).toBeDefined();
   });
 
   it("counts every row in a migration snapshot", async () => {

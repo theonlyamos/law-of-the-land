@@ -23,6 +23,54 @@ describe("Better Auth options", () => {
     ).toMatchObject({ issuer: "Law of the Land Admin" });
   });
 
+  it("persists input-disabled assurance only at successful Two Factor session boundaries", async () => {
+    const options = createAuthOptions({} as never);
+    expect(
+      options.session?.additionalFields?.adminTwoFactorVerifiedAt,
+    ).toMatchObject({ type: "date", required: false, input: false });
+
+    const hook = options.databaseHooks?.session?.create?.before;
+    expect(hook).toBeTypeOf("function");
+    const session = {
+      id: "session-id",
+      token: "session-token",
+      userId: "admin-id",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+
+    for (const path of [
+      "/two-factor/verify-totp",
+      "/two-factor/verify-backup-code",
+    ]) {
+      await expect(
+        hook?.(session, { path } as never),
+      ).resolves.toMatchObject({
+        data: { adminTwoFactorVerifiedAt: expect.any(Date) },
+      });
+    }
+
+    for (const path of [
+      "/sign-in/email",
+      "/verify-email",
+      "/callback/:id",
+    ]) {
+      await expect(
+        hook?.(session, {
+          path,
+          context: {
+            internalAdapter: {
+              findUserById: async () => ({ role: "user" }),
+            },
+          },
+        } as never),
+      ).resolves.not.toMatchObject({
+        data: { adminTwoFactorVerifiedAt: expect.anything() },
+      });
+    }
+  });
+
   it("blocks Better Auth's built-in role mutation route", async () => {
     const auth = createAuth({} as never);
 

@@ -48,6 +48,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               }
             | {
                 data: {
+                  adminTwoFactorVerifiedAt?: null | number;
                   createdAt: number;
                   expiresAt: number;
                   impersonatedBy?: null | string;
@@ -168,6 +169,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | "userAgent"
                     | "userId"
                     | "impersonatedBy"
+                    | "adminTwoFactorVerifiedAt"
                     | "_id";
                   mode?: "sensitive" | "insensitive";
                   operator?:
@@ -399,6 +401,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | "userAgent"
                     | "userId"
                     | "impersonatedBy"
+                    | "adminTwoFactorVerifiedAt"
                     | "_id";
                   mode?: "sensitive" | "insensitive";
                   operator?:
@@ -719,6 +722,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | {
                 model: "session";
                 update: {
+                  adminTwoFactorVerifiedAt?: null | number;
                   createdAt?: number;
                   expiresAt?: number;
                   impersonatedBy?: null | string;
@@ -739,6 +743,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | "userAgent"
                     | "userId"
                     | "impersonatedBy"
+                    | "adminTwoFactorVerifiedAt"
                     | "_id";
                   mode?: "sensitive" | "insensitive";
                   operator?:
@@ -1007,6 +1012,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | {
                 model: "session";
                 update: {
+                  adminTwoFactorVerifiedAt?: null | number;
                   createdAt?: number;
                   expiresAt?: number;
                   impersonatedBy?: null | string;
@@ -1027,6 +1033,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | "userAgent"
                     | "userId"
                     | "impersonatedBy"
+                    | "adminTwoFactorVerifiedAt"
                     | "_id";
                   mode?: "sensitive" | "insensitive";
                   operator?:

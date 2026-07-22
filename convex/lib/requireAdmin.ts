@@ -3,6 +3,7 @@ import { components } from "../_generated/api";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { authComponent } from "../auth";
 import {
+  getPermissionAccess,
   hasRolePermission,
   parseAdminRoles,
   type AdminRole,
@@ -10,23 +11,11 @@ import {
 
 type AdminCtx = QueryCtx | MutationCtx;
 
-const impersonationRestrictedPermissions = new Set([
-  "user:set_role",
-  "user:ban",
-  "user:impersonate",
-  "session:revoke",
-  "billing:write",
-  "document:publish",
-  "document:rollback",
-  "conversation:export",
-  "operations:write",
-]);
-
 export function isImpersonationRestrictedPermission(
   resource: string,
   action: string,
 ): boolean {
-  return impersonationRestrictedPermissions.has(`${resource}:${action}`);
+  return getPermissionAccess(resource, action) !== "read";
 }
 
 export async function requireAdminPermission(
@@ -44,29 +33,35 @@ export async function requireAdminPermission(
     throw new ConvexError("Two-factor authentication required");
   }
 
-  const roles = parseAdminRoles(user.role);
-  if (!hasRolePermission(roles, resource, action)) {
-    throw new ConvexError("Admin permission required");
+  const sessionId = identity.sessionId;
+  if (typeof sessionId !== "string") {
+    throw new ConvexError("You must be signed in to perform this action.");
+  }
+  const session = await ctx.runQuery(components.betterAuth.adapter.findOne, {
+    model: "session",
+    where: [{ field: "_id", operator: "eq", value: sessionId }],
+  });
+  if (!session || session.userId !== user._id) {
+    throw new ConvexError("You must be signed in to perform this action.");
+  }
+  if (
+    typeof session.adminTwoFactorVerifiedAt !== "number" ||
+    !Number.isFinite(session.adminTwoFactorVerifiedAt)
+  ) {
+    throw new ConvexError("Two-factor verification required for this session");
   }
 
-  if (isImpersonationRestrictedPermission(resource, action)) {
-    const sessionId = identity.sessionId;
-    if (typeof sessionId !== "string") {
-      throw new ConvexError("You must be signed in to perform this action.");
-    }
-
-    const session = await ctx.runQuery(components.betterAuth.adapter.findOne, {
-      model: "session",
-      where: [{ field: "_id", operator: "eq", value: sessionId }],
-    });
-    if (!session) {
-      throw new ConvexError("You must be signed in to perform this action.");
-    }
-    if (session.impersonatedBy) {
-      throw new ConvexError(
-        "Impersonated sessions cannot perform this admin action",
-      );
-    }
+  const roles = parseAdminRoles(user.role);
+  if (
+    session.impersonatedBy &&
+    isImpersonationRestrictedPermission(resource, action)
+  ) {
+    throw new ConvexError(
+      "Impersonated sessions cannot perform this admin action",
+    );
+  }
+  if (!hasRolePermission(roles, resource, action)) {
+    throw new ConvexError("Admin permission required");
   }
 
   return { userId: user._id, roles };

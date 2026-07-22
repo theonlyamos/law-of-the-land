@@ -10,6 +10,7 @@ import {
   betterAuthAdminRoles,
   hasRolePermission,
 } from "../lib/adminPermissions";
+import { isImpersonationRestrictedPermission } from "../lib/requireAdmin";
 import schema from "../schema";
 
 const modules = Object.fromEntries(
@@ -37,6 +38,7 @@ async function createAuthFixture(
     role: string;
     twoFactorEnabled: boolean;
     impersonatedBy?: string;
+    assured?: boolean;
   },
 ): Promise<AuthFixture> {
   const now = Date.now();
@@ -69,6 +71,9 @@ async function createAuthFixture(
             createdAt: now,
             updatedAt: now,
             impersonatedBy: options.impersonatedBy,
+            ...(options.assured === false
+              ? {}
+              : { adminTwoFactorVerifiedAt: now }),
           },
         },
       },
@@ -123,14 +128,41 @@ describe("admin permission registry", () => {
   });
 
   it("expands super admin permissions without enabling admin impersonation", () => {
-    expect(hasRolePermission(["super_admin"], "anything", "dangerous")).toBe(
+    expect(hasRolePermission(["super_admin"], "operations", "write")).toBe(
       true,
     );
+    expect(hasRolePermission(["super_admin"], "operations", "retry")).toBe(
+      true,
+    );
+    expect(hasRolePermission(["super_admin"], "anything", "dangerous")).toBe(
+      false,
+    );
+    expect(
+      betterAuthAdminRoles.super_admin.authorize({
+        operations: ["write", "retry"],
+      }).success,
+    ).toBe(true);
     expect(
       betterAuthAdminRoles.super_admin.authorize({
         user: ["impersonate-admins"],
       }).success,
     ).toBe(false);
+  });
+
+  it("classifies every write and unknown permission as impersonation-restricted", () => {
+    expect(isImpersonationRestrictedPermission("quota", "write")).toBe(true);
+    expect(isImpersonationRestrictedPermission("operations", "write")).toBe(
+      true,
+    );
+    expect(isImpersonationRestrictedPermission("operations", "retry")).toBe(
+      true,
+    );
+    expect(isImpersonationRestrictedPermission("future", "unknown")).toBe(
+      true,
+    );
+    expect(isImpersonationRestrictedPermission("operations", "read")).toBe(
+      false,
+    );
   });
 
   it("exposes only the fixed administrative roles", () => {
@@ -158,6 +190,20 @@ describe("admin permission registry", () => {
     await expect(
       asAdminWithoutTwoFactor.query(api.admin.overview.get, {}),
     ).rejects.toThrow("Two-factor authentication required");
+  });
+
+  it("rejects an enrolled admin using an unassured email-auto-sign-in-like session", async () => {
+    const t = createTestBackend();
+    const fixture = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+      assured: false,
+    });
+
+    await expect(
+      t.withIdentity({ subject: fixture.userId, sessionId: fixture.sessionId })
+        .query(api.admin.overview.get, {}),
+    ).rejects.toThrow("Two-factor verification required for this session");
   });
 
   it("uses the authoritative Better Auth role instead of identity claims", async () => {
@@ -193,7 +239,14 @@ describe("admin permission registry", () => {
         }
         return await hook(
           { userId: admin.userId } as never,
-          { path: "/callback/:id" } as never,
+          {
+            path: "/callback/:id",
+            context: {
+              internalAdapter: {
+                findUserById: async () => ({ role: "super_admin" }),
+              },
+            },
+          } as never,
         );
       }),
     ).rejects.toThrow("Administrators must use Two Factor credential sign-in");
@@ -215,7 +268,14 @@ describe("admin permission registry", () => {
         }
         return await hook(
           { userId: user.userId } as never,
-          { path: "/callback/:id" } as never,
+          {
+            path: "/callback/:id",
+            context: {
+              internalAdapter: {
+                findUserById: async () => ({ role: "user" }),
+              },
+            },
+          } as never,
         );
       }),
     ).resolves.toBeNull();
@@ -235,12 +295,17 @@ describe("admin permission registry", () => {
         if (!hook) {
           throw new Error("OAuth admin session policy missing");
         }
-        return await hook(
+        const result = await hook(
           { userId: admin.userId } as never,
           { path: "/two-factor/verify-totp" } as never,
         );
+        if (typeof result !== "object" || !("data" in result)) {
+          return null;
+        }
+        const verifiedAt = result.data.adminTwoFactorVerifiedAt;
+        return verifiedAt instanceof Date ? verifiedAt.getTime() : null;
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual(expect.any(Number));
   });
 
   it("blocks role changes from an impersonated session", async () => {
@@ -332,6 +397,26 @@ describe("admin permission registry", () => {
     ).resolves.toEqual({ changed: true, roles: ["auditor"] });
   });
 
+  it("does not count a partial role-name match as another super administrator", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+    await createAuthFixture(t, {
+      role: "not_super_admin",
+      twoFactorEnabled: true,
+    });
+
+    await expect(
+      t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
+        .mutation(api.admin.roles.setAdminRoles, {
+          targetUserId: actor.userId,
+          roles: ["auditor"],
+        }),
+    ).rejects.toThrow("Cannot remove the last active super administrator");
+  });
+
   it("updates Better Auth roles and appends one immutable audit event", async () => {
     const t = createTestBackend();
     const actor = await createAuthFixture(t, {
@@ -391,6 +476,50 @@ describe("admin permission registry", () => {
     await expect(readAuthSession(t, target.sessionId)).resolves.toMatchObject({
       _id: target.sessionId,
     });
+  });
+
+  it("denies an unassured session inserted after promotion revocation", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+    const target = await createAuthFixture(t, {
+      role: "user",
+      twoFactorEnabled: true,
+    });
+
+    await t
+      .withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
+      .mutation(api.admin.roles.setAdminRoles, {
+        targetUserId: target.userId,
+        roles: ["super_admin"],
+      });
+
+    const racedSessionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const session = await ctx.runMutation(
+        components.betterAuth.adapter.create,
+        {
+          input: {
+            model: "session",
+            data: {
+              token: crypto.randomUUID(),
+              userId: target.userId,
+              expiresAt: now + 60_000,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        },
+      );
+      return session._id;
+    });
+
+    await expect(
+      t.withIdentity({ subject: target.userId, sessionId: racedSessionId })
+        .query(api.admin.overview.get, {}),
+    ).rejects.toThrow("Two-factor verification required for this session");
   });
 
   it("bootstraps only enrolled allowlisted users and remains idempotent", async () => {

@@ -18,19 +18,30 @@ const adminRoleValidator = v.union(
   v.literal("auditor"),
 );
 
-type BetterAuthUser = NonNullable<
-  Awaited<ReturnType<typeof authComponent.getAnyUserById>>
->;
-
-function isActiveSuperAdmin(user: BetterAuthUser): boolean {
+function isActiveSuperAdmin(user: unknown): boolean {
+  if (typeof user !== "object" || user === null) {
+    return false;
+  }
+  const candidate = user as {
+    role?: unknown;
+    twoFactorEnabled?: unknown;
+    banned?: unknown;
+    banExpires?: unknown;
+  };
+  const banExpiresAt =
+    candidate.banExpires instanceof Date
+      ? candidate.banExpires.getTime()
+      : typeof candidate.banExpires === "number"
+        ? candidate.banExpires
+        : undefined;
   const banHasExpired =
-    user.banned === true &&
-    typeof user.banExpires === "number" &&
-    user.banExpires <= Date.now();
+    candidate.banned === true &&
+    banExpiresAt !== undefined &&
+    banExpiresAt <= Date.now();
   return (
-    user.twoFactorEnabled === true &&
-    (user.banned !== true || banHasExpired) &&
-    parseAdminRoles(user.role).includes("super_admin")
+    candidate.twoFactorEnabled === true &&
+    (candidate.banned !== true || banHasExpired) &&
+    parseAdminRoles(candidate.role).includes("super_admin")
   );
 }
 
@@ -48,33 +59,30 @@ async function hasAnotherActiveSuperAdmin(
   excludedUserId: string,
 ): Promise<boolean> {
   const adapter = authComponent.adapter(ctx)(createAuthOptions(ctx));
-  const commonWhere = [
-    { field: "role", operator: "contains" as const, value: "super_admin" },
-    { field: "twoFactorEnabled", value: true },
-  ];
-  const [unbanned, expiredBan] = await Promise.all([
-    adapter.findMany({
-      model: "user",
-      where: [
-        ...commonWhere,
-        { field: "banned", operator: "ne", value: true },
-      ],
-      limit: 2,
-    }),
-    adapter.findMany({
-      model: "user",
-      where: [
-        ...commonWhere,
-        { field: "banned", value: true },
-        { field: "banExpires", operator: "lte", value: new Date() },
-      ],
-      limit: 2,
-    }),
-  ]);
+  const pageSize = 100;
+  let offset = 0;
 
-  return [...unbanned, ...expiredBan].some(
-    (user) => hasStringId(user) && user.id !== excludedUserId,
-  );
+  while (true) {
+    const candidates = await adapter.findMany({
+      model: "user",
+      limit: pageSize,
+      offset,
+    });
+    if (
+      candidates.some(
+        (candidate) =>
+          hasStringId(candidate) &&
+          candidate.id !== excludedUserId &&
+          isActiveSuperAdmin(candidate),
+      )
+    ) {
+      return true;
+    }
+    if (candidates.length < pageSize) {
+      return false;
+    }
+    offset += pageSize;
+  }
 }
 
 export async function writeAdminRoles(

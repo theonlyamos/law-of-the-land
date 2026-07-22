@@ -1,6 +1,10 @@
 import { createClient, type GenericCtx } from "@convex-dev/better-auth";
 import { convex } from "@convex-dev/better-auth/plugins";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import {
+  APIError,
+  createAuthMiddleware,
+  getSessionFromCtx,
+} from "better-auth/api";
 import { betterAuth, type BetterAuthOptions } from "better-auth/minimal";
 import { admin } from "better-auth/plugins/admin";
 import { twoFactor } from "better-auth/plugins/two-factor";
@@ -31,10 +35,29 @@ export function isOAuthCallbackRoute(path: string): boolean {
   return path === "/callback/:id" || path.startsWith("/callback/");
 }
 
+const twoFactorVerificationRoutes = new Set([
+  "/two-factor/verify-totp",
+  "/two-factor/verify-otp",
+  "/two-factor/verify-backup-code",
+]);
+
+export function isTwoFactorVerificationRoute(path: string): boolean {
+  return twoFactorVerificationRoutes.has(path);
+}
+
 export const createAuthOptions = (ctx: GenericCtx<DataModel>) =>
   ({
     baseURL: siteUrl,
     database: authComponent.adapter(ctx),
+    session: {
+      additionalFields: {
+        adminTwoFactorVerifiedAt: {
+          type: "date",
+          required: false,
+          input: false,
+        },
+      },
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: true,
@@ -86,15 +109,21 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) =>
       session: {
         create: {
           before: async (session, hookCtx) => {
+            if (hookCtx && isTwoFactorVerificationRoute(hookCtx.path)) {
+              return {
+                data: { adminTwoFactorVerifiedAt: new Date() },
+              };
+            }
             if (!hookCtx || !isOAuthCallbackRoute(hookCtx.path)) {
               return;
             }
 
-            const user = await authComponent.getAnyUserById(
-              ctx,
+            const user = await hookCtx.context.internalAdapter.findUserById(
               session.userId,
             );
-            if (user && parseAdminRoles(user.role).length > 0) {
+            const authoritativeRole = (user as { role?: unknown } | null)
+              ?.role;
+            if (parseAdminRoles(authoritativeRole).length > 0) {
               throw new APIError("FORBIDDEN", {
                 code: "ADMIN_OAUTH_REQUIRES_CREDENTIAL_2FA",
                 message:
@@ -112,6 +141,15 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) =>
             code: "GUARDED_ADMIN_MUTATION_REQUIRED",
             message: "Guarded admin mutation required",
           });
+        }
+        if (hookCtx.path === "/two-factor/disable") {
+          const session = await getSessionFromCtx(hookCtx);
+          if (session && parseAdminRoles(session.user.role).length > 0) {
+            throw new APIError("FORBIDDEN", {
+              code: "ADMIN_TWO_FACTOR_REQUIRED",
+              message: "Administrators cannot disable Two Factor",
+            });
+          }
         }
       }),
     },
