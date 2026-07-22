@@ -417,6 +417,55 @@ describe("admin permission registry", () => {
     ).rejects.toThrow("Cannot remove the last active super administrator");
   });
 
+  it("finds the only valid alternate super administrator after the first page", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 100; index += 1) {
+        await ctx.runMutation(components.betterAuth.adapter.create, {
+          input: {
+            model: "user",
+            data: {
+              name: `Pagination User ${index}`,
+              email: `pagination-${index}-${crypto.randomUUID()}@example.com`,
+              emailVerified: true,
+              createdAt: now + index,
+              updatedAt: now + index,
+              role: "user",
+              banned: false,
+              twoFactorEnabled: false,
+            },
+          },
+        });
+      }
+    });
+    await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+
+    const boundedPage = await t.run(async (ctx) =>
+      await ctx.runQuery(components.betterAuth.adminUsers.listPage, {
+        paginationOpts: { numItems: 1_000, cursor: null },
+      }),
+    );
+    expect(boundedPage.page).toHaveLength(100);
+    expect(boundedPage.isDone).toBe(false);
+
+    await expect(
+      t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
+        .mutation(api.admin.roles.setAdminRoles, {
+          targetUserId: actor.userId,
+          roles: ["auditor"],
+        }),
+    ).resolves.toEqual({ changed: true, roles: ["auditor"] });
+  });
+
   it("updates Better Auth roles and appends one immutable audit event", async () => {
     const t = createTestBackend();
     const actor = await createAuthFixture(t, {

@@ -9,6 +9,7 @@
  */
 
 import type * as adapter from "../adapter.js";
+import type * as adminUsers from "../adminUsers.js";
 import type * as auth from "../auth.js";
 import type * as countRows from "../countRows.js";
 import type * as generatedSchema from "../generatedSchema.js";
@@ -23,6 +24,7 @@ import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
   adapter: typeof adapter;
+  adminUsers: typeof adminUsers;
   auth: typeof auth;
   countRows: typeof countRows;
   generatedSchema: typeof generatedSchema;

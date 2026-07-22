@@ -1,4 +1,6 @@
+import type { FunctionReturnType } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import { components } from "../_generated/api";
 import type { MutationCtx } from "../_generated/server";
 import { mutation } from "../_generated/server";
 import { authComponent, createAuthOptions } from "../auth";
@@ -45,43 +47,35 @@ function isActiveSuperAdmin(user: unknown): boolean {
   );
 }
 
-function hasStringId(value: unknown): value is { id: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "id" in value &&
-    typeof value.id === "string"
-  );
-}
+type AdminUserPage = FunctionReturnType<
+  typeof components.betterAuth.adminUsers.listPage
+>;
 
 async function hasAnotherActiveSuperAdmin(
   ctx: MutationCtx,
   excludedUserId: string,
 ): Promise<boolean> {
-  const adapter = authComponent.adapter(ctx)(createAuthOptions(ctx));
   const pageSize = 100;
-  let offset = 0;
+  let cursor: string | null = null;
 
   while (true) {
-    const candidates = await adapter.findMany({
-      model: "user",
-      limit: pageSize,
-      offset,
-    });
+    const result: AdminUserPage = await ctx.runQuery(
+      components.betterAuth.adminUsers.listPage,
+      { paginationOpts: { numItems: pageSize, cursor } },
+    );
     if (
-      candidates.some(
+      result.page.some(
         (candidate) =>
-          hasStringId(candidate) &&
-          candidate.id !== excludedUserId &&
+          candidate.userId !== excludedUserId &&
           isActiveSuperAdmin(candidate),
       )
     ) {
       return true;
     }
-    if (candidates.length < pageSize) {
+    if (result.isDone) {
       return false;
     }
-    offset += pageSize;
+    cursor = result.continueCursor;
   }
 }
 

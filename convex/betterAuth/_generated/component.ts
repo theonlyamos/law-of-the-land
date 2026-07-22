@@ -1233,6 +1233,34 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    adminUsers: {
+      listPage: FunctionReference<
+        "query",
+        "internal",
+        {
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            banExpires: number | null;
+            banned: boolean | null;
+            role: string | null;
+            twoFactorEnabled: boolean | null;
+            userId: string;
+          }>;
+        },
+        Name
+      >;
+    };
     migrations: {
       countAuthTables: FunctionReference<
         "query",
