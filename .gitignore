@@ -40,3 +40,10 @@ next-env.d.ts
 node_modules
 .next
 .git
+
+# Local Superpowers design and planning artifacts
+.superpowers/
+docs/superpowers/
+
+# Generated performance-harness output
+artifacts/admin-performance.json

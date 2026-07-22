@@ -8,8 +8,13 @@
     "dev:all": "bun run dev:convex & bun run dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
-    "convex:codegen": "convex codegen"
+    "lint": "eslint .",
+    "convex:codegen": "convex codegen",
+    "test": "vitest run",
+    "test:convex": "vitest run --project convex --passWithNoTests",
+    "test:ui": "vitest run --project ui",
+    "test:e2e": "playwright test",
+    "test:budgets": "node -e \"require('node:fs').rmSync('artifacts/admin-performance.json', { force: true })\" && playwright test e2e/performance.spec.ts && node scripts/check-admin-budgets.mjs artifacts/admin-performance.json"
   },
   "dependencies": {
     "@convex-dev/better-auth": "^0.12.2",
@@ -35,17 +40,24 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4.2.4",
     "@tailwindcss/typography": "^0.5.19",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^25.6.0",
     "@types/react": "^19.0.12",
     "@types/react-dom": "^19.0.4",
+    "convex-test": "^0.0.54",
     "eslint": "^10.3.0",
     "eslint-config-next": "^16.2.4",
+    "jsdom": "^29.1.1",
     "postcss": "^8.5.13",
     "tailwindcss": "^4.2.4",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "@types/react": "19.0.12",

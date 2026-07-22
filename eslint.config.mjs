@@ -2,7 +2,7 @@ import { defineConfig } from "eslint/config";
 
 export default defineConfig([
   {
-    ignores: [".next/**", "node_modules/**", "*.bak", "src.bak/**"],
+    ignores: [".next/**", "node_modules/**", "*.bak", "src.bak/**", "convex/_generated/**"],
   },
   {
     languageOptions: {
