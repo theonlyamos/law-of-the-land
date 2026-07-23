@@ -296,4 +296,44 @@ describe("chat pagination", () => {
       vi.useRealTimers();
     }
   }, 30_000);
+
+  it("does not recreate a session when an append arrives after its removal", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = createTestBackend();
+      const owner = await createUser(t, `chat-owner-${crypto.randomUUID()}@example.com`);
+      await t.run(async (ctx) => {
+        await ctx.db.insert("chatSessions", {
+          userId: owner.userId,
+          externalId: "removed-before-append",
+          title: "Removed before append",
+          lastMessage: "",
+          messageCount: 0,
+          updatedAt: 1,
+        });
+      });
+
+      await t
+        .withIdentity({ subject: owner.userId, sessionId: owner.sessionId })
+        .mutation(api.chats.remove, { externalId: "removed-before-append" });
+      await expect(
+        t
+          .withIdentity({ subject: owner.userId, sessionId: owner.sessionId })
+          .mutation(api.chats.appendMessages, {
+            externalId: "removed-before-append",
+            lastMessage: "Should not persist",
+            messages: [{ role: "user", content: "Too late", clientId: "late-message", createdAt: 2 }],
+          }),
+      ).rejects.toThrow("Chat session not found");
+
+      await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+      await expect(
+        t
+          .withIdentity({ subject: owner.userId, sessionId: owner.sessionId })
+          .query(api.chats.getByExternalId, { externalId: "removed-before-append" }),
+      ).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
 });

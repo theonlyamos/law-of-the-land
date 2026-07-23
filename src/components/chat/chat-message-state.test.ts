@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginComposerBottomScroll,
   beginPrependScroll,
   canCommitRequestGeneration,
+  consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
@@ -65,6 +67,40 @@ describe("chat message reconciliation", () => {
 });
 
 describe("chat scroll and route lifecycles", () => {
+  it("makes a composer send authoritative over an in-flight older-page prepend until both settle", () => {
+    const composer = beginComposerBottomScroll({ routeGeneration: 4 });
+
+    const whileBothPending = consumeComposerBottomScroll(composer, {
+      routeGeneration: 4,
+      sendPending: true,
+      loadMorePending: true,
+    });
+    expect(whileBothPending).toEqual({
+      intent: composer,
+      cancelPrepend: true,
+      scrollToBottom: true,
+    });
+
+    const afterOlderPageLands = consumeComposerBottomScroll(whileBothPending.intent, {
+      routeGeneration: 4,
+      sendPending: true,
+      loadMorePending: false,
+    });
+    expect(afterOlderPageLands).toEqual({
+      intent: composer,
+      cancelPrepend: true,
+      scrollToBottom: true,
+    });
+
+    expect(
+      consumeComposerBottomScroll(afterOlderPageLands.intent, {
+        routeGeneration: 4,
+        sendPending: false,
+        loadMorePending: false,
+      }),
+    ).toEqual({ intent: null, cancelPrepend: true, scrollToBottom: true });
+  });
+
   it("consumes a prepend snapshot only after the requested page adds all prior persisted rows", () => {
     const intent = beginPrependScroll({
       routeGeneration: 4,

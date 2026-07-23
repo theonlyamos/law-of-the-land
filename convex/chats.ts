@@ -1,5 +1,5 @@
 import { paginationOptsValidator } from "convex/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
@@ -209,18 +209,7 @@ export const appendMessages = mutation({
       )
       .unique();
 
-    if (!session) {
-      const sessionId = await ctx.db.insert("chatSessions", {
-        userId,
-        externalId: args.externalId,
-        title: args.title ?? "New chat",
-        lastMessage: args.lastMessage,
-        messageCount: 0,
-        updatedAt: Date.now(),
-        country: args.country,
-      });
-      session = (await ctx.db.get(sessionId))!;
-    }
+    if (!session) throw new ConvexError("Chat session not found.");
 
     // Skip messages that were already saved (retries, double-submits).
     let inserted = 0;

@@ -75,6 +75,38 @@ export interface PrependScrollIntent {
   scrollTop: number;
 }
 
+export interface ComposerBottomScrollIntent {
+  routeGeneration: number;
+}
+
+export function beginComposerBottomScroll(
+  intent: ComposerBottomScrollIntent,
+): ComposerBottomScrollIntent {
+  return intent;
+}
+
+export function consumeComposerBottomScroll(
+  intent: ComposerBottomScrollIntent | null,
+  {
+    routeGeneration,
+    sendPending,
+    loadMorePending,
+  }: { routeGeneration: number; sendPending: boolean; loadMorePending: boolean },
+): {
+  intent: ComposerBottomScrollIntent | null;
+  cancelPrepend: boolean;
+  scrollToBottom: boolean;
+} {
+  if (!intent || intent.routeGeneration !== routeGeneration) {
+    return { intent: null, cancelPrepend: false, scrollToBottom: false };
+  }
+  return {
+    intent: sendPending || loadMorePending ? intent : null,
+    cancelPrepend: true,
+    scrollToBottom: true,
+  };
+}
+
 export interface ServerOrderKey {
   createdAt: number;
   creationTime: number;

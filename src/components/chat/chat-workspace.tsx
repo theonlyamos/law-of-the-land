@@ -14,12 +14,15 @@ import type { ChatSession } from "@/lib/chat-sessions";
 import { COUNTRIES, DEFAULT_COUNTRY, findCountry } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import {
+  beginComposerBottomScroll,
   beginPrependScroll,
   canCommitRequestGeneration,
+  consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
   type LocalChatMessage,
+  type ComposerBottomScrollIntent,
   type PersistedChatMessage,
   type PrependScrollIntent,
 } from "./chat-message-state";
@@ -107,6 +110,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isDeletingCurrentChat, setIsDeletingCurrentChat] = useState(false);
   const [isCurrentChatDeleted, setIsCurrentChatDeleted] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -120,7 +125,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const activeRequestRef = useRef<AbortController | null>(null);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
-  const composerScrollRequestedRef = useRef(true);
+  const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
   activeChatIdRef.current = chatId;
 
   const {
@@ -186,7 +191,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     setLocalMessages([]);
     setSaveFailed(false);
     prependScrollIntentRef.current = null;
-    composerScrollRequestedRef.current = true;
+    composerScrollIntentRef.current = null;
   }, []);
 
   // A route change invalidates every pending response before state for the
@@ -194,6 +199,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   useEffect(() => {
     invalidateChatRequests();
     setQuery("");
+    setDeleteError(null);
+    setIsDeletingCurrentChat(false);
     setIsCurrentChatDeleted(false);
   }, [chatId, invalidateChatRequests]);
 
@@ -209,7 +216,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   }, [isMobileSidebarOpen]);
 
   useEffect(() => {
-    if (!chatId || !isAuthenticated || authLoading || isCurrentChatDeleted) return;
+    if (!chatId || !isAuthenticated || authLoading || isCurrentChatDeleted || isDeletingCurrentChat) return;
     if (ensuredRef.current.has(chatId)) return;
 
     ensuredRef.current.add(chatId);
@@ -217,10 +224,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       externalId: chatId,
       country: findCountry(initialCountry)?.code,
     });
-  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated, isCurrentChatDeleted]);
+  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated, isCurrentChatDeleted, isDeletingCurrentChat]);
 
   useEffect(() => {
-    if (!chatId || sessionData === undefined || isCurrentChatDeleted) return;
+    if (!chatId || sessionData === undefined || isCurrentChatDeleted || isDeletingCurrentChat) return;
     if (sessionData) {
       observedSessionIdsRef.current.add(chatId);
       return;
@@ -230,7 +237,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     setIsCurrentChatDeleted(true);
     invalidateChatRequests();
     router.replace(routeAfterDeletingCurrentSession(chatId, sessions.map((session) => session.id)));
-  }, [chatId, invalidateChatRequests, isCurrentChatDeleted, router, sessionData, sessions]);
+  }, [chatId, invalidateChatRequests, isCurrentChatDeleted, isDeletingCurrentChat, router, sessionData, sessions]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -241,6 +248,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       "[data-radix-scroll-area-viewport]"
     );
     if (!viewport) return;
+    const composer = consumeComposerBottomScroll(composerScrollIntentRef.current, {
+      routeGeneration: requestGenerationRef.current,
+      sendPending: isLoading,
+      loadMorePending: messagesPaginationStatus === "LoadingMore",
+    });
+    composerScrollIntentRef.current = composer.intent;
+    if (composer.cancelPrepend) prependScrollIntentRef.current = null;
+    if (composer.scrollToBottom) {
+      scrollToBottom();
+      return;
+    }
     const prepend = consumePrependScroll(prependScrollIntentRef.current, {
       routeGeneration: requestGenerationRef.current,
       serverRows: persistedMessages,
@@ -251,15 +269,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     prependScrollIntentRef.current = prepend.intent;
     if (prepend.scrollTop !== null) {
       viewport.scrollTop = prepend.scrollTop;
-      // Deterministic precedence: a completed history prepend wins over a
-      // composer bottom-scroll requested while that page was in flight.
-      composerScrollRequestedRef.current = false;
       return;
     }
-    if (prependScrollIntentRef.current || !composerScrollRequestedRef.current) return;
-    composerScrollRequestedRef.current = false;
-    scrollToBottom();
-  }, [displayMessages, messagesPaginationStatus, persistedMessages]);
+    if (prependScrollIntentRef.current) return;
+  }, [displayMessages, isLoading, messagesPaginationStatus, persistedMessages]);
 
   const handleLoadOlderMessages = useCallback(() => {
     if (messagesPaginationStatus !== "CanLoadMore" || prependScrollIntentRef.current) return;
@@ -339,7 +352,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
       setQuery("");
       setIsLoading(true);
-      composerScrollRequestedRef.current = true;
+      prependScrollIntentRef.current = null;
+      composerScrollIntentRef.current = beginComposerBottomScroll({
+        routeGeneration: requestGeneration,
+      });
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       try {
@@ -357,7 +373,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
         if (!isCurrentRequest()) return;
 
         const completedAssistant = { ...assistantMessage, content: chatData.result };
-        composerScrollRequestedRef.current = true;
         setLocalMessages((previous) =>
           previous.map((message) =>
             message.localId === assistantMessage.localId ? completedAssistant : message
@@ -397,7 +412,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
           return;
         }
         console.error("Error:", error);
-        composerScrollRequestedRef.current = true;
         setLocalMessages((previous) =>
           previous.map((message) => {
             if (message.localId === assistantMessage.localId) {
@@ -449,14 +463,29 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
-      await removeSession({ externalId: sessionId });
+      const isCurrentChat = sessionId === chatId;
+      if (isCurrentChat) {
+        // Invalidate before awaiting the mutation so stale send callbacks and
+        // finally blocks cannot update the chat while deletion is pending.
+        invalidateChatRequests();
+        setDeleteError(null);
+        setIsDeletingCurrentChat(true);
+      }
 
-      if (sessionId !== chatId) return;
+      try {
+        await removeSession({ externalId: sessionId });
+        if (!isCurrentChat || activeChatIdRef.current !== chatId) return;
 
-      setIsCurrentChatDeleted(true);
-      invalidateChatRequests();
-      router.replace(routeAfterDeletingCurrentSession(sessionId, sessions.map((session) => session.id)));
-      setIsMobileSidebarOpen(false);
+        setIsDeletingCurrentChat(false);
+        setIsCurrentChatDeleted(true);
+        router.replace(routeAfterDeletingCurrentSession(sessionId, sessions.map((session) => session.id)));
+        setIsMobileSidebarOpen(false);
+      } catch (error) {
+        if (!isCurrentChat || activeChatIdRef.current !== chatId) return;
+        console.error("Failed to delete chat:", error);
+        setIsDeletingCurrentChat(false);
+        setDeleteError("We could not delete this chat. Please try again.");
+      }
     },
     [chatId, invalidateChatRequests, removeSession, router, sessions]
   );
@@ -468,6 +497,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
   if (isCurrentChatDeleted) {
     return <PageLoader label="Chat deleted…" />;
+  }
+
+  if (isDeletingCurrentChat) {
+    return <PageLoader label="Deleting chat…" />;
   }
 
   return (
@@ -638,6 +671,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
               <p role="alert" className="mb-2 text-sm text-muted-foreground">
                 The last answer is shown above but could not be saved to your account. It may be
                 missing when you return to this chat.
+              </p>
+            )}
+            {deleteError && (
+              <p role="alert" className="mb-2 text-sm text-destructive">
+                {deleteError}
               </p>
             )}
             <ChatInput
