@@ -1,4 +1,3 @@
-import { ConvexError } from "convex/values";
 import { components } from "../_generated/api";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { authComponent } from "../auth";
@@ -8,6 +7,7 @@ import {
   parseAdminRoles,
   type AdminRole,
 } from "./adminPermissions";
+import { adminAccessError } from "./adminAccessErrors";
 
 type AdminCtx = QueryCtx | MutationCtx;
 
@@ -29,12 +29,13 @@ export async function requireAdminPermission(
     admin.impersonatedBy &&
     isImpersonationRestrictedPermission(resource, action)
   ) {
-    throw new ConvexError(
+    throw adminAccessError(
+      "ADMIN_FORBIDDEN",
       "Impersonated sessions cannot perform this admin action",
     );
   }
   if (!hasRolePermission(admin.roles, resource, action)) {
-    throw new ConvexError("Admin permission required");
+    throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
   }
 
   return { userId: admin.userId, roles: admin.roles };
@@ -55,33 +56,48 @@ export async function requireCurrentAdmin(
   const user = await authComponent.safeGetAuthUser(ctx);
 
   if (!identity || !user) {
-    throw new ConvexError("You must be signed in to perform this action.");
+    throw adminAccessError(
+      "ADMIN_AUTH_REQUIRED",
+      "You must be signed in to perform this action.",
+    );
   }
   if (user.twoFactorEnabled !== true) {
-    throw new ConvexError("Two-factor authentication required");
+    throw adminAccessError(
+      "ADMIN_2FA_REQUIRED",
+      "Two-factor authentication required",
+    );
   }
 
   const sessionId = identity.sessionId;
   if (typeof sessionId !== "string") {
-    throw new ConvexError("You must be signed in to perform this action.");
+    throw adminAccessError(
+      "ADMIN_AUTH_REQUIRED",
+      "You must be signed in to perform this action.",
+    );
   }
   const session = await ctx.runQuery(components.betterAuth.adapter.findOne, {
     model: "session",
     where: [{ field: "_id", operator: "eq", value: sessionId }],
   });
   if (!session || session.userId !== user._id) {
-    throw new ConvexError("You must be signed in to perform this action.");
+    throw adminAccessError(
+      "ADMIN_AUTH_REQUIRED",
+      "You must be signed in to perform this action.",
+    );
   }
   if (
     typeof session.adminTwoFactorVerifiedAt !== "number" ||
     !Number.isFinite(session.adminTwoFactorVerifiedAt)
   ) {
-    throw new ConvexError("Two-factor verification required for this session");
+    throw adminAccessError(
+      "ADMIN_2FA_REQUIRED",
+      "Two-factor verification required for this session",
+    );
   }
 
   const roles = parseAdminRoles(user.role);
   if (roles.length === 0) {
-    throw new ConvexError("Admin permission required");
+    throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
   }
 
   return {

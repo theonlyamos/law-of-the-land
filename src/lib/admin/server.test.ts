@@ -1,14 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadAdminOverview } from "./server";
+import { authorizeAdminPage, loadAdminOverview } from "./server";
+
+const denialCodes = [
+  "ADMIN_AUTH_REQUIRED",
+  "ADMIN_2FA_REQUIRED",
+  "ADMIN_FORBIDDEN",
+  "ADMIN_DISABLED",
+] as const;
 
 describe("server-side admin request sequencing", () => {
-  it("does not request overview data when the authoritative admin check fails", async () => {
-    const fetchQuery = vi.fn().mockRejectedValue(new Error("Admin permission required"));
+  it.each(denialCodes)("classifies %s as an expected access denial", async (code) => {
+    const denial = Object.assign(new Error("Administrative access denied"), {
+      data: { code, message: "Restricted" },
+    });
+    const fetchQuery = vi.fn().mockRejectedValue(denial);
 
-    await expect(loadAdminOverview(fetchQuery)).rejects.toThrow(
-      "Admin permission required",
-    );
+    await expect(authorizeAdminPage(fetchQuery)).resolves.toEqual({
+      status: "denied",
+    });
     expect(fetchQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates infrastructure and serialization failures unchanged", async () => {
+    const failure = new Error("fetch failed: connection refused");
+    const fetchQuery = vi.fn().mockRejectedValue(failure);
+
+    await expect(authorizeAdminPage(fetchQuery)).rejects.toBe(failure);
   });
 
   it("loads overview data only after the authoritative admin check succeeds", async () => {
@@ -25,7 +42,7 @@ describe("server-side admin request sequencing", () => {
       .mockResolvedValueOnce(overview);
 
     await expect(loadAdminOverview(fetchQuery)).resolves.toEqual({
-      currentAdmin,
+      access: { status: "authorized", currentAdmin },
       overview,
     });
     expect(fetchQuery.mock.invocationCallOrder[0]).toBeLessThan(
@@ -38,7 +55,22 @@ describe("server-side admin request sequencing", () => {
     const fetchQuery = vi.fn().mockResolvedValue(currentAdmin);
 
     await expect(loadAdminOverview(fetchQuery)).resolves.toEqual({
-      currentAdmin,
+      access: { status: "authorized", currentAdmin },
+      overview: null,
+    });
+    expect(fetchQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not request overview data after a classified denial", async () => {
+    const denial = Object.assign(new Error("Administrative access denied"), {
+      data: { code: "ADMIN_FORBIDDEN", message: "Restricted" },
+    });
+    const fetchQuery = vi
+      .fn()
+      .mockRejectedValue(denial);
+
+    await expect(loadAdminOverview(fetchQuery)).resolves.toEqual({
+      access: { status: "denied" },
       overview: null,
     });
     expect(fetchQuery).toHaveBeenCalledTimes(1);

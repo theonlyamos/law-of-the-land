@@ -1,4 +1,4 @@
-import { ConvexError, v } from "convex/values";
+import { v } from "convex/values";
 import type { Doc } from "../_generated/dataModel";
 import { query, type QueryCtx } from "../_generated/server";
 import {
@@ -10,6 +10,7 @@ import {
   requireCurrentAdmin,
 } from "../lib/requireAdmin";
 import { readAdminEnabled } from "./featureFlags";
+import { adminAccessError } from "../lib/adminAccessErrors";
 
 const adminRoleValidator = v.union(
   v.literal("super_admin"),
@@ -124,7 +125,10 @@ const HIGH_RISK_ACTIONS = [
 async function requireEnabledAdmin(ctx: QueryCtx) {
   const admin = await requireCurrentAdmin(ctx);
   if (!(await readAdminEnabled(ctx))) {
-    throw new ConvexError("Administration is not enabled");
+    throw adminAccessError(
+      "ADMIN_DISABLED",
+      "Administration is not enabled",
+    );
   }
   return admin;
 }
@@ -176,7 +180,10 @@ export const get = query({
   handler: async (ctx): Promise<AdminOverviewResult> => {
     const admin = await requireAdminPermission(ctx, "operations", "read");
     if (!(await readAdminEnabled(ctx))) {
-      throw new ConvexError("Administration is not enabled");
+      throw adminAccessError(
+        "ADMIN_DISABLED",
+        "Administration is not enabled",
+      );
     }
 
     // The aggregate and workflow tables arrive in later independently gated

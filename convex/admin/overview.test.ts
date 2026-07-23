@@ -96,6 +96,15 @@ async function enablePanel(t: Backend) {
 }
 
 describe("admin overview", () => {
+  it("returns a stable access code when authentication is missing", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+
+    await expect(
+      t.query(api.admin.overview.currentAdmin, {}),
+    ).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+  });
+
   it("does not expose the feature flag query to anonymous callers", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -127,7 +136,7 @@ describe("admin overview", () => {
       t
         .withIdentity({ subject: admin.userId, sessionId: admin.sessionId })
         .query(api.admin.overview.currentAdmin, {}),
-    ).rejects.toThrow("Administration is not enabled");
+    ).rejects.toThrow("ADMIN_DISABLED");
   });
 
   it("returns constant-shape counters and bounded empty queues for a new control plane", async () => {
@@ -149,5 +158,54 @@ describe("admin overview", () => {
     expect(result.failedJobs).toHaveLength(0);
     expect(result.reviewItems).toHaveLength(0);
     expect(result.highRiskEvents).toHaveLength(0);
+  });
+
+  it("merges high-risk action indexes into one masked descending top ten", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await createAdmin(t, "super_admin");
+    const baseTime = 1_800_000_000_000;
+    const actions = [
+      "admin.roles_changed",
+      "document.published",
+      "user.banned",
+    ] as const;
+
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 15; index += 1) {
+        await ctx.db.insert("auditEvents", {
+          actorType: "user",
+          actorUserId: "sensitive-actor-id",
+          actorId: "sensitive-actor-id",
+          actorRoles: ["super_admin"],
+          action: actions[index % actions.length],
+          targetType: "user",
+          targetId: `sensitive-target-${index}`,
+          reason: "Governance check",
+          outcome: index % 2 === 0 ? "success" : "denied",
+          metadata: { sequence: index },
+          createdAt: baseTime + index,
+        });
+      }
+    });
+
+    const result = await t
+      .withIdentity({ subject: admin.userId, sessionId: admin.sessionId })
+      .query(api.admin.overview.get, {});
+
+    expect(result.highRiskEvents).toHaveLength(10);
+    expect(result.highRiskEvents.map((event) => event.createdAt)).toEqual(
+      Array.from({ length: 10 }, (_, index) => baseTime + 14 - index),
+    );
+    for (const event of result.highRiskEvents) {
+      expect(Object.keys(event).sort()).toEqual([
+        "action",
+        "createdAt",
+        "outcome",
+      ]);
+      expect(JSON.stringify(event)).not.toContain("sensitive-");
+      expect(event).not.toHaveProperty("reason");
+      expect(event).not.toHaveProperty("metadata");
+    }
   });
 });

@@ -7,7 +7,10 @@ export default async function AdminOverviewPage() {
   // Rechecking here is deliberate: layouts and pages can render concurrently.
   // The helper guarantees `get` is never issued before this page's own
   // authoritative currentAdmin check succeeds.
-  const { overview } = await loadAdminOverview();
+  const { access, overview } = await loadAdminOverview();
+  if (access.status === "denied") {
+    return null;
+  }
   if (overview) {
     return <AdminOverview overview={overview} />;
   }

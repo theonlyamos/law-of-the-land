@@ -14,15 +14,13 @@ export default async function AdminLayout({
     return children;
   }
 
-  let currentAdmin;
-  try {
-    currentAdmin = await authorizeAdminPage();
-  } catch {
+  const access = await authorizeAdminPage();
+  if (access.status === "denied") {
     redirect("/admin/forbidden");
   }
 
   return (
-    <AdminShell currentAdmin={currentAdmin} currentPath={pathname ?? undefined}>
+    <AdminShell currentAdmin={access.currentAdmin} currentPath={pathname ?? undefined}>
       {children}
     </AdminShell>
   );
