@@ -1,6 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
 import { query, type MutationCtx } from "../_generated/server";
+import { isAdminRole } from "../lib/adminPermissions";
 import { requireAdminPermission } from "../lib/requireAdmin";
 
 const MAX_ACTOR_ROLES = 6;
@@ -8,10 +9,20 @@ const MAX_AUDIT_REASON_LENGTH = 500;
 const MAX_AUDIT_SUMMARY_LENGTH = 2_000;
 const DEFAULT_AUDIT_LIST_LIMIT = 50;
 const MAX_AUDIT_LIST_LIMIT = 100;
-const SIGNED_URL_PATTERN =
-  /https?:\/\/\S*[?&](?:x-amz-signature|signature|sig|token)=/i;
+const MAX_AUDIT_IDENTIFIER_LENGTH = 256;
+const MAX_AUDIT_ACTION_LENGTH = 128;
+const MAX_AUDIT_TARGET_TYPE_LENGTH = 64;
+const MAX_METADATA_DEPTH = 3;
+const MAX_METADATA_ENTRIES = 20;
+const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const ACTION_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
+const TARGET_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
+const METADATA_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+const RAW_URI_PATTERN = /(?:^|[^A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\/\/)?\S+/i;
 const SECRET_VALUE_PATTERN =
   /\b(?:authorization|bearer|token|api[_ -]?key|secret)\b\s*[:=]/i;
+const SENSITIVE_METADATA_KEY_PATTERN =
+  /token|secret|password|authorization|cookie|api[_ -]?key|signature|credential/i;
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -30,8 +41,18 @@ export type GovernanceAuditEvent = {
 type LegacyAuditFields = {
   actorType: "system" | "user";
   actorUserId?: string;
-  metadata: Record<string, string | number | boolean | null>;
+  metadata: Record<string, AuditMetadataValue>;
 };
+
+type AuditMetadataPrimitive = string | number | boolean | null;
+
+interface AuditMetadataObject {
+  [key: string]: AuditMetadataValue;
+}
+
+type AuditMetadataValue = AuditMetadataPrimitive | AuditMetadataObject;
+
+type PersistedAuditMetadata = Record<string, string | number | boolean | null>;
 
 function assertSafeAuditText(
   value: string | undefined,
@@ -44,21 +65,146 @@ function assertSafeAuditText(
   if (value.length > maximumLength) {
     throw new ConvexError(`Audit ${field} exceeds its maximum length`);
   }
-  if (SIGNED_URL_PATTERN.test(value)) {
-    throw new ConvexError("Audit text must not contain signed URLs");
+  if (RAW_URI_PATTERN.test(value)) {
+    throw new ConvexError("Audit text must not contain raw URIs");
   }
   if (SECRET_VALUE_PATTERN.test(value)) {
     throw new ConvexError("Audit text must not contain secrets");
   }
 }
 
-function assertSafeLegacyMetadata(
-  metadata: Record<string, string | number | boolean | null>,
+function assertLexeme(
+  value: string,
+  field: string,
+  pattern: RegExp,
+  maximumLength: number,
 ): void {
-  for (const value of Object.values(metadata)) {
-    if (typeof value === "string") {
-      assertSafeAuditText(value, "metadata", MAX_AUDIT_SUMMARY_LENGTH);
+  if (value.length === 0 || value.length > maximumLength || !pattern.test(value)) {
+    throw new ConvexError(`Audit ${field} is not a safe lexeme`);
+  }
+}
+
+function assertSafeGovernanceEvent(event: GovernanceAuditEvent): void {
+  assertLexeme(
+    event.actorId,
+    "actor ID",
+    IDENTIFIER_PATTERN,
+    MAX_AUDIT_IDENTIFIER_LENGTH,
+  );
+  if (event.actorRoles.length > MAX_ACTOR_ROLES) {
+    throw new ConvexError("Audit actor roles exceed the fixed role limit");
+  }
+  for (const role of event.actorRoles) {
+    if (!isAdminRole(role)) {
+      throw new ConvexError("Audit actor role is not a fixed administrative role");
     }
+  }
+  assertLexeme(event.action, "action", ACTION_PATTERN, MAX_AUDIT_ACTION_LENGTH);
+  assertLexeme(
+    event.targetType,
+    "target type",
+    TARGET_TYPE_PATTERN,
+    MAX_AUDIT_TARGET_TYPE_LENGTH,
+  );
+  assertLexeme(
+    event.targetId,
+    "target ID",
+    IDENTIFIER_PATTERN,
+    MAX_AUDIT_IDENTIFIER_LENGTH,
+  );
+  assertSafeAuditText(event.reason, "reason", MAX_AUDIT_REASON_LENGTH);
+  assertSafeAuditText(
+    event.beforeSummary,
+    "summary",
+    MAX_AUDIT_SUMMARY_LENGTH,
+  );
+  assertSafeAuditText(
+    event.afterSummary,
+    "summary",
+    MAX_AUDIT_SUMMARY_LENGTH,
+  );
+}
+
+function assertSafeMetadataKey(key: string): void {
+  if (!METADATA_KEY_PATTERN.test(key) || SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
+    throw new ConvexError("Audit metadata key is not safe");
+  }
+}
+
+function validateMetadataValue(
+  value: AuditMetadataValue,
+  depth: number,
+  entries: { count: number },
+): void {
+  if (typeof value === "string") {
+    assertSafeAuditText(value, "metadata", MAX_AUDIT_SUMMARY_LENGTH);
+    return;
+  }
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  if (depth >= MAX_METADATA_DEPTH) {
+    throw new ConvexError("Audit metadata exceeds its maximum depth");
+  }
+  for (const [key, nestedValue] of Object.entries(value)) {
+    entries.count += 1;
+    if (entries.count > MAX_METADATA_ENTRIES) {
+      throw new ConvexError("Audit metadata exceeds its maximum entry count");
+    }
+    assertSafeMetadataKey(key);
+    validateMetadataValue(nestedValue, depth + 1, entries);
+  }
+}
+
+function validateLegacyMetadata(
+  metadata: Record<string, AuditMetadataValue>,
+): PersistedAuditMetadata {
+  const entries = { count: 0 };
+  const persisted: PersistedAuditMetadata = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    entries.count += 1;
+    if (entries.count > MAX_METADATA_ENTRIES) {
+      throw new ConvexError("Audit metadata exceeds its maximum entry count");
+    }
+    assertSafeMetadataKey(key);
+    validateMetadataValue(value, 0, entries);
+    if (typeof value === "object" && value !== null) {
+      throw new ConvexError("Audit metadata must remain flat");
+    }
+    persisted[key] = value;
+  }
+  return persisted;
+}
+
+function isSafeStoredAuditEvent(event: {
+  actorId?: string;
+  actorUserId?: string;
+  actorRoles?: string[];
+  action: string;
+  targetType: string;
+  targetId: string;
+  reason?: string;
+  beforeSummary?: string;
+  afterSummary?: string;
+  outcome?: AuditOutcome;
+  metadata: Record<string, AuditMetadataValue>;
+}): boolean {
+  try {
+    assertSafeGovernanceEvent({
+      actorId: event.actorId ?? event.actorUserId ?? "system",
+      actorRoles: event.actorRoles ?? [],
+      action: event.action,
+      targetType: event.targetType,
+      targetId: event.targetId,
+      reason: event.reason,
+      beforeSummary: event.beforeSummary,
+      afterSummary: event.afterSummary,
+      outcome: event.outcome ?? "success",
+    });
+    validateLegacyMetadata(event.metadata);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -97,21 +243,8 @@ export async function writeAudit(
     metadata: {},
   },
 ): Promise<Id<"auditEvents">> {
-  if (event.actorRoles.length > MAX_ACTOR_ROLES) {
-    throw new ConvexError("Audit actor roles exceed the fixed role limit");
-  }
-  assertSafeAuditText(event.reason, "reason", MAX_AUDIT_REASON_LENGTH);
-  assertSafeAuditText(
-    event.beforeSummary,
-    "summary",
-    MAX_AUDIT_SUMMARY_LENGTH,
-  );
-  assertSafeAuditText(
-    event.afterSummary,
-    "summary",
-    MAX_AUDIT_SUMMARY_LENGTH,
-  );
-  assertSafeLegacyMetadata(legacy.metadata);
+  assertSafeGovernanceEvent(event);
+  const metadata = validateLegacyMetadata(legacy.metadata);
 
   return await ctx.db.insert("auditEvents", {
     actorType: legacy.actorType,
@@ -125,7 +258,7 @@ export async function writeAudit(
     beforeSummary: event.beforeSummary,
     afterSummary: event.afterSummary,
     outcome: event.outcome,
-    metadata: legacy.metadata,
+    metadata,
     createdAt: Date.now(),
   });
 }
@@ -153,7 +286,7 @@ export const listAudit = query({
       .order("desc")
       .take(limit);
 
-    return events.map((event) => ({
+    return events.filter(isSafeStoredAuditEvent).map((event) => ({
       actorId: maskAuditIdentifier(event.actorId ?? event.actorUserId ?? "system"),
       actorRoles: event.actorRoles ?? [],
       action: event.action,

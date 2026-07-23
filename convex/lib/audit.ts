@@ -1,7 +1,13 @@
 import type { MutationCtx } from "../_generated/server";
 import { writeAudit } from "../admin/audit";
 
-type AuditMetadataValue = string | number | boolean | null;
+type AuditMetadataPrimitive = string | number | boolean | null;
+
+interface AuditMetadataObject {
+  [key: string]: AuditMetadataValue;
+}
+
+type AuditMetadataValue = AuditMetadataPrimitive | AuditMetadataObject;
 
 export type AuditEventInput = {
   actorType: "system" | "user";

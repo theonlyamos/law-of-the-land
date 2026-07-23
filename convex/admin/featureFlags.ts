@@ -2,8 +2,11 @@ import { v } from "convex/values";
 import { query } from "../_generated/server";
 
 function readAdminEnvironment(): string | null {
-  const environment = process.env.ADMIN_ENVIRONMENT?.trim();
-  return environment ? environment : null;
+  const environment = process.env.ADMIN_ENVIRONMENT;
+  if (!environment || environment.trim() !== environment) {
+    return null;
+  }
+  return environment;
 }
 
 /**
@@ -24,13 +27,13 @@ export const isAdminEnabled = query({
       return false;
     }
 
-    const flag = await ctx.db
+    const flags = await ctx.db
       .query("featureFlags")
       .withIndex("by_key_and_environment", (q) =>
         q.eq("key", "admin_panel").eq("environment", environment),
       )
-      .unique();
+      .take(2);
 
-    return flag?.enabled === true;
+    return flags.length === 1 && flags[0].enabled === true;
   },
 });

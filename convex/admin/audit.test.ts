@@ -149,10 +149,10 @@ describe("audit writer", () => {
         writeAudit(ctx, {
           ...baseEvent,
           reason:
-            "https://storage.example.test/file?X-Amz-Signature=not-for-audit",
+            "See (https://storage.example.test/file?X-Amz-Signature=not-for-audit)",
         }),
       ),
-    ).rejects.toThrow("signed URLs");
+    ).rejects.toThrow("raw URIs");
 
     await expect(
       t.run((ctx) =>
@@ -187,7 +187,60 @@ describe("audit writer", () => {
           },
         }),
       ),
-    ).rejects.toThrow("signed URLs");
+    ).rejects.toThrow("raw URIs");
+  });
+
+  it("rejects unsafe governance identifiers, actions, target types, and roles", async () => {
+    const t = convexTest(schema, modules);
+    const safeEvent = {
+      actorId: "user_1",
+      actorRoles: ["support_agent"],
+      action: "conversation.access_granted",
+      targetType: "chatSession",
+      targetId: "chat_1",
+      outcome: "success" as const,
+    };
+
+    for (const event of [
+      { ...safeEvent, actorId: "https://example.test/user" },
+      { ...safeEvent, actorRoles: ["support agent"] },
+      { ...safeEvent, action: "conversation/access_granted" },
+      { ...safeEvent, targetType: "chat session" },
+      { ...safeEvent, targetId: "https://example.test/chat" },
+    ]) {
+      await expect(t.run((ctx) => writeAudit(ctx, event))).rejects.toThrow();
+    }
+  });
+
+  it("rejects sensitive and nested unsafe legacy metadata without writing it", async () => {
+    const t = convexTest(schema, modules);
+    const baseEvent = {
+      actorType: "system" as const,
+      action: "admin.bootstrap_super_admin",
+      targetType: "user",
+      targetId: "user_1",
+    };
+
+    for (const metadata of [
+      { accessToken: "not-for-audit" },
+      { audit: { credentials: "not-for-audit" } },
+      {
+        audit: {
+          source:
+            "https://storage.googleapis.com/bucket/file?X-Goog-Signature=not-for-audit",
+        },
+      },
+    ]) {
+      await expect(
+        t.run((ctx) =>
+          appendAuditEvent(ctx, { ...baseEvent, metadata } as never),
+        ),
+      ).rejects.toThrow();
+    }
+
+    await expect(
+      t.run(async (ctx) => await ctx.db.query("auditEvents").take(1)),
+    ).resolves.toEqual([]);
   });
 
   it("returns a bounded, masked list to an authorized auditor", async () => {
@@ -211,11 +264,23 @@ describe("audit writer", () => {
         targetId: "chat_sensitive_ghijkl",
         outcome: "success",
       });
+      await ctx.db.insert("auditEvents", {
+        actorType: "user",
+        actorUserId: "user_unsafe_abcdef",
+        actorId: "user_unsafe_abcdef",
+        actorRoles: ["support_agent"],
+        action: "conversation/access_granted",
+        targetType: "chatSession",
+        targetId: "chat_unsafe_abcdef",
+        outcome: "success",
+        metadata: {},
+        createdAt: Date.now() + 1,
+      });
     });
 
     const events = await t
       .withIdentity({ subject: auditor.userId, sessionId: auditor.sessionId })
-      .query(api.admin.audit.listAudit, { limit: 1 });
+      .query(api.admin.audit.listAudit, { limit: 2 });
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
@@ -277,6 +342,50 @@ describe("admin panel feature gate", () => {
         });
         await expect(
           mismatched.query(api.admin.featureFlags.isAdminEnabled, {}),
+        ).resolves.toBe(false);
+      },
+    );
+  });
+
+  it("fails closed for a padded environment selector or duplicate rows", async () => {
+    await withAdminEnvironment(
+      { enabled: "true", environment: " staging " },
+      async () => {
+        const padded = convexTest(schema, modules);
+        await padded.run(async (ctx) => {
+          await ctx.db.insert("featureFlags", {
+            key: "admin_panel",
+            environment: "staging",
+            enabled: true,
+            updatedAt: Date.now(),
+          });
+        });
+        await expect(
+          padded.query(api.admin.featureFlags.isAdminEnabled, {}),
+        ).resolves.toBe(false);
+      },
+    );
+
+    await withAdminEnvironment(
+      { enabled: "true", environment: "staging" },
+      async () => {
+        const duplicate = convexTest(schema, modules);
+        await duplicate.run(async (ctx) => {
+          await ctx.db.insert("featureFlags", {
+            key: "admin_panel",
+            environment: "staging",
+            enabled: true,
+            updatedAt: Date.now(),
+          });
+          await ctx.db.insert("featureFlags", {
+            key: "admin_panel",
+            environment: "staging",
+            enabled: true,
+            updatedAt: Date.now(),
+          });
+        });
+        await expect(
+          duplicate.query(api.admin.featureFlags.isAdminEnabled, {}),
         ).resolves.toBe(false);
       },
     );
