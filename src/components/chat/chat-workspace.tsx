@@ -17,17 +17,20 @@ import {
   beginComposerBottomScroll,
   beginPrependScroll,
   canCommitRequestGeneration,
+  clearRejectedRouteEnsure,
   consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
+  startOrReuseRouteEnsure,
   shouldEnsureForNewSubmission,
   type LocalChatMessage,
   type ComposerBottomScrollIntent,
   type PersistedChatMessage,
   type PrependScrollIntent,
+  type RouteEnsureEntry,
 } from "./chat-message-state";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
@@ -122,11 +125,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
-  const routeEnsureRef = useRef<{
-    routeGeneration: number;
-    externalId: string;
-    promise: Promise<unknown>;
-  } | null>(null);
+  const routeEnsureRef = useRef<RouteEnsureEntry | null>(null);
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
@@ -296,7 +295,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     loadMoreMessages(50);
   }, [loadMoreMessages, messagesPaginationStatus, persistedMessages]);
 
-  const ensureSessionForNewSubmission = useCallback((): Promise<unknown> | null => {
+  const ensureSessionForNewSubmission = useCallback((): RouteEnsureEntry | null => {
     if (!chatId) return null;
 
     const routeGeneration = requestGenerationRef.current;
@@ -306,7 +305,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       existingEnsure.routeGeneration === routeGeneration &&
       existingEnsure.externalId === chatId
     ) {
-      return existingEnsure.promise;
+      return existingEnsure;
     }
     if (
       !shouldEnsureForNewSubmission({
@@ -318,12 +317,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       return null;
     }
 
-    const promise = ensureSession({
+    const entry = startOrReuseRouteEnsure({
+      current: routeEnsureRef.current,
+      routeGeneration,
       externalId: chatId,
-      country: findCountry(initialCountry)?.code,
+      start: () => ensureSession({
+        externalId: chatId,
+        country: findCountry(initialCountry)?.code,
+      }),
     });
-    routeEnsureRef.current = { routeGeneration, externalId: chatId, promise };
-    return promise;
+    routeEnsureRef.current = entry;
+    return entry;
   }, [chatId, ensureSession, initialCountry, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
 
   const handleSearch = useCallback(
@@ -381,12 +385,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
       setIsLoading(true);
       setEnsureError(null);
-      const routeEnsure = ensureSessionForNewSubmission();
-      const persistenceEnsure = routeEnsure ?? Promise.resolve();
-      if (routeEnsure) {
+      const routeEnsureEntry = ensureSessionForNewSubmission();
+      const persistenceEnsure = routeEnsureEntry?.promise ?? Promise.resolve();
+      if (routeEnsureEntry) {
         try {
           await persistenceEnsure;
         } catch (error) {
+          routeEnsureRef.current = clearRejectedRouteEnsure(
+            routeEnsureRef.current,
+            routeEnsureEntry,
+          );
           if (!isCurrentRequest()) return;
           console.error("Failed to create chat:", error);
           setEnsureError("We could not start this chat. Please try again.");

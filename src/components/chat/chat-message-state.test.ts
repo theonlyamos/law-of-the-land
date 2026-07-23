@@ -3,12 +3,14 @@ import {
   beginComposerBottomScroll,
   beginPrependScroll,
   canCommitRequestGeneration,
+  clearRejectedRouteEnsure,
   consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
+  startOrReuseRouteEnsure,
   shouldEnsureForNewSubmission,
   type LocalChatMessage,
   type PersistedChatMessage,
@@ -257,5 +259,51 @@ describe("route-scoped chat creation", () => {
     expect(shouldEnsureForNewSubmission({ sessionObserved: true, isDeleted: false, isDeleting: false })).toBe(false);
     expect(shouldEnsureForNewSubmission({ sessionObserved: false, isDeleted: true, isDeleting: false })).toBe(false);
     expect(shouldEnsureForNewSubmission({ sessionObserved: false, isDeleted: false, isDeleting: true })).toBe(false);
+  });
+
+  it("clears a matching rejected ensure so a later submission starts and completes a fresh ensure", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const ensure = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    let cached = startOrReuseRouteEnsure({
+      current: null,
+      routeGeneration: 7,
+      externalId: "chat-7",
+      start: ensure,
+    });
+
+    first.reject(new Error("first ensure failed"));
+    await expect(cached.promise).rejects.toThrow("first ensure failed");
+    cached = clearRejectedRouteEnsure(cached, cached);
+    expect(cached).toBeNull();
+
+    const retry = startOrReuseRouteEnsure({
+      current: cached,
+      routeGeneration: 7,
+      externalId: "chat-7",
+      start: ensure,
+    });
+    second.resolve();
+    await expect(retry.promise).resolves.toBeUndefined();
+    expect(ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not clear the current route ensure when an old route promise rejects", () => {
+    const oldEnsure = deferred<void>();
+    const currentEnsure = deferred<void>();
+    const oldEntry = startOrReuseRouteEnsure({
+      current: null,
+      routeGeneration: 7,
+      externalId: "chat-old",
+      start: () => oldEnsure.promise,
+    });
+    const currentEntry = startOrReuseRouteEnsure({
+      current: null,
+      routeGeneration: 8,
+      externalId: "chat-current",
+      start: () => currentEnsure.promise,
+    });
+
+    expect(clearRejectedRouteEnsure(currentEntry, oldEntry)).toBe(currentEntry);
   });
 });

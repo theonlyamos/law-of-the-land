@@ -176,6 +176,48 @@ export function shouldEnsureForNewSubmission({
   return !sessionObserved && !isDeleted && !isDeleting;
 }
 
+export interface RouteEnsureEntry {
+  routeGeneration: number;
+  externalId: string;
+  promise: Promise<unknown>;
+}
+
+function isSameRouteEnsure(left: RouteEnsureEntry, right: RouteEnsureEntry): boolean {
+  return (
+    left.routeGeneration === right.routeGeneration &&
+    left.externalId === right.externalId &&
+    left.promise === right.promise
+  );
+}
+
+export function startOrReuseRouteEnsure({
+  current,
+  routeGeneration,
+  externalId,
+  start,
+}: {
+  current: RouteEnsureEntry | null;
+  routeGeneration: number;
+  externalId: string;
+  start: () => Promise<unknown>;
+}): RouteEnsureEntry {
+  if (
+    current &&
+    current.routeGeneration === routeGeneration &&
+    current.externalId === externalId
+  ) {
+    return current;
+  }
+  return { routeGeneration, externalId, promise: start() };
+}
+
+export function clearRejectedRouteEnsure(
+  current: RouteEnsureEntry | null,
+  rejected: RouteEnsureEntry,
+): RouteEnsureEntry | null {
+  return current && isSameRouteEnsure(current, rejected) ? null : current;
+}
+
 export async function runAfterRouteEnsure({
   ensurePromise,
   isCurrentRoute,
