@@ -19,10 +19,8 @@ const ACTION_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
 const TARGET_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const METADATA_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 const RAW_URI_PATTERN = /(?:^|[^A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\/\/)?\S+/i;
-const SECRET_VALUE_PATTERN =
-  /\b(?:authorization|bearer|token|api[_ -]?key|secret)\b\s*[:=]/i;
-const SENSITIVE_METADATA_KEY_PATTERN =
-  /token|secret|password|authorization|cookie|api[_ -]?key|signature|credential/i;
+const SENSITIVE_TERM_PATTERN =
+  /password|passwd|cookie|credentials?|signature|authorization|bearer|secret|private\s+key|api\s+key|(?:access|refresh|id|session)\s+token/i;
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -54,6 +52,13 @@ type AuditMetadataValue = AuditMetadataPrimitive | AuditMetadataObject;
 
 type PersistedAuditMetadata = Record<string, string | number | boolean | null>;
 
+function hasSensitiveTerm(value: string): boolean {
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ");
+  return SENSITIVE_TERM_PATTERN.test(normalized);
+}
+
 function assertSafeAuditText(
   value: string | undefined,
   field: "reason" | "summary" | "metadata",
@@ -68,7 +73,7 @@ function assertSafeAuditText(
   if (RAW_URI_PATTERN.test(value)) {
     throw new ConvexError("Audit text must not contain raw URIs");
   }
-  if (SECRET_VALUE_PATTERN.test(value)) {
+  if (hasSensitiveTerm(value)) {
     throw new ConvexError("Audit text must not contain secrets");
   }
 }
@@ -79,7 +84,12 @@ function assertLexeme(
   pattern: RegExp,
   maximumLength: number,
 ): void {
-  if (value.length === 0 || value.length > maximumLength || !pattern.test(value)) {
+  if (
+    value.length === 0 ||
+    value.length > maximumLength ||
+    !pattern.test(value) ||
+    RAW_URI_PATTERN.test(value)
+  ) {
     throw new ConvexError(`Audit ${field} is not a safe lexeme`);
   }
 }
@@ -125,8 +135,29 @@ function assertSafeGovernanceEvent(event: GovernanceAuditEvent): void {
   );
 }
 
+function assertSafeLegacyActorIdentity(
+  legacy: LegacyAuditFields,
+  canonicalActorId: string,
+): void {
+  if (legacy.actorUserId === undefined) {
+    return;
+  }
+  assertLexeme(
+    legacy.actorUserId,
+    "actor ID",
+    IDENTIFIER_PATTERN,
+    MAX_AUDIT_IDENTIFIER_LENGTH,
+  );
+  if (
+    (legacy.actorType === "user" && legacy.actorUserId !== canonicalActorId) ||
+    (legacy.actorType === "system" && legacy.actorUserId !== "system")
+  ) {
+    throw new ConvexError("Audit actor identities must not diverge");
+  }
+}
+
 function assertSafeMetadataKey(key: string): void {
-  if (!METADATA_KEY_PATTERN.test(key) || SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
+  if (!METADATA_KEY_PATTERN.test(key) || hasSensitiveTerm(key)) {
     throw new ConvexError("Audit metadata key is not safe");
   }
 }
@@ -177,6 +208,7 @@ function validateLegacyMetadata(
 }
 
 function isSafeStoredAuditEvent(event: {
+  actorType: "system" | "user";
   actorId?: string;
   actorUserId?: string;
   actorRoles?: string[];
@@ -190,8 +222,34 @@ function isSafeStoredAuditEvent(event: {
   metadata: Record<string, AuditMetadataValue>;
 }): boolean {
   try {
+    if (event.actorId !== undefined) {
+      assertLexeme(
+        event.actorId,
+        "actor ID",
+        IDENTIFIER_PATTERN,
+        MAX_AUDIT_IDENTIFIER_LENGTH,
+      );
+    }
+    if (event.actorUserId !== undefined) {
+      assertLexeme(
+        event.actorUserId,
+        "actor ID",
+        IDENTIFIER_PATTERN,
+        MAX_AUDIT_IDENTIFIER_LENGTH,
+      );
+    }
+    const canonicalActorId =
+      event.actorId ?? event.actorUserId ?? "system";
+    assertSafeLegacyActorIdentity(
+      {
+        actorType: event.actorType,
+        actorUserId: event.actorUserId,
+        metadata: event.metadata,
+      },
+      canonicalActorId,
+    );
     assertSafeGovernanceEvent({
-      actorId: event.actorId ?? event.actorUserId ?? "system",
+      actorId: canonicalActorId,
       actorRoles: event.actorRoles ?? [],
       action: event.action,
       targetType: event.targetType,
@@ -244,6 +302,7 @@ export async function writeAudit(
   },
 ): Promise<Id<"auditEvents">> {
   assertSafeGovernanceEvent(event);
+  assertSafeLegacyActorIdentity(legacy, event.actorId);
   const metadata = validateLegacyMetadata(legacy.metadata);
 
   return await ctx.db.insert("auditEvents", {

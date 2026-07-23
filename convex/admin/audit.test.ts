@@ -153,6 +153,14 @@ describe("audit writer", () => {
         }),
       ),
     ).rejects.toThrow("raw URIs");
+    await expect(
+      t.run((ctx) =>
+        writeAudit(ctx, {
+          ...baseEvent,
+          reason: "password=hunter2",
+        }),
+      ),
+    ).rejects.toThrow("secrets");
 
     await expect(
       t.run((ctx) =>
@@ -223,6 +231,19 @@ describe("audit writer", () => {
 
     for (const metadata of [
       { accessToken: "not-for-audit" },
+      { access_token: "not-for-audit" },
+      { refreshToken: "not-for-audit" },
+      { id_token: "not-for-audit" },
+      { sessionToken: "not-for-audit" },
+      { cookie: "not-for-audit" },
+      { signature: "not-for-audit" },
+      { credentials: "not-for-audit" },
+      { passwd: "not-for-audit" },
+      { privateKey: "not-for-audit" },
+      { api_key: "not-for-audit" },
+      { authorization: "not-for-audit" },
+      { bearer: "not-for-audit" },
+      { secret: "not-for-audit" },
       { audit: { credentials: "not-for-audit" } },
       {
         audit: {
@@ -238,6 +259,40 @@ describe("audit writer", () => {
       ).rejects.toThrow();
     }
 
+    await expect(
+      t.run(async (ctx) => await ctx.db.query("auditEvents").take(1)),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejects unsafe or divergent legacy actor identities before writing", async () => {
+    const t = convexTest(schema, modules);
+    const event = {
+      actorId: "user_1",
+      actorRoles: ["support_agent"],
+      action: "conversation.access_granted",
+      targetType: "chatSession",
+      targetId: "chat_1",
+      outcome: "success" as const,
+    };
+
+    await expect(
+      t.run((ctx) =>
+        writeAudit(ctx, event, {
+          actorType: "user",
+          actorUserId: "urn:admin",
+          metadata: {},
+        }),
+      ),
+    ).rejects.toThrow("actor ID");
+    await expect(
+      t.run((ctx) =>
+        writeAudit(ctx, event, {
+          actorType: "user",
+          actorUserId: "user_2",
+          metadata: {},
+        }),
+      ),
+    ).rejects.toThrow("identities");
     await expect(
       t.run(async (ctx) => await ctx.db.query("auditEvents").take(1)),
     ).resolves.toEqual([]);
@@ -276,11 +331,35 @@ describe("audit writer", () => {
         metadata: {},
         createdAt: Date.now() + 1,
       });
+      await ctx.db.insert("auditEvents", {
+        actorType: "user",
+        actorUserId: "https://example.test/user",
+        actorId: "user_unsafe_url",
+        actorRoles: ["support_agent"],
+        action: "conversation.access_granted",
+        targetType: "chatSession",
+        targetId: "chat_unsafe_url",
+        outcome: "success",
+        metadata: {},
+        createdAt: Date.now() + 2,
+      });
+      await ctx.db.insert("auditEvents", {
+        actorType: "user",
+        actorUserId: "user_different",
+        actorId: "user_canonical",
+        actorRoles: ["support_agent"],
+        action: "conversation.access_granted",
+        targetType: "chatSession",
+        targetId: "chat_unsafe_divergent",
+        outcome: "success",
+        metadata: {},
+        createdAt: Date.now() + 3,
+      });
     });
 
     const events = await t
       .withIdentity({ subject: auditor.userId, sessionId: auditor.sessionId })
-      .query(api.admin.audit.listAudit, { limit: 2 });
+      .query(api.admin.audit.listAudit, { limit: 4 });
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
