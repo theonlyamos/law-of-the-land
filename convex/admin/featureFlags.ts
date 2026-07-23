@@ -1,6 +1,10 @@
 import { v } from "convex/values";
 import { query, type QueryCtx } from "../_generated/server";
-import { requireCurrentAdmin } from "../lib/requireAdmin";
+import { adminAccessError } from "../lib/adminAccessErrors";
+import {
+  requireAdminPermission,
+  requireCurrentAdmin,
+} from "../lib/requireAdmin";
 
 function readAdminEnvironment(): string | null {
   const environment = process.env.ADMIN_ENVIRONMENT;
@@ -33,6 +37,21 @@ export async function readAdminEnabled(ctx: QueryCtx): Promise<boolean> {
     .take(2);
 
   return flags.length === 1 && flags[0].enabled === true;
+}
+
+export async function requireEnabledAdminPermission(
+  ctx: QueryCtx,
+  resource: string,
+  action: string,
+) {
+  const admin = await requireAdminPermission(ctx, resource, action);
+  if (!(await readAdminEnabled(ctx))) {
+    throw adminAccessError(
+      "ADMIN_DISABLED",
+      "Administration is not enabled",
+    );
+  }
+  return admin;
 }
 
 export const isAdminEnabled = query({

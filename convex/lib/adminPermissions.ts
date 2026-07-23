@@ -84,6 +84,7 @@ export const ADMIN_PERMISSIONS = {
     "jurisdiction:read",
     "resource:read",
     "document:read",
+    "user:read",
     "analytics:read",
     "audit:read_masked",
     "operations:read",

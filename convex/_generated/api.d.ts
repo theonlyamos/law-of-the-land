@@ -9,10 +9,13 @@
  */
 
 import type * as admin_audit from "../admin/audit.js";
+import type * as admin_conversations from "../admin/conversations.js";
 import type * as admin_featureFlags from "../admin/featureFlags.js";
 import type * as admin_migrations from "../admin/migrations.js";
 import type * as admin_overview from "../admin/overview.js";
+import type * as admin_operations from "../admin/operations.js";
 import type * as admin_roles from "../admin/roles.js";
+import type * as admin_users from "../admin/users.js";
 import type * as auth from "../auth.js";
 import type * as chats from "../chats.js";
 import type * as http from "../http.js";
@@ -33,10 +36,13 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "admin/audit": typeof admin_audit;
+  "admin/conversations": typeof admin_conversations;
   "admin/featureFlags": typeof admin_featureFlags;
   "admin/migrations": typeof admin_migrations;
   "admin/overview": typeof admin_overview;
+  "admin/operations": typeof admin_operations;
   "admin/roles": typeof admin_roles;
+  "admin/users": typeof admin_users;
   auth: typeof auth;
   chats: typeof chats;
   http: typeof http;
