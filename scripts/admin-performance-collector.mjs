@@ -38,7 +38,7 @@ function preciseDelta(after, before) {
 }
 
 export function buildAdminSliceArtifact(beforeInput, afterInput, metadata) {
-  const before = metricSnapshot(beforeInput);
+  const before = metricSnapshot({ ...beforeInput, routeJsGzip: 0 });
   const after = metricSnapshot(afterInput);
   if (metadata.sampleCount !== 20) {
     throw new TypeError("Authenticated admin performance requires exactly 20 request samples.");

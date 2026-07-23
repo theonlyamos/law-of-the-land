@@ -21,7 +21,14 @@ type BrowserMetrics = {
 };
 
 const artifactPath = path.resolve("artifacts/admin-performance.json");
+const publicBaselineArtifactPath = path.resolve(
+  "test-results/admin-performance-public-baseline.json",
+);
 const adminSessionCookie = process.env.ADMIN_E2E_SESSION_COOKIE;
+
+test.afterAll(() => {
+  fs.rmSync(publicBaselineArtifactPath, { force: true });
+});
 
 async function installPerformanceObservers(page: Page) {
   await page.addInitScript(() => {
@@ -157,7 +164,7 @@ test("records the unauthenticated public-search API baseline performance metrics
     ),
   ).toBeTruthy();
 
-  writePerformanceArtifact(artifactPath, artifact);
+  writePerformanceArtifact(publicBaselineArtifactPath, artifact);
 });
 
 test("records the authenticated admin overview against the public baseline", async ({
@@ -184,8 +191,10 @@ test("records the authenticated admin overview against the public baseline", asy
     },
   ]);
 
-  expect(fs.existsSync(artifactPath)).toBe(true);
-  const publicBaseline = JSON.parse(fs.readFileSync(artifactPath, "utf8")) as {
+  expect(fs.existsSync(publicBaselineArtifactPath)).toBe(true);
+  const publicBaseline = JSON.parse(
+    fs.readFileSync(publicBaselineArtifactPath, "utf8"),
+  ) as {
     lcp: number;
     inp: number;
     cls: number;

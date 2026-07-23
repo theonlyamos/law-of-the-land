@@ -18,6 +18,12 @@ export default defineConfig({
         },
       }),
       defineProject({
+        resolve: {
+          alias: {
+            "@": path.resolve(__dirname, "src"),
+            "@/convex": path.resolve(__dirname, "convex"),
+          },
+        },
         test: {
           name: "ui",
           environment: "jsdom",

@@ -28,6 +28,10 @@ export type AdminPageAccess =
   | { status: "authorized"; currentAdmin: CurrentAdmin }
   | { status: "denied" };
 
+type ClassifiedAdminQuery<T> =
+  | { status: "success"; value: T }
+  | { status: "denied" };
+
 function adminAccessCodeFromError(error: unknown): AdminAccessCode | null {
   if (typeof error !== "object" || error === null || !("data" in error)) {
     return null;
@@ -42,21 +46,32 @@ function adminAccessCodeFromError(error: unknown): AdminAccessCode | null {
   return isAdminAccessCode(code) ? code : null;
 }
 
-export async function authorizeAdminPage(
-  fetchQuery: AdminQueryFetcher = defaultFetcher,
-): Promise<AdminPageAccess> {
+async function withAdminAccessClassification<T>(
+  operation: () => Promise<T>,
+): Promise<ClassifiedAdminQuery<T>> {
   try {
-    const currentAdmin = (await fetchQuery(
-      api.admin.overview.currentAdmin,
-      {},
-    )) as CurrentAdmin;
-    return { status: "authorized", currentAdmin };
+    return { status: "success", value: await operation() };
   } catch (error) {
     if (adminAccessCodeFromError(error)) {
       return { status: "denied" };
     }
     throw error;
   }
+}
+
+export async function authorizeAdminPage(
+  fetchQuery: AdminQueryFetcher = defaultFetcher,
+): Promise<AdminPageAccess> {
+  const result = await withAdminAccessClassification(() =>
+    fetchQuery(
+      api.admin.overview.currentAdmin,
+      {},
+    ) as Promise<CurrentAdmin>,
+  );
+  if (result.status === "denied") {
+    return result;
+  }
+  return { status: "authorized", currentAdmin: result.value };
 }
 
 export async function loadAdminOverview(
@@ -70,9 +85,11 @@ export async function loadAdminOverview(
   if (!hasRolePermission(currentAdmin.roles, "operations", "read")) {
     return { access, overview: null };
   }
-  const overview = (await fetchQuery(
-    api.admin.overview.get,
-    {},
-  )) as AdminOverview;
-  return { access, overview };
+  const result = await withAdminAccessClassification(() =>
+    fetchQuery(api.admin.overview.get, {}) as Promise<AdminOverview>,
+  );
+  if (result.status === "denied") {
+    return { access: result, overview: null };
+  }
+  return { access, overview: result.value };
 }

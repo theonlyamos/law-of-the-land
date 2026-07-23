@@ -14,7 +14,7 @@
     "test:convex": "vitest run --project convex --passWithNoTests",
     "test:ui": "vitest run --project ui",
     "test:e2e": "playwright test",
-    "test:budgets": "node -e \"require('node:fs').rmSync('artifacts/admin-performance.json', { force: true })\" && playwright test e2e/performance.spec.ts && node scripts/check-admin-budgets.mjs artifacts/admin-performance.json"
+    "test:budgets": "node scripts/check-admin-budgets.mjs --require-session && node -e \"require('node:fs').rmSync('artifacts/admin-performance.json', { force: true })\" && playwright test e2e/performance.spec.ts && node scripts/check-admin-budgets.mjs artifacts/admin-performance.json"
   },
   "dependencies": {
     "@convex-dev/better-auth": "^0.12.2",

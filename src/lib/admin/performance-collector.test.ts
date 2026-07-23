@@ -52,9 +52,9 @@ describe("admin performance collector", () => {
       baseline: "authenticated-admin-overview",
       baselineDescription:
         "Authenticated /admin server render with bounded overview queries; route JavaScript excludes scripts already loaded by the public baseline.",
-      before,
+      before: { ...before, routeJsGzip: 0 },
       after,
-      delta: { lcp: 100, inp: 10, cls: 0.01, routeJsGzip: -97_352, p95: 20 },
+      delta: { lcp: 100, inp: 10, cls: 0.01, routeJsGzip: 2_648, p95: 20 },
       commitSha: "abc123",
       timestamp: "2026-07-23T00:00:00.000Z",
       sampleCount: 20,

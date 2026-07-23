@@ -2,6 +2,7 @@ import { AdminOverview } from "@/components/admin/admin-overview";
 import { PermissionBoundary } from "@/components/admin/permission-boundary";
 import { loadAdminOverview } from "@/lib/admin/server";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 export default async function AdminOverviewPage() {
   // Rechecking here is deliberate: layouts and pages can render concurrently.
@@ -9,7 +10,7 @@ export default async function AdminOverviewPage() {
   // authoritative currentAdmin check succeeds.
   const { access, overview } = await loadAdminOverview();
   if (access.status === "denied") {
-    return null;
+    redirect("/admin/forbidden");
   }
   if (overview) {
     return <AdminOverview overview={overview} />;

@@ -50,6 +50,34 @@ describe("server-side admin request sequencing", () => {
     );
   });
 
+  it("classifies a structured denial from the overview query without returning content", async () => {
+    const currentAdmin = { userId: "admin_1", roles: ["auditor"] };
+    const denial = Object.assign(new Error("Administrative access denied"), {
+      data: { code: "ADMIN_DISABLED", message: "Restricted" },
+    });
+    const fetchQuery = vi
+      .fn()
+      .mockResolvedValueOnce(currentAdmin)
+      .mockRejectedValueOnce(denial);
+
+    await expect(loadAdminOverview(fetchQuery)).resolves.toEqual({
+      access: { status: "denied" },
+      overview: null,
+    });
+    expect(fetchQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates an infrastructure failure from the overview query unchanged", async () => {
+    const currentAdmin = { userId: "admin_1", roles: ["auditor"] };
+    const failure = new Error("fetch failed: connection reset");
+    const fetchQuery = vi
+      .fn()
+      .mockResolvedValueOnce(currentAdmin)
+      .mockRejectedValueOnce(failure);
+
+    await expect(loadAdminOverview(fetchQuery)).rejects.toBe(failure);
+  });
+
   it("does not request the operations overview for an administrator without that permission", async () => {
     const currentAdmin = { userId: "admin_1", roles: ["support_agent"] };
     const fetchQuery = vi.fn().mockResolvedValue(currentAdmin);
