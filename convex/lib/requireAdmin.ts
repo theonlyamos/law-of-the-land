@@ -23,6 +23,34 @@ export async function requireAdminPermission(
   resource: string,
   action: string,
 ): Promise<{ userId: string; roles: AdminRole[] }> {
+  const admin = await requireCurrentAdmin(ctx);
+
+  if (
+    admin.impersonatedBy &&
+    isImpersonationRestrictedPermission(resource, action)
+  ) {
+    throw new ConvexError(
+      "Impersonated sessions cannot perform this admin action",
+    );
+  }
+  if (!hasRolePermission(admin.roles, resource, action)) {
+    throw new ConvexError("Admin permission required");
+  }
+
+  return { userId: admin.userId, roles: admin.roles };
+}
+
+/**
+ * Resolves an assured administrative session from Better Auth. This is the
+ * identity gate for admin pages whose contents are permission-filtered later.
+ */
+export async function requireCurrentAdmin(
+  ctx: AdminCtx,
+): Promise<{
+  userId: string;
+  roles: AdminRole[];
+  impersonatedBy?: string;
+}> {
   const identity = await ctx.auth.getUserIdentity();
   const user = await authComponent.safeGetAuthUser(ctx);
 
@@ -52,17 +80,15 @@ export async function requireAdminPermission(
   }
 
   const roles = parseAdminRoles(user.role);
-  if (
-    session.impersonatedBy &&
-    isImpersonationRestrictedPermission(resource, action)
-  ) {
-    throw new ConvexError(
-      "Impersonated sessions cannot perform this admin action",
-    );
-  }
-  if (!hasRolePermission(roles, resource, action)) {
+  if (roles.length === 0) {
     throw new ConvexError("Admin permission required");
   }
 
-  return { userId: user._id, roles };
+  return {
+    userId: user._id,
+    roles,
+    ...(typeof session.impersonatedBy === "string"
+      ? { impersonatedBy: session.impersonatedBy }
+      : {}),
+  };
 }

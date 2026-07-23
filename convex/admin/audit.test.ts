@@ -7,6 +7,7 @@ import authSchema from "../betterAuth/schema";
 import { appendAuditEvent } from "../lib/audit";
 import schema from "../schema";
 import { writeAudit } from "./audit";
+import { readAdminEnabled } from "./featureFlags";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -385,7 +386,7 @@ describe("admin panel feature gate", () => {
   it("fails closed when the server environment selector is missing", async () => {
     await withAdminEnvironment({ enabled: "true" }, async () => {
       const t = convexTest(schema, modules);
-      await expect(t.query(api.admin.featureFlags.isAdminEnabled, {})).resolves.toBe(
+      await expect(t.run((ctx) => readAdminEnabled(ctx))).resolves.toBe(
         false,
       );
     });
@@ -405,7 +406,7 @@ describe("admin panel feature gate", () => {
           });
         });
         await expect(
-          t.query(api.admin.featureFlags.isAdminEnabled, {}),
+          t.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(false);
       },
     );
@@ -417,7 +418,7 @@ describe("admin panel feature gate", () => {
       async () => {
         const missing = convexTest(schema, modules);
         await expect(
-          missing.query(api.admin.featureFlags.isAdminEnabled, {}),
+          missing.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(false);
 
         const mismatched = convexTest(schema, modules);
@@ -430,7 +431,7 @@ describe("admin panel feature gate", () => {
           });
         });
         await expect(
-          mismatched.query(api.admin.featureFlags.isAdminEnabled, {}),
+          mismatched.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(false);
       },
     );
@@ -450,7 +451,7 @@ describe("admin panel feature gate", () => {
           });
         });
         await expect(
-          padded.query(api.admin.featureFlags.isAdminEnabled, {}),
+          padded.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(false);
       },
     );
@@ -474,7 +475,7 @@ describe("admin panel feature gate", () => {
           });
         });
         await expect(
-          duplicate.query(api.admin.featureFlags.isAdminEnabled, {}),
+          duplicate.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(false);
       },
     );
@@ -494,7 +495,7 @@ describe("admin panel feature gate", () => {
           });
         });
         await expect(
-          t.query(api.admin.featureFlags.isAdminEnabled, {}),
+          t.run((ctx) => readAdminEnabled(ctx)),
         ).resolves.toBe(true);
       },
     );

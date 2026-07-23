@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
-import { safeRedirectPath } from "@/lib/redirect";
+import { safeRedirectPath } from "./lib/redirect";
 
 const UUID_V4_RE =
   /^\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -13,6 +13,10 @@ function isSettingsRoute(pathname: string) {
   return pathname === "/settings" || pathname.startsWith("/settings/");
 }
 
+function isAdminRoute(pathname: string) {
+  return pathname === "/admin" || pathname.startsWith("/admin/");
+}
+
 export async function proxy(request: NextRequest) {
   const sessionCookie = getSessionCookie(request);
   const { pathname, search } = request.nextUrl;
@@ -22,10 +26,23 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL(redirectTo, request.url));
   }
 
-  if ((isChatRoute(pathname) || isSettingsRoute(pathname)) && !sessionCookie) {
+  if (
+    (isChatRoute(pathname) ||
+      isSettingsRoute(pathname) ||
+      isAdminRoute(pathname)) &&
+    !sessionCookie
+  ) {
     const signInUrl = new URL("/signin", request.url);
     signInUrl.searchParams.set("redirect", pathname + search);
     return NextResponse.redirect(signInUrl);
+  }
+
+  if (isAdminRoute(pathname)) {
+    const requestHeaders = new Headers(request.headers);
+    // Always overwrite caller input so the server layout can safely exempt
+    // only the static forbidden destination from its redirecting guard.
+    requestHeaders.set("x-admin-pathname", pathname);
+    return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
   return NextResponse.next();
