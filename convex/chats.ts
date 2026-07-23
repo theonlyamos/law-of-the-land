@@ -1,3 +1,4 @@
+import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
@@ -10,26 +11,64 @@ const messageValidator = v.object({
   createdAt: v.optional(v.number()),
 });
 
+const MAX_SESSION_PAGE_SIZE = 30;
+const MAX_MESSAGE_PAGE_SIZE = 50;
+
+const chatSessionSummaryValidator = v.object({
+  id: v.string(),
+  title: v.string(),
+  lastMessage: v.string(),
+  timestamp: v.number(),
+  messageCount: v.number(),
+});
+
+const chatSessionMetadataValidator = v.object({
+  id: v.string(),
+  title: v.string(),
+  lastMessage: v.string(),
+  timestamp: v.number(),
+  messageCount: v.number(),
+  country: v.union(v.string(), v.null()),
+});
+
+const chatMessageValidator = v.object({
+  id: v.string(),
+  role: v.union(v.literal("user"), v.literal("assistant")),
+  content: v.string(),
+  createdAt: v.number(),
+});
+
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { paginationOpts: paginationOptsValidator },
+  returns: v.object({
+    page: v.array(chatSessionSummaryValidator),
+    isDone: v.boolean(),
+    continueCursor: v.string(),
+  }),
+  handler: async (ctx, args) => {
     const userId = await optionalUserId(ctx);
-    if (!userId) return [];
+    if (!userId) return { page: [], isDone: true, continueCursor: "" };
 
-    const sessions = await ctx.db
+    const result = await ctx.db
       .query("chatSessions")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
+      .withIndex("by_user_and_updatedAt", (q) => q.eq("userId", userId))
+      .order("desc")
+      .paginate({
+        ...args.paginationOpts,
+        numItems: Math.min(args.paginationOpts.numItems, MAX_SESSION_PAGE_SIZE),
+      });
 
-    return sessions
-      .map((session) => ({
+    return {
+      page: result.page.map((session) => ({
         id: session.externalId,
         title: session.title,
         lastMessage: session.lastMessage,
         timestamp: session.updatedAt,
         messageCount: session.messageCount,
-      }))
-      .sort((a, b) => b.timestamp - a.timestamp);
+      })),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
+    };
   },
 });
 
@@ -37,6 +76,7 @@ export const getByExternalId = query({
   args: {
     externalId: v.string(),
   },
+  returns: v.union(chatSessionMetadataValidator, v.null()),
   handler: async (ctx, args) => {
     const userId = await optionalUserId(ctx);
     if (!userId) return null;
@@ -50,11 +90,6 @@ export const getByExternalId = query({
 
     if (!session) return null;
 
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-      .collect();
-
     return {
       id: session.externalId,
       title: session.title,
@@ -62,14 +97,52 @@ export const getByExternalId = query({
       timestamp: session.updatedAt,
       messageCount: session.messageCount,
       country: session.country ?? null,
-      messages: messages
-        .sort((a, b) => a.createdAt - b.createdAt)
-        .map((message) => ({
-          id: message.clientId ?? message._id,
-          role: message.role,
-          content: message.content,
-          createdAt: message.createdAt,
-        })),
+    };
+  },
+});
+
+export const listMessages = query({
+  args: {
+    externalId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: v.object({
+    page: v.array(chatMessageValidator),
+    isDone: v.boolean(),
+    continueCursor: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const userId = await optionalUserId(ctx);
+    if (!userId) return { page: [], isDone: true, continueCursor: "" };
+
+    const session = await ctx.db
+      .query("chatSessions")
+      .withIndex("by_user_externalId", (q) =>
+        q.eq("userId", userId).eq("externalId", args.externalId),
+      )
+      .unique();
+    if (!session) return { page: [], isDone: true, continueCursor: "" };
+
+    const result = await ctx.db
+      .query("messages")
+      .withIndex("by_session_and_createdAt", (q) => q.eq("sessionId", session._id))
+      .order("desc")
+      .paginate({
+        ...args.paginationOpts,
+        numItems: Math.min(args.paginationOpts.numItems, MAX_MESSAGE_PAGE_SIZE),
+      });
+
+    return {
+      // The database query reads newest-first so the cursor continues into
+      // older history; each page itself remains chronological for consumers.
+      page: result.page.reverse().map((message) => ({
+        id: message.clientId ?? message._id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+      })),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
     };
   },
 });

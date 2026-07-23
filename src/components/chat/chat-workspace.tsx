@@ -3,10 +3,10 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import { useRouter } from "next/navigation";
-import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
@@ -98,21 +98,57 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const [saveFailed, setSaveFailed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
   const ensuredRef = useRef<Set<string>>(new Set());
+  const pendingScrollAdjustmentRef = useRef<{ height: number; top: number } | null>(null);
+  const shouldScrollToBottomRef = useRef(true);
 
-  const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
+  const {
+    results: sessionsData,
+    status: sessionsPaginationStatus,
+    loadMore: loadMoreSessions,
+  } = usePaginatedQuery(api.chats.list, isAuthenticated ? {} : "skip", {
+    initialNumItems: 30,
+  });
   const sessionData = useQuery(
     api.chats.getByExternalId,
     isAuthenticated && chatId ? { externalId: chatId } : "skip"
+  );
+  const {
+    results: messageResults,
+    status: messagesPaginationStatus,
+    loadMore: loadMoreMessages,
+  } = usePaginatedQuery(
+    api.chats.listMessages,
+    isAuthenticated && chatId ? { externalId: chatId } : "skip",
+    { initialNumItems: 50 }
   );
   const ensureSession = useMutation(api.chats.ensure);
   const appendMessages = useMutation(api.chats.appendMessages);
   const removeSession = useMutation(api.chats.remove);
 
-  const sessions = (sessionsData ?? []).map(toSidebarSession);
-  const isChatLoading = chatId !== null && sessionData === undefined;
+  const sessions = sessionsData.map(toSidebarSession);
+  const persistedMessages = useMemo<Message[]>(() => {
+    const byId = new Map<string, Message>();
+    for (const message of messageResults) {
+      byId.set(message.id, {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: new Date(message.createdAt),
+      });
+    }
+    return [...byId.values()].sort(
+      (a, b) =>
+        (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) ||
+        (a.id ?? "").localeCompare(b.id ?? "")
+    );
+  }, [messageResults]);
+  const isChatLoading =
+    chatId !== null &&
+    (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage");
   // Existing chats answer from the jurisdiction they were started in.
   const chatCountry =
     sessionData?.country ?? findCountry(initialCountry)?.code ?? selectedCountry;
@@ -123,6 +159,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     setMessages([]);
     setQuery("");
     setSaveFailed(false);
+    shouldScrollToBottomRef.current = true;
+    pendingScrollAdjustmentRef.current = null;
   }, [chatId]);
 
   useEffect(() => {
@@ -149,23 +187,42 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
   useEffect(() => {
     if (!sessionData) return;
-    setMessages(
-      sessionData.messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
-      }))
-    );
-  }, [sessionData]);
+    if (!pendingScrollAdjustmentRef.current) shouldScrollToBottomRef.current = true;
+    setMessages(persistedMessages);
+  }, [persistedMessages, sessionData]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    );
+    const previous = pendingScrollAdjustmentRef.current;
+    if (viewport && previous) {
+      viewport.scrollTop = previous.top + (viewport.scrollHeight - previous.height);
+      pendingScrollAdjustmentRef.current = null;
+      return;
+    }
+    if (!shouldScrollToBottomRef.current) return;
+    shouldScrollToBottomRef.current = false;
     scrollToBottom();
   }, [messages]);
+
+  const handleLoadOlderMessages = useCallback(() => {
+    if (messagesPaginationStatus !== "CanLoadMore") return;
+    const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (viewport) {
+      pendingScrollAdjustmentRef.current = {
+        height: viewport.scrollHeight,
+        top: viewport.scrollTop,
+      };
+    }
+    loadMoreMessages(50);
+  }, [loadMoreMessages, messagesPaginationStatus]);
 
   const persistTurn = useCallback(
     async (turnMessages: Message[], meta: { title?: string; lastMessage: string }) => {
@@ -219,6 +276,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       };
       const base = [...messages, userMessage];
 
+      shouldScrollToBottomRef.current = true;
       setMessages([
         ...base,
         {
@@ -247,6 +305,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
           createdAt: new Date(),
         };
         const next = [...base, assistantMessage];
+        shouldScrollToBottomRef.current = true;
         setMessages(next);
 
         const isFirstUserTurn = priorForApi.length === 0;
@@ -258,6 +317,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
         });
       } catch (error) {
         console.error("Error:", error);
+        shouldScrollToBottomRef.current = true;
         setMessages([
           ...base,
           {
@@ -283,10 +343,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     processedBootstrap.current.add(key);
     router.replace(`/${chatId}`, { scroll: false });
 
-    if (sessionData && sessionData.messages.length > 0) return;
+    if (sessionData && persistedMessages.length > 0) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [chatId, handleSearch, initialQuery, router, sessionData]);
+  }, [chatId, handleSearch, initialQuery, persistedMessages.length, router, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -321,7 +381,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   );
 
 
-  if (authLoading || sessionsData === undefined) {
+  if (authLoading || (isAuthenticated && sessionsPaginationStatus === "LoadingFirstPage")) {
     return <PageLoader label="Loading chat…" />;
   }
 
@@ -337,12 +397,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
       <Sidebar
         sessions={sessions}
+        sessionPaginationStatus={sessionsPaginationStatus === "LoadingFirstPage" ? "Exhausted" : sessionsPaginationStatus}
         activeSession={chatId ?? undefined}
         isOpen={isMobileSidebarOpen}
         collapsed={isSidebarCollapsed}
         onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
         onAfterSessionNavigate={() => setIsMobileSidebarOpen(false)}
         onNewSession={handleNewSession}
+        onLoadMoreSessions={() => loadMoreSessions(30)}
         onDeleteSession={(sessionId) => {
           void handleDeleteSession(sessionId);
         }}
@@ -423,8 +485,25 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
           </div>
         ) : (
           <>
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea ref={messagesScrollAreaRef} className="min-h-0 flex-1">
           <div className={`${THREAD_RAIL} flex flex-col py-8`}>
+            {messagesPaginationStatus === "CanLoadMore" && (
+              <div className="mb-4 flex justify-center">
+                <Button variant="ghost" size="sm" onClick={handleLoadOlderMessages}>
+                  Load older messages
+                </Button>
+              </div>
+            )}
+            {messagesPaginationStatus === "LoadingMore" && (
+              <p className="mb-4 text-center text-xs text-muted-foreground" aria-live="polite">
+                Loading older messages…
+              </p>
+            )}
+            {messagesPaginationStatus === "Exhausted" && messages.length > 0 && (
+              <p className="mb-4 text-center text-xs text-muted-foreground">
+                Beginning of conversation
+              </p>
+            )}
             {messages.length === 0 && (
               <div className="flex flex-col items-center gap-2 py-24 text-center">
                 <p className="text-lg font-medium">What do you want to know?</p>

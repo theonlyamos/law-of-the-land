@@ -64,6 +64,7 @@ export default defineSchema({
     country: v.optional(v.string()),
   })
     .index("by_user", ["userId"])
+    .index("by_user_and_updatedAt", ["userId", "updatedAt"])
     .index("by_user_externalId", ["userId", "externalId"]),
   dailyUsage: defineTable({
     userId: v.string(),
@@ -79,5 +80,6 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])
+    .index("by_session_and_createdAt", ["sessionId", "createdAt"])
     .index("by_session_clientId", ["sessionId", "clientId"]),
 });

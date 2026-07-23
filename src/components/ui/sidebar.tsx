@@ -25,6 +25,7 @@ import logo from "@/app/logo-transparent.png";
 
 interface SidebarProps {
   sessions: ChatSession[];
+  sessionPaginationStatus: "CanLoadMore" | "LoadingMore" | "Exhausted";
   activeSession?: string;
   /** Mobile drawer state (< md). */
   isOpen: boolean;
@@ -33,18 +34,21 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
   onAfterSessionNavigate?: () => void;
   onNewSession: () => void;
+  onLoadMoreSessions: () => void;
   onDeleteSession: (sessionId: string) => void;
   onClose: () => void;
 }
 
 export function Sidebar({
   sessions,
+  sessionPaginationStatus,
   activeSession,
   isOpen,
   collapsed = false,
   onToggleCollapse,
   onAfterSessionNavigate,
   onNewSession,
+  onLoadMoreSessions,
   onDeleteSession,
   onClose,
 }: SidebarProps) {
@@ -213,6 +217,29 @@ export function Sidebar({
                 )}
               </div>
             ))
+          )}
+          {sessions.length > 0 && (
+            <div className="pt-2">
+              {sessionPaginationStatus === "CanLoadMore" && (
+                <Button
+                  variant="ghost"
+                  className="h-10 w-full text-sm text-muted-foreground"
+                  onClick={onLoadMoreSessions}
+                >
+                  Load more chats
+                </Button>
+              )}
+              {sessionPaginationStatus === "LoadingMore" && (
+                <p className="py-2 text-center text-xs text-muted-foreground" aria-live="polite">
+                  Loading more chats…
+                </p>
+              )}
+              {sessionPaginationStatus === "Exhausted" && (
+                <p className="py-2 text-center text-xs text-muted-foreground">
+                  All chats loaded
+                </p>
+              )}
+            </div>
           )}
         </div>
       </ScrollArea>

@@ -5,7 +5,7 @@ import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
-import { useConvexAuth, useQuery } from "convex/react";
+import { useConvexAuth, usePaginatedQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
@@ -14,11 +14,15 @@ function LandingShell() {
   const [query, setQuery] = useState("");
   const [country, setCountry] = useState(DEFAULT_COUNTRY.code);
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const sessionsData = useQuery(api.chats.list, isAuthenticated ? {} : "skip");
+  const { results: sessionsData, status: sessionsStatus } = usePaginatedQuery(
+    api.chats.list,
+    isAuthenticated ? {} : "skip",
+    { initialNumItems: 30 }
+  );
 
   // chats.list is sorted by most recent first. Signed-in users start a fresh
   // conversation via /new, so the landing always forwards to the last chat.
-  const latestChatId = sessionsData?.[0]?.id ?? null;
+  const latestChatId = sessionsData[0]?.id ?? null;
   const shouldRedirect = isAuthenticated && latestChatId !== null;
 
   useEffect(() => {
@@ -28,7 +32,6 @@ function LandingShell() {
   }, [latestChatId, router, shouldRedirect]);
 
   const savedChats = useMemo<ChatSession[]>(() => {
-    if (!sessionsData) return [];
     return sessionsData.map((session) => ({
       id: session.id,
       title: session.title,
@@ -75,7 +78,7 @@ function LandingShell() {
     [query, goToChat]
   );
 
-  if (shouldRedirect || (isAuthenticated && sessionsData === undefined)) {
+  if (shouldRedirect || (isAuthenticated && sessionsStatus === "LoadingFirstPage")) {
     return <PageLoader label="Opening your last chat…" />;
   }
 
