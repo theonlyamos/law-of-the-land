@@ -21,6 +21,9 @@ import {
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
+  runAfterRouteEnsure,
+  runRemovalAfterRouteEnsure,
+  shouldEnsureForNewSubmission,
   type LocalChatMessage,
   type ComposerBottomScrollIntent,
   type PersistedChatMessage,
@@ -110,6 +113,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [ensureError, setEnsureError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isDeletingCurrentChat, setIsDeletingCurrentChat] = useState(false);
   const [isCurrentChatDeleted, setIsCurrentChatDeleted] = useState(false);
@@ -118,7 +122,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
-  const ensuredRef = useRef<Set<string>>(new Set());
+  const routeEnsureRef = useRef<{
+    routeGeneration: number;
+    externalId: string;
+    promise: Promise<unknown>;
+  } | null>(null);
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
@@ -198,8 +206,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   // next chat is visible, so late fetches cannot bleed into it.
   useEffect(() => {
     invalidateChatRequests();
+    routeEnsureRef.current = null;
     setQuery("");
     setDeleteError(null);
+    setEnsureError(null);
     setIsDeletingCurrentChat(false);
     setIsCurrentChatDeleted(false);
   }, [chatId, invalidateChatRequests]);
@@ -214,17 +224,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isMobileSidebarOpen]);
-
-  useEffect(() => {
-    if (!chatId || !isAuthenticated || authLoading || isCurrentChatDeleted || isDeletingCurrentChat) return;
-    if (ensuredRef.current.has(chatId)) return;
-
-    ensuredRef.current.add(chatId);
-    void ensureSession({
-      externalId: chatId,
-      country: findCountry(initialCountry)?.code,
-    });
-  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated, isCurrentChatDeleted, isDeletingCurrentChat]);
 
   useEffect(() => {
     if (!chatId || sessionData === undefined || isCurrentChatDeleted || isDeletingCurrentChat) return;
@@ -297,6 +296,36 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     loadMoreMessages(50);
   }, [loadMoreMessages, messagesPaginationStatus, persistedMessages]);
 
+  const ensureSessionForNewSubmission = useCallback((): Promise<unknown> | null => {
+    if (!chatId) return null;
+
+    const routeGeneration = requestGenerationRef.current;
+    const existingEnsure = routeEnsureRef.current;
+    if (
+      existingEnsure &&
+      existingEnsure.routeGeneration === routeGeneration &&
+      existingEnsure.externalId === chatId
+    ) {
+      return existingEnsure.promise;
+    }
+    if (
+      !shouldEnsureForNewSubmission({
+        sessionObserved: Boolean(sessionData) || observedSessionIdsRef.current.has(chatId),
+        isDeleted: isCurrentChatDeleted,
+        isDeleting: isDeletingCurrentChat,
+      })
+    ) {
+      return null;
+    }
+
+    const promise = ensureSession({
+      externalId: chatId,
+      country: findCountry(initialCountry)?.code,
+    });
+    routeEnsureRef.current = { routeGeneration, externalId: chatId, promise };
+    return promise;
+  }, [chatId, ensureSession, initialCountry, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
+
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       const trimmed = searchQuery.trim();
@@ -350,8 +379,25 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
           chatId
         );
 
-      setQuery("");
       setIsLoading(true);
+      setEnsureError(null);
+      const routeEnsure = ensureSessionForNewSubmission();
+      const persistenceEnsure = routeEnsure ?? Promise.resolve();
+      if (routeEnsure) {
+        try {
+          await persistenceEnsure;
+        } catch (error) {
+          if (!isCurrentRequest()) return;
+          console.error("Failed to create chat:", error);
+          setEnsureError("We could not start this chat. Please try again.");
+          setIsLoading(false);
+          if (activeRequestRef.current === controller) activeRequestRef.current = null;
+          return;
+        }
+        if (!isCurrentRequest()) return;
+      }
+
+      setQuery("");
       prependScrollIntentRef.current = null;
       composerScrollIntentRef.current = beginComposerBottomScroll({
         routeGeneration: requestGeneration,
@@ -381,19 +427,23 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
         const isFirstUserTurn = priorForApi.length === 0;
         try {
-          await appendMessages({
-            externalId: chatId,
-            title: isFirstUserTurn
-              ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
-              : undefined,
-            lastMessage: chatData.result,
-            country: chatCountry,
-            messages: [userMessage, completedAssistant].map((message) => ({
-              role: message.role,
-              content: message.content,
-              clientId: message.clientId,
-              createdAt: message.createdAt,
-            })),
+          await runAfterRouteEnsure({
+            ensurePromise: persistenceEnsure,
+            isCurrentRoute: isCurrentRequest,
+            run: () => appendMessages({
+              externalId: chatId,
+              title: isFirstUserTurn
+                ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
+                : undefined,
+              lastMessage: chatData.result,
+              country: chatCountry,
+              messages: [userMessage, completedAssistant].map((message) => ({
+                role: message.role,
+                content: message.content,
+                clientId: message.clientId,
+                createdAt: message.createdAt,
+              })),
+            }),
           });
         } catch (error) {
           if (!isCurrentRequest()) return;
@@ -428,7 +478,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
         }
       }
     },
-    [appendMessages, chatCountry, chatId, displayMessages, isLoading, router, selectedCountry]
+    [
+      appendMessages,
+      chatCountry,
+      chatId,
+      displayMessages,
+      ensureSessionForNewSubmission,
+      isLoading,
+      router,
+      selectedCountry,
+    ]
   );
 
   useEffect(() => {
@@ -464,16 +523,27 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
       const isCurrentChat = sessionId === chatId;
+      const inFlightEnsure =
+        isCurrentChat &&
+        routeEnsureRef.current?.routeGeneration === requestGenerationRef.current &&
+        routeEnsureRef.current.externalId === chatId
+          ? routeEnsureRef.current.promise
+          : null;
       if (isCurrentChat) {
         // Invalidate before awaiting the mutation so stale send callbacks and
         // finally blocks cannot update the chat while deletion is pending.
         invalidateChatRequests();
+        routeEnsureRef.current = null;
         setDeleteError(null);
+        setEnsureError(null);
         setIsDeletingCurrentChat(true);
       }
 
       try {
-        await removeSession({ externalId: sessionId });
+        await runRemovalAfterRouteEnsure({
+          ensurePromise: inFlightEnsure,
+          remove: () => removeSession({ externalId: sessionId }),
+        });
         if (!isCurrentChat || activeChatIdRef.current !== chatId) return;
 
         setIsDeletingCurrentChat(false);
@@ -671,6 +741,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
               <p role="alert" className="mb-2 text-sm text-muted-foreground">
                 The last answer is shown above but could not be saved to your account. It may be
                 missing when you return to this chat.
+              </p>
+            )}
+            {ensureError && (
+              <p role="alert" className="mb-2 text-sm text-destructive">
+                {ensureError}
               </p>
             )}
             {deleteError && (

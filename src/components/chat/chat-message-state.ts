@@ -164,6 +164,49 @@ export function canCommitRequestGeneration(
   );
 }
 
+export function shouldEnsureForNewSubmission({
+  sessionObserved,
+  isDeleted,
+  isDeleting,
+}: {
+  sessionObserved: boolean;
+  isDeleted: boolean;
+  isDeleting: boolean;
+}): boolean {
+  return !sessionObserved && !isDeleted && !isDeleting;
+}
+
+export async function runAfterRouteEnsure({
+  ensurePromise,
+  isCurrentRoute,
+  run,
+}: {
+  ensurePromise: Promise<unknown>;
+  isCurrentRoute: () => boolean;
+  run: () => Promise<unknown> | unknown;
+}): Promise<boolean> {
+  await ensurePromise;
+  if (!isCurrentRoute()) return false;
+  await run();
+  return true;
+}
+
+export async function runRemovalAfterRouteEnsure({
+  ensurePromise,
+  remove,
+}: {
+  ensurePromise: Promise<unknown> | null;
+  remove: () => Promise<unknown> | unknown;
+}): Promise<void> {
+  try {
+    await ensurePromise;
+  } catch {
+    // A failed create leaves no session to remove; still let the removal
+    // mutation resolve that race as a missing-session no-op.
+  }
+  await remove();
+}
+
 export function routeAfterDeletingCurrentSession(
   deletedSessionId: string,
   remainingSessionIds: string[],

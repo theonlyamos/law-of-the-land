@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   beginComposerBottomScroll,
   beginPrependScroll,
@@ -7,6 +7,9 @@ import {
   consumePrependScroll,
   reconcileChatMessages,
   routeAfterDeletingCurrentSession,
+  runAfterRouteEnsure,
+  runRemovalAfterRouteEnsure,
+  shouldEnsureForNewSubmission,
   type LocalChatMessage,
   type PersistedChatMessage,
 } from "./chat-message-state";
@@ -172,5 +175,87 @@ describe("chat scroll and route lifecycles", () => {
     expect(canCommitRequestGeneration(3, 3, "chat-current", "chat-stale")).toBe(false);
     expect(routeAfterDeletingCurrentSession("chat-2", ["chat-1", "chat-2"])).toBe("/chat-1");
     expect(routeAfterDeletingCurrentSession("chat-2", ["chat-2"])).toBe("/");
+  });
+});
+
+describe("route-scoped chat creation", () => {
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it("does not append until the route ensure has resolved", async () => {
+    const ensure = deferred<void>();
+    const events: string[] = [];
+    const append = runAfterRouteEnsure({
+      ensurePromise: ensure.promise,
+      isCurrentRoute: () => true,
+      run: async () => {
+        events.push("append");
+      },
+    });
+
+    expect(events).toEqual([]);
+    ensure.resolve();
+    await expect(append).resolves.toBe(true);
+    expect(events).toEqual(["append"]);
+  });
+
+  it("does not persist an answer when the route ensure rejects", async () => {
+    const ensure = deferred<void>();
+    const append = vi.fn();
+    const work = runAfterRouteEnsure({
+      ensurePromise: ensure.promise,
+      isCurrentRoute: () => true,
+      run: append,
+    });
+
+    ensure.reject(new Error("ensure failed"));
+    await expect(work).rejects.toThrow("ensure failed");
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("waits for an in-flight ensure before removing the current session", async () => {
+    const ensure = deferred<void>();
+    const events: string[] = [];
+    const remove = runRemovalAfterRouteEnsure({
+      ensurePromise: ensure.promise,
+      remove: async () => {
+        events.push("remove");
+      },
+    });
+
+    expect(events).toEqual([]);
+    ensure.resolve();
+    await remove;
+    expect(events).toEqual(["remove"]);
+  });
+
+  it("detaches an old route before its ensure completion can append", async () => {
+    const ensure = deferred<void>();
+    const append = vi.fn();
+    let isCurrentRoute = true;
+    const work = runAfterRouteEnsure({
+      ensurePromise: ensure.promise,
+      isCurrentRoute: () => isCurrentRoute,
+      run: append,
+    });
+
+    isCurrentRoute = false;
+    ensure.resolve();
+    await expect(work).resolves.toBe(false);
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("only starts creation for a genuine new submission", () => {
+    expect(shouldEnsureForNewSubmission({ sessionObserved: false, isDeleted: false, isDeleting: false })).toBe(true);
+    expect(shouldEnsureForNewSubmission({ sessionObserved: true, isDeleted: false, isDeleting: false })).toBe(false);
+    expect(shouldEnsureForNewSubmission({ sessionObserved: false, isDeleted: true, isDeleting: false })).toBe(false);
+    expect(shouldEnsureForNewSubmission({ sessionObserved: false, isDeleted: false, isDeleting: true })).toBe(false);
   });
 });
