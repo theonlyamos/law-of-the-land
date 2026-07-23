@@ -20,7 +20,7 @@ const TARGET_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const METADATA_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 const RAW_URI_PATTERN = /(?:^|[^A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\/\/)?\S+/i;
 const SENSITIVE_TERM_PATTERN =
-  /password|passwd|cookie|credentials?|signature|authorization|bearer|secret|private\s+key|api\s+key|(?:access|refresh|id|session)\s+token/i;
+  /\b(?:token|auth|password|passwd|cookie|credentials?|signature|authorization|bearer|secret|private\s+key|api\s+key|(?:access|refresh|id|session)\s+token)\b/i;
 
 export type AuditOutcome = "success" | "failure" | "denied";
 

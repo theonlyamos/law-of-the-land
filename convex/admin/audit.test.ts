@@ -161,6 +161,11 @@ describe("audit writer", () => {
         }),
       ),
     ).rejects.toThrow("secrets");
+    for (const reason of ["token", "auth=admin", "authToken=not-for-audit"]) {
+      await expect(
+        t.run((ctx) => writeAudit(ctx, { ...baseEvent, reason })),
+      ).rejects.toThrow("secrets");
+    }
 
     await expect(
       t.run((ctx) =>
@@ -244,6 +249,11 @@ describe("audit writer", () => {
       { authorization: "not-for-audit" },
       { bearer: "not-for-audit" },
       { secret: "not-for-audit" },
+      { token: "not-for-audit" },
+      { auth: "not-for-audit" },
+      { auth_token: "not-for-audit" },
+      { authToken: "not-for-audit" },
+      { "auth-token": "not-for-audit" },
       { audit: { credentials: "not-for-audit" } },
       {
         audit: {
