@@ -1,7 +1,8 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
-import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { optionalUserId, requireUserId } from "./lib/requireUser";
 
 const messageValidator = v.object({
@@ -13,6 +14,12 @@ const messageValidator = v.object({
 
 const MAX_SESSION_PAGE_SIZE = 30;
 const MAX_MESSAGE_PAGE_SIZE = 50;
+const DELETE_BATCH_SIZE = 100;
+
+export function normalizePageSize(numItems: number, maxPageSize: number): number {
+  if (!Number.isFinite(numItems) || numItems <= 0) return 1;
+  return Math.min(maxPageSize, Math.max(1, Math.floor(numItems)));
+}
 
 const chatSessionSummaryValidator = v.object({
   id: v.string(),
@@ -32,10 +39,12 @@ const chatSessionMetadataValidator = v.object({
 });
 
 const chatMessageValidator = v.object({
-  id: v.string(),
+  storageId: v.id("messages"),
+  clientId: v.union(v.string(), v.null()),
   role: v.union(v.literal("user"), v.literal("assistant")),
   content: v.string(),
   createdAt: v.number(),
+  creationTime: v.number(),
 });
 
 export const list = query({
@@ -51,11 +60,11 @@ export const list = query({
 
     const result = await ctx.db
       .query("chatSessions")
-      .withIndex("by_user_and_updatedAt", (q) => q.eq("userId", userId))
+      .withIndex("by_userId_and_updatedAt", (q) => q.eq("userId", userId))
       .order("desc")
       .paginate({
         ...args.paginationOpts,
-        numItems: Math.min(args.paginationOpts.numItems, MAX_SESSION_PAGE_SIZE),
+        numItems: normalizePageSize(args.paginationOpts.numItems, MAX_SESSION_PAGE_SIZE),
       });
 
     return {
@@ -129,17 +138,19 @@ export const listMessages = query({
       .order("desc")
       .paginate({
         ...args.paginationOpts,
-        numItems: Math.min(args.paginationOpts.numItems, MAX_MESSAGE_PAGE_SIZE),
+        numItems: normalizePageSize(args.paginationOpts.numItems, MAX_MESSAGE_PAGE_SIZE),
       });
 
     return {
       // The database query reads newest-first so the cursor continues into
       // older history; each page itself remains chronological for consumers.
       page: result.page.reverse().map((message) => ({
-        id: message.clientId ?? message._id,
+        storageId: message._id,
+        clientId: message.clientId ?? null,
         role: message.role,
         content: message.content,
         createdAt: message.createdAt,
+        creationTime: message._creationTime,
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
@@ -152,6 +163,7 @@ export const ensure = mutation({
     externalId: v.string(),
     country: v.optional(v.string()),
   },
+  returns: v.object({ id: v.string() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
 
@@ -186,6 +198,7 @@ export const appendMessages = mutation({
     country: v.optional(v.string()),
     messages: v.array(messageValidator),
   },
+  returns: v.object({ id: v.string() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
 
@@ -247,6 +260,7 @@ export const remove = mutation({
   args: {
     externalId: v.string(),
   },
+  returns: v.object({ deleted: v.boolean() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
 
@@ -259,17 +273,31 @@ export const remove = mutation({
 
     if (!session) return { deleted: false };
 
+    await ctx.db.delete(session._id);
+    await ctx.scheduler.runAfter(0, internal.chats.deleteMessageBatch, {
+      sessionId: session._id,
+    });
+    return { deleted: true };
+  },
+});
+
+export const deleteMessageBatch = internalMutation({
+  args: { sessionId: v.id("chatSessions") },
+  returns: v.object({ deletedCount: v.number(), hasMore: v.boolean() }),
+  handler: async (ctx, args) => {
     const messages = await ctx.db
       .query("messages")
-      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-      .collect();
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .take(DELETE_BATCH_SIZE);
+    for (const message of messages) await ctx.db.delete(message._id);
 
-    for (const message of messages) {
-      await ctx.db.delete(message._id);
+    const hasMore = messages.length === DELETE_BATCH_SIZE;
+    if (hasMore) {
+      await ctx.scheduler.runAfter(0, internal.chats.deleteMessageBatch, {
+        sessionId: args.sessionId,
+      });
     }
-
-    await ctx.db.delete(session._id);
-    return { deleted: true };
+    return { deletedCount: messages.length, hasMore };
   },
 });
 
@@ -286,6 +314,7 @@ export const migrateFromLocal = mutation({
       })
     ),
   },
+  returns: v.object({ migratedCount: v.number() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     let migratedCount = 0;

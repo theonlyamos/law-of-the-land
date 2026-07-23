@@ -10,17 +10,28 @@ import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
-import type { ChatSession, Message } from "@/lib/chat-sessions";
+import type { ChatSession } from "@/lib/chat-sessions";
 import { COUNTRIES, DEFAULT_COUNTRY, findCountry } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
+import {
+  beginPrependScroll,
+  canCommitRequestGeneration,
+  consumePrependScroll,
+  reconcileChatMessages,
+  routeAfterDeletingCurrentSession,
+  type LocalChatMessage,
+  type PersistedChatMessage,
+  type PrependScrollIntent,
+} from "./chat-message-state";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
+async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!response.ok) {
     const data = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -93,17 +104,24 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const [selectedCountry, setSelectedCountry] = useState(
     findCountry(initialCountry)?.code ?? DEFAULT_COUNTRY.code
   );
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [isCurrentChatDeleted, setIsCurrentChatDeleted] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
   const ensuredRef = useRef<Set<string>>(new Set());
-  const pendingScrollAdjustmentRef = useRef<{ height: number; top: number } | null>(null);
-  const shouldScrollToBottomRef = useRef(true);
+  const observedSessionIdsRef = useRef<Set<string>>(new Set());
+  const requestGenerationRef = useRef(0);
+  const activeChatIdRef = useRef(chatId);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const localSequenceRef = useRef(0);
+  const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
+  const composerScrollRequestedRef = useRef(true);
+  activeChatIdRef.current = chatId;
 
   const {
     results: sessionsData,
@@ -130,22 +148,29 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const removeSession = useMutation(api.chats.remove);
 
   const sessions = sessionsData.map(toSidebarSession);
-  const persistedMessages = useMemo<Message[]>(() => {
-    const byId = new Map<string, Message>();
+  const persistedMessages = useMemo<PersistedChatMessage[]>(() => {
+    const byStorageId = new Map<string, PersistedChatMessage>();
     for (const message of messageResults) {
-      byId.set(message.id, {
-        id: message.id,
+      byStorageId.set(message.storageId, {
+        storageId: message.storageId,
+        clientId: message.clientId,
         role: message.role,
         content: message.content,
-        createdAt: new Date(message.createdAt),
+        createdAt: message.createdAt,
+        creationTime: message.creationTime,
       });
     }
-    return [...byId.values()].sort(
+    return [...byStorageId.values()].sort(
       (a, b) =>
-        (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) ||
-        (a.id ?? "").localeCompare(b.id ?? "")
+        a.createdAt - b.createdAt ||
+        a.creationTime - b.creationTime ||
+        a.storageId.localeCompare(b.storageId)
     );
   }, [messageResults]);
+  const displayMessages = useMemo(
+    () => reconcileChatMessages({ persisted: persistedMessages, local: localMessages }),
+    [localMessages, persistedMessages]
+  );
   const isChatLoading =
     chatId !== null &&
     (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage");
@@ -153,15 +178,24 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const chatCountry =
     sessionData?.country ?? findCountry(initialCountry)?.code ?? selectedCountry;
 
-  // Clear the previous conversation's state when switching chats so it never
-  // flashes in (or leaks into the API history of) the next one.
-  useEffect(() => {
-    setMessages([]);
-    setQuery("");
+  const invalidateChatRequests = useCallback(() => {
+    requestGenerationRef.current += 1;
+    activeRequestRef.current?.abort();
+    activeRequestRef.current = null;
+    setIsLoading(false);
+    setLocalMessages([]);
     setSaveFailed(false);
-    shouldScrollToBottomRef.current = true;
-    pendingScrollAdjustmentRef.current = null;
-  }, [chatId]);
+    prependScrollIntentRef.current = null;
+    composerScrollRequestedRef.current = true;
+  }, []);
+
+  // A route change invalidates every pending response before state for the
+  // next chat is visible, so late fetches cannot bleed into it.
+  useEffect(() => {
+    invalidateChatRequests();
+    setQuery("");
+    setIsCurrentChatDeleted(false);
+  }, [chatId, invalidateChatRequests]);
 
   useEffect(() => {
     if (!isMobileSidebarOpen) return;
@@ -175,7 +209,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   }, [isMobileSidebarOpen]);
 
   useEffect(() => {
-    if (!chatId || !isAuthenticated || authLoading) return;
+    if (!chatId || !isAuthenticated || authLoading || isCurrentChatDeleted) return;
     if (ensuredRef.current.has(chatId)) return;
 
     ensuredRef.current.add(chatId);
@@ -183,13 +217,20 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       externalId: chatId,
       country: findCountry(initialCountry)?.code,
     });
-  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated]);
+  }, [authLoading, chatId, ensureSession, initialCountry, isAuthenticated, isCurrentChatDeleted]);
 
   useEffect(() => {
-    if (!sessionData) return;
-    if (!pendingScrollAdjustmentRef.current) shouldScrollToBottomRef.current = true;
-    setMessages(persistedMessages);
-  }, [persistedMessages, sessionData]);
+    if (!chatId || sessionData === undefined || isCurrentChatDeleted) return;
+    if (sessionData) {
+      observedSessionIdsRef.current.add(chatId);
+      return;
+    }
+    if (!observedSessionIdsRef.current.has(chatId)) return;
+
+    setIsCurrentChatDeleted(true);
+    invalidateChatRequests();
+    router.replace(routeAfterDeletingCurrentSession(chatId, sessions.map((session) => session.id)));
+  }, [chatId, invalidateChatRequests, isCurrentChatDeleted, router, sessionData, sessions]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -199,55 +240,49 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>(
       "[data-radix-scroll-area-viewport]"
     );
-    const previous = pendingScrollAdjustmentRef.current;
-    if (viewport && previous) {
-      viewport.scrollTop = previous.top + (viewport.scrollHeight - previous.height);
-      pendingScrollAdjustmentRef.current = null;
+    if (!viewport) return;
+    const prepend = consumePrependScroll(prependScrollIntentRef.current, {
+      routeGeneration: requestGenerationRef.current,
+      serverRows: persistedMessages,
+      scrollHeight: viewport.scrollHeight,
+      loadMoreCompleted:
+        messagesPaginationStatus !== "LoadingFirstPage" && messagesPaginationStatus !== "LoadingMore",
+    });
+    prependScrollIntentRef.current = prepend.intent;
+    if (prepend.scrollTop !== null) {
+      viewport.scrollTop = prepend.scrollTop;
+      // Deterministic precedence: a completed history prepend wins over a
+      // composer bottom-scroll requested while that page was in flight.
+      composerScrollRequestedRef.current = false;
       return;
     }
-    if (!shouldScrollToBottomRef.current) return;
-    shouldScrollToBottomRef.current = false;
+    if (prependScrollIntentRef.current || !composerScrollRequestedRef.current) return;
+    composerScrollRequestedRef.current = false;
     scrollToBottom();
-  }, [messages]);
+  }, [displayMessages, messagesPaginationStatus, persistedMessages]);
 
   const handleLoadOlderMessages = useCallback(() => {
-    if (messagesPaginationStatus !== "CanLoadMore") return;
+    if (messagesPaginationStatus !== "CanLoadMore" || prependScrollIntentRef.current) return;
     const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>(
       "[data-radix-scroll-area-viewport]"
     );
     if (viewport) {
-      pendingScrollAdjustmentRef.current = {
-        height: viewport.scrollHeight,
-        top: viewport.scrollTop,
-      };
+      prependScrollIntentRef.current = beginPrependScroll({
+        routeGeneration: requestGenerationRef.current,
+        previousStorageIds: persistedMessages.map((message) => message.storageId),
+        previousOldestServerOrderKey: persistedMessages[0]
+          ? {
+              createdAt: persistedMessages[0].createdAt,
+              creationTime: persistedMessages[0].creationTime,
+              storageId: persistedMessages[0].storageId,
+            }
+          : null,
+        scrollHeight: viewport.scrollHeight,
+        scrollTop: viewport.scrollTop,
+      });
     }
     loadMoreMessages(50);
-  }, [loadMoreMessages, messagesPaginationStatus]);
-
-  const persistTurn = useCallback(
-    async (turnMessages: Message[], meta: { title?: string; lastMessage: string }) => {
-      if (!chatId) return;
-      setSaveFailed(false);
-      try {
-        await appendMessages({
-          externalId: chatId,
-          title: meta.title,
-          lastMessage: meta.lastMessage,
-          country: chatCountry,
-          messages: turnMessages.map((message) => ({
-            role: message.role,
-            content: message.content,
-            clientId: message.id,
-            createdAt: message.createdAt?.getTime(),
-          })),
-        });
-      } catch (error) {
-        console.error("Failed to save chat:", error);
-        setSaveFailed(true);
-      }
-    },
-    [appendMessages, chatCountry, chatId]
-  );
+  }, [loadMoreMessages, messagesPaginationStatus, persistedMessages]);
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
@@ -263,74 +298,123 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
         return;
       }
 
-      setQuery("");
-      setIsLoading(true);
-
-      const priorForApi = messages.slice(-10);
-
-      const userMessage: Message = {
-        id: crypto.randomUUID(),
+      const requestGeneration = requestGenerationRef.current;
+      const controller = new AbortController();
+      activeRequestRef.current?.abort();
+      activeRequestRef.current = controller;
+      const nextSequence = () => {
+        localSequenceRef.current += 1;
+        return localSequenceRef.current;
+      };
+      const priorForApi = displayMessages.slice(-10).map((message) => ({
+        role: message.role,
+        content: message.content,
+        createdAt: new Date(message.createdAt),
+      }));
+      const userMessage: LocalChatMessage = {
+        localId: crypto.randomUUID(),
+        clientId: crypto.randomUUID(),
         role: "user",
         content: trimmed,
-        createdAt: new Date(),
+        createdAt: Date.now(),
+        sequence: nextSequence(),
+        state: "pending",
       };
-      const base = [...messages, userMessage];
+      const assistantMessage: LocalChatMessage = {
+        localId: crypto.randomUUID(),
+        clientId: crypto.randomUUID(),
+        role: "assistant",
+        content: "...",
+        createdAt: Date.now(),
+        sequence: nextSequence(),
+        state: "pending",
+      };
+      const isCurrentRequest = () =>
+        canCommitRequestGeneration(
+          requestGenerationRef.current,
+          requestGeneration,
+          activeChatIdRef.current,
+          chatId
+        );
 
-      shouldScrollToBottomRef.current = true;
-      setMessages([
-        ...base,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: "...",
-        },
-      ]);
+      setQuery("");
+      setIsLoading(true);
+      composerScrollRequestedRef.current = true;
+      setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       try {
         const searchData = await postJson<{ result: string }>("/api/search", {
           query: trimmed,
           country: chatCountry,
-        });
+        }, controller.signal);
+        if (!isCurrentRequest()) return;
 
         const chatData = await postJson<{ result: string }>("/api/chat", {
           query: trimmed,
           messages: priorForApi,
           context: searchData.result,
-        });
+        }, controller.signal);
+        if (!isCurrentRequest()) return;
 
-        const assistantMessage: Message = {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: chatData.result,
-          createdAt: new Date(),
-        };
-        const next = [...base, assistantMessage];
-        shouldScrollToBottomRef.current = true;
-        setMessages(next);
+        const completedAssistant = { ...assistantMessage, content: chatData.result };
+        composerScrollRequestedRef.current = true;
+        setLocalMessages((previous) =>
+          previous.map((message) =>
+            message.localId === assistantMessage.localId ? completedAssistant : message
+          )
+        );
 
         const isFirstUserTurn = priorForApi.length === 0;
-        await persistTurn([userMessage, assistantMessage], {
-          title: isFirstUserTurn
-            ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
-            : undefined,
-          lastMessage: chatData.result,
-        });
+        try {
+          await appendMessages({
+            externalId: chatId,
+            title: isFirstUserTurn
+              ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
+              : undefined,
+            lastMessage: chatData.result,
+            country: chatCountry,
+            messages: [userMessage, completedAssistant].map((message) => ({
+              role: message.role,
+              content: message.content,
+              clientId: message.clientId,
+              createdAt: message.createdAt,
+            })),
+          });
+        } catch (error) {
+          if (!isCurrentRequest()) return;
+          console.error("Failed to save chat:", error);
+          setSaveFailed(true);
+          setLocalMessages((previous) =>
+            previous.map((message) =>
+              message.localId === userMessage.localId || message.localId === assistantMessage.localId
+                ? { ...message, state: "error" }
+                : message
+            )
+          );
+        }
       } catch (error) {
+        if (!isCurrentRequest() || (error instanceof DOMException && error.name === "AbortError")) {
+          return;
+        }
         console.error("Error:", error);
-        shouldScrollToBottomRef.current = true;
-        setMessages([
-          ...base,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: answerErrorMessage(error),
-          },
-        ]);
+        composerScrollRequestedRef.current = true;
+        setLocalMessages((previous) =>
+          previous.map((message) => {
+            if (message.localId === assistantMessage.localId) {
+              return { ...message, content: answerErrorMessage(error), state: "error" };
+            }
+            if (message.localId === userMessage.localId) return { ...message, state: "error" };
+            return message;
+          })
+        );
       } finally {
-        setIsLoading(false);
+        if (isCurrentRequest()) {
+          setIsLoading(false);
+          if (activeRequestRef.current === controller) activeRequestRef.current = null;
+        }
       }
     },
-    [chatCountry, chatId, isLoading, messages, persistTurn, router, selectedCountry]
+    [appendMessages, chatCountry, chatId, displayMessages, isLoading, router, selectedCountry]
   );
 
   useEffect(() => {
@@ -369,20 +453,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
       if (sessionId !== chatId) return;
 
-      const remaining = sessions.filter((session) => session.id !== sessionId);
-      if (remaining.length === 0) {
-        router.push("/");
-      } else {
-        router.push(`/${remaining[0].id}`);
-      }
+      setIsCurrentChatDeleted(true);
+      invalidateChatRequests();
+      router.replace(routeAfterDeletingCurrentSession(sessionId, sessions.map((session) => session.id)));
       setIsMobileSidebarOpen(false);
     },
-    [chatId, removeSession, router, sessions]
+    [chatId, invalidateChatRequests, removeSession, router, sessions]
   );
 
 
   if (authLoading || (isAuthenticated && sessionsPaginationStatus === "LoadingFirstPage")) {
     return <PageLoader label="Loading chat…" />;
+  }
+
+  if (isCurrentChatDeleted) {
+    return <PageLoader label="Chat deleted…" />;
   }
 
   return (
@@ -499,12 +584,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 Loading older messages…
               </p>
             )}
-            {messagesPaginationStatus === "Exhausted" && messages.length > 0 && (
+            {messagesPaginationStatus === "Exhausted" && displayMessages.length > 0 && (
               <p className="mb-4 text-center text-xs text-muted-foreground">
                 Beginning of conversation
               </p>
             )}
-            {messages.length === 0 && (
+            {displayMessages.length === 0 && (
               <div className="flex flex-col items-center gap-2 py-24 text-center">
                 <p className="text-lg font-medium">What do you want to know?</p>
                 <p className="max-w-sm text-sm text-muted-foreground">
@@ -513,12 +598,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 </p>
               </div>
             )}
-            {messages.map((message, index) => {
+            {displayMessages.map((message, index) => {
               const isUser = message.role === "user";
 
               return (
                 <div
-                  key={message.id ?? index}
+                  key={message.key}
                   className={`flex min-w-0 ${
                     isUser
                       ? `justify-end ${index > 0 ? "mt-12" : ""}`
@@ -529,7 +614,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                     <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground [overflow-wrap:anywhere] sm:max-w-[75%]">
                       {message.content}
                     </div>
-                  ) : message.content === "..." ? (
+                  ) : message.source === "local" && message.state === "pending" && message.content === "..." ? (
                     <div className="flex gap-1 py-2" aria-label="Preparing answer">
                       <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:0ms]" />
                       <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:150ms]" />
@@ -563,7 +648,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
               isLoading={isLoading}
               rows={4}
               placeholder={
-                messages.length === 0
+                displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
                   : undefined
               }
