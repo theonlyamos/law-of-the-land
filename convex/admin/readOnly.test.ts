@@ -116,7 +116,7 @@ async function createUser(
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
 const previousGroundxApiKey = process.env.GROUNDX_API_KEY;
-const previousPolarAccessToken = process.env.POLAR_ACCESS_TOKEN;
+const previousPolarOrganizationToken = process.env.POLAR_ORGANIZATION_TOKEN;
 
 afterEach(() => {
   if (previousAdminPanelEnabled === undefined) {
@@ -134,10 +134,10 @@ afterEach(() => {
   } else {
     process.env.GROUNDX_API_KEY = previousGroundxApiKey;
   }
-  if (previousPolarAccessToken === undefined) {
-    delete process.env.POLAR_ACCESS_TOKEN;
+  if (previousPolarOrganizationToken === undefined) {
+    delete process.env.POLAR_ORGANIZATION_TOKEN;
   } else {
-    process.env.POLAR_ACCESS_TOKEN = previousPolarAccessToken;
+    process.env.POLAR_ORGANIZATION_TOKEN = previousPolarOrganizationToken;
   }
 });
 
@@ -345,7 +345,7 @@ describe("read-only admin query behavior", () => {
     const asAuditor = await createAdmin(t, "auditor");
     const asSupport = await createAdmin(t, "support_agent");
     process.env.GROUNDX_API_KEY = "groundx-secret-value";
-    process.env.POLAR_ACCESS_TOKEN = "polar-secret-value";
+    process.env.POLAR_ORGANIZATION_TOKEN = "polar-secret-value";
 
     const health = await asAuditor.query(
       api.admin.operations.listIntegrationHealth,
@@ -361,6 +361,16 @@ describe("read-only admin query behavior", () => {
       "status",
     ]);
     expect(JSON.stringify(health)).not.toContain("secret-value");
+
+    const fullHealth = await asAuditor.query(
+      api.admin.operations.listIntegrationHealth,
+      { paginationOpts: { numItems: 20, cursor: null } },
+    );
+    expect(fullHealth.page.find((row) => row.id === "billing")).toMatchObject({
+      configured: true,
+      status: "ready",
+    });
+    expect(JSON.stringify(fullHealth)).not.toContain("polar-secret-value");
 
     await expect(
       asAuditor.query(api.admin.users.list, {

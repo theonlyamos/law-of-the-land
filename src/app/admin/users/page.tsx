@@ -110,7 +110,7 @@ export default async function UsersPage({
                 <span className="grid gap-1">
                   <Link
                     href={`/admin/users/${encodeURIComponent(user.id)}`}
-                    className="font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+                    className="inline-flex min-h-11 items-center font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
                   >
                     {user.name}
                   </Link>

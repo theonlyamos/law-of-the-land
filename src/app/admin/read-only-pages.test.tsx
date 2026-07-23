@@ -5,11 +5,13 @@ import { api } from "../../../convex/_generated/api";
 const mocks = vi.hoisted(() => ({
   authorizeAdminPage: vi.fn(),
   fetchAuthQuery: vi.fn(),
+  isAdminAccessDenial: vi.fn(),
   redirect: vi.fn(),
 }));
 
 vi.mock("@/lib/admin/server", () => ({
   authorizeAdminPage: mocks.authorizeAdminPage,
+  isAdminAccessDenial: mocks.isAdminAccessDenial,
 }));
 vi.mock("@/lib/auth-server", () => ({
   fetchAuthQuery: mocks.fetchAuthQuery,
@@ -28,11 +30,23 @@ afterEach(cleanup);
 beforeEach(() => {
   mocks.authorizeAdminPage.mockReset();
   mocks.fetchAuthQuery.mockReset();
+  mocks.isAdminAccessDenial.mockReset();
   mocks.redirect.mockReset();
   mocks.authorizeAdminPage.mockResolvedValue({
     status: "authorized",
     currentAdmin: { userId: "admin-1", roles: ["super_admin"] },
   });
+  mocks.isAdminAccessDenial.mockImplementation(
+    (error: unknown) =>
+      typeof error === "object" &&
+      error !== null &&
+      "data" in error &&
+      typeof error.data === "object" &&
+      error.data !== null &&
+      "code" in error.data &&
+      typeof error.data.code === "string" &&
+      error.data.code.startsWith("ADMIN_"),
+  );
   mocks.redirect.mockImplementation(() => {
     throw new Error("NEXT_REDIRECT");
   });
@@ -78,6 +92,11 @@ describe("read-only admin pages", () => {
       "href",
       "/admin/users/user-1",
     );
+    expect(screen.getByRole("link", { name: "Ama Mensah" })).toHaveClass(
+      "inline-flex",
+      "min-h-11",
+      "items-center",
+    );
     expect(screen.getByRole("link", { name: "Next page" })).toHaveAttribute(
       "href",
       expect.stringContaining("q=ama%40example.com"),
@@ -114,6 +133,11 @@ describe("read-only admin pages", () => {
       },
     );
     expect(screen.getByRole("columnheader", { name: "Messages" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "user-1" })).toHaveClass(
+      "inline-flex",
+      "min-h-11",
+      "items-center",
+    );
     expect(screen.queryByRole("columnheader", { name: "Prompt" })).toBeNull();
     expect(screen.queryByRole("columnheader", { name: "Answer" })).toBeNull();
   });
@@ -153,6 +177,42 @@ describe("read-only admin pages", () => {
     expect(
       screen.getByText("Session records are not included in your role."),
     ).toBeVisible();
+  });
+
+  it("redirects a structured exact-user denial to the forbidden page", async () => {
+    const denial = Object.assign(new Error("Administrative access denied"), {
+      data: { code: "ADMIN_DISABLED", message: "Restricted" },
+    });
+    mocks.fetchAuthQuery.mockRejectedValue(denial);
+
+    await expect(
+      UserDetailPage({
+        params: Promise.resolve({ userId: "user-1" }),
+        searchParams: Promise.resolve({}),
+      }),
+    ).rejects.toThrow("NEXT_REDIRECT");
+    expect(mocks.redirect).toHaveBeenCalledWith("/admin/forbidden");
+    expect(mocks.isAdminAccessDenial).toHaveBeenCalledWith(denial);
+  });
+
+  it("renders a recoverable exact-user error for a generic outage", async () => {
+    const outage = new Error("connection reset");
+    mocks.fetchAuthQuery.mockRejectedValue(outage);
+
+    render(
+      await UserDetailPage({
+        params: Promise.resolve({ userId: "user-1" }),
+        searchParams: Promise.resolve({}),
+      }),
+    );
+
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "User record could not be loaded",
+    );
+    expect(
+      screen.getByRole("link", { name: "Try loading this user again" }),
+    ).toHaveAttribute("href", "/admin/users/user-1");
   });
 
   it("renders bounded operational configuration posture", async () => {

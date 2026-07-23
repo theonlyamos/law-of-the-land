@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { authorizeAdminPage, loadAdminOverview } from "./server";
+import {
+  authorizeAdminPage,
+  isAdminAccessDenial,
+  loadAdminOverview,
+} from "./server";
 
 const denialCodes = [
   "ADMIN_AUTH_REQUIRED",
@@ -9,6 +13,18 @@ const denialCodes = [
 ] as const;
 
 describe("server-side admin request sequencing", () => {
+  it.each(denialCodes)("recognizes %s for page-level denial handling", (code) => {
+    expect(
+      isAdminAccessDenial({
+        data: { code, message: "Restricted" },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not classify infrastructure failures as access denials", () => {
+    expect(isAdminAccessDenial(new Error("connection refused"))).toBe(false);
+  });
+
   it.each(denialCodes)("classifies %s as an expected access denial", async (code) => {
     const denial = Object.assign(new Error("Administrative access denied"), {
       data: { code, message: "Restricted" },

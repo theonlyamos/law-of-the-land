@@ -113,7 +113,7 @@ export default async function ConversationsPage({
               owner: (
                 <Link
                   href={`/admin/users/${encodeURIComponent(conversation.userId)}`}
-                  className="break-all font-semibold underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+                  className="inline-flex min-h-11 items-center break-all font-semibold underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
                 >
                   {conversation.userId}
                 </Link>

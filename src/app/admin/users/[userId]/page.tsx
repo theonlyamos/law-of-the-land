@@ -5,7 +5,10 @@ import {
   readAdminTableNavigation,
   type AdminTableSearchParams,
 } from "@/components/admin/data-table";
-import { authorizeAdminPage } from "@/lib/admin/server";
+import {
+  authorizeAdminPage,
+  isAdminAccessDenial,
+} from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
@@ -25,6 +28,41 @@ function formatDateTime(timestamp: number) {
   }).format(new Date(timestamp));
 }
 
+function UserRecordError({ userId }: { userId: string }) {
+  const userHref = `/admin/users/${encodeURIComponent(userId)}`;
+  return (
+    <div className="mx-auto max-w-[72rem]">
+      <Link
+        href="/admin/users"
+        className="inline-flex min-h-11 items-center text-sm font-semibold underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+      >
+        Back to users
+      </Link>
+      <div
+        role="alert"
+        className="mt-7 border-y border-[oklch(67%_0.055_35)] bg-[oklch(93%_0.035_45)] px-5 py-8 sm:px-7"
+      >
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(42%_0.09_35)]">
+          User record unavailable
+        </p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-[-0.035em]">
+          User record could not be loaded
+        </h1>
+        <p className="mt-3 max-w-[62ch] text-sm leading-6 text-[oklch(36%_0.045_35)]">
+          The administration service could not return this record. No user
+          data was displayed. Check the connection and try again.
+        </p>
+        <Link
+          href={userHref}
+          className="mt-5 inline-flex min-h-11 items-center bg-[oklch(28%_0.055_252)] px-5 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+        >
+          Try loading this user again
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export default async function UserDetailPage({
   params,
   searchParams,
@@ -42,14 +80,21 @@ export default async function UserDetailPage({
     redirect("/admin/forbidden");
   }
 
-  let userResult: Awaited<ReturnType<typeof fetchAuthQuery>>;
+  let userResult: Awaited<ReturnType<typeof fetchAuthQuery>> | null = null;
+  let userLoadFailed = false;
   try {
     userResult = await fetchAuthQuery(api.admin.users.list, {
       paginationOpts: { numItems: 1, cursor: null },
       search: { kind: "user_id", value: userId },
     });
-  } catch {
-    redirect("/admin/forbidden");
+  } catch (error) {
+    if (isAdminAccessDenial(error)) {
+      redirect("/admin/forbidden");
+    }
+    userLoadFailed = true;
+  }
+  if (userLoadFailed || !userResult || !Array.isArray(userResult.page)) {
+    return <UserRecordError userId={userId} />;
   }
   const users = userResult.page as Array<{
     id: string;

@@ -46,13 +46,17 @@ function adminAccessCodeFromError(error: unknown): AdminAccessCode | null {
   return isAdminAccessCode(code) ? code : null;
 }
 
+export function isAdminAccessDenial(error: unknown): boolean {
+  return adminAccessCodeFromError(error) !== null;
+}
+
 async function withAdminAccessClassification<T>(
   operation: () => Promise<T>,
 ): Promise<ClassifiedAdminQuery<T>> {
   try {
     return { status: "success", value: await operation() };
   } catch (error) {
-    if (adminAccessCodeFromError(error)) {
+    if (isAdminAccessDenial(error)) {
       return { status: "denied" };
     }
     throw error;
