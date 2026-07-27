@@ -136,6 +136,9 @@ describe("read-only admin pages", () => {
       },
     );
     expect(screen.getByRole("columnheader", { name: "Messages" })).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "conversation-1" }),
+    ).toHaveAttribute("href", "/admin/conversations/conversation-1");
     expect(screen.getByRole("link", { name: "user-1" })).toHaveClass(
       "inline-flex",
       "min-h-11",

@@ -102,9 +102,12 @@ export default async function ConversationsPage({
             cells: {
               conversation: (
                 <span className="grid gap-1">
-                  <span className="font-semibold text-[oklch(27%_0.06_252)]">
+                  <Link
+                    href={`/admin/conversations/${encodeURIComponent(conversation.id)}`}
+                    className="inline-flex min-h-11 items-center font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+                  >
                     {conversation.id}
-                  </span>
+                  </Link>
                   <span className="break-all text-xs text-[oklch(45%_0.035_252)]">
                     {conversation.externalId}
                   </span>
