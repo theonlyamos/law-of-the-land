@@ -2,6 +2,132 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  jurisdictions: defineTable({
+    code: v.string(),
+    name: v.string(),
+    slug: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("enabled"),
+      v.literal("archived"),
+    ),
+    isDefault: v.boolean(),
+    stagingBucketId: v.optional(v.string()),
+    productionBucketId: v.optional(v.string()),
+    providerSyncState: v.union(
+      v.literal("pending"),
+      v.literal("synced"),
+      v.literal("drifted"),
+      v.literal("failed"),
+    ),
+    createdBy: v.string(),
+    updatedBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_code", ["code"])
+    .index("by_slug", ["slug"])
+    .index("by_status_and_name", ["status", "name"])
+    .index("by_isDefault", ["isDefault"]),
+  legalResources: defineTable({
+    jurisdictionId: v.id("jurisdictions"),
+    type: v.union(
+      v.literal("constitution"),
+      v.literal("act"),
+      v.literal("regulation"),
+      v.literal("ordinance"),
+      v.literal("judgment"),
+      v.literal("policy"),
+      v.literal("guidance"),
+    ),
+    title: v.string(),
+    issuer: v.string(),
+    officialCitation: v.string(),
+    sourceUrl: v.string(),
+    topics: v.array(v.string()),
+    effectiveDate: v.string(),
+    repealDate: v.optional(v.string()),
+    status: v.union(
+      v.literal("active"),
+      v.literal("repealed"),
+      v.literal("archived"),
+    ),
+    activeVersionId: v.optional(v.id("documentVersions")),
+    createdBy: v.string(),
+    updatedBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_jurisdictionId_and_status", ["jurisdictionId", "status"])
+    .index("by_jurisdictionId_and_updatedAt", ["jurisdictionId", "updatedAt"])
+    .index("by_jurisdictionId_and_officialCitation", [
+      "jurisdictionId",
+      "officialCitation",
+    ])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"])
+    .index("by_activeVersionId", ["activeVersionId"]),
+  documentVersions: defineTable({
+    resourceId: v.id("legalResources"),
+    versionNumber: v.number(),
+    originalStorageId: v.id("_storage"),
+    filename: v.string(),
+    mimeType: v.string(),
+    byteSize: v.number(),
+    sha256: v.string(),
+    sourceUrl: v.string(),
+    effectiveDate: v.optional(v.string()),
+    repealDate: v.optional(v.string()),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("uploading"),
+      v.literal("staging_processing"),
+      v.literal("ready_for_review"),
+      v.literal("approved"),
+      v.literal("publishing"),
+      v.literal("published"),
+      v.literal("rejected"),
+      v.literal("failed"),
+      v.literal("superseded"),
+      v.literal("unpublished"),
+      v.literal("archived"),
+    ),
+    groundxStagingDocumentId: v.optional(v.string()),
+    groundxStagingProcessId: v.optional(v.string()),
+    groundxProductionDocumentId: v.optional(v.string()),
+    groundxProductionProcessId: v.optional(v.string()),
+    submittedBy: v.string(),
+    reviewedBy: v.optional(v.string()),
+    submittedAt: v.optional(v.number()),
+    reviewedAt: v.optional(v.number()),
+    publishedAt: v.optional(v.number()),
+    unpublishedAt: v.optional(v.number()),
+    failureSummary: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_resourceId_and_versionNumber", ["resourceId", "versionNumber"])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"])
+    .index("by_resourceId_and_sha256", ["resourceId", "sha256"])
+    .index("by_resourceId_and_status", ["resourceId", "status"]),
+  reviewDecisions: defineTable({
+    documentVersionId: v.id("documentVersions"),
+    reviewerId: v.string(),
+    decision: v.union(v.literal("approve"), v.literal("reject")),
+    notes: v.string(),
+    checklistAnswers: v.record(v.string(), v.boolean()),
+    evaluationRunId: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_documentVersionId_and_createdAt", [
+      "documentVersionId",
+      "createdAt",
+    ])
+    .index("by_decision_and_createdAt", ["decision", "createdAt"]),
+  resourceVersionCounters: defineTable({
+    resourceId: v.id("legalResources"),
+    nextVersionNumber: v.number(),
+    updatedAt: v.number(),
+  }).index("by_resourceId", ["resourceId"]),
   auditEvents: defineTable({
     actorType: v.union(v.literal("system"), v.literal("user")),
     actorUserId: v.optional(v.string()),
