@@ -43,6 +43,7 @@ export default defineSchema({
     title: v.string(),
     issuer: v.string(),
     officialCitation: v.string(),
+    officialCitationKey: v.string(),
     sourceUrl: v.string(),
     topics: v.array(v.string()),
     effectiveDate: v.string(),
@@ -63,6 +64,10 @@ export default defineSchema({
     .index("by_jurisdictionId_and_officialCitation", [
       "jurisdictionId",
       "officialCitation",
+    ])
+    .index("by_jurisdictionId_and_officialCitationKey", [
+      "jurisdictionId",
+      "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
     .index("by_activeVersionId", ["activeVersionId"]),

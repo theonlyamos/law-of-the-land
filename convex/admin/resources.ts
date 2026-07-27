@@ -1,4 +1,4 @@
-import { paginationOptsValidator } from "convex/server";
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import { mutation, query, type MutationCtx } from "../_generated/server";
@@ -32,6 +32,48 @@ const resourceTypeValidator = v.union(
   v.literal("policy"),
   v.literal("guidance"),
 );
+
+const jurisdictionDocValidator = v.object({
+  _id: v.id("jurisdictions"), _creationTime: v.number(), code: v.string(), name: v.string(),
+  slug: v.string(), status: jurisdictionStatusValidator, isDefault: v.boolean(),
+  stagingBucketId: v.optional(v.string()), productionBucketId: v.optional(v.string()),
+  providerSyncState: v.union(v.literal("pending"), v.literal("synced"), v.literal("drifted"), v.literal("failed")),
+  createdBy: v.string(), updatedBy: v.string(), createdAt: v.number(), updatedAt: v.number(),
+});
+const resourceDocValidator = v.object({
+  _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
+  type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
+  officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
+  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  createdAt: v.number(), updatedAt: v.number(),
+});
+const versionStatusValidator = v.union(
+  v.literal("draft"), v.literal("uploading"), v.literal("staging_processing"),
+  v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"),
+  v.literal("published"), v.literal("rejected"), v.literal("failed"),
+  v.literal("superseded"), v.literal("unpublished"), v.literal("archived"),
+);
+const versionDocValidator = v.object({
+  _id: v.id("documentVersions"), _creationTime: v.number(), resourceId: v.id("legalResources"),
+  versionNumber: v.number(), originalStorageId: v.id("_storage"), filename: v.string(),
+  mimeType: v.string(), byteSize: v.number(), sha256: v.string(), sourceUrl: v.string(),
+  effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: versionStatusValidator,
+  groundxStagingDocumentId: v.optional(v.string()), groundxStagingProcessId: v.optional(v.string()),
+  groundxProductionDocumentId: v.optional(v.string()), groundxProductionProcessId: v.optional(v.string()),
+  submittedBy: v.string(), reviewedBy: v.optional(v.string()), submittedAt: v.optional(v.number()),
+  reviewedAt: v.optional(v.number()), publishedAt: v.optional(v.number()), unpublishedAt: v.optional(v.number()),
+  failureSummary: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number(),
+});
+const resourceDetailValidator = v.object({
+  _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
+  type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
+  officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
+  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  createdAt: v.number(), updatedAt: v.number(),
+  jurisdiction: v.object({ code: v.string(), name: v.string(), status: jurisdictionStatusValidator }),
+});
 
 type Actor = { userId: string; roles: AdminRole[] };
 type ResourceType = Doc<"legalResources">["type"];
@@ -99,6 +141,7 @@ function validateDate(value: string, field: string): string {
 }
 
 function validateSourceUrl(value: string): string {
+  if (value.length > 500) throw new ConvexError("INVALID_SOURCE_URL");
   let url: URL;
   try {
     url = new URL(value);
@@ -112,19 +155,38 @@ function validateSourceUrl(value: string): string {
 }
 
 function validateTopics(values: string[]): string[] {
-  if (values.length > MAX_TOPICS) throw new ConvexError("INVALID_TOPICS");
-  const topics = values.map((value) => requiredText(value, "TOPIC"));
+  if (values.length > Math.min(MAX_TOPICS, 8)) throw new ConvexError("INVALID_TOPICS");
+  const topics = values.map((value) => {
+    const topic = requiredText(value, "TOPIC");
+    if (topic.length > 80) throw new ConvexError("INVALID_TOPIC");
+    return topic;
+  });
   if (new Set(topics.map((topic) => topic.toLocaleLowerCase("en"))).size !== topics.length) {
     throw new ConvexError("INVALID_TOPICS");
   }
   return topics;
 }
 
-function validateDates(effectiveDate: string, repealDate?: string) {
-  const effective = validateDate(effectiveDate, "EFFECTIVE_DATE");
-  const repeal = repealDate === undefined ? undefined : validateDate(repealDate, "REPEAL_DATE");
-  if (repeal && repeal < effective) throw new ConvexError("INVALID_DATE_RANGE");
-  return { effectiveDate: effective, repealDate: repeal };
+function canonicalCitation(value: string): string {
+  return value.normalize("NFKC").toLowerCase();
+}
+
+function jurisdictionSnapshot(row: Pick<Doc<"jurisdictions">, "code" | "name" | "slug" | "status" | "isDefault" | "stagingBucketId" | "productionBucketId" | "providerSyncState">) {
+  return {
+    code: row.code, name: row.name, slug: row.slug, status: row.status, isDefault: row.isDefault,
+    stagingBucketId: row.stagingBucketId ?? null, productionBucketId: row.productionBucketId ?? null,
+    providerSyncState: row.providerSyncState,
+  };
+}
+
+function resourceSnapshot(row: Pick<Doc<"legalResources">, "jurisdictionId" | "type" | "title" | "issuer" | "officialCitation" | "sourceUrl" | "topics" | "effectiveDate" | "repealDate" | "status" | "activeVersionId">) {
+  const source = new URL(row.sourceUrl);
+  return {
+    jurisdictionId: row.jurisdictionId, type: row.type, title: row.title, issuer: row.issuer,
+    officialCitation: row.officialCitation, sourceUrl: `${source.host}${source.pathname}${source.search}${source.hash}`, topics: row.topics,
+    effectiveDate: row.effectiveDate, repealDate: row.repealDate ?? null, status: row.status,
+    activeVersionId: row.activeVersionId ?? null,
+  };
 }
 
 async function assertUniqueJurisdiction(
@@ -199,12 +261,17 @@ async function requireEnabledCatalogRead(
 export const listJurisdictions = query({
   args: {
     status: v.optional(jurisdictionStatusValidator),
+    code: v.optional(v.string()),
     paginationOpts: paginationOptsValidator,
   },
+  returns: paginationResultValidator(jurisdictionDocValidator),
   handler: async (ctx, args) => {
     await requireEnabledCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
-    const source = args.status
+    const code = args.code === undefined ? undefined : normalizeCode(args.code);
+    const source = code
+      ? ctx.db.query("jurisdictions").withIndex("by_code", (q) => q.eq("code", code))
+      : args.status
       ? ctx.db.query("jurisdictions").withIndex("by_status_and_name", (q) => q.eq("status", args.status!))
       : ctx.db.query("jurisdictions");
     return await source.paginate(args.paginationOpts);
@@ -249,7 +316,12 @@ export const createJurisdiction = mutation({
       targetType: "jurisdiction",
       targetId: id,
       reason,
-      after: JSON.stringify({ code, slug, status: "draft" }),
+      before: JSON.stringify(null),
+      after: JSON.stringify(jurisdictionSnapshot({
+        code, name: requiredText(args.name, "JURISDICTION_NAME"), slug, status: "draft",
+        isDefault: args.isDefault, stagingBucketId: optionalBucket(args.stagingBucketId),
+        productionBucketId: optionalBucket(args.productionBucketId), providerSyncState: "pending",
+      })),
     });
     return id;
   },
@@ -265,6 +337,7 @@ export const updateJurisdiction = mutation({
     isDefault: v.boolean(),
     reason: v.string(),
   },
+  returns: jurisdictionDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
@@ -290,8 +363,8 @@ export const updateJurisdiction = mutation({
       targetType: "jurisdiction",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ name: row.name, slug: row.slug }),
-      after: JSON.stringify({ name: patch.name, slug: patch.slug }),
+      before: JSON.stringify(jurisdictionSnapshot(row)),
+      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -299,6 +372,7 @@ export const updateJurisdiction = mutation({
 
 export const enableJurisdiction = mutation({
   args: { id: v.id("jurisdictions"), reason: v.string() },
+  returns: jurisdictionDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
@@ -313,8 +387,8 @@ export const enableJurisdiction = mutation({
       targetType: "jurisdiction",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ status: row.status }),
-      after: JSON.stringify({ status: patch.status }),
+      before: JSON.stringify(jurisdictionSnapshot(row)),
+      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -322,6 +396,7 @@ export const enableJurisdiction = mutation({
 
 export const archiveJurisdiction = mutation({
   args: { id: v.id("jurisdictions"), reason: v.string() },
+  returns: jurisdictionDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
@@ -347,8 +422,8 @@ export const archiveJurisdiction = mutation({
       targetType: "jurisdiction",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ status: row.status }),
-      after: JSON.stringify({ status: patch.status }),
+      before: JSON.stringify(jurisdictionSnapshot(row)),
+      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -360,6 +435,7 @@ export const listResources = query({
     status: v.optional(resourceStatusValidator),
     paginationOpts: paginationOptsValidator,
   },
+  returns: paginationResultValidator(resourceDocValidator),
   handler: async (ctx, args) => {
     await requireEnabledCatalogRead(ctx, "resource");
     validatePageSize(args.paginationOpts.numItems);
@@ -380,6 +456,7 @@ export const listResources = query({
 
 export const getResource = query({
   args: { id: v.id("legalResources") },
+  returns: resourceDetailValidator,
   handler: async (ctx, args) => {
     await requireEnabledCatalogRead(ctx, "resource");
     const resource = await ctx.db.get("legalResources", args.id);
@@ -404,7 +481,6 @@ const resourceMutationArgs = {
   sourceUrl: v.string(),
   topics: v.array(v.string()),
   effectiveDate: v.string(),
-  repealDate: v.optional(v.string()),
   reason: v.string(),
 } as const;
 
@@ -418,7 +494,6 @@ async function resourceInput(
     sourceUrl: string;
     topics: string[];
     effectiveDate: string;
-    repealDate?: string;
     exceptId?: Id<"legalResources">;
   },
 ) {
@@ -427,23 +502,24 @@ async function resourceInput(
     throw new ConvexError("JURISDICTION_NOT_AVAILABLE");
   }
   const officialCitation = requiredText(input.officialCitation, "OFFICIAL_CITATION");
+  const officialCitationKey = canonicalCitation(officialCitation);
   const citations = await ctx.db
     .query("legalResources")
-    .withIndex("by_jurisdictionId_and_officialCitation", (q) =>
-      q.eq("jurisdictionId", input.jurisdictionId).eq("officialCitation", officialCitation),
+    .withIndex("by_jurisdictionId_and_officialCitationKey", (q) =>
+      q.eq("jurisdictionId", input.jurisdictionId).eq("officialCitationKey", officialCitationKey),
     )
     .take(2);
   if (citations.some((row) => row._id !== input.exceptId)) {
     throw new ConvexError("RESOURCE_CITATION_EXISTS");
   }
-  const dates = validateDates(input.effectiveDate, input.repealDate);
   return {
     title: requiredText(input.title, "RESOURCE_TITLE"),
     issuer: requiredText(input.issuer, "RESOURCE_ISSUER"),
     officialCitation,
+    officialCitationKey,
     sourceUrl: validateSourceUrl(input.sourceUrl),
     topics: validateTopics(input.topics),
-    ...dates,
+    effectiveDate: validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
   };
 }
 
@@ -476,7 +552,10 @@ export const createResource = mutation({
       targetType: "legalResource",
       targetId: id,
       reason,
-      after: JSON.stringify({ jurisdictionId: args.jurisdictionId, type, status: "active" }),
+      before: JSON.stringify(null),
+      after: JSON.stringify(resourceSnapshot({
+        jurisdictionId: args.jurisdictionId, type, ...normalized, status: "active",
+      })),
     });
     return id;
   },
@@ -484,26 +563,36 @@ export const createResource = mutation({
 
 export const updateResource = mutation({
   args: { id: v.id("legalResources"), ...resourceMutationArgs },
+  returns: resourceDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
     if (row.status === "archived") throw new ConvexError("RESOURCE_ARCHIVED");
+    if (
+      (row.status === "active" && row.repealDate !== undefined) ||
+      (row.status === "repealed" && row.repealDate === undefined)
+    ) throw new ConvexError("RESOURCE_STATUS_DATE_MISMATCH");
     const normalized = await resourceInput(ctx, {
       jurisdictionId: row.jurisdictionId,
       ...args,
       exceptId: row._id,
     });
-    const patch = { ...normalized, updatedBy: actor.userId, updatedAt: Date.now() };
+    const patch = {
+      ...normalized,
+      ...(row.status === "repealed" ? { repealDate: row.repealDate } : {}),
+      updatedBy: actor.userId,
+      updatedAt: Date.now(),
+    };
     await ctx.db.patch(row._id, patch);
     await auditChange(ctx, actor, {
       action: "resource.updated",
       targetType: "legalResource",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ title: row.title, officialCitation: row.officialCitation }),
-      after: JSON.stringify({ title: patch.title, officialCitation: patch.officialCitation }),
+      before: JSON.stringify(resourceSnapshot(row)),
+      after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -511,6 +600,7 @@ export const updateResource = mutation({
 
 export const archiveResource = mutation({
   args: { id: v.id("legalResources"), reason: v.string() },
+  returns: resourceDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
     const reason = validateAuditReason(args.reason);
@@ -524,8 +614,8 @@ export const archiveResource = mutation({
       targetType: "legalResource",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ status: row.status }),
-      after: JSON.stringify({ status: patch.status }),
+      before: JSON.stringify(resourceSnapshot(row)),
+      after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -537,12 +627,14 @@ export const markResourceRepealed = mutation({
     repealDate: v.string(),
     reason: v.string(),
   },
+  returns: resourceDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
     if (row.status !== "active") throw new ConvexError("INVALID_RESOURCE_TRANSITION");
+    if (row.repealDate !== undefined) throw new ConvexError("RESOURCE_STATUS_DATE_MISMATCH");
     const repealDate = validateDate(args.repealDate, "REPEAL_DATE");
     if (repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
     const patch = {
@@ -557,8 +649,8 @@ export const markResourceRepealed = mutation({
       targetType: "legalResource",
       targetId: row._id,
       reason,
-      before: JSON.stringify({ status: row.status, repealDate: row.repealDate ?? null }),
-      after: JSON.stringify({ status: patch.status, repealDate }),
+      before: JSON.stringify(resourceSnapshot(row)),
+      after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
   },
@@ -566,6 +658,7 @@ export const markResourceRepealed = mutation({
 
 export const listVersions = query({
   args: { resourceId: v.id("legalResources"), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(versionDocValidator),
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "document", "read");
     validatePageSize(args.paginationOpts.numItems);

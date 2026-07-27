@@ -224,6 +224,12 @@ describe("jurisdiction governance", () => {
       }),
     ).resolves.toMatchObject({ status: "enabled" });
     await expect(
+      manager.client.mutation(enableJurisdiction, {
+        id: ghId,
+        reason: "Duplicate enable",
+      }),
+    ).rejects.toThrow("INVALID_JURISDICTION_TRANSITION");
+    await expect(
       manager.client.mutation(updateJurisdiction, {
         id: ghId,
         name: "Republic of Ghana",
@@ -236,6 +242,13 @@ describe("jurisdiction governance", () => {
     ).resolves.toMatchObject({ name: "Republic of Ghana" });
     await expect(manager.client.query(listJurisdictions, page)).resolves.toMatchObject({
       page: [expect.objectContaining({ code: "GH" })],
+    });
+    await expect(manager.client.query(listJurisdictions, {
+      code: "gh",
+      paginationOpts: { numItems: 25, cursor: null },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({ code: "GH" })],
+      isDone: true,
     });
 
     const audits = await t.run(async (ctx) =>
@@ -251,6 +264,17 @@ describe("jurisdiction governance", () => {
       "jurisdiction.enabled",
       "jurisdiction.updated",
     ]);
+    const updateAudit = audits[2];
+    expect(updateAudit.reason).toBe("Use official display name");
+    expect(updateAudit.correlationId).toMatch(/^op_[a-f0-9]{32}$/);
+    expect(JSON.parse(updateAudit.beforeSummary!)).toMatchObject({
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
+      isDefault: true, stagingBucketId: "staging-gh", productionBucketId: "11833",
+    });
+    expect(JSON.parse(updateAudit.afterSummary!)).toMatchObject({
+      code: "GH", name: "Republic of Ghana", slug: "ghana", status: "enabled",
+      isDefault: true, stagingBucketId: "staging-gh", productionBucketId: "11833",
+    });
 
     process.env.ADMIN_PANEL_ENABLED = "false";
     await expect(superAdmin.client.query(listJurisdictions, page)).rejects.toThrow(
@@ -305,6 +329,32 @@ describe("legal resource governance", () => {
     await expect(
       manager.client.mutation(createResource, {
         ...valid,
+        officialCitation: "  1992 CONSTITUTION  ",
+      }),
+    ).rejects.toThrow("RESOURCE_CITATION_EXISTS");
+    await expect(
+      manager.client.mutation(createResource, {
+        ...valid,
+        officialCitation: "1992 Constituti\u006fn".normalize("NFD"),
+      }),
+    ).rejects.toThrow("RESOURCE_CITATION_EXISTS");
+    await manager.client.mutation(createResource, {
+      ...valid,
+      title: "Cafe law",
+      officialCitation: "Caf\u00e9 Act",
+      sourceUrl: "https://example.gov.gh/cafe-act",
+    });
+    await expect(
+      manager.client.mutation(createResource, {
+        ...valid,
+        title: "Duplicate cafe law",
+        officialCitation: "Cafe\u0301 Act",
+        sourceUrl: "https://example.gov.gh/cafe-act-copy",
+      }),
+    ).rejects.toThrow("RESOURCE_CITATION_EXISTS");
+    await expect(
+      manager.client.mutation(createResource, {
+        ...valid,
         officialCitation: "Act 1",
         type: "bill",
       }),
@@ -318,8 +368,14 @@ describe("legal resource governance", () => {
         sourceUrl: "javascript:alert(1)",
         topics: [],
         effectiveDate: "1993-01-07",
-        repealDate: "1992-01-01",
         reason: "Invalid update",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      manager.client.mutation(createResource, {
+        ...valid,
+        officialCitation: "Act with invalid lifecycle",
+        repealDate: "2024-01-01",
       }),
     ).rejects.toThrow();
   });
@@ -355,11 +411,55 @@ describe("legal resource governance", () => {
       }),
     ).resolves.toMatchObject({ status: "repealed", repealDate: "2024-01-31" });
     await expect(
+      manager.client.mutation(markResourceRepealed, {
+        id: resourceId,
+        repealDate: "2024-02-01",
+        reason: "Duplicate repeal",
+      }),
+    ).rejects.toThrow("INVALID_RESOURCE_TRANSITION");
+    await expect(
+      manager.client.mutation(updateResource, {
+        id: resourceId,
+        title: "Updated title",
+        issuer: "Updated issuer",
+        officialCitation: "Act 843",
+        sourceUrl: "https://example.gov.gh/act-843-updated",
+        topics: ["privacy", "data"],
+        effectiveDate: "2012-05-10",
+        reason: "Update governed metadata",
+      }),
+    ).resolves.toMatchObject({ status: "repealed", repealDate: "2024-01-31" });
+    await expect(
       manager.client.mutation(archiveJurisdiction, {
         id: jurisdictionId,
         reason: "Retire catalog",
       }),
     ).resolves.toMatchObject({ status: "archived" });
+    await expect(
+      manager.client.mutation(archiveJurisdiction, {
+        id: jurisdictionId,
+        reason: "Duplicate archive",
+      }),
+    ).rejects.toThrow("INVALID_JURISDICTION_TRANSITION");
+
+    const resourceAudits = await t.run(async (ctx) =>
+      ctx.db.query("auditEvents").withIndex("by_targetType_and_targetId", (q) =>
+        q.eq("targetType", "legalResource").eq("targetId", resourceId),
+      ).take(10),
+    );
+    const updateAudit = resourceAudits.find((row) => row.action === "resource.updated")!;
+    expect(updateAudit.reason).toBe("Update governed metadata");
+    expect(updateAudit.correlationId).toMatch(/^op_[a-f0-9]{32}$/);
+    expect(JSON.parse(updateAudit.beforeSummary!)).toMatchObject({
+      issuer: "Parliament of Ghana", sourceUrl: "example.gov.gh/act-843",
+      topics: ["privacy"], effectiveDate: "2012-05-10", repealDate: "2024-01-31",
+      status: "repealed",
+    });
+    expect(JSON.parse(updateAudit.afterSummary!)).toMatchObject({
+      issuer: "Updated issuer", sourceUrl: "example.gov.gh/act-843-updated",
+      topics: ["privacy", "data"], effectiveDate: "2012-05-10", repealDate: "2024-01-31",
+      status: "repealed",
+    });
   });
 
   it("blocks jurisdiction archival while active resources exist, then archives both records", async () => {
@@ -397,6 +497,19 @@ describe("legal resource governance", () => {
         reason: "Instrument withdrawn",
       }),
     ).resolves.toMatchObject({ status: "archived" });
+    await expect(
+      manager.client.mutation(archiveResource, {
+        id: resourceId,
+        reason: "Duplicate archive",
+      }),
+    ).rejects.toThrow("INVALID_RESOURCE_TRANSITION");
+    await expect(
+      manager.client.mutation(markResourceRepealed, {
+        id: resourceId,
+        repealDate: "2025-01-01",
+        reason: "Out of order repeal",
+      }),
+    ).rejects.toThrow("INVALID_RESOURCE_TRANSITION");
     await expect(
       manager.client.mutation(archiveJurisdiction, {
         id: jurisdictionId,

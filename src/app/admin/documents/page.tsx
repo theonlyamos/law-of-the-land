@@ -23,6 +23,8 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const parameters = await searchParams;
   const navigation = readAdminTableNavigation(parameters);
   const status = single(parameters.status);
+  const jurisdictionCode = single(parameters.jurisdictionCode);
+  const jurisdictionCursor = single(parameters.jurisdictionCursor) || null;
   const validStatus = status === "" || STATUSES.includes(status as (typeof STATUSES)[number]);
   const access = await authorizeAdminPage();
   if (
@@ -43,15 +45,20 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
     } catch { failed = true; }
   }
   const rows = (result && "page" in result ? result.page : []) as Doc<"legalResources">[];
-  let jurisdictionIds: string[] = [];
+  let jurisdictionOptions: Array<{ id: string; code: string; name: string }> = [];
+  let jurisdictionNextCursor = "";
+  let jurisdictionIsDone = true;
   if (canWrite && !failed) {
     try {
       const jurisdictions = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
-        paginationOpts: { numItems: 100, cursor: null },
+        paginationOpts: { numItems: 25, cursor: jurisdictionCursor },
+        ...(jurisdictionCode ? { code: jurisdictionCode } : {}),
       });
-      jurisdictionIds = jurisdictions.page
+      jurisdictionOptions = jurisdictions.page
         .filter((jurisdiction) => jurisdiction.status !== "archived")
-        .map((jurisdiction) => jurisdiction._id);
+        .map((jurisdiction) => ({ id: jurisdiction._id, code: jurisdiction.code, name: jurisdiction.name }));
+      jurisdictionNextCursor = jurisdictions.continueCursor;
+      jurisdictionIsDone = jurisdictions.isDone;
     } catch { failed = true; }
   }
 
@@ -64,10 +71,14 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         </div>
         <p className="max-w-[48ch] text-sm leading-6 text-[oklch(41%_0.035_252)]">Canonical instruments are governed independently from their immutable file versions and review history.</p>
       </header>
-      {canWrite && jurisdictionIds.length > 0 ? (
+      {canWrite ? (
         <section className="mt-8" aria-labelledby="new-resource-heading">
           <h2 id="new-resource-heading" className="mb-4 text-xl font-semibold tracking-[-0.025em]">Create canonical legal resource</h2>
-          <ResourceEditor jurisdictionIds={jurisdictionIds} />
+          <ResourceEditor
+            jurisdictionIds={jurisdictionOptions.map((row) => row.id)}
+            jurisdictionOptions={jurisdictionOptions}
+            jurisdictionPicker={{ searchCode: jurisdictionCode, currentCursor: jurisdictionCursor, nextCursor: jurisdictionNextCursor, isDone: jurisdictionIsDone }}
+          />
         </section>
       ) : null}
       <div className="mt-8">

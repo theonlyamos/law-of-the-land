@@ -34,5 +34,28 @@ describe("catalog mutation controls", () => {
     expect(screen.getByRole("textbox", { name: "Official citation" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Create legal resource" })).toBeVisible();
     expect(screen.queryByLabelText("Status")).toBeNull();
+    expect(screen.queryByLabelText("Repeal date")).toBeNull();
+  });
+
+  it("bounds jurisdiction options and exposes exact-code search and cursor navigation", () => {
+    const jurisdictions = Array.from({ length: 25 }, (_, index) => ({
+      id: `jurisdiction_${index + 1}`,
+      code: `X${String(index).padStart(2, "0")}`,
+      name: `Jurisdiction ${index + 1}`,
+    }));
+    render(
+      <ResourceEditor
+        jurisdictionIds={jurisdictions.map((row) => row.id)}
+        jurisdictionOptions={jurisdictions}
+        jurisdictionPicker={{ searchCode: "", nextCursor: "cursor-25", isDone: false }}
+      />,
+    );
+    const jurisdictionSelect = screen.getByLabelText("Jurisdiction ID");
+    expect(jurisdictionSelect.querySelectorAll("option")).toHaveLength(25);
+    expect(screen.getByRole("textbox", { name: "Find jurisdiction by ISO code" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Next jurisdictions" })).toHaveAttribute(
+      "href",
+      "/admin/documents?jurisdictionCursor=cursor-25",
+    );
   });
 });

@@ -4,6 +4,7 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useMutation } from "convex/react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { type FormEvent, useState } from "react";
 
 const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[oklch(98%_0.01_82)] px-3 text-base text-[oklch(23%_0.045_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700";
@@ -105,7 +106,17 @@ type ResourceInput = {
   status: "active" | "repealed" | "archived";
 };
 
-export function ResourceEditor({ jurisdictionIds, resource }: { jurisdictionIds: readonly string[]; resource?: ResourceInput }) {
+export function ResourceEditor({
+  jurisdictionIds,
+  jurisdictionOptions,
+  jurisdictionPicker,
+  resource,
+}: {
+  jurisdictionIds: readonly string[];
+  jurisdictionOptions?: readonly { id: string; code: string; name: string }[];
+  jurisdictionPicker?: { searchCode: string; currentCursor?: string | null; nextCursor: string; isDone: boolean };
+  resource?: ResourceInput;
+}) {
   const router = useRouter();
   const create = useMutation(api.admin.resources.createResource);
   const update = useMutation(api.admin.resources.updateResource);
@@ -132,7 +143,7 @@ export function ResourceEditor({ jurisdictionIds, resource }: { jurisdictionIds:
         const values = {
           title: text(data, "title"), issuer: text(data, "issuer"), officialCitation: text(data, "officialCitation"),
           sourceUrl: text(data, "sourceUrl"), topics: text(data, "topics").split(",").map((value) => value.trim()).filter(Boolean),
-          effectiveDate: text(data, "effectiveDate"), repealDate: optionalText(data, "repealDate"), reason,
+          effectiveDate: text(data, "effectiveDate"), reason,
         };
         if (resource) await update({ id: resource.id as Id<"legalResources">, ...values });
         else await create({ jurisdictionId: text(data, "jurisdictionId") as Id<"jurisdictions">, type: text(data, "type"), ...values });
@@ -143,9 +154,26 @@ export function ResourceEditor({ jurisdictionIds, resource }: { jurisdictionIds:
     finally { setPending(false); }
   }
 
+  const options = jurisdictionOptions ?? jurisdictionIds.map((id) => ({ id, code: id, name: id }));
+  const nextParameters = new URLSearchParams();
+  if (jurisdictionPicker?.searchCode) nextParameters.set("jurisdictionCode", jurisdictionPicker.searchCode);
+  if (jurisdictionPicker?.nextCursor) nextParameters.set("jurisdictionCursor", jurisdictionPicker.nextCursor);
+
   return (
-    <form onSubmit={submit} className="grid gap-4 border-y border-[oklch(73%_0.03_77)] bg-[oklch(94%_0.022_79)] px-4 py-5 sm:grid-cols-2 lg:grid-cols-4">
-      {!resource ? <label className={labelClass}>Jurisdiction ID<select name="jurisdictionId" required className={fieldClass}>{jurisdictionIds.map((id) => <option key={id} value={id}>{id}</option>)}</select></label> : null}
+    <div className="grid gap-4">
+      {!resource && jurisdictionPicker ? (
+        <div className="flex flex-wrap items-end gap-3 border-t border-[oklch(73%_0.03_77)] pt-4">
+          <form action="/admin/documents" method="get" className="flex flex-wrap items-end gap-3">
+            <label className={labelClass}>Find jurisdiction by ISO code<input aria-label="Find jurisdiction by ISO code" name="jurisdictionCode" defaultValue={jurisdictionPicker.searchCode} maxLength={2} className={fieldClass} /></label>
+            <button className={secondaryButtonClass}>Find jurisdiction</button>
+          </form>
+          {!jurisdictionPicker.isDone ? <Link className={secondaryButtonClass} href={`/admin/documents?${nextParameters.toString()}`}>Next jurisdictions</Link> : null}
+          {jurisdictionPicker.currentCursor ? <Link className={secondaryButtonClass} href="/admin/documents">First jurisdiction page</Link> : null}
+          {jurisdictionPicker.searchCode ? <Link className={secondaryButtonClass} href="/admin/documents">Clear jurisdiction search</Link> : null}
+        </div>
+      ) : null}
+      <form onSubmit={submit} className="grid gap-4 border-y border-[oklch(73%_0.03_77)] bg-[oklch(94%_0.022_79)] px-4 py-5 sm:grid-cols-2 lg:grid-cols-4">
+      {!resource ? <label className={labelClass}>Jurisdiction ID<select name="jurisdictionId" required disabled={options.length === 0} className={fieldClass}>{options.length === 0 ? <option>No jurisdiction on this page</option> : options.map((option) => <option key={option.id} value={option.id}>{option.code} / {option.name}</option>)}</select></label> : null}
       {!resource ? <label className={labelClass}>Resource type<select name="type" required className={fieldClass}>{["constitution", "act", "regulation", "ordinance", "judgment", "policy", "guidance"].map((type) => <option key={type}>{type}</option>)}</select></label> : null}
       <label className={labelClass}>Title<input name="title" defaultValue={resource?.title} required className={fieldClass} /></label>
       <label className={labelClass}>Issuer<input name="issuer" defaultValue={resource?.issuer} required className={fieldClass} /></label>
@@ -153,14 +181,15 @@ export function ResourceEditor({ jurisdictionIds, resource }: { jurisdictionIds:
       <label className={labelClass}>Official HTTPS source<input type="url" name="sourceUrl" defaultValue={resource?.sourceUrl} required className={fieldClass} /></label>
       <label className={labelClass}>Topics, comma separated<input name="topics" defaultValue={resource?.topics.join(", ")} className={fieldClass} /></label>
       <label className={labelClass}>Effective date<input type="date" name="effectiveDate" defaultValue={resource?.effectiveDate} required className={fieldClass} /></label>
-      <label className={labelClass}>Repeal date<input type="date" name="repealDate" defaultValue={resource?.repealDate} className={fieldClass} /></label>
+      {resource?.status === "active" ? <label className={labelClass}>Repeal transition date<input type="date" name="repealDate" className={fieldClass} /></label> : null}
       <label className={`${labelClass} sm:col-span-2`}>Audit reason<input name="reason" required minLength={3} maxLength={500} className={fieldClass} /></label>
       <div className="flex flex-wrap gap-3 sm:col-span-2 lg:col-span-4">
-        <button value="save" disabled={pending} className={buttonClass}>{resource ? "Save resource metadata" : "Create legal resource"}</button>
+        <button value="save" disabled={pending || (!resource && options.length === 0)} className={buttonClass}>{resource ? "Save resource metadata" : "Create legal resource"}</button>
         {resource?.status === "active" ? <button value="repeal" disabled={pending} className={secondaryButtonClass}>Mark resource repealed</button> : null}
         {resource && resource.status !== "archived" ? <button value="archive" disabled={pending} className={secondaryButtonClass}>Archive legal resource</button> : null}
       </div>
       {error ? <p role="alert" className="text-sm text-red-800 sm:col-span-2 lg:col-span-4">{error}</p> : null}
-    </form>
+      </form>
+    </div>
   );
 }
