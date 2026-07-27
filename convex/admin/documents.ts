@@ -186,7 +186,9 @@ export const createDocumentVersion = mutation({
     const limit = uploadLimit();
     const resource = await ctx.db.get("legalResources", args.resourceId);
     if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
-    if (resource.status === "archived") throw new ConvexError("RESOURCE_ARCHIVED");
+    if (resource.status !== "active") {
+      throw new ConvexError("RESOURCE_NOT_ACTIVE");
+    }
 
     const { filename, extension } = validatedFilename(args.filename);
     const mimeType = validatedMime(args.mimeType, extension);
@@ -194,6 +196,13 @@ export const createDocumentVersion = mutation({
     const sha256 = validatedSha256(args.sha256);
     const sourceUrl = validatedSourceUrl(args.sourceUrl, resource.sourceUrl);
     const effectiveDate = validatedDate(args.effectiveAt);
+    const resourceEffectiveDate = validatedDate(resource.effectiveDate);
+    if (
+      Date.parse(`${effectiveDate}T00:00:00.000Z`) <
+      Date.parse(`${resourceEffectiveDate}T00:00:00.000Z`)
+    ) {
+      throw new ConvexError("DOCUMENT_EFFECTIVE_DATE_BEFORE_RESOURCE");
+    }
 
     const metadata = await ctx.db.system.get("_storage", args.storageId);
     if (!metadata) throw new ConvexError("DOCUMENT_STORAGE_NOT_FOUND");

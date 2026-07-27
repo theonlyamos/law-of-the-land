@@ -53,7 +53,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
           <ResourceEditor jurisdictionIds={[resource.jurisdictionId]} resource={{ id: resource._id, jurisdictionId: resource.jurisdictionId, type: resource.type, title: resource.title, issuer: resource.issuer, officialCitation: resource.officialCitation, sourceUrl: resource.sourceUrl, topics: resource.topics, effectiveDate: resource.effectiveDate, repealDate: resource.repealDate, status: resource.status }} />
         </section>
       ) : null}
-      {canUpload ? (
+      {canUpload && resource.status === "active" ? (
         <section className="mt-10" aria-label="Original document upload">
           {uploadLimit === null ? (
             <p role="alert" className="border-y border-[oklch(64%_0.09_45)] bg-[oklch(95%_0.035_55)] px-5 py-5 text-sm font-medium text-[oklch(34%_0.08_35)]">
@@ -62,6 +62,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
           ) : (
             <DocumentUpload
               resourceId={resource._id}
+              resourceStatus={resource.status}
               defaultSourceUrl={resource.sourceUrl}
               defaultEffectiveAt={resource.effectiveDate}
               maxBytes={uploadLimit}

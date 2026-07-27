@@ -27,11 +27,13 @@ type UploadState =
 
 export function DocumentUpload({
   resourceId,
+  resourceStatus,
   defaultSourceUrl,
   defaultEffectiveAt,
   maxBytes,
 }: {
   resourceId: string;
+  resourceStatus: "active" | "repealed" | "archived";
   defaultSourceUrl: string;
   defaultEffectiveAt: string;
   maxBytes: number;
@@ -46,6 +48,8 @@ export function DocumentUpload({
   const [effectiveAt, setEffectiveAt] = useState(defaultEffectiveAt);
   const [state, setState] = useState<UploadState>({ kind: "idle" });
   const busy = state.kind === "busy";
+
+  if (resourceStatus !== "active") return null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

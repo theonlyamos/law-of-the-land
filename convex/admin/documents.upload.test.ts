@@ -91,7 +91,10 @@ async function asAdmin(t: Backend, role: string) {
   };
 }
 
-async function seedResource(t: Backend, status: "active" | "archived" = "active") {
+async function seedResource(
+  t: Backend,
+  status: "active" | "repealed" | "archived" = "active",
+) {
   return await t.run(async (ctx) => {
     const now = Date.now();
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
@@ -118,6 +121,7 @@ async function seedResource(t: Backend, status: "active" | "archived" = "active"
       sourceUrl: "https://laws.example.gov/catalog/act-843",
       topics: ["privacy"],
       effectiveDate: "2012-10-16",
+      ...(status === "repealed" ? { repealDate: "2020-01-01" } : {}),
       status,
       createdBy: "fixture",
       updatedBy: "fixture",
@@ -288,6 +292,7 @@ describe("governed original-file uploads", () => {
     await enablePanel(t);
     const manager = await asAdmin(t, "content_manager");
     const resourceId = await seedResource(t);
+    const repealedId = await seedResource(t, "repealed");
     const archivedId = await seedResource(t, "archived");
     const storageId = await storeFile(t);
     const valid = {
@@ -315,9 +320,15 @@ describe("governed original-file uploads", () => {
     await expect(
       manager.client.mutation(createDocumentVersion, {
         ...valid,
+        resourceId: repealedId,
+      }),
+    ).rejects.toThrow("RESOURCE_NOT_ACTIVE");
+    await expect(
+      manager.client.mutation(createDocumentVersion, {
+        ...valid,
         resourceId: archivedId,
       }),
-    ).rejects.toThrow("RESOURCE_ARCHIVED");
+    ).rejects.toThrow("RESOURCE_NOT_ACTIVE");
     process.env.ADMIN_MAX_DOCUMENT_BYTES = "2";
     await expect(
       manager.client.mutation(createDocumentVersion, valid),
@@ -326,6 +337,39 @@ describe("governed original-file uploads", () => {
     await expect(
       manager.client.mutation(createDocumentVersion, valid),
     ).rejects.toThrow("DOCUMENT_UPLOAD_NOT_CONFIGURED");
+  });
+
+  it("accepts the governed effective-date boundary and rejects an earlier date", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const resourceId = await seedResource(t);
+    const earlierStorageId = await storeFile(t, "def");
+    const boundaryStorageId = await storeFile(t, "abc");
+    const base = {
+      resourceId,
+      filename: "law.pdf",
+      mimeType: "application/pdf",
+      byteSize: 3,
+      sourceUrl: "https://laws.example.gov/files/law.pdf",
+    };
+
+    await expect(
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: earlierStorageId,
+        sha256: "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34",
+        effectiveAt: "2012-10-15",
+      }),
+    ).rejects.toThrow("DOCUMENT_EFFECTIVE_DATE_BEFORE_RESOURCE");
+    await expect(
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: boundaryStorageId,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        effectiveAt: "2012-10-16",
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("rejects a duplicate checksum in the same resource while permitting it in another resource", async () => {
@@ -361,5 +405,126 @@ describe("governed original-file uploads", () => {
         storageId: thirdStorageId,
       }),
     ).resolves.toBeTruthy();
+  });
+
+  it("allocates unique monotonic versions for concurrent distinct originals", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const resourceId = await seedResource(t);
+    const firstStorageId = await storeFile(t, "abc");
+    const secondStorageId = await storeFile(t, "def");
+    const base = {
+      resourceId,
+      filename: "law.pdf",
+      mimeType: "application/pdf",
+      byteSize: 3,
+      sourceUrl: "https://laws.example.gov/files/law.pdf",
+      effectiveAt: "2012-10-16",
+    };
+
+    await Promise.all([
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: firstStorageId,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      }),
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: secondStorageId,
+        sha256: "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34",
+      }),
+    ]);
+
+    const state = await t.run(async (ctx) => ({
+      versions: await ctx.db
+        .query("documentVersions")
+        .withIndex("by_resourceId_and_versionNumber", (q) =>
+          q.eq("resourceId", resourceId),
+        )
+        .take(3),
+      counter: await ctx.db
+        .query("resourceVersionCounters")
+        .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+        .unique(),
+    }));
+    expect(state.versions.map((row) => row.versionNumber)).toEqual([1, 2]);
+    expect(state.counter?.nextVersionNumber).toBe(3);
+  });
+
+  it("allows exactly one winner for concurrent identical checksums", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const resourceId = await seedResource(t);
+    const firstStorageId = await storeFile(t, "abc");
+    const secondStorageId = await storeFile(t, "abc");
+    const base = {
+      resourceId,
+      filename: "law.pdf",
+      mimeType: "application/pdf",
+      byteSize: 3,
+      sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      sourceUrl: "https://laws.example.gov/files/law.pdf",
+      effectiveAt: "2012-10-16",
+    };
+
+    const results = await Promise.allSettled([
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: firstStorageId,
+      }),
+      manager.client.mutation(createDocumentVersion, {
+        ...base,
+        storageId: secondStorageId,
+      }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: "DUPLICATE_DOCUMENT_CHECKSUM" }),
+    });
+    const state = await t.run(async (ctx) => ({
+      versions: await ctx.db
+        .query("documentVersions")
+        .withIndex("by_resourceId_and_versionNumber", (q) =>
+          q.eq("resourceId", resourceId),
+        )
+        .take(2),
+      counter: await ctx.db
+        .query("resourceVersionCounters")
+        .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+        .unique(),
+    }));
+    expect(state.versions).toHaveLength(1);
+    expect(state.counter?.nextVersionNumber).toBe(2);
+  });
+
+  it("rejects a claim that disagrees with authoritative stored contentType", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const resourceId = await seedResource(t);
+    const storageId = await storeFile(t, "abc", "application/pdf");
+    await t.run(async (ctx) => {
+      await ctx.db.patch(
+        storageId as unknown as Id<"documentVersions">,
+        { contentType: "application/pdf" } as never,
+      );
+    });
+
+    await expect(
+      manager.client.mutation(createDocumentVersion, {
+        resourceId,
+        storageId,
+        filename: "law.png",
+        mimeType: "image/png",
+        byteSize: 3,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        sourceUrl: "https://laws.example.gov/files/law.png",
+        effectiveAt: "2012-10-16",
+      }),
+    ).rejects.toThrow("DOCUMENT_MIME_MISMATCH");
   });
 });

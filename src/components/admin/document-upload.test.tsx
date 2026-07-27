@@ -36,10 +36,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderUpload() {
+function renderUpload(resourceStatus: "active" | "repealed" | "archived" = "active") {
   render(
     <DocumentUpload
       resourceId="resource_1"
+      resourceStatus={resourceStatus}
       defaultSourceUrl="https://laws.example.gov/files/act.pdf"
       defaultEffectiveAt="2012-10-16"
       maxBytes={100}
@@ -62,6 +63,15 @@ describe("document original upload", () => {
     expect(screen.getByText(/100 B maximum/i)).toBeVisible();
     expect(screen.getByRole("button", { name: "Upload draft version" })).toBeVisible();
   });
+
+  it.each(["repealed", "archived"] as const)(
+    "does not render upload controls for a %s resource",
+    (status) => {
+      renderUpload(status);
+      expect(screen.queryByRole("heading", { name: "Add an original" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Upload draft version" })).toBeNull();
+    },
+  );
 
   it("stops an unsupported file before requesting an upload URL", async () => {
     renderUpload();
