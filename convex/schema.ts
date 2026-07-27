@@ -261,6 +261,44 @@ export default defineSchema({
   })
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_targetUserId_and_createdAt", ["targetUserId", "createdAt"]),
+  integrationJobs: defineTable({
+    type: v.union(
+      v.literal("create_bucket"),
+      v.literal("ingest_remote"),
+      v.literal("copy_documents"),
+      v.literal("delete_documents"),
+      v.literal("poll_process"),
+    ),
+    targetType: v.string(),
+    targetId: v.string(),
+    payload: v.string(),
+    actorId: v.string(),
+    actorRoles: v.array(v.string()),
+    idempotencyKey: v.string(),
+    requestFingerprint: v.string(),
+    correlationId: v.string(),
+    callbackTokenHash: v.string(),
+    processId: v.optional(v.string()),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("waiting_callback"),
+      v.literal("succeeded"),
+      v.literal("failed"),
+      v.literal("cancelled"),
+      v.literal("manual_review"),
+    ),
+    attemptCount: v.number(),
+    nextAttemptAt: v.optional(v.number()),
+    lastErrorKind: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_actorId_and_idempotencyKey", ["actorId", "idempotencyKey"])
+    .index("by_callbackTokenHash", ["callbackTokenHash"])
+    .index("by_processId", ["processId"])
+    .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
+    .index("by_targetType_and_targetId", ["targetType", "targetId"]),
   adminAccessGrants: defineTable({
     adminId: v.string(),
     chatSessionId: v.id("chatSessions"),
