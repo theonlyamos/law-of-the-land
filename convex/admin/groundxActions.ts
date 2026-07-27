@@ -36,7 +36,7 @@ type Adapter = Pick<GroundxAdapter, "createBucket" | "ingestRemote" | "copyDocum
 
 export async function executeGroundxJob(adapter: Adapter, job: Doc<"integrationJobs">) {
   const raw: unknown = JSON.parse(job.payload);
-  if (job.status === "waiting_callback" || job.type === "poll_process") {
+  if (job.processId !== undefined || job.type === "poll_process") {
     const processId = job.processId ?? payloadSchemas.poll_process.parse(raw).processId;
     return await adapter.getProcess({ processId });
   }
@@ -55,32 +55,53 @@ export async function executeGroundxJob(adapter: Adapter, job: Doc<"integrationJ
 }
 
 export const runGroundxJob = internalAction({
-  args: { jobId: v.id("integrationJobs") },
+  args: {
+    jobId: v.id("integrationJobs"),
+    leaseToken: v.optional(v.string()),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const before = (await ctx.runQuery(getJobRef, { jobId: args.jobId })) as Doc<"integrationJobs"> | null;
-    if (!before) return null;
-    if (!(await ctx.runMutation(claimJobRef, { jobId: args.jobId }))) return null;
+    const claim = args.leaseToken
+      ? ((await ctx.runQuery(getJobRef, {
+          jobId: args.jobId,
+          leaseToken: args.leaseToken,
+        })) as Doc<"integrationJobs"> | null)
+      : ((await ctx.runMutation(claimJobRef, { jobId: args.jobId })) as {
+          leaseToken: string;
+          job: Doc<"integrationJobs">;
+        } | null);
+    if (!claim) return null;
+    const leaseToken = args.leaseToken ?? (claim as { leaseToken: string }).leaseToken;
+    const job = args.leaseToken
+      ? (claim as Doc<"integrationJobs">)
+      : (claim as { job: Doc<"integrationJobs"> }).job;
     const apiKey = process.env.GROUNDX_API_KEY;
     if (!apiKey) {
-      await ctx.runMutation(failureRef, { jobId: args.jobId, kind: "authentication" });
+      await ctx.runMutation(failureRef, {
+        jobId: args.jobId,
+        leaseToken,
+        kind: "authentication",
+      });
       return null;
     }
+    let result: Awaited<ReturnType<typeof executeGroundxJob>>;
     try {
-      const result = await executeGroundxJob(new GroundxAdapter({ apiKey }), before);
-      await ctx.runMutation(resultRef, {
-        jobId: args.jobId,
-        processId: result.processId,
-        status: result.status,
-      });
+      result = await executeGroundxJob(new GroundxAdapter({ apiKey }), job);
     } catch (error) {
       const kind = error instanceof ProviderError ? error.kind : "invalid_response";
       await ctx.runMutation(failureRef, {
         jobId: args.jobId,
+        leaseToken,
         kind,
-        retryable: error instanceof ProviderError ? error.retryable : false,
       });
+      return null;
     }
+    await ctx.runMutation(resultRef, {
+      jobId: args.jobId,
+      leaseToken,
+      processId: result.processId,
+      status: result.status,
+    });
     return null;
   },
 });
