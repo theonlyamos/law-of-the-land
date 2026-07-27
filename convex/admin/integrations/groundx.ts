@@ -119,6 +119,7 @@ const copyDocumentsInputSchema = documentIdsInputSchema.extend({
 
 export type ProviderErrorKind =
   | "invalid_request"
+  | "validation"
   | "authentication"
   | "not_found"
   | "rate_limit"
@@ -189,6 +190,9 @@ function invalidResponse(status: number | null = null): ProviderError {
 }
 
 function errorForStatus(status: number): ProviderError {
+  if (status === 400 || status === 422) {
+    return new ProviderError("validation", false, status, "GroundX rejected the request");
+  }
   if (status === 401 || status === 403) {
     return new ProviderError("authentication", false, status, "GroundX authentication failed");
   }

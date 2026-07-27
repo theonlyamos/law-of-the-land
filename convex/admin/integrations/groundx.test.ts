@@ -116,7 +116,8 @@ describe("GroundxAdapter SDK bindings", () => {
   });
 
   it("gets normalized process progress through the SDK", async () => {
-    const adapter = makeAdapter();
+    const sdk = makeSdk();
+    const adapter = makeAdapter({ sdk });
 
     await expect(adapter.getProcess({ processId: "process-1" })).resolves.toEqual({
       processId: "process-1",
@@ -124,6 +125,10 @@ describe("GroundxAdapter SDK bindings", () => {
       statusMessage: "Indexing",
       progress: { complete: 2, processing: 1, errors: 0, cancelled: 0 },
     });
+    expect(sdk.documents.getProcessingStatusById).toHaveBeenCalledWith(
+      { processId: "process-1" },
+      { timeout: 25 },
+    );
   });
 
   it("deletes documents through the SDK and returns its process", async () => {
@@ -140,7 +145,8 @@ describe("GroundxAdapter SDK bindings", () => {
   });
 
   it("returns a narrow normalized document", async () => {
-    const adapter = makeAdapter();
+    const sdk = makeSdk();
+    const adapter = makeAdapter({ sdk });
 
     await expect(adapter.getDocument({ documentId: "doc-1" })).resolves.toEqual({
       documentId: "doc-1",
@@ -155,10 +161,15 @@ describe("GroundxAdapter SDK bindings", () => {
       xrayUrl: "https://groundx.example/xray/doc-1",
       searchData: { jurisdiction: "GH" },
     });
+    expect(sdk.documents.get).toHaveBeenCalledWith(
+      { documentId: "doc-1" },
+      { timeout: 25 },
+    );
   });
 
   it("returns normalized service health through the SDK", async () => {
-    const adapter = makeAdapter();
+    const sdk = makeSdk();
+    const adapter = makeAdapter({ sdk });
 
     await expect(adapter.health()).resolves.toEqual({
       services: [
@@ -169,6 +180,7 @@ describe("GroundxAdapter SDK bindings", () => {
         },
       ],
     });
+    expect(sdk.health.list).toHaveBeenCalledWith({ timeout: 25 });
   });
 });
 
@@ -209,6 +221,49 @@ describe("GroundxAdapter copy binding", () => {
 });
 
 describe("GroundxAdapter failures", () => {
+  it.each([
+    [400, "validation", false, "GroundX rejected the request"],
+    [422, "validation", false, "GroundX rejected the request"],
+    [404, "not_found", false, "GroundX resource was not found"],
+    [429, "rate_limit", true, "GroundX rate limit exceeded"],
+    [408, "timeout", true, "GroundX request timed out"],
+    [503, "provider", true, "GroundX service request failed"],
+  ] as const)(
+    "maps SDK HTTP %i to %s without exposing provider data",
+    async (status, kind, retryable, message) => {
+      const sdk = makeSdk();
+      sdk.health.list.mockRejectedValue({
+        response: { status, data: "groundx-test-secret raw body" },
+      });
+      const adapter = makeAdapter({ sdk });
+
+      await expect(adapter.health()).rejects.toEqual(
+        expect.objectContaining({ kind, retryable, status, message }),
+      );
+    },
+  );
+
+  it.each([
+    [400, "validation", false, "GroundX rejected the request"],
+    [422, "validation", false, "GroundX rejected the request"],
+    [404, "not_found", false, "GroundX resource was not found"],
+    [429, "rate_limit", true, "GroundX rate limit exceeded"],
+    [504, "timeout", true, "GroundX request timed out"],
+    [500, "provider", true, "GroundX service request failed"],
+  ] as const)(
+    "maps copy HTTP %i to %s without reading provider data",
+    async (status, kind, retryable, message) => {
+      const text = vi.fn();
+      const fetch = vi.fn().mockResolvedValue({ ok: false, status, text });
+      const adapter = makeAdapter({ fetch });
+
+      await expect(
+        adapter.copyDocuments({ fromBucket: 1, toBucket: 2, documentIds: ["doc-1"] }),
+      ).rejects.toEqual(expect.objectContaining({ kind, retryable, status, message }));
+      expect(text).not.toHaveBeenCalled();
+    },
+  );
+
   it("classifies rate limits without exposing provider response bodies", async () => {
     const secretBody = "provider-debug groundx-test-secret";
     const sdk = makeSdk();
@@ -287,6 +342,77 @@ describe("GroundxAdapter failures", () => {
     );
   });
 
+  it.each([
+    [
+      "bucket",
+      (sdk: ReturnType<typeof makeSdk>) =>
+        sdk.buckets.create.mockResolvedValue({ data: {} }),
+      (adapter: GroundxAdapter) => adapter.createBucket({ name: "Ghana" }),
+    ],
+    [
+      "process status",
+      (sdk: ReturnType<typeof makeSdk>) =>
+        sdk.documents.getProcessingStatusById.mockResolvedValue({
+          data: { ingest: { status: "processing" } },
+        }),
+      (adapter: GroundxAdapter) => adapter.getProcess({ processId: "process-1" }),
+    ],
+    [
+      "document",
+      (sdk: ReturnType<typeof makeSdk>) =>
+        sdk.documents.get.mockResolvedValue({
+          data: { document: { documentId: "" } },
+        }),
+      (adapter: GroundxAdapter) => adapter.getDocument({ documentId: "doc-1" }),
+    ],
+    [
+      "health",
+      (sdk: ReturnType<typeof makeSdk>) =>
+        sdk.health.list.mockResolvedValue({
+          data: {
+            health: {
+              services: [
+                { service: "ingest", status: "unexpected", lastUpdate: "now" },
+              ],
+            },
+          },
+        }),
+      (adapter: GroundxAdapter) => adapter.health(),
+    ],
+  ] as const)("rejects a malformed %s response envelope", async (_family, arrange, act) => {
+    const sdk = makeSdk();
+    arrange(sdk);
+    const adapter = makeAdapter({ sdk });
+
+    await expect(act(adapter)).rejects.toEqual(
+      expect.objectContaining({
+        kind: "invalid_response",
+        retryable: false,
+        message: "GroundX returned an invalid response",
+      }),
+    );
+  });
+
+  it("classifies malformed copy JSON as an invalid response", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response("not-json", {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const adapter = makeAdapter({ fetch });
+
+    await expect(
+      adapter.copyDocuments({ fromBucket: 1, toBucket: 2, documentIds: ["doc-1"] }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        kind: "invalid_response",
+        retryable: false,
+        status: 202,
+      }),
+    );
+  });
+
   it("classifies copy endpoint HTTP failures without reading or exposing the body", async () => {
     const text = vi.fn();
     const fetch = vi.fn().mockResolvedValue({
@@ -348,5 +474,62 @@ describe("GroundxAdapter failures", () => {
       }),
     );
     expect(sdk.documents.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe("GroundxAdapter copy timeout lifecycle", () => {
+  it("aborts an in-flight copy request when the configured timeout elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborts = 0;
+      const fetch = vi.fn((_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            aborts += 1;
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          });
+        }),
+      );
+      const adapter = makeAdapter({ fetch, timeoutMs: 25 });
+
+      const result = adapter
+        .copyDocuments({ fromBucket: 1, toBucket: 2, documentIds: ["doc-1"] })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(aborts).toBe(1);
+      await expect(result).resolves.toEqual(
+        expect.objectContaining({ kind: "timeout", retryable: true }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["success", new Response(JSON.stringify(ingestResult.data), { status: 202 })],
+    ["HTTP failure", { ok: false, status: 503 }],
+  ])("clears the copy timeout after %s", async (_outcome, response) => {
+    vi.useFakeTimers();
+    try {
+      let lateAborts = 0;
+      const fetch = vi.fn((_url: string, init: RequestInit) => {
+        init.signal?.addEventListener("abort", () => {
+          lateAborts += 1;
+        });
+        return Promise.resolve(response as Response);
+      });
+      const adapter = makeAdapter({ fetch, timeoutMs: 25 });
+
+      await adapter
+        .copyDocuments({ fromBucket: 1, toBucket: 2, documentIds: ["doc-1"] })
+        .catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(lateAborts).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
