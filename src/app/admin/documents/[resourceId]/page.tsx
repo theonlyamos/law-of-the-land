@@ -3,6 +3,7 @@ import type { Doc, Id } from "../../../../../convex/_generated/dataModel";
 import { hasRolePermission } from "../../../../../convex/lib/adminPermissions";
 import { CatalogStatus, VersionHistory } from "@/components/admin/resource-register";
 import { ResourceEditor } from "@/components/admin/catalog-actions";
+import { DocumentUpload } from "@/components/admin/document-upload";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
 import Link from "next/link";
@@ -17,6 +18,11 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
       !hasRolePermission(access.currentAdmin.roles, "resource", "write"))
   ) redirect("/admin/forbidden");
   const canWrite = hasRolePermission(access.currentAdmin.roles, "resource", "write");
+  const canUpload = hasRolePermission(access.currentAdmin.roles, "document", "write");
+  const configuredUploadLimit = Number(process.env.ADMIN_MAX_DOCUMENT_BYTES);
+  const uploadLimit = Number.isSafeInteger(configuredUploadLimit) && configuredUploadLimit > 0
+    ? configuredUploadLimit
+    : null;
   const resourceId = rawResourceId as Id<"legalResources">;
   let resource: Awaited<ReturnType<typeof fetchAuthQuery>>;
   let versions: Awaited<ReturnType<typeof fetchAuthQuery>>;
@@ -45,6 +51,22 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
         <section className="mt-10" aria-labelledby="resource-actions-heading">
           <h2 id="resource-actions-heading" className="mb-4 text-xl font-semibold tracking-[-0.025em]">Metadata and lifecycle actions</h2>
           <ResourceEditor jurisdictionIds={[resource.jurisdictionId]} resource={{ id: resource._id, jurisdictionId: resource.jurisdictionId, type: resource.type, title: resource.title, issuer: resource.issuer, officialCitation: resource.officialCitation, sourceUrl: resource.sourceUrl, topics: resource.topics, effectiveDate: resource.effectiveDate, repealDate: resource.repealDate, status: resource.status }} />
+        </section>
+      ) : null}
+      {canUpload ? (
+        <section className="mt-10" aria-label="Original document upload">
+          {uploadLimit === null ? (
+            <p role="alert" className="border-y border-[oklch(64%_0.09_45)] bg-[oklch(95%_0.035_55)] px-5 py-5 text-sm font-medium text-[oklch(34%_0.08_35)]">
+              Original uploads are unavailable until the document size policy is configured.
+            </p>
+          ) : (
+            <DocumentUpload
+              resourceId={resource._id}
+              defaultSourceUrl={resource.sourceUrl}
+              defaultEffectiveAt={resource.effectiveDate}
+              maxBytes={uploadLimit}
+            />
+          )}
         </section>
       ) : null}
       <section className="mt-10" aria-labelledby="version-history-heading">
