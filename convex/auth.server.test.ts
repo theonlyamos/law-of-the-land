@@ -12,8 +12,8 @@ type AuthHandler = {
   handler(request: Request): Promise<Response>;
 };
 
-function createServerAuthTest() {
-  const options = createAuthOptions({} as never);
+function createServerAuthTest(ctx: object = {}) {
+  const options = createAuthOptions(ctx as never);
   const { database: _database, emailVerification: _emailVerification, ...rest } =
     options;
   const db: Record<string, MemoryRow[]> = {
@@ -74,11 +74,12 @@ async function postAuth(
   path: string,
   cookie: string,
   body: Record<string, unknown>,
+  extraHeaders: Record<string, string> = {},
 ) {
   return await auth.handler(
     new Request(`http://localhost:3000/api/auth${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie },
+      headers: { "content-type": "application/json", cookie, ...extraHeaders },
       body: JSON.stringify(body),
     }),
   );
@@ -165,5 +166,55 @@ describe("Better Auth administrative Two Factor policy", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: true });
+  });
+
+  it("issues an exact action-bound proof only after password verification succeeds", async () => {
+    const issued: unknown[] = [];
+    const { auth } = createServerAuthTest({
+      runMutation: async (_reference: unknown, args: unknown) => {
+        issued.push(args);
+        return null;
+      },
+    });
+    const credentials = await signUp(auth);
+    const scope = {
+      action: "roles_assign",
+      target: "target-user",
+      key: crypto.randomUUID(),
+    };
+
+    const rejected = await postAuth(
+      auth,
+      "/verify-password",
+      credentials.cookie,
+      { password: "incorrect-password" },
+      {
+        "x-admin-step-up-action": scope.action,
+        "x-admin-step-up-target": scope.target,
+        "x-admin-step-up-key": scope.key,
+      },
+    );
+    expect(rejected.status).toBe(400);
+    expect(issued).toEqual([]);
+
+    const accepted = await postAuth(
+      auth,
+      "/verify-password",
+      credentials.cookie,
+      { password: credentials.password },
+      {
+        "x-admin-step-up-action": scope.action,
+        "x-admin-step-up-target": scope.target,
+        "x-admin-step-up-key": scope.key,
+      },
+    );
+    expect(accepted.status).toBe(200);
+    expect(issued).toHaveLength(1);
+    expect(issued[0]).toMatchObject({
+      action: scope.action,
+      targetId: scope.target,
+      idempotencyKey: scope.key,
+    });
+    expect(JSON.stringify(issued)).not.toContain(credentials.password);
   });
 });

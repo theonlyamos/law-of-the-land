@@ -5,6 +5,7 @@ import {
   readAdminTableNavigation,
   type AdminTableSearchParams,
 } from "@/components/admin/data-table";
+import { UserActions } from "@/components/admin/user-actions";
 import {
   authorizeAdminPage,
   isAdminAccessDenial,
@@ -241,6 +242,21 @@ export default async function UserDetailPage({
           </p>
         )}
       </section>
+
+      <UserActions
+        user={{
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          emailVerified: user.emailVerified,
+          banned: user.banned,
+          roles: user.roles,
+        }}
+        sessions={sessions.map((session) => ({
+          id: session.id,
+          isImpersonated: session.isImpersonated,
+        }))}
+      />
     </div>
   );
 }

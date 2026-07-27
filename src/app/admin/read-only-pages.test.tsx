@@ -19,6 +19,9 @@ vi.mock("@/lib/auth-server", () => ({
 vi.mock("next/navigation", () => ({
   redirect: mocks.redirect,
 }));
+vi.mock("@/components/admin/user-actions", () => ({
+  UserActions: () => <section aria-label="User actions" />,
+}));
 
 import ConversationsPage from "./conversations/page";
 import OperationsPage from "./operations/page";

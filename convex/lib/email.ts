@@ -1,8 +1,7 @@
 /**
  * Sends transactional email through Resend. Requires RESEND_API_KEY (and
- * optionally EMAIL_FROM) set on the Convex deployment. Without a key — e.g.
- * local dev — the message is logged to the Convex console instead so the
- * verification link stays reachable.
+ * optionally EMAIL_FROM) set on the Convex deployment. Recipients, message
+ * bodies, provider responses, and verification links are never logged.
  */
 export async function sendEmail(options: {
   to: string;
@@ -13,7 +12,7 @@ export async function sendEmail(options: {
 
   if (!apiKey) {
     console.warn(
-      `RESEND_API_KEY is not set — email to ${options.to} (“${options.subject}”) was not sent. Content:\n${options.html}`
+      "Transactional email was not sent because delivery is not configured.",
     );
     return;
   }
@@ -33,7 +32,6 @@ export async function sendEmail(options: {
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Resend returned ${response.status}: ${body.slice(0, 300)}`);
+    throw new Error(`Email provider returned status ${response.status}`);
   }
 }

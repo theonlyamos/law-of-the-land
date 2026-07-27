@@ -130,6 +130,7 @@ export async function writeAdminRoles(
   },
   dependencies: {
     fetchAdminUserPage?: AdminUserPageFetcher;
+    skipAudit?: boolean;
   } = {},
 ): Promise<{ changed: boolean; roles: AdminRole[] }> {
   const target = await authComponent.getAnyUserById(ctx, input.targetUserId);
@@ -176,18 +177,20 @@ export async function writeAdminRoles(
         where: [{ field: "userId", value: target._id }],
       })
     : 0;
-  await appendAuditEvent(ctx, {
-    actorType: input.actorType,
-    actorUserId: input.actorUserId,
-    action: input.auditAction,
-    targetType: "user",
-    targetId: target._id,
-    metadata: {
-      previousRoles: currentRoles.join(",") || "user",
-      nextRoles: nextRoles.join(",") || "user",
-      revokedSessions,
-    },
-  });
+  if (!dependencies.skipAudit) {
+    await appendAuditEvent(ctx, {
+      actorType: input.actorType,
+      actorUserId: input.actorUserId,
+      action: input.auditAction,
+      targetType: "user",
+      targetId: target._id,
+      metadata: {
+        previousRoles: currentRoles.join(",") || "user",
+        nextRoles: nextRoles.join(",") || "user",
+        revokedSessions,
+      },
+    });
+  }
 
   return { changed: true, roles: nextRoles };
 }

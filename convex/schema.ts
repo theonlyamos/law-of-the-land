@@ -15,6 +15,7 @@ export default defineSchema({
     reason: v.optional(v.string()),
     beforeSummary: v.optional(v.string()),
     afterSummary: v.optional(v.string()),
+    correlationId: v.optional(v.string()),
     outcome: v.optional(
       v.union(
         v.literal("success"),
@@ -32,6 +33,92 @@ export default defineSchema({
     .index("by_actorId_and_createdAt", ["actorId", "createdAt"])
     .index("by_action_and_createdAt", ["action", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
+  adminOperations: defineTable({
+    actorId: v.string(),
+    action: v.string(),
+    targetId: v.string(),
+    idempotencyKey: v.string(),
+    requestFingerprint: v.string(),
+    correlationId: v.string(),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("succeeded"),
+      v.literal("failed"),
+      v.literal("queued"),
+      v.literal("authorized"),
+    ),
+    result: v.optional(
+      v.object({
+        status: v.union(
+          v.literal("succeeded"),
+          v.literal("failed"),
+          v.literal("queued"),
+          v.literal("authorized"),
+        ),
+        correlationId: v.string(),
+        action: v.string(),
+        targetId: v.string(),
+      }),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_actorId_and_idempotencyKey", [
+      "actorId",
+      "idempotencyKey",
+    ])
+    .index("by_action_and_targetId_and_createdAt", [
+      "action",
+      "targetId",
+      "createdAt",
+    ])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"]),
+  adminStepUpProofs: defineTable({
+    actorId: v.string(),
+    sessionId: v.string(),
+    action: v.string(),
+    targetId: v.string(),
+    idempotencyKey: v.string(),
+    issuedAt: v.number(),
+    expiresAt: v.number(),
+    consumedAt: v.optional(v.number()),
+  }).index(
+    "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+    ["actorId", "sessionId", "action", "targetId", "idempotencyKey"],
+  ),
+  userDeletionRequests: defineTable({
+    operationId: v.id("adminOperations"),
+    actorId: v.string(),
+    targetUserId: v.string(),
+    executeAfter: v.number(),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("executing"),
+      v.literal("completed"),
+      v.literal("cancelled"),
+      v.literal("failed"),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_status_and_executeAfter", ["status", "executeAfter"])
+    .index("by_targetUserId_and_status", ["targetUserId", "status"]),
+  verificationEmailRequests: defineTable({
+    operationId: v.id("adminOperations"),
+    actorId: v.string(),
+    targetUserId: v.string(),
+    targetEmail: v.string(),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("executing"),
+      v.literal("completed"),
+      v.literal("failed"),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_targetUserId_and_createdAt", ["targetUserId", "createdAt"]),
   adminAccessGrants: defineTable({
     adminId: v.string(),
     chatSessionId: v.id("chatSessions"),

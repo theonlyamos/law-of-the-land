@@ -33,6 +33,7 @@ export type GovernanceAuditEvent = {
   reason?: string;
   beforeSummary?: string;
   afterSummary?: string;
+  correlationId?: string;
   outcome: AuditOutcome;
 };
 
@@ -133,6 +134,22 @@ function assertSafeGovernanceEvent(event: GovernanceAuditEvent): void {
     "summary",
     MAX_AUDIT_SUMMARY_LENGTH,
   );
+  if (event.correlationId !== undefined) {
+    assertLexeme(
+      event.correlationId,
+      "correlation ID",
+      IDENTIFIER_PATTERN,
+      MAX_AUDIT_IDENTIFIER_LENGTH,
+    );
+  }
+}
+
+export function validateAuditReason(reason: string): string {
+  if (reason.trim() !== reason || reason.length < 3) {
+    throw new ConvexError("Audit reason must be a trimmed explanation");
+  }
+  assertSafeAuditText(reason, "reason", MAX_AUDIT_REASON_LENGTH);
+  return reason;
 }
 
 function assertSafeLegacyActorIdentity(
@@ -316,6 +333,7 @@ export async function writeAudit(
     reason: event.reason,
     beforeSummary: event.beforeSummary,
     afterSummary: event.afterSummary,
+    correlationId: event.correlationId,
     outcome: event.outcome,
     metadata,
     createdAt: Date.now(),
