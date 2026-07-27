@@ -138,7 +138,10 @@ export function isTwoFactorVerificationRoute(path: string): boolean {
 
 export const createAuthOptions = (
   ctx: GenericCtx<DataModel>,
-  internalOptions: { allowGuardedAdminRoutes?: boolean } = {},
+  internalOptions: {
+    allowGuardedAdminRoutes?: boolean;
+    onVerificationDelivery?: (succeeded: boolean) => void;
+  } = {},
 ) =>
   ({
     baseURL: siteUrl,
@@ -169,16 +172,22 @@ export const createAuthOptions = (
       sendOnSignUp: true,
       autoSignInAfterVerification: true,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendEmail({
-          to: user.email,
-          subject: "Verify your email — Law of the Land",
-          html: `
-            <p>Welcome to Law of the Land.</p>
-            <p>Confirm your email address to start asking legal questions and saving your chats:</p>
-            <p><a href="${url}">Verify my email</a></p>
-            <p>If you did not create this account, you can ignore this message.</p>
-          `,
-        });
+        try {
+          await sendEmail({
+            to: user.email,
+            subject: "Verify your email — Law of the Land",
+            html: `
+              <p>Welcome to Law of the Land.</p>
+              <p>Confirm your email address to start asking legal questions and saving your chats:</p>
+              <p><a href="${url}">Verify my email</a></p>
+              <p>If you did not create this account, you can ignore this message.</p>
+            `,
+          });
+          internalOptions.onVerificationDelivery?.(true);
+        } catch (error) {
+          internalOptions.onVerificationDelivery?.(false);
+          throw error;
+        }
       },
     },
     socialProviders: {
@@ -349,5 +358,10 @@ export const createAuth = (ctx: GenericCtx<DataModel>) =>
  */
 export const createGuardedAdminAuth = (ctx: GenericCtx<DataModel>) =>
   betterAuth(createAuthOptions(ctx, { allowGuardedAdminRoutes: true }));
+
+export const createVerificationDeliveryAuth = (
+  ctx: GenericCtx<DataModel>,
+  onVerificationDelivery: (succeeded: boolean) => void,
+) => betterAuth(createAuthOptions(ctx, { onVerificationDelivery }));
 
 export const { getAuthUser } = authComponent.clientApi();

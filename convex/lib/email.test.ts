@@ -14,17 +14,18 @@ afterEach(() => {
 });
 
 describe("transactional email secret handling", () => {
-  it("does not log recipients, raw links, or verification material in local mode", async () => {
+  it("reports unconfigured delivery as a sanitized failure", async () => {
     delete process.env.RESEND_API_KEY;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await sendEmail({
-      to: "private-user@example.com",
-      subject: "Verify your email",
-      html: '<a href="https://example.com/verify?token=secret-value">Verify</a>',
-    });
+    await expect(
+      sendEmail({
+        to: "private-user@example.com",
+        subject: "Verify your email",
+        html: '<a href="https://example.com/verify?token=secret-value">Verify</a>',
+      }),
+    ).rejects.toThrow("delivery is not configured");
 
-    expect(warn).toHaveBeenCalledOnce();
     const output = JSON.stringify(warn.mock.calls);
     expect(output).not.toContain("private-user@example.com");
     expect(output).not.toContain("https://");

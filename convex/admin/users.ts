@@ -5,7 +5,7 @@ import {
 } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { components } from "../_generated/api";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import {
   internalAction,
   internalMutation,
@@ -19,9 +19,9 @@ import {
   type AdminRole,
 } from "../lib/adminPermissions";
 import {
-  createAuth,
   createAuthOptions,
   createGuardedAdminAuth,
+  createVerificationDeliveryAuth,
   authComponent,
 } from "../auth";
 import { writeAudit, validateAuditReason } from "./audit";
@@ -33,8 +33,10 @@ const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const VERIFICATION_RESEND_WINDOW_MS = 5 * 60 * 1_000;
+const VERIFICATION_DELIVERY_LEASE_MS = 5 * 60 * 1_000;
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
 const USER_DELETION_DELAY_MS = 7 * 24 * 60 * 60 * 1_000;
+const USER_DELETION_BATCH_SIZE = 25;
 
 const adminRoleValidator = v.union(
   ...ADMIN_ROLES.map((role) => v.literal(role)),
@@ -268,7 +270,7 @@ async function requireTargetUser(ctx: MutationCtx, userId: string) {
   return target;
 }
 
-async function requireStepUp(
+async function consumeStepUp(
   ctx: MutationCtx,
   actorId: string,
   input: {
@@ -276,14 +278,14 @@ async function requireStepUp(
     targetId: string;
     idempotencyKey: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   const identity = await ctx.auth.getUserIdentity();
   if (
     !identity ||
     typeof identity.sessionId !== "string" ||
     identity.subject !== actorId
   ) {
-    throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
+    return false;
   }
   const proofs = await ctx.db
     .query("adminStepUpProofs")
@@ -304,9 +306,10 @@ async function requireStepUp(
     proofs[0].expiresAt < Date.now() ||
     Date.now() - proofs[0].issuedAt > STEP_UP_MAX_AGE_MS
   ) {
-    throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
+    return false;
   }
   await ctx.db.patch(proofs[0]._id, { consumedAt: Date.now() });
+  return true;
 }
 
 const userRowValidator = v.object({
@@ -518,11 +521,6 @@ export const banUser = mutation({
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
     requireExactConfirmation(args.confirmation, `BAN ${args.userId}`);
-    if (actor.userId === args.userId) {
-      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
-    }
-    await requireTargetUser(ctx, args.userId);
-
     const operation = await beginOperation(ctx, actor, {
       action: "user_ban",
       targetType: "user",
@@ -538,6 +536,10 @@ export const banUser = mutation({
     if (operation.replay) {
       return operation.result;
     }
+    if (actor.userId === args.userId) {
+      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
+    }
+    await requireTargetUser(ctx, args.userId);
 
     try {
       const { auth, headers } = await authComponent.getAuth(
@@ -570,8 +572,6 @@ export const unbanUser = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "user", "ban");
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
-    await requireTargetUser(ctx, args.userId);
-
     const operation = await beginOperation(ctx, actor, {
       action: "user_unban",
       targetType: "user",
@@ -583,6 +583,7 @@ export const unbanUser = mutation({
     if (operation.replay) {
       return operation.result;
     }
+    await requireTargetUser(ctx, args.userId);
 
     try {
       const { auth, headers } = await authComponent.getAuth(
@@ -618,23 +619,6 @@ export const revokeSession = mutation({
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
     requireExactConfirmation(args.confirmation, `REVOKE ${args.sessionId}`);
-    const session = await ctx.runQuery(
-      components.betterAuth.adapter.findOne,
-      {
-        model: "session",
-        where: [{ field: "_id", operator: "eq", value: args.sessionId }],
-      },
-    );
-    if (!session || session.userId !== args.userId) {
-      throw new ConvexError("ADMIN_SESSION_NOT_FOUND");
-    }
-    if (session.userId === actor.userId) {
-      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
-    }
-    if (typeof session.token !== "string") {
-      throw new ConvexError("ADMIN_SESSION_STATE_INVALID");
-    }
-
     const operation = await beginOperation(ctx, actor, {
       action: "session_revoke",
       targetType: "session",
@@ -650,6 +634,22 @@ export const revokeSession = mutation({
     });
     if (operation.replay) {
       return operation.result;
+    }
+    const session = await ctx.runQuery(
+      components.betterAuth.adapter.findOne,
+      {
+        model: "session",
+        where: [{ field: "_id", operator: "eq", value: args.sessionId }],
+      },
+    );
+    if (!session || session.userId !== args.userId) {
+      throw new ConvexError("ADMIN_SESSION_NOT_FOUND");
+    }
+    if (session.userId === actor.userId) {
+      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
+    }
+    if (typeof session.token !== "string") {
+      throw new ConvexError("ADMIN_SESSION_STATE_INVALID");
     }
 
     try {
@@ -688,11 +688,6 @@ export const revokeAllSessions = mutation({
       args.confirmation,
       `REVOKE ALL ${args.userId}`,
     );
-    if (actor.userId === args.userId) {
-      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
-    }
-    await requireTargetUser(ctx, args.userId);
-
     const operation = await beginOperation(ctx, actor, {
       action: "sessions_revoke_all",
       targetType: "user",
@@ -708,6 +703,10 @@ export const revokeAllSessions = mutation({
     if (operation.replay) {
       return operation.result;
     }
+    if (actor.userId === args.userId) {
+      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
+    }
+    await requireTargetUser(ctx, args.userId);
 
     try {
       const { auth, headers } = await authComponent.getAuth(
@@ -733,6 +732,10 @@ const sendQueuedVerificationEmailReference =
   makeFunctionReference<"action">(
     "admin/users:sendQueuedVerificationEmail",
   );
+const expireVerificationEmailRequestReference =
+  makeFunctionReference<"mutation">(
+    "admin/users:expireVerificationEmailRequest",
+  );
 
 export const resendVerification = mutation({
   args: {
@@ -745,6 +748,17 @@ export const resendVerification = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "user", "support");
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
+    const operation = await beginOperation(ctx, actor, {
+      action: "verification_resend",
+      targetType: "user",
+      targetId: args.userId,
+      reason: args.reason,
+      idempotencyKey: args.idempotencyKey,
+      payload: { reason: args.reason, userId: args.userId },
+    });
+    if (operation.replay) {
+      return operation.result;
+    }
     const target = await requireTargetUser(ctx, args.userId);
     if (target.emailVerified === true) {
       throw new ConvexError("ADMIN_EMAIL_ALREADY_VERIFIED");
@@ -759,25 +773,16 @@ export const resendVerification = mutation({
         q.eq("action", "verification_resend").eq("targetId", args.userId),
       )
       .order("desc")
-      .take(1);
+      .take(2);
+    const prior = recent.find(
+      (candidate) => candidate._id !== operation.operationId,
+    );
     if (
-      recent[0] &&
-      recent[0].idempotencyKey !== args.idempotencyKey &&
-      recent[0].createdAt > Date.now() - VERIFICATION_RESEND_WINDOW_MS
+      prior &&
+      prior.idempotencyKey !== args.idempotencyKey &&
+      prior.createdAt > Date.now() - VERIFICATION_RESEND_WINDOW_MS
     ) {
       throw new ConvexError("ADMIN_VERIFICATION_RATE_LIMITED");
-    }
-
-    const operation = await beginOperation(ctx, actor, {
-      action: "verification_resend",
-      targetType: "user",
-      targetId: args.userId,
-      reason: args.reason,
-      idempotencyKey: args.idempotencyKey,
-      payload: { reason: args.reason, userId: args.userId },
-    });
-    if (operation.replay) {
-      return operation.result;
     }
 
     const now = Date.now();
@@ -793,6 +798,11 @@ export const resendVerification = mutation({
     await ctx.scheduler.runAfter(0, sendQueuedVerificationEmailReference, {
       requestId,
     });
+    await ctx.scheduler.runAfter(
+      VERIFICATION_DELIVERY_LEASE_MS,
+      expireVerificationEmailRequestReference,
+      { requestId },
+    );
     return await storeOperationResult(ctx, operation, "queued");
   },
 });
@@ -819,11 +829,69 @@ export const claimVerificationEmail = internalMutation({
     if (!request || request.status !== "queued") {
       return null;
     }
+    const leaseExpiresAt = Date.now() + VERIFICATION_DELIVERY_LEASE_MS;
     await ctx.db.patch(request._id, {
       status: "executing",
+      leaseExpiresAt,
       updatedAt: Date.now(),
     });
+    await ctx.scheduler.runAfter(
+      VERIFICATION_DELIVERY_LEASE_MS,
+      expireVerificationEmailRequestReference,
+      { requestId: request._id },
+    );
     return { targetEmail: request.targetEmail };
+  },
+});
+
+async function terminalizeVerificationEmail(
+  ctx: MutationCtx,
+  request: Doc<"verificationEmailRequests">,
+  succeeded: boolean,
+): Promise<void> {
+  const operation = await ctx.db.get(request.operationId);
+  await ctx.db.patch(request._id, {
+    status: succeeded ? "completed" : "failed",
+    updatedAt: Date.now(),
+  });
+  if (!operation) {
+    return;
+  }
+  const actor = await authComponent.getAnyUserById(ctx, request.actorId);
+  await writeAudit(ctx, {
+    actorId: request.actorId,
+    actorRoles: parseAdminRoles(actor?.role),
+    action: auditAction(
+      "verification_resend",
+      succeeded ? "success" : "failure",
+    ),
+    targetType: "user",
+    targetId: request.targetUserId,
+    correlationId: operation.correlationId,
+    outcome: succeeded ? "success" : "failure",
+  });
+}
+
+export const expireVerificationEmailRequest = internalMutation({
+  args: { requestId: v.id("verificationEmailRequests") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const request = await ctx.db.get(args.requestId);
+    if (!request || request.status === "completed" || request.status === "failed") {
+      return null;
+    }
+    const staleQueued =
+      request.status === "queued" &&
+      request.createdAt <= Date.now() - VERIFICATION_DELIVERY_LEASE_MS;
+    const staleExecuting =
+      request.status === "executing" &&
+      request.leaseExpiresAt !== undefined &&
+      request.leaseExpiresAt <= Date.now();
+    if (!staleQueued && !staleExecuting) {
+      return null;
+    }
+    await terminalizeVerificationEmail(ctx, request, false);
+    return null;
   },
 });
 
@@ -838,32 +906,7 @@ export const finalizeVerificationEmail = internalMutation({
     if (!request || request.status !== "executing") {
       return null;
     }
-    const operation = await ctx.db.get(request.operationId);
-    if (!operation) {
-      await ctx.db.patch(request._id, {
-        status: "failed",
-        updatedAt: Date.now(),
-      });
-      return null;
-    }
-    const actor = await authComponent.getAnyUserById(ctx, request.actorId);
-    const roles = parseAdminRoles(actor?.role);
-    await ctx.db.patch(request._id, {
-      status: args.succeeded ? "completed" : "failed",
-      updatedAt: Date.now(),
-    });
-    await writeAudit(ctx, {
-      actorId: request.actorId,
-      actorRoles: roles,
-      action: auditAction(
-        "verification_resend",
-        args.succeeded ? "success" : "failure",
-      ),
-      targetType: "user",
-      targetId: request.targetUserId,
-      correlationId: operation.correlationId,
-      outcome: args.succeeded ? "success" : "failure",
-    });
+    await terminalizeVerificationEmail(ctx, request, args.succeeded);
     return null;
   },
 });
@@ -880,11 +923,18 @@ export const sendQueuedVerificationEmail = internalAction({
     }
     let succeeded = false;
     try {
-      const { auth } = await authComponent.getAuth(createAuth, ctx);
+      let deliverySucceeded = false;
+      const { auth } = await authComponent.getAuth(
+        (authCtx) =>
+          createVerificationDeliveryAuth(authCtx, (delivered) => {
+            deliverySucceeded = delivered;
+          }),
+        ctx,
+      );
       const response = await auth.api.sendVerificationEmail({
         body: { email: claimed.targetEmail },
       });
-      succeeded = response.status === true;
+      succeeded = response.status === true && deliverySucceeded;
     } catch {
       succeeded = false;
     }
@@ -908,10 +958,6 @@ export const assignRoles = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "user", "set_role");
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
-    const target = await requireTargetUser(ctx, args.userId);
-    if (actor.userId === args.userId) {
-      throw new ConvexError("ADMIN_SELF_ROLE_CHANGE_FORBIDDEN");
-    }
     const operation = await beginOperation(ctx, actor, {
       action: "roles_assign",
       targetType: "user",
@@ -927,11 +973,19 @@ export const assignRoles = mutation({
     if (operation.replay) {
       return operation.result;
     }
-    await requireStepUp(ctx, actor.userId, {
-      action: "roles_assign",
-      targetId: args.userId,
-      idempotencyKey: args.idempotencyKey,
-    });
+    await requireTargetUser(ctx, args.userId);
+    if (actor.userId === args.userId) {
+      throw new ConvexError("ADMIN_SELF_ROLE_CHANGE_FORBIDDEN");
+    }
+    if (
+      !(await consumeStepUp(ctx, actor.userId, {
+        action: "roles_assign",
+        targetId: args.userId,
+        idempotencyKey: args.idempotencyKey,
+      }))
+    ) {
+      return await failOperation(ctx, actor, operation, "user", args.reason);
+    }
 
     try {
       await writeAdminRoles(
@@ -956,6 +1010,11 @@ export const assignRoles = mutation({
   },
 });
 
+const expirePreparedImpersonationReference =
+  makeFunctionReference<"mutation">(
+    "admin/users:expirePreparedImpersonation",
+  );
+
 export const startImpersonation = mutation({
   args: {
     userId: v.string(),
@@ -971,13 +1030,6 @@ export const startImpersonation = mutation({
     );
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
-    if (actor.userId === args.userId) {
-      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
-    }
-    const target = await requireTargetUser(ctx, args.userId);
-    if (parseAdminRoles(target.role).length > 0) {
-      throw new ConvexError("ADMIN_IMPERSONATION_TARGET_FORBIDDEN");
-    }
     const operation = await beginOperation(ctx, actor, {
       action: "impersonation_start",
       targetType: "user",
@@ -989,12 +1041,29 @@ export const startImpersonation = mutation({
     if (operation.replay) {
       return operation.result;
     }
-    await requireStepUp(ctx, actor.userId, {
-      action: "impersonation_start",
-      targetId: args.userId,
-      idempotencyKey: args.idempotencyKey,
-    });
-    return await storeOperationResult(ctx, operation, "authorized");
+    if (actor.userId === args.userId) {
+      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
+    }
+    const target = await requireTargetUser(ctx, args.userId);
+    if (parseAdminRoles(target.role).length > 0) {
+      throw new ConvexError("ADMIN_IMPERSONATION_TARGET_FORBIDDEN");
+    }
+    if (
+      !(await consumeStepUp(ctx, actor.userId, {
+        action: "impersonation_start",
+        targetId: args.userId,
+        idempotencyKey: args.idempotencyKey,
+      }))
+    ) {
+      return await failOperation(ctx, actor, operation, "user", args.reason);
+    }
+    const result = await storeOperationResult(ctx, operation, "authorized");
+    await ctx.scheduler.runAfter(
+      STEP_UP_MAX_AGE_MS,
+      expirePreparedImpersonationReference,
+      { operationId: operation.operationId },
+    );
+    return result;
   },
 });
 
@@ -1068,6 +1137,48 @@ export const recordAdminStepUpProof = internalMutation({
   },
 });
 
+async function terminalizePreparedImpersonation(
+  ctx: MutationCtx,
+  operation: Doc<"adminOperations">,
+  succeeded: boolean,
+): Promise<void> {
+  const actor = await authComponent.getAnyUserById(ctx, operation.actorId);
+  await ctx.db.patch(operation._id, {
+    status: succeeded ? "succeeded" : "failed",
+    updatedAt: Date.now(),
+  });
+  await writeAudit(ctx, {
+    actorId: operation.actorId,
+    actorRoles: parseAdminRoles(actor?.role),
+    action: auditAction(
+      "impersonation_start",
+      succeeded ? "success" : "failure",
+    ),
+    targetType: "user",
+    targetId: operation.targetId,
+    correlationId: operation.correlationId,
+    outcome: succeeded ? "success" : "failure",
+  });
+}
+
+export const expirePreparedImpersonation = internalMutation({
+  args: { operationId: v.id("adminOperations") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const operation = await ctx.db.get(args.operationId);
+    if (
+      !operation ||
+      operation.action !== "impersonation_start" ||
+      (operation.status !== "authorized" && operation.status !== "pending") ||
+      operation.updatedAt > Date.now() - STEP_UP_MAX_AGE_MS
+    ) {
+      return null;
+    }
+    await terminalizePreparedImpersonation(ctx, operation, false);
+    return null;
+  },
+});
+
 export const consumePreparedImpersonation = internalMutation({
   args: {
     actorId: v.string(),
@@ -1092,9 +1203,32 @@ export const consumePreparedImpersonation = internalMutation({
       !operation ||
       operation.action !== "impersonation_start" ||
       operation.targetId !== args.targetId ||
-      operation.status !== "authorized" ||
-      operation.updatedAt < Date.now() - STEP_UP_MAX_AGE_MS
+      operation.status !== "authorized"
     ) {
+      return false;
+    }
+    if (operation.updatedAt < Date.now() - STEP_UP_MAX_AGE_MS) {
+      await terminalizePreparedImpersonation(ctx, operation, false);
+      return false;
+    }
+    try {
+      const actor = await requireEnabledAdminPermission(
+        ctx,
+        "user",
+        "impersonate",
+      );
+      const identity = await ctx.auth.getUserIdentity();
+      if (
+        actor.userId !== args.actorId ||
+        !identity ||
+        identity.subject !== args.actorId ||
+        identity.sessionId !== args.sessionId
+      ) {
+        await terminalizePreparedImpersonation(ctx, operation, false);
+        return false;
+      }
+    } catch {
+      await terminalizePreparedImpersonation(ctx, operation, false);
       return false;
     }
     const [session, target] = await Promise.all([
@@ -1112,12 +1246,18 @@ export const consumePreparedImpersonation = internalMutation({
       !target ||
       parseAdminRoles(target.role).length > 0
     ) {
+      await terminalizePreparedImpersonation(ctx, operation, false);
       return false;
     }
     await ctx.db.patch(operation._id, {
       status: "pending",
       updatedAt: Date.now(),
     });
+    await ctx.scheduler.runAfter(
+      STEP_UP_MAX_AGE_MS,
+      expirePreparedImpersonationReference,
+      { operationId: operation._id },
+    );
     return true;
   },
 });
@@ -1188,13 +1328,6 @@ export const queueUserDeletion = mutation({
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
     requireExactConfirmation(args.confirmation, `DELETE ${args.userId}`);
-    if (actor.userId === args.userId) {
-      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
-    }
-    const target = await requireTargetUser(ctx, args.userId);
-    if (parseAdminRoles(target.role).length > 0) {
-      throw new ConvexError("ADMIN_ADMINISTRATOR_DELETION_FORBIDDEN");
-    }
     const operation = await beginOperation(ctx, actor, {
       action: "user_deletion_queue",
       targetType: "user",
@@ -1210,11 +1343,22 @@ export const queueUserDeletion = mutation({
     if (operation.replay) {
       return operation.result;
     }
-    await requireStepUp(ctx, actor.userId, {
-      action: "user_deletion_queue",
-      targetId: args.userId,
-      idempotencyKey: args.idempotencyKey,
-    });
+    if (actor.userId === args.userId) {
+      throw new ConvexError("ADMIN_SELF_ACTION_FORBIDDEN");
+    }
+    const target = await requireTargetUser(ctx, args.userId);
+    if (parseAdminRoles(target.role).length > 0) {
+      throw new ConvexError("ADMIN_ADMINISTRATOR_DELETION_FORBIDDEN");
+    }
+    if (
+      !(await consumeStepUp(ctx, actor.userId, {
+        action: "user_deletion_queue",
+        targetId: args.userId,
+        idempotencyKey: args.idempotencyKey,
+      }))
+    ) {
+      return await failOperation(ctx, actor, operation, "user", args.reason);
+    }
 
     const now = Date.now();
     const requestId = await ctx.db.insert("userDeletionRequests", {
@@ -1223,6 +1367,7 @@ export const queueUserDeletion = mutation({
       targetUserId: args.userId,
       executeAfter: now + USER_DELETION_DELAY_MS,
       status: "queued",
+      phase: "sessions",
       createdAt: now,
       updatedAt: now,
     });
@@ -1246,8 +1391,8 @@ export const executeQueuedUserDeletion = internalMutation({
     const request = await ctx.db.get(args.requestId);
     if (
       !request ||
-      request.status !== "queued" ||
-      request.executeAfter > Date.now()
+      (request.status !== "queued" && request.status !== "executing") ||
+      (request.status === "queued" && request.executeAfter > Date.now())
     ) {
       return null;
     }
@@ -1283,16 +1428,54 @@ export const executeQueuedUserDeletion = internalMutation({
       status: "executing",
       updatedAt: Date.now(),
     });
-    const adapter = authComponent.adapter(ctx)(createAuthOptions(ctx));
+    const phase = request.phase ?? "sessions";
     try {
-      await adapter.deleteMany({
-        model: "session",
-        where: [{ field: "userId", value: request.targetUserId }],
-      });
-      await adapter.deleteMany({
-        model: "account",
-        where: [{ field: "userId", value: request.targetUserId }],
-      });
+      if (phase !== "user") {
+        const model =
+          phase === "sessions"
+            ? "session"
+            : phase === "accounts"
+              ? "account"
+              : "twoFactor";
+        const deleted = await ctx.runMutation(
+          components.betterAuth.adapter.deleteMany,
+          {
+            input: {
+              model,
+              where: [
+                {
+                  field: "userId",
+                  operator: "eq",
+                  value: request.targetUserId,
+                },
+              ],
+            },
+            paginationOpts: {
+              numItems: USER_DELETION_BATCH_SIZE,
+              cursor: request.cursor ?? null,
+              maximumRowsRead: USER_DELETION_BATCH_SIZE,
+            },
+          },
+        );
+        const nextPhase =
+          phase === "sessions"
+            ? "accounts"
+            : phase === "accounts"
+              ? "two_factor"
+              : "user";
+        await ctx.db.patch(request._id, {
+          phase: deleted.isDone ? nextPhase : phase,
+          cursor: deleted.isDone ? undefined : deleted.continueCursor,
+          updatedAt: Date.now(),
+        });
+        await ctx.scheduler.runAfter(
+          0,
+          executeQueuedUserDeletionReference,
+          { requestId: request._id },
+        );
+        return null;
+      }
+      const adapter = authComponent.adapter(ctx)(createAuthOptions(ctx));
       await adapter.delete({
         model: "user",
         where: [{ field: "id", value: request.targetUserId }],

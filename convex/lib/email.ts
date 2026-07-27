@@ -11,10 +11,7 @@ export async function sendEmail(options: {
   const apiKey = process.env.RESEND_API_KEY;
 
   if (!apiKey) {
-    console.warn(
-      "Transactional email was not sent because delivery is not configured.",
-    );
-    return;
+    throw new Error("Transactional email delivery is not configured");
   }
 
   const response = await fetch("https://api.resend.com/emails", {

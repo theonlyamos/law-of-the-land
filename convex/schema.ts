@@ -98,6 +98,15 @@ export default defineSchema({
       v.literal("cancelled"),
       v.literal("failed"),
     ),
+    phase: v.optional(
+      v.union(
+        v.literal("sessions"),
+        v.literal("accounts"),
+        v.literal("two_factor"),
+        v.literal("user"),
+      ),
+    ),
+    cursor: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -114,6 +123,7 @@ export default defineSchema({
       v.literal("completed"),
       v.literal("failed"),
     ),
+    leaseExpiresAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
