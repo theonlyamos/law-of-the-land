@@ -413,6 +413,39 @@ describe("GroundxAdapter failures", () => {
     );
   });
 
+  it("rejects a valid JSON copy response with the wrong envelope without exposing it", async () => {
+    const rawProviderValue = "groundx-test-secret raw copy response";
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          copy: { processId: "process-1", status: "queued" },
+          debug: rawProviderValue,
+        }),
+        {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    const adapter = makeAdapter({ fetch });
+
+    const error = await adapter
+      .copyDocuments({ fromBucket: 1, toBucket: 2, documentIds: ["doc-1"] })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        kind: "invalid_response",
+        retryable: false,
+        status: 202,
+        message: "GroundX returned an invalid response",
+      }),
+    );
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(JSON.stringify(error)).not.toContain(rawProviderValue);
+    expect(String(error)).not.toContain(rawProviderValue);
+  });
+
   it("classifies copy endpoint HTTP failures without reading or exposing the body", async () => {
     const text = vi.fn();
     const fetch = vi.fn().mockResolvedValue({
