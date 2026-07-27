@@ -120,6 +120,7 @@ export default defineSchema({
     status: v.union(
       v.literal("queued"),
       v.literal("executing"),
+      v.literal("unknown"),
       v.literal("completed"),
       v.literal("failed"),
     ),

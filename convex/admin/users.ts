@@ -15,6 +15,7 @@ import {
 } from "../_generated/server";
 import {
   ADMIN_ROLES,
+  hasRolePermission,
   parseAdminRoles,
   type AdminRole,
 } from "../lib/adminPermissions";
@@ -25,7 +26,10 @@ import {
   authComponent,
 } from "../auth";
 import { writeAudit, validateAuditReason } from "./audit";
-import { requireEnabledAdminPermission } from "./featureFlags";
+import {
+  readAdminEnabled,
+  requireEnabledAdminPermission,
+} from "./featureFlags";
 import { writeAdminRoles } from "./roles";
 
 const MAX_PAGE_SIZE = 50;
@@ -877,7 +881,12 @@ export const expireVerificationEmailRequest = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const request = await ctx.db.get(args.requestId);
-    if (!request || request.status === "completed" || request.status === "failed") {
+    if (
+      !request ||
+      request.status === "unknown" ||
+      request.status === "completed" ||
+      request.status === "failed"
+    ) {
       return null;
     }
     const staleQueued =
@@ -888,6 +897,13 @@ export const expireVerificationEmailRequest = internalMutation({
       request.leaseExpiresAt !== undefined &&
       request.leaseExpiresAt <= Date.now();
     if (!staleQueued && !staleExecuting) {
+      return null;
+    }
+    if (staleExecuting) {
+      await ctx.db.patch(request._id, {
+        status: "unknown",
+        updatedAt: Date.now(),
+      });
       return null;
     }
     await terminalizeVerificationEmail(ctx, request, false);
@@ -903,7 +919,10 @@ export const finalizeVerificationEmail = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const request = await ctx.db.get(args.requestId);
-    if (!request || request.status !== "executing") {
+    if (
+      !request ||
+      (request.status !== "executing" && request.status !== "unknown")
+    ) {
       return null;
     }
     await terminalizeVerificationEmail(ctx, request, args.succeeded);
@@ -1211,39 +1230,30 @@ export const consumePreparedImpersonation = internalMutation({
       await terminalizePreparedImpersonation(ctx, operation, false);
       return false;
     }
-    try {
-      const actor = await requireEnabledAdminPermission(
-        ctx,
-        "user",
-        "impersonate",
-      );
-      const identity = await ctx.auth.getUserIdentity();
-      if (
-        actor.userId !== args.actorId ||
-        !identity ||
-        identity.subject !== args.actorId ||
-        identity.sessionId !== args.sessionId
-      ) {
-        await terminalizePreparedImpersonation(ctx, operation, false);
-        return false;
-      }
-    } catch {
-      await terminalizePreparedImpersonation(ctx, operation, false);
-      return false;
-    }
-    const [session, target] = await Promise.all([
+    const [actor, session, target, adminEnabled] = await Promise.all([
+      authComponent.getAnyUserById(ctx, args.actorId),
       ctx.runQuery(components.betterAuth.adapter.findOne, {
         model: "session",
         where: [{ field: "_id", operator: "eq", value: args.sessionId }],
       }),
       authComponent.getAnyUserById(ctx, args.targetId),
+      readAdminEnabled(ctx),
     ]);
+    const actorRoles = parseAdminRoles(actor?.role);
     if (
+      !adminEnabled ||
+      !actor ||
+      actor.banned === true ||
+      actor.twoFactorEnabled !== true ||
+      !hasRolePermission(actorRoles, "user", "impersonate") ||
       !session ||
       session.userId !== args.actorId ||
       session.expiresAt <= Date.now() ||
       typeof session.adminTwoFactorVerifiedAt !== "number" ||
+      !Number.isFinite(session.adminTwoFactorVerifiedAt) ||
+      typeof session.impersonatedBy === "string" ||
       !target ||
+      target._id === actor._id ||
       parseAdminRoles(target.role).length > 0
     ) {
       await terminalizePreparedImpersonation(ctx, operation, false);

@@ -895,61 +895,79 @@ describe("audited administrative user actions", () => {
     expect(queued[0]).toMatchObject({ status: "queued" });
   });
 
-  it("leases a verification claim and terminalizes a stale claim exactly once", async () => {
-    const t = createBackend();
-    await enablePanel(t);
-    const admin = await asAdmin(t, "super_admin");
-    const target = await createUser(t, { emailVerified: false });
-    await admin.client.mutation(resendVerification, {
-      userId: target._id,
-      reason: "User requested another verification message",
-      idempotencyKey: crypto.randomUUID(),
-    });
-    const requestId = await t.run(async (ctx) => {
-      const request = await ctx.db
-        .query("verificationEmailRequests")
-        .withIndex("by_targetUserId_and_createdAt", (q) =>
-          q.eq("targetUserId", target._id),
-        )
-        .unique();
-      if (!request) throw new Error("Expected verification request");
-      return request._id;
-    });
+  it.each([
+    [true, "completed", "success"],
+    [false, "failed", "failure"],
+  ] as const)(
+    "reconciles an expired in-flight verification %s exactly once",
+    async (succeeded, expectedStatus, expectedOutcome) => {
+      const t = createBackend();
+      await enablePanel(t);
+      const admin = await asAdmin(t, "super_admin");
+      const target = await createUser(t, { emailVerified: false });
+      await admin.client.mutation(resendVerification, {
+        userId: target._id,
+        reason: "User requested another verification message",
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const requestId = await t.run(async (ctx) => {
+        const request = await ctx.db
+          .query("verificationEmailRequests")
+          .withIndex("by_targetUserId_and_createdAt", (q) =>
+            q.eq("targetUserId", target._id),
+          )
+          .unique();
+        if (!request) throw new Error("Expected verification request");
+        return request._id;
+      });
 
-    await expect(
-      t.mutation(claimVerificationEmail, { requestId }),
-    ).resolves.toMatchObject({ targetEmail: target.email });
-    await t.mutation(expireVerificationEmailRequest, { requestId });
-    await expect(t.run((ctx) => ctx.db.get(requestId))).resolves.toMatchObject({
-      status: "executing",
-    });
-    await t.run((ctx) =>
-      ctx.db.patch(requestId, { leaseExpiresAt: 0 } as never),
-    );
-    await t.mutation(expireVerificationEmailRequest, { requestId });
-    await t.mutation(expireVerificationEmailRequest, { requestId });
-    await t.mutation(finalizeVerificationEmail, {
-      requestId,
-      succeeded: true,
-    });
+      await expect(
+        t.mutation(claimVerificationEmail, { requestId }),
+      ).resolves.toMatchObject({ targetEmail: target.email });
+      await expect(
+        t.mutation(claimVerificationEmail, { requestId }),
+      ).resolves.toBeNull();
+      await t.mutation(expireVerificationEmailRequest, { requestId });
+      await expect(
+        t.run((ctx) => ctx.db.get(requestId)),
+      ).resolves.toMatchObject({ status: "executing" });
+      await t.run((ctx) =>
+        ctx.db.patch(requestId, { leaseExpiresAt: 0 } as never),
+      );
+      await t.mutation(expireVerificationEmailRequest, { requestId });
+      await t.mutation(expireVerificationEmailRequest, { requestId });
 
-    await expect(t.run((ctx) => ctx.db.get(requestId))).resolves.toMatchObject({
-      status: "failed",
-    });
-    const events = await t.run((ctx) =>
-      ctx.db
-        .query("auditEvents")
-        .withIndex("by_targetType_and_targetId", (q) =>
-          q.eq("targetType", "user").eq("targetId", target._id),
-        )
-        .take(5),
-    );
-    expect(events.map((event) => event.action)).toEqual([
-      "admin.verification_resend.attempt",
-      "admin.verification_resend.failure",
-    ]);
-    expect(events[0].correlationId).toBe(events[1].correlationId);
-  });
+      await expect(
+        t.run((ctx) => ctx.db.get(requestId)),
+      ).resolves.toMatchObject({ status: "unknown" });
+      await expect(
+        t.mutation(claimVerificationEmail, { requestId }),
+      ).resolves.toBeNull();
+      await t.mutation(finalizeVerificationEmail, { requestId, succeeded });
+      await t.mutation(finalizeVerificationEmail, {
+        requestId,
+        succeeded: !succeeded,
+      });
+      await t.mutation(expireVerificationEmailRequest, { requestId });
+
+      await expect(
+        t.run((ctx) => ctx.db.get(requestId)),
+      ).resolves.toMatchObject({ status: expectedStatus });
+      const events = await t.run((ctx) =>
+        ctx.db
+          .query("auditEvents")
+          .withIndex("by_targetType_and_targetId", (q) =>
+            q.eq("targetType", "user").eq("targetId", target._id),
+          )
+          .take(5),
+      );
+      expect(events.map((event) => event.action)).toEqual([
+        "admin.verification_resend.attempt",
+        `admin.verification_resend.${expectedOutcome}`,
+      ]);
+      expect(events[0].correlationId).toBe(events[1].correlationId);
+    },
+  );
 
   it("records an honest verification failure when delivery is unconfigured", async () => {
     const t = createBackend();
