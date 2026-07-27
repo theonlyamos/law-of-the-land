@@ -9,6 +9,7 @@ import { requireEnabledAdminPermission } from "./featureFlags";
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
 
 const exportResultValidator = v.object({
   status: v.literal("queued"),
@@ -47,6 +48,48 @@ function exportFingerprint(input: {
     grantId: input.grantId,
     reason: input.reason,
   });
+}
+
+async function consumeExportStepUp(
+  ctx: MutationCtx,
+  input: {
+    actorId: string;
+    chatId: Id<"chatSessions">;
+    grantId: Id<"adminAccessGrants">;
+    idempotencyKey: string;
+  },
+): Promise<boolean> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (
+    !identity ||
+    identity.subject !== input.actorId ||
+    typeof identity.sessionId !== "string"
+  ) {
+    return false;
+  }
+  const proofs = await ctx.db
+    .query("adminStepUpProofs")
+    .withIndex(
+      "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+      (q) =>
+        q
+          .eq("actorId", input.actorId)
+          .eq("sessionId", identity.sessionId as string)
+          .eq("action", "conversation_export")
+          .eq("targetId", `${input.chatId}:${input.grantId}`)
+          .eq("idempotencyKey", input.idempotencyKey),
+    )
+    .take(2);
+  if (
+    proofs.length !== 1 ||
+    proofs[0].consumedAt !== undefined ||
+    proofs[0].expiresAt <= Date.now() ||
+    Date.now() - proofs[0].issuedAt > STEP_UP_MAX_AGE_MS
+  ) {
+    return false;
+  }
+  await ctx.db.patch(proofs[0]._id, { consumedAt: Date.now() });
+  return true;
 }
 
 async function writeExportAudit(
@@ -130,6 +173,17 @@ export const queueConversationExport = mutation({
         action: "conversation_export",
         targetId: operation.result.targetId,
       };
+    }
+
+    if (
+      !(await consumeExportStepUp(ctx, {
+        actorId: actor.userId,
+        chatId: args.chatId,
+        grantId: args.grantId,
+        idempotencyKey,
+      }))
+    ) {
+      throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
     }
 
     const now = Date.now();

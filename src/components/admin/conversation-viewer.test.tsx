@@ -6,6 +6,7 @@ const convex = vi.hoisted(() => ({
   createGrant: vi.fn(),
   queueExport: vi.fn(),
   queryArgs: undefined as unknown,
+  queryOptions: undefined as unknown,
   loadMore: vi.fn(),
 }));
 
@@ -14,8 +15,9 @@ vi.mock("convex/react", () => ({
     "purpose" in args
       ? convex.createGrant(args)
       : convex.queueExport(args),
-  usePaginatedQuery: (_reference: unknown, args: unknown) => {
+  usePaginatedQuery: (_reference: unknown, args: unknown, options: unknown) => {
     convex.queryArgs = args;
+    convex.queryOptions = options;
     if (args === "skip") {
       return { results: [], status: "LoadingFirstPage", loadMore: convex.loadMore };
     }
@@ -25,7 +27,7 @@ vi.mock("convex/react", () => ({
           id: "message_1",
           role: "assistant",
           content:
-            "## Finding\n<script>alert('unsafe')</script>\n[bad](javascript:alert(1))\npassword: [REDACTED]",
+            "## Finding\n<script>alert('unsafe')</script>\n![tracker](https://tracking.example/pixel.png)\n[safe](https://example.com/case) [mail](mailto:support@example.com) [bad](javascript:alert(1))\npassword: [REDACTED]",
           createdAt: 1_900_000_000_000,
         },
       ],
@@ -42,6 +44,11 @@ beforeEach(() => {
   convex.queueExport.mockReset();
   convex.loadMore.mockReset();
   convex.queryArgs = undefined;
+  convex.queryOptions = undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: true }),
+  );
   convex.createGrant.mockResolvedValue({
     grantId: "grant_42",
     expiresAt: 1_900_000_900_000,
@@ -54,7 +61,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function renderViewer(permissions = ["conversation:read_content", "conversation:export"]) {
   return render(
@@ -69,6 +79,7 @@ describe("conversation viewer", () => {
     renderViewer();
 
     expect(convex.queryArgs).toBe("skip");
+    expect(convex.queryOptions).toEqual({ initialNumItems: 50 });
     expect(screen.queryByRole("heading", { name: "Finding" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Purpose for access"), {
       target: { value: "Ticket 42 investigation" },
@@ -100,11 +111,21 @@ describe("conversation viewer", () => {
 
     await screen.findByRole("heading", { name: "Finding" });
     expect(document.querySelector("script")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
     expect(screen.queryByText("alert('unsafe')")).toBeNull();
-    expect(screen.getByText("bad").closest("a")).not.toHaveAttribute(
+    expect(screen.getByRole("link", { name: "safe" })).toHaveAttribute(
       "href",
-      expect.stringMatching(/^javascript:/i),
+      "https://example.com/case",
     );
+    expect(screen.getByRole("link", { name: "safe" })).toHaveAttribute(
+      "rel",
+      expect.stringContaining("noopener"),
+    );
+    expect(screen.getByRole("link", { name: "mail" })).toHaveAttribute(
+      "href",
+      "mailto:support@example.com",
+    );
+    expect(screen.getByText("bad").closest("a")).toBeNull();
   });
 
   it("loads the next bounded page in batches of 50", async () => {
@@ -133,9 +154,26 @@ describe("conversation viewer", () => {
     fireEvent.change(screen.getByLabelText("Exact export confirmation"), {
       target: { value: "EXPORT chat_42" },
     });
+    fireEvent.change(screen.getByLabelText("Confirm your password"), {
+      target: { value: "private-password" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Queue conversation export" }));
 
     await waitFor(() => expect(convex.queueExport).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/verify-password",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-admin-step-up-action": "conversation_export",
+          "x-admin-step-up-target": "chat_42:grant_42",
+          "x-admin-step-up-key": expect.stringMatching(/^export_/),
+        }),
+        body: JSON.stringify({ password: "private-password" }),
+      }),
+    );
+    expect(JSON.stringify(convex.queueExport.mock.calls)).not.toContain(
+      "private-password",
+    );
     expect(convex.queueExport).toHaveBeenCalledWith({
       chatId: "chat_42",
       grantId: "grant_42",

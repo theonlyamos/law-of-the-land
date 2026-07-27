@@ -369,6 +369,44 @@ describe("Better Auth administrative Two Factor policy", () => {
     expect(JSON.stringify(issued)).not.toContain(credentials.password);
   });
 
+  it("forwards a conversation export grant scope only after password verification", async () => {
+    const issued: unknown[] = [];
+    const { auth } = createServerAuthTest({
+      runMutation: async (_reference: unknown, args: unknown) => {
+        issued.push(args);
+        return null;
+      },
+    });
+    const credentials = await signUp(auth);
+    const scope = {
+      action: "conversation_export",
+      target: "chat_42:grant_42",
+      key: crypto.randomUUID(),
+    };
+
+    const accepted = await postAuth(
+      auth,
+      "/verify-password",
+      credentials.cookie,
+      { password: credentials.password },
+      {
+        "x-admin-step-up-action": scope.action,
+        "x-admin-step-up-target": scope.target,
+        "x-admin-step-up-key": scope.key,
+      },
+    );
+
+    expect(accepted.status).toBe(200);
+    expect(issued).toEqual([
+      expect.objectContaining({
+        action: scope.action,
+        targetId: scope.target,
+        idempotencyKey: scope.key,
+      }),
+    ]);
+    expect(JSON.stringify(issued)).not.toContain(credentials.password);
+  });
+
   it.each([
     ["legitimate cookie session", 200],
     ["actor without impersonate permission", 403],

@@ -33,6 +33,9 @@ const listMessages = makeFunctionReference<"query">(
 const queueConversationExport = makeFunctionReference<"mutation">(
   "admin/exports:queueConversationExport",
 );
+const recordAdminStepUpProof = makeFunctionReference<"mutation">(
+  "admin/users:recordAdminStepUpProof",
+);
 
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
@@ -135,6 +138,43 @@ async function seedConversation(t: Backend, messageCount = 3) {
       });
     }
     return chatId;
+  });
+}
+
+async function issueExportStepUp(
+  t: Backend,
+  input: {
+    actorId: string;
+    sessionId: string;
+    chatId: Id<"chatSessions">;
+    grantId: Id<"adminAccessGrants">;
+    idempotencyKey: string;
+  },
+) {
+  const targetId = `${input.chatId}:${input.grantId}`;
+  await t.mutation(recordAdminStepUpProof, {
+    actorId: input.actorId,
+    sessionId: input.sessionId,
+    action: "conversation_export",
+    targetId,
+    idempotencyKey: input.idempotencyKey,
+  });
+  return await t.run(async (ctx) => {
+    const proofs = await ctx.db
+      .query("adminStepUpProofs")
+      .withIndex(
+        "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+        (q) =>
+          q
+            .eq("actorId", input.actorId)
+            .eq("sessionId", input.sessionId)
+            .eq("action", "conversation_export")
+            .eq("targetId", targetId)
+            .eq("idempotencyKey", input.idempotencyKey),
+      )
+      .take(2);
+    expect(proofs).toHaveLength(1);
+    return proofs[0]._id;
   });
 }
 
@@ -255,9 +295,113 @@ describe("audited conversation access grants", () => {
       }),
     ).rejects.toThrow("ADMIN_DISABLED");
   });
+
+  it.each([
+    "demoted actor",
+    "disabled feature",
+    "invalidated assurance",
+    "impersonated session",
+  ] as const)("revalidates post-grant authority for a %s", async (change) => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const chatId = await seedConversation(t);
+    const grant = await admin.client.mutation(createAccessGrant, {
+      chatId,
+      purpose: "Ticket 91 investigation",
+    });
+    const exportArgs = {
+      chatId,
+      grantId: grant.grantId,
+      reason: "Attach transcript to ticket 91",
+      idempotencyKey: `authority-${change.replaceAll(" ", "-")}`,
+      confirmation: `EXPORT ${chatId}`,
+    };
+
+    if (change === "demoted actor") {
+      await t.run((ctx) =>
+        ctx.runMutation(components.betterAuth.adapter.updateOne, {
+          input: {
+            model: "user",
+            where: [{ field: "_id", operator: "eq", value: admin.userId }],
+            update: { role: "user" },
+          },
+        }),
+      );
+    } else if (change === "disabled feature") {
+      process.env.ADMIN_PANEL_ENABLED = "false";
+    } else if (change === "invalidated assurance") {
+      await t.run((ctx) =>
+        ctx.runMutation(components.betterAuth.adapter.updateOne, {
+          input: {
+            model: "session",
+            where: [{ field: "_id", operator: "eq", value: admin.sessionId }],
+            update: { adminTwoFactorVerifiedAt: null },
+          },
+        }),
+      );
+    } else {
+      await t.run((ctx) =>
+        ctx.runMutation(components.betterAuth.adapter.updateOne, {
+          input: {
+            model: "session",
+            where: [{ field: "_id", operator: "eq", value: admin.sessionId }],
+            update: { impersonatedBy: "original-admin" },
+          },
+        }),
+      );
+    }
+
+    await expect(
+      admin.client.query(listMessages, {
+        chatId,
+        grantId: grant.grantId,
+        ...firstPage,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      admin.client.mutation(queueConversationExport, exportArgs),
+    ).rejects.toThrow();
+  });
 });
 
 describe("conversation exports", () => {
+  it("requires and consumes one fresh grant-bound step-up while allowing exact replay", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const chatId = await seedConversation(t);
+    const grant = await admin.client.mutation(createAccessGrant, {
+      chatId,
+      purpose: "Ticket 68 investigation",
+    });
+    const input = {
+      chatId,
+      grantId: grant.grantId,
+      reason: "Attach transcript to ticket 68",
+      idempotencyKey: "export-ticket-68",
+      confirmation: `EXPORT ${chatId}`,
+    };
+
+    await expect(
+      admin.client.mutation(queueConversationExport, input),
+    ).rejects.toThrow("ADMIN_STEP_UP_REQUIRED");
+    const proofId = await issueExportStepUp(t, {
+      actorId: admin.userId,
+      sessionId: admin.sessionId,
+      chatId,
+      grantId: grant.grantId,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const first = await admin.client.mutation(queueConversationExport, input);
+    const replay = await admin.client.mutation(queueConversationExport, input);
+
+    expect(first).toEqual(replay);
+    await expect(t.run((ctx) => ctx.db.get(proofId))).resolves.toMatchObject({
+      consumedAt: expect.any(Number),
+    });
+  });
+
   it("requires typed confirmation and queues one idempotent audited export", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -281,6 +425,13 @@ describe("conversation exports", () => {
         confirmation: "EXPORT wrong-chat",
       }),
     ).rejects.toThrow("ADMIN_CONFIRMATION_MISMATCH");
+    await issueExportStepUp(t, {
+      actorId: admin.userId,
+      sessionId: admin.sessionId,
+      chatId,
+      grantId: grant.grantId,
+      idempotencyKey: input.idempotencyKey,
+    });
     const first = await admin.client.mutation(queueConversationExport, input);
     const replay = await admin.client.mutation(queueConversationExport, input);
 
@@ -330,6 +481,13 @@ describe("conversation exports", () => {
       idempotencyKey: "approved-export-11",
       confirmation: `EXPORT ${chatId}`,
     };
+    await issueExportStepUp(t, {
+      actorId: admin.userId,
+      sessionId: admin.sessionId,
+      chatId,
+      grantId: grant.grantId,
+      idempotencyKey: base.idempotencyKey,
+    });
     await admin.client.mutation(queueConversationExport, base);
     await expect(
       admin.client.mutation(queueConversationExport, {

@@ -87,6 +87,7 @@ const STEP_UP_ACTIONS = new Set([
   "roles_assign",
   "impersonation_start",
   "user_deletion_queue",
+  "conversation_export",
 ]);
 
 function validateIdempotencyKey(value: string): string {
@@ -1100,9 +1101,8 @@ export const recordAdminStepUpProof = internalMutation({
     if (!STEP_UP_ACTIONS.has(args.action)) {
       throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     }
-    const [actor, target, session] = await Promise.all([
+    const [actor, session] = await Promise.all([
       authComponent.getAnyUserById(ctx, args.actorId),
-      authComponent.getAnyUserById(ctx, args.targetId),
       ctx.runQuery(components.betterAuth.adapter.findOne, {
         model: "session",
         where: [{ field: "_id", operator: "eq", value: args.sessionId }],
@@ -1110,14 +1110,47 @@ export const recordAdminStepUpProof = internalMutation({
     ]);
     if (
       !actor ||
-      !target ||
       parseAdminRoles(actor.role).length === 0 ||
       actor.twoFactorEnabled !== true ||
       !session ||
       session.userId !== args.actorId ||
       typeof session.adminTwoFactorVerifiedAt !== "number" ||
-      session.expiresAt <= Date.now()
+      session.expiresAt <= Date.now() ||
+      (args.action === "conversation_export" &&
+        typeof session.impersonatedBy === "string")
     ) {
+      throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+    }
+
+    if (args.action === "conversation_export") {
+      const separator = args.targetId.indexOf(":");
+      if (separator < 1 || separator === args.targetId.length - 1) {
+        throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+      }
+      const chatId = args.targetId.slice(0, separator) as Id<"chatSessions">;
+      const grantId = args.targetId.slice(
+        separator + 1,
+      ) as Id<"adminAccessGrants">;
+      const [chat, grant] = await Promise.all([
+        ctx.db.get("chatSessions", chatId),
+        ctx.db.get("adminAccessGrants", grantId),
+      ]);
+      if (
+        !hasRolePermission(
+          parseAdminRoles(actor.role),
+          "conversation",
+          "export",
+        ) ||
+        !chat ||
+        !grant ||
+        grant.adminId !== args.actorId ||
+        grant.chatSessionId !== chatId ||
+        grant.revokedAt !== undefined ||
+        grant.expiresAt <= Date.now()
+      ) {
+        throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+      }
+    } else if (!(await authComponent.getAnyUserById(ctx, args.targetId))) {
       throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     }
 

@@ -7,6 +7,7 @@ import {
   type MutationCtx,
   type QueryCtx,
 } from "../_generated/server";
+import { adminAccessError } from "../lib/adminAccessErrors";
 import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 
@@ -14,6 +15,23 @@ const MAX_PAGE_SIZE = 50;
 const ACCESS_GRANT_TTL_MS = 15 * 60 * 1_000;
 
 type ConversationAdminCtx = QueryCtx | MutationCtx;
+
+async function requireDirectConversationContentAdmin(
+  ctx: ConversationAdminCtx,
+) {
+  const admin = await requireEnabledAdminPermission(
+    ctx,
+    "conversation",
+    "read_content",
+  );
+  if (admin.impersonatedBy) {
+    throw adminAccessError(
+      "ADMIN_FORBIDDEN",
+      "Impersonated sessions cannot access conversation content",
+    );
+  }
+  return admin;
+}
 
 const messageRowValidator = v.object({
   id: v.id("messages"),
@@ -148,11 +166,7 @@ export const createAccessGrant = mutation({
     expiresAt: v.number(),
   }),
   handler: async (ctx, args) => {
-    const admin = await requireEnabledAdminPermission(
-      ctx,
-      "conversation",
-      "read_content",
-    );
+    const admin = await requireDirectConversationContentAdmin(ctx);
     const purpose = validateAuditReason(args.purpose);
     if (!(await ctx.db.get("chatSessions", args.chatId))) {
       throw new ConvexError("Conversation was not found");
@@ -195,11 +209,7 @@ export const listMessages = query({
     continueCursor: v.string(),
   }),
   handler: async (ctx, args) => {
-    const admin = await requireEnabledAdminPermission(
-      ctx,
-      "conversation",
-      "read_content",
-    );
+    const admin = await requireDirectConversationContentAdmin(ctx);
     await validateConversationAccessGrant(ctx, {
       grantId: args.grantId,
       chatId: args.chatId,

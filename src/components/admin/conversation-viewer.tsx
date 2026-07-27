@@ -22,7 +22,9 @@ function newExportKey(): string {
 export function safeMarkdownUrl(url: string): string {
   try {
     const parsed = new URL(url, "https://admin.invalid");
-    return parsed.protocol === "http:" || parsed.protocol === "https:"
+    return parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "mailto:"
       ? url
       : "";
   } catch {
@@ -92,12 +94,34 @@ export function ConversationViewer({
   async function submitExport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!grant || exportState === "working") return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const reason = String(form.get("reason") ?? "").trim();
     const confirmation = String(form.get("confirmation") ?? "");
+    const password = String(form.get("password") ?? "");
     setExportState("working");
     setExportError("");
     try {
+      const verification = await fetch("/api/auth/verify-password", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-admin-step-up-action": "conversation_export",
+          "x-admin-step-up-target": `${chatId}:${grant.grantId}`,
+          "x-admin-step-up-key": exportKey,
+        },
+        body: JSON.stringify({ password }),
+      });
+      const passwordInput = formElement.elements.namedItem("password");
+      if (passwordInput instanceof HTMLInputElement) {
+        passwordInput.value = "";
+      }
+      if (!verification.ok) {
+        throw new Error(
+          "Your password could not be verified. Check it and try again.",
+        );
+      }
       await queueExport({
         chatId,
         grantId: grant.grantId,
@@ -199,7 +223,23 @@ export function ConversationViewer({
           </label>
           <label className="grid content-start gap-2 text-sm font-semibold">
             Exact export confirmation
-            <input name="confirmation" required autoComplete="off" pattern={`EXPORT ${chatId}`} className={fieldClass} />
+            <input
+              name="confirmation"
+              required
+              autoComplete="off"
+              pattern={`EXPORT ${chatId}`}
+              className={fieldClass}
+            />
+          </label>
+          <label className="grid content-start gap-2 text-sm font-semibold">
+            Confirm your password
+            <input
+              name="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              className={fieldClass}
+            />
           </label>
           {exportState === "error" ? (
             <p role="alert" className="lg:col-span-2 text-sm text-[oklch(34%_0.1_28)]">{exportError}</p>
@@ -230,7 +270,25 @@ export function ConversationViewer({
               </time>
             </div>
             <div className="markdown-content min-w-0 leading-7 [overflow-wrap:anywhere]">
-              <ReactMarkdown skipHtml urlTransform={safeMarkdownUrl}>
+              <ReactMarkdown
+                skipHtml
+                urlTransform={safeMarkdownUrl}
+                components={{
+                  img: () => null,
+                  a: ({ href, children }) =>
+                    href ? (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {children}
+                      </a>
+                    ) : (
+                      <span>{children}</span>
+                    ),
+                }}
+              >
                 {message.content}
               </ReactMarkdown>
             </div>

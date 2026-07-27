@@ -50,6 +50,7 @@ const stepUpActions = new Set([
   "roles_assign",
   "impersonation_start",
   "user_deletion_queue",
+  "conversation_export",
 ]);
 const stepUpKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const recordAdminStepUpProofReference =

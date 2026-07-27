@@ -22,7 +22,11 @@ export async function requireAdminPermission(
   ctx: AdminCtx,
   resource: string,
   action: string,
-): Promise<{ userId: string; roles: AdminRole[] }> {
+): Promise<{
+  userId: string;
+  roles: AdminRole[];
+  impersonatedBy?: string;
+}> {
   const admin = await requireCurrentAdmin(ctx);
 
   if (
@@ -38,7 +42,13 @@ export async function requireAdminPermission(
     throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
   }
 
-  return { userId: admin.userId, roles: admin.roles };
+  return {
+    userId: admin.userId,
+    roles: admin.roles,
+    ...(admin.impersonatedBy
+      ? { impersonatedBy: admin.impersonatedBy }
+      : {}),
+  };
 }
 
 /**
