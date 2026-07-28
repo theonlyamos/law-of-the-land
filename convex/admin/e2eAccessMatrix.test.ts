@@ -48,7 +48,7 @@ describe("admin E2E authorization matrix", () => {
     for (const entry of entries) {
       for (const role of ADMIN_ROLES) {
         const granted = "permissions" in entry
-          ? entry.permissions.some(([resource, action]) => hasRolePermission([role], resource, action))
+          ? (entry.adminOnly || entry.permissions.some(([resource, action]) => hasRolePermission([role], resource, action)))
           : hasRolePermission([role], entry.resource, entry.action);
         expect(
           granted,
@@ -56,7 +56,7 @@ describe("admin E2E authorization matrix", () => {
         ).toBe(entry.allowed.includes(role as never));
       }
       const normalGranted = "permissions" in entry
-        ? entry.permissions.some(([resource, action]) => hasRolePermission(["user"], resource, action))
+        ? false
         : hasRolePermission(["user"], entry.resource, entry.action);
       expect(normalGranted).toBe(false);
     }
@@ -79,5 +79,13 @@ describe("admin E2E authorization matrix", () => {
       expect(entry, entry.path).toHaveProperty("success");
       expect((entry as { success?: unknown }).success, entry.path).not.toBe("authorization_only");
     }
+  });
+
+  it("matches the canonical page gates for the overview and document detail", () => {
+    expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin")?.allowed).toEqual(ADMIN_ROLES);
+    expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin/documents/:resourceId")).toMatchObject({
+      permissions: [["resource", "read"], ["resource", "write"]],
+      allowed: ["super_admin", "content_manager", "auditor"],
+    });
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ADMIN_ROLES, hasRolePermission } from "../../../convex/lib/adminPermissions";
 import {
   authorizeAdminPage,
   isAdminAccessDenial,
@@ -13,6 +14,19 @@ const denialCodes = [
 ] as const;
 
 describe("server-side admin request sequencing", () => {
+  it.each(ADMIN_ROLES)("authorizes the /admin workspace for %s while loading operations content only when granted", async (role) => {
+    const currentAdmin = { userId: `${role}_1`, roles: [role] };
+    const overview = { counters: [], failedJobs: [], reviewItems: [], highRiskEvents: [] };
+    const fetchQuery = vi.fn().mockResolvedValueOnce(currentAdmin).mockResolvedValueOnce(overview);
+    const canReadOperations = hasRolePermission([role], "operations", "read");
+
+    await expect(loadAdminOverview(fetchQuery)).resolves.toEqual({
+      access: { status: "authorized", currentAdmin },
+      overview: canReadOperations ? overview : null,
+    });
+    expect(fetchQuery).toHaveBeenCalledTimes(canReadOperations ? 2 : 1);
+  });
+
   it.each(denialCodes)("recognizes %s for page-level denial handling", (code) => {
     expect(
       isAdminAccessDenial({

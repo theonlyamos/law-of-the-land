@@ -13,6 +13,7 @@ const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
 const resultRef = makeFunctionReference<"mutation">("admin/jobs:applyProviderResult");
 const failureRef = makeFunctionReference<"mutation">("admin/jobs:recordProviderFailure");
 const evidenceTargetRef = makeFunctionReference<"query">("admin/documents:getStagingEvidenceTarget");
+const consumeE2EProviderOutcomeRef = makeFunctionReference<"mutation">("admin/e2eFixtures:consumeProviderOutcome");
 
 const payloadSchemas = {
   create_bucket: z.object({ name: z.string().trim().min(1).max(200) }),
@@ -84,6 +85,15 @@ export const runGroundxJob = internalAction({
       ? (claim as Doc<"integrationJobs">)
       : (claim as { job: Doc<"integrationJobs"> }).job;
     if (resolveE2EProviderIsolation() === "stub") {
+      const outcome = await ctx.runMutation(consumeE2EProviderOutcomeRef, { jobId: args.jobId }) as "succeeded" | "failed";
+      if (outcome === "failed") {
+        await ctx.runMutation(failureRef, {
+          jobId: args.jobId,
+          leaseToken,
+          kind: "provider",
+        });
+        return null;
+      }
       await ctx.runMutation(resultRef, {
         jobId: args.jobId,
         leaseToken,

@@ -72,12 +72,7 @@ export function assertIsolatedWebServerEnvironment(environment) {
  * second child with an allowlist instead of relying on config.webServer.env.
  */
 export function buildWebServerEnvironment(environment) {
-  const result = {};
-  for (const [key, value] of Object.entries(environment)) {
-    if (value !== undefined && INFRASTRUCTURE_KEYS.has(key.toUpperCase())) {
-      result[key] = value;
-    }
-  }
+  const result = buildBrowserEnvironment(environment);
   if (environment.ADMIN_E2E_CONVEX_URL) {
     result.NEXT_PUBLIC_CONVEX_URL = environment.ADMIN_E2E_CONVEX_URL;
   }
@@ -86,5 +81,17 @@ export function buildWebServerEnvironment(environment) {
   }
   result.NODE_ENV = "production";
   result.NEXT_TELEMETRY_DISABLED = "1";
+  return result;
+}
+
+/** Chromium receives process infrastructure only. Test-runner secrets remain
+ * in the parent so fixtures can sign cookies and call guarded controls. */
+export function buildBrowserEnvironment(environment) {
+  const result = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (value !== undefined && INFRASTRUCTURE_KEYS.has(key.toUpperCase())) {
+      result[key] = value;
+    }
+  }
   return result;
 }

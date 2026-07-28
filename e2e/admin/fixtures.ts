@@ -45,8 +45,8 @@ export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManife
 
 export async function controlBrowserFixtures(
   fixture: BrowserFixtureManifest,
-  operation: "publication_failed" | "publication_succeeded" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
-  input: string | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } } = "",
+  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
+  input: string | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } } | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" } = "",
 ) {
   const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
   if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
@@ -63,8 +63,12 @@ export async function controlBrowserFixtures(
     success?: string;
     terminal?: boolean;
     state?: Record<string, unknown>;
+    armed?: boolean;
+    outcome?: "succeeded" | "failed";
+    operation?: "publish" | "rollback" | "unpublish";
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
+    publicationJob: { id: string; status: string; processId: string | null; lastErrorKind: string | null } | null;
     grantActive: boolean;
     retention: { deletedTotal: number; lastSuccessfulAt: number | null };
     callbackJob: null | { status: string; payload: string; retentionRedactedAt: number | null };

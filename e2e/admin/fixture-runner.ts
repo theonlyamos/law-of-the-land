@@ -1,5 +1,5 @@
 import { makeSignature } from "better-auth/crypto";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -25,11 +25,16 @@ export type AdminE2ETarget = {
   accountPassword: string;
 };
 
-export type FixtureManifest = {
+type FixtureRecoveryManifest = {
   version: 1;
+  state: "provisional" | "ready";
   tag: string;
   convexUrl: string;
   convexSiteUrl: string;
+};
+
+export type FixtureManifest = FixtureRecoveryManifest & {
+  state: "ready";
   sessions: Partial<Record<FixedRole, string>>;
   variants: {
     normal: { userId: string; cookie: string };
@@ -157,6 +162,16 @@ export async function bootstrapAdminFixtures(options: {
 }): Promise<FixtureManifest> {
   const target = resolveAdminE2ETarget(options.environment);
   const request = options.request ?? fetch;
+  const recoveryManifest: FixtureRecoveryManifest = {
+    version: 1,
+    state: "provisional",
+    tag: options.fixtureTag,
+    convexUrl: target.convexUrl,
+    convexSiteUrl: target.convexSiteUrl,
+  };
+  await mkdir(dirname(options.manifestPath), { recursive: true, mode: 0o700 });
+  await writeFile(options.manifestPath, JSON.stringify(recoveryManifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await chmod(options.manifestPath, 0o600);
   const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/bootstrap`, {
     method: "POST",
     headers: authorizationHeaders(target.fixtureSecret),
@@ -182,6 +197,7 @@ export async function bootstrapAdminFixtures(options: {
   }
   const manifest: FixtureManifest = {
     version: 1,
+    state: "ready",
     tag: payload.tag,
     convexUrl: target.convexUrl,
     convexSiteUrl: target.convexSiteUrl,
@@ -189,9 +205,14 @@ export async function bootstrapAdminFixtures(options: {
     variants,
     records: payload.records,
   };
-  await mkdir(dirname(options.manifestPath), { recursive: true, mode: 0o700 });
-  await writeFile(options.manifestPath, JSON.stringify(manifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
-  await chmod(options.manifestPath, 0o600);
+  const completedPath = `${options.manifestPath}.${crypto.randomUUID()}.ready`;
+  try {
+    await writeFile(completedPath, JSON.stringify(manifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await chmod(completedPath, 0o600);
+    await rename(completedPath, options.manifestPath);
+  } finally {
+    await rm(completedPath, { force: true });
+  }
   return manifest;
 }
 
@@ -202,7 +223,10 @@ export async function cleanupAdminFixtures(options: {
 }): Promise<void> {
   const request = options.request ?? fetch;
   try {
-    const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureManifest;
+    const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureRecoveryManifest;
+    if (manifest.version !== 1 || !["provisional", "ready"].includes(manifest.state) || !manifest.tag || !manifest.convexSiteUrl) {
+      throw new Error("Admin E2E recovery manifest is invalid.");
+    }
     const target = resolveAdminE2ETarget(options.environment);
     if (manifest.convexSiteUrl !== target.convexSiteUrl) {
       throw new Error("Admin E2E manifest target does not match the guarded cleanup target.");

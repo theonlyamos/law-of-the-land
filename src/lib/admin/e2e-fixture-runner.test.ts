@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,7 +8,7 @@ import {
   resolveAdminE2ETarget,
   type FixtureManifest,
 } from "../../../e2e/admin/fixture-runner";
-import { assertIsolatedWebServerEnvironment, buildWebServerEnvironment } from "../../../e2e/admin/web-server-environment.mjs";
+import { assertIsolatedWebServerEnvironment, buildBrowserEnvironment, buildWebServerEnvironment } from "../../../e2e/admin/web-server-environment.mjs";
 import playwrightConfig from "../../../playwright.config";
 
 const safeEnvironment = {
@@ -99,15 +99,52 @@ describe("admin E2E fixture lifecycle", () => {
       init: { method: "POST", headers: { authorization: "Bearer fixture-secret-that-is-at-least-32-chars", "content-type": "application/json" }, body: '{"tag":"e2e_runnerfixture1"}' },
     });
     expect(manifest.sessions.super_admin).toMatch(/^better-auth\.session_token=raw-super-token\.[A-Za-z0-9+/]+=*$/);
+    expect(manifest.state).toBe("ready");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     if (process.platform !== "win32") expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
+  });
+
+  it("writes a sufficient provisional recovery manifest before the bootstrap request and retains it on transport failure", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    let duringRequest: unknown;
+    await expect(bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: "e2e_failurewindow1",
+      manifestPath,
+      request: async () => {
+        duringRequest = JSON.parse(await readFile(manifestPath, "utf8"));
+        return new Response("bootstrap unavailable", { status: 503 });
+      },
+    })).rejects.toThrow(/bootstrap failed/i);
+    expect(duringRequest).toEqual({
+      version: 1,
+      state: "provisional",
+      tag: "e2e_failurewindow1",
+      convexUrl: "http://127.0.0.1:3210",
+      convexSiteUrl: "http://127.0.0.1:3211",
+    });
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0 }), { status: 200 }) });
+  });
+
+  it("retains the provisional recovery manifest when a successful response fails validation", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    await expect(bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: "e2e_validationwindow1",
+      manifestPath,
+      request: async () => new Response(JSON.stringify({ tag: "e2e_validationwindow1", providerTransport: "stub", sessions: {}, variants: {}, records: {} }), { status: 200 }),
+    })).rejects.toThrow(/omitted the super_admin session token/i);
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
+    await rm(manifestPath, { force: true });
   });
 
   it("cleans up the exact manifest tag and retains a private recovery manifest when cleanup fails", async () => {
     const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
     const manifest: FixtureManifest = {
       version: 1,
+      state: "ready",
       tag: "e2e_exactfixture1",
       convexUrl: "http://127.0.0.1:3210",
       convexSiteUrl: "http://127.0.0.1:3211",
@@ -181,6 +218,26 @@ describe("Playwright web server environment", () => {
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
     expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
+  });
+
+  it("launches Chromium with an explicit allowlist that excludes every parent-held E2E and application secret", () => {
+    const environment = buildBrowserEnvironment({
+      PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp",
+      ADMIN_E2E_SESSION_MANIFEST: "C:\\private\\manifest.json",
+      ADMIN_E2E_FIXTURE_SECRET: "fixture-secret",
+      ADMIN_E2E_ACCOUNT_PASSWORD: "account-password",
+      ADMIN_E2E_ROLE_SESSIONS_JSON: "role-cookies",
+      ADMIN_E2E_BETTER_AUTH_SECRET: "auth-secret",
+      GROUNDX_API_KEY: "groundx-secret",
+      RESEND_API_KEY: "resend-secret",
+      BETTER_AUTH_SECRET: "app-auth-secret",
+      DATABASE_URL: "database-secret",
+    });
+    expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
+    expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+      expect(JSON.stringify(environment)).not.toContain(secret);
+    }
   });
 
   it("refuses to start a browser server until the explicit isolated target is complete and safe", () => {

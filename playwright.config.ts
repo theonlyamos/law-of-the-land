@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { buildBrowserEnvironment } from "./e2e/admin/web-server-environment.mjs";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -16,6 +17,7 @@ export default defineConfig({
   outputDir: "test-results/playwright",
   use: {
     baseURL: "http://127.0.0.1:3000",
+    launchOptions: { env: buildBrowserEnvironment(process.env) },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },

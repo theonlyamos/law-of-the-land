@@ -1,21 +1,30 @@
-import type { AdminRole } from "../lib/adminPermissions";
+import { ADMIN_ROLES, hasRolePermission, type AdminRole } from "../lib/adminPermissions";
+
+type RoutePermission = readonly [resource: string, action: string];
+
+function protectedRoute(path: string, permissions: readonly RoutePermission[] = []) {
+  const allowed = permissions.length === 0
+    ? [...ADMIN_ROLES]
+    : ADMIN_ROLES.filter((role) => permissions.some(([resource, action]) => hasRolePermission([role], resource, action)));
+  return { path, permissions, adminOnly: permissions.length === 0, allowed };
+}
 
 export const E2E_PROTECTED_ROUTES = [
-  { path: "/admin", permissions: [["operations", "read"]], allowed: ["super_admin", "auditor"] },
-  { path: "/admin/users", permissions: [["user", "read"]], allowed: ["super_admin", "support_agent", "billing_manager", "auditor"] },
-  { path: "/admin/conversations", permissions: [["conversation", "read_content"]], allowed: ["super_admin", "support_agent"] },
-  { path: "/admin/documents", permissions: [["resource", "read"], ["resource", "write"]], allowed: ["super_admin", "content_manager", "auditor"] },
-  { path: "/admin/review", permissions: [["document", "read"], ["document", "review"]], allowed: ["super_admin", "content_manager", "content_reviewer", "auditor"] },
-  { path: "/admin/billing", permissions: [["billing", "read"]], allowed: ["super_admin", "billing_manager"] },
-  { path: "/admin/analytics", permissions: [["analytics", "read"]], allowed: ["super_admin", "billing_manager", "auditor"] },
-  { path: "/admin/operations", permissions: [["operations", "read"]], allowed: ["super_admin", "auditor"] },
-  { path: "/admin/incidents", permissions: [["operations", "read"]], allowed: ["super_admin", "auditor"] },
-  { path: "/admin/audit", permissions: [["audit", "read_masked"]], allowed: ["super_admin", "auditor"] },
-  { path: "/admin/jurisdictions", permissions: [["jurisdiction", "read"], ["jurisdiction", "write"]], allowed: ["super_admin", "content_manager", "auditor"] },
-  { path: "/admin/users/:userId", permissions: [["user", "read"]], allowed: ["super_admin", "support_agent", "billing_manager", "auditor"] },
-  { path: "/admin/conversations/:chatId", permissions: [["conversation", "read_content"]], allowed: ["super_admin", "support_agent"] },
-  { path: "/admin/documents/:resourceId", permissions: [["document", "read"], ["document", "write"]], allowed: ["super_admin", "content_manager", "content_reviewer", "auditor"] },
-] as const satisfies ReadonlyArray<{ path: string; permissions: ReadonlyArray<readonly [string, string]>; allowed: readonly AdminRole[] }>;
+  protectedRoute("/admin"),
+  protectedRoute("/admin/users", [["user", "read"]]),
+  protectedRoute("/admin/conversations", [["conversation", "read_content"]]),
+  protectedRoute("/admin/documents", [["resource", "read"], ["resource", "write"]]),
+  protectedRoute("/admin/review", [["document", "read"], ["document", "review"]]),
+  protectedRoute("/admin/billing", [["billing", "read"]]),
+  protectedRoute("/admin/analytics", [["analytics", "read"]]),
+  protectedRoute("/admin/operations", [["operations", "read"]]),
+  protectedRoute("/admin/incidents", [["operations", "read"]]),
+  protectedRoute("/admin/audit", [["audit", "read_masked"]]),
+  protectedRoute("/admin/jurisdictions", [["jurisdiction", "read"], ["jurisdiction", "write"]]),
+  protectedRoute("/admin/users/:userId", [["user", "read"]]),
+  protectedRoute("/admin/conversations/:chatId", [["conversation", "read_content"]]),
+  protectedRoute("/admin/documents/:resourceId", [["resource", "read"], ["resource", "write"]]),
+] as const satisfies ReadonlyArray<{ path: string; permissions: ReadonlyArray<readonly [string, string]>; adminOnly: boolean; allowed: readonly AdminRole[] }>;
 
 export const E2E_PRIVILEGED_FUNCTIONS = [
   { path: "admin/roles:setAdminRoles", resource: "user", action: "set_role", allowed: ["super_admin"], success: "roles_changed" },

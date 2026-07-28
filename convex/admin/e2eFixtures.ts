@@ -6,7 +6,6 @@ import type { Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { internalAction, internalMutation } from "../_generated/server";
 import { hashCallbackToken } from "./jobs";
-import { applyPublicationJobOutcome } from "./publicationState";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 
@@ -48,8 +47,17 @@ function requireTag(tag: string) {
 }
 
 async function listFixtureUsers(ctx: MutationCtx, tag: string) {
-  const suffix = `.${tag}@e2e.invalid`;
-  const matches: Array<{ userId: string; email: string }> = [];
+  const owned = await ctx.db.query("e2eFixtureOwnership")
+    .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag).eq("kind", "better_auth_user"))
+    .take(500);
+  const ownedIds = new Set(owned.map((row) => row.targetId));
+  const exactEmails = new Set([
+    ...FIXED_ROLES.map((role) => `${role}.${tag}@e2e.invalid`),
+    `normal.${tag}@e2e.invalid`,
+    `no_two_factor.${tag}@e2e.invalid`,
+    `unassured.${tag}@e2e.invalid`,
+  ]);
+  const matches = new Map<string, { userId: string; email: string }>();
   let cursor: string | null = null;
   for (let page = 0; page < 10; page += 1) {
     const result = await ctx.runQuery(components.betterAuth.adapter.findMany, {
@@ -58,12 +66,14 @@ async function listFixtureUsers(ctx: MutationCtx, tag: string) {
       paginationOpts: { numItems: 100, cursor },
     }) as { page: Array<{ _id: string; email?: string }>; isDone: boolean; continueCursor: string };
     for (const user of result.page) {
-      if (typeof user.email === "string" && user.email.endsWith(suffix)) matches.push({ userId: user._id, email: user.email });
+      if (typeof user.email === "string" && (ownedIds.has(user._id) || exactEmails.has(user.email))) {
+        matches.set(user._id, { userId: user._id, email: user.email });
+      }
     }
     if (result.isDone) break;
     cursor = result.continueCursor;
   }
-  return matches;
+  return [...matches.values()];
 }
 
 async function cleanupFixture(ctx: MutationCtx, tag: string) {
@@ -103,7 +113,7 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
   }
 
   const fixtureJurisdictions = (await ctx.db.query("jurisdictions").take(500)).filter(
-    (row) => row.slug === tag || row.createdBy === `fixture:${tag}`,
+    (row) => row.slug === tag || row.createdBy === `fixture:${tag}` || fixtureUserIds.has(row.createdBy),
   );
   for (const jurisdiction of fixtureJurisdictions) {
     const resources = await ctx.db.query("legalResources")
@@ -170,11 +180,13 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     if (!taggedJob && job.targetId !== tag && !fixtureVersionIds.has(job.targetId) && !fixtureUserIds.has(job.actorId)) continue;
     await ctx.db.delete(job._id); deleted += 1;
   }
-  for (const usage of await ctx.db.query("dailyUsage").withIndex("by_user_day", (q) => q.eq("userId", `fixture:${tag}`).eq("day", tag)).take(10)) {
-    await ctx.db.delete(usage._id); deleted += 1;
+  for (const userId of new Set([`fixture:${tag}`, ...fixtureUserIds])) {
+    for (const usage of await ctx.db.query("dailyUsage").withIndex("by_user_day", (q) => q.eq("userId", userId)).take(500)) {
+      await ctx.db.delete(usage._id); deleted += 1;
+    }
   }
   for (const override of await ctx.db.query("quotaOverrides").take(500)) {
-    if (override.userId !== `fixture:${tag}` && !override.userId.startsWith(`fixture:${tag}:`)) continue;
+    if (override.userId !== `fixture:${tag}` && !fixtureUserIds.has(override.userId)) continue;
     await ctx.db.delete(override._id); deleted += 1;
   }
   for (const operation of await ctx.db.query("adminOperations").withIndex("by_action_and_targetId_and_createdAt", (q) => q.eq("action", "e2e.fixture").eq("targetId", tag)).take(100)) {
@@ -184,6 +196,12 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     for (const event of await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", userId)).take(200)) {
       await ctx.db.delete(event._id); deleted += 1;
     }
+  }
+  for (const outcome of await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(500)) {
+    await ctx.db.delete(outcome._id); deleted += 1;
+  }
+  for (const ownership of await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag).eq("kind", "better_auth_user")).take(500)) {
+    await ctx.db.delete(ownership._id); deleted += 1;
   }
   for (const storageId of fixtureStorageIds) {
     if (await ctx.db.system.get("_storage", storageId)) await ctx.storage.delete(storageId);
@@ -236,6 +254,7 @@ export const bootstrapRecords = internalMutation({
         role, banned: false, twoFactorEnabled,
       } } });
       const token = `${tag}_${crypto.randomUUID().replaceAll("-", "")}`;
+      await ctx.db.insert("e2eFixtureOwnership", { tag, kind: "better_auth_user", targetId: user._id, createdAt: now });
       await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "account", data: {
         accountId: user._id, providerId: "credential", userId: user._id, password: passwordHash, createdAt: now, updatedAt: now,
       } } });
@@ -361,6 +380,14 @@ export const cleanup = internalMutation({
 const matrixRoleValidator = v.union(...FIXED_ROLES.map((role) => v.literal(role)));
 const MATRIX_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
+function matrixJurisdictionCode(path: string, role: (typeof FIXED_ROLES)[number]) {
+  const pathIndex = E2E_PRIVILEGED_FUNCTIONS.findIndex((entry) => entry.path === path);
+  const roleIndex = FIXED_ROLES.indexOf(role);
+  if (pathIndex < 0 || roleIndex < 0) throw new ConvexError("E2E_MATRIX_ENTRY_NOT_FOUND");
+  const ordinal = pathIndex * FIXED_ROLES.length + roleIndex;
+  return `${String.fromCharCode(65 + Math.floor(ordinal / 26))}${String.fromCharCode(65 + (ordinal % 26))}`;
+}
+
 async function fixtureActor(ctx: MutationCtx, tag: string, role: (typeof FIXED_ROLES)[number]) {
   const email = `${role}.${tag}@e2e.invalid`;
   const actor = (await listFixtureUsers(ctx, tag)).find((row) => row.email === email);
@@ -393,6 +420,7 @@ async function createMatrixUser(
     banned: options.banned ?? false,
     twoFactorEnabled: options.twoFactorEnabled ?? false,
   } } });
+  await ctx.db.insert("e2eFixtureOwnership", { tag, kind: "better_auth_user", targetId: user._id, createdAt: now });
   let sessionId: string | undefined;
   if (options.session) {
     const session = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: {
@@ -423,6 +451,68 @@ async function mainFixtureRecords(ctx: MutationCtx, tag: string) {
     : Array.from(Uint8Array.from(atob(metadata.sha256), (character) => character.charCodeAt(0)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   return { jurisdiction, resource, storageId, byteSize: metadata.size, sha256Hex };
 }
+
+type StubPublicationOperation = "publish" | "rollback" | "unpublish";
+type StubProviderOutcome = "succeeded" | "failed";
+
+function publicationOperationFromPayload(payload: string): StubPublicationOperation | null {
+  let value: unknown;
+  try { value = JSON.parse(payload); } catch { return null; }
+  if (!value || typeof value !== "object") return null;
+  const operation = (value as { operation?: unknown }).operation;
+  return operation === "publish" || operation === "rollback" || operation === "unpublish" ? operation : null;
+}
+
+async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id<"documentVersions">) {
+  const version = await ctx.db.get(versionId);
+  if (!version) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  const resource = await ctx.db.get(version.resourceId);
+  if (!resource) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  const jurisdiction = await ctx.db.get(resource.jurisdictionId);
+  if (!jurisdiction || (jurisdiction.slug !== tag && jurisdiction.createdBy !== `fixture:${tag}`)) {
+    throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  }
+  return { version, resource };
+}
+
+async function armProviderOutcome(
+  ctx: MutationCtx,
+  input: { tag: string; versionId: Id<"documentVersions">; operation: StubPublicationOperation; outcome: StubProviderOutcome },
+) {
+  await requireTaggedVersion(ctx, input.tag, input.versionId);
+  const rows = await ctx.db.query("e2eProviderStubOutcomes")
+    .withIndex("by_targetId_and_operation", (q) => q.eq("targetId", input.versionId).eq("operation", input.operation))
+    .take(2);
+  if (rows.length > 1) throw new ConvexError("E2E_PROVIDER_OUTCOME_STATE_INVALID");
+  const existing = rows[0];
+  if (existing && existing.tag !== input.tag) throw new ConvexError("E2E_PROVIDER_OUTCOME_TAG_MISMATCH");
+  if (existing && existing.consumedAt === undefined) throw new ConvexError("E2E_PROVIDER_OUTCOME_ALREADY_ARMED");
+  const state = { tag: input.tag, targetId: input.versionId, operation: input.operation, outcome: input.outcome, armedAt: Date.now(), consumedAt: undefined, jobId: undefined };
+  if (existing) await ctx.db.patch(existing._id, state);
+  else await ctx.db.insert("e2eProviderStubOutcomes", state);
+  return { armed: true as const, tag: input.tag, versionId: input.versionId, operation: input.operation, outcome: input.outcome };
+}
+
+export const consumeProviderOutcome = internalMutation({
+  args: { jobId: v.id("integrationJobs") },
+  returns: v.union(v.literal("succeeded"), v.literal("failed")),
+  handler: async (ctx, args) => {
+    requireFixtureEnvironment();
+    const job = await ctx.db.get(args.jobId);
+    if (!job || job.status !== "running") throw new ConvexError("E2E_PROVIDER_JOB_STATE_INVALID");
+    const operation = publicationOperationFromPayload(job.payload);
+    if (job.targetType !== "documentVersion" || operation === null) return "succeeded" as const;
+    const rows = await ctx.db.query("e2eProviderStubOutcomes")
+      .withIndex("by_targetId_and_operation", (q) => q.eq("targetId", job.targetId).eq("operation", operation))
+      .take(2);
+    if (rows.length !== 1 || rows[0].consumedAt !== undefined || rows[0].jobId !== undefined) {
+      throw new ConvexError("E2E_PROVIDER_OUTCOME_NOT_ARMED");
+    }
+    await requireTaggedVersion(ctx, rows[0].tag, job.targetId as Id<"documentVersions">);
+    await ctx.db.patch(rows[0]._id, { consumedAt: Date.now(), jobId: job._id });
+    return rows[0].outcome;
+  },
+});
 
 async function createMatrixResource(ctx: MutationCtx, tag: string, key: string, suffix: string) {
   const { jurisdiction } = await mainFixtureRecords(ctx, tag);
@@ -524,7 +614,7 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/exports:issueConversationExportReference": { const { chatId, grantId } = await chatAndGrant(); const { storageId } = await mainFixtureRecords(ctx, input.tag); const correlationId = `${marker}-export`; await ctx.db.insert("adminExports", { correlationId, requesterId: actor.userId, requesterSessionId: actor.sessionId, chatSessionId: chatId, accessGrantId: grantId, status: "ready", storageId, expiresAt: Date.now() + 10 * 60_000, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { correlationId, grantId }); break; }
     case "admin/documents:generateUploadUrl": break;
     case "admin/documents:createDocumentVersion": { const resourceId = await createMatrixResource(ctx, input.tag, input.key, "create-version"); const stored = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { resourceId, storageId: stored.storageId, filename: `${marker}.pdf`, mimeType: "application/pdf", byteSize: stored.byteSize, sha256: stored.sha256Hex, sourceUrl: "https://example.invalid/matrix", effectiveAt: "2026-02-01" }); break; }
-    case "admin/resources:createJurisdiction": Object.assign(args, { code: `M${crypto.randomUUID().slice(0, 8).toUpperCase()}`, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
+    case "admin/resources:createJurisdiction": Object.assign(args, { code: matrixJurisdictionCode(input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
     case "admin/resources:updateJurisdiction":
     case "admin/resources:enableJurisdiction":
     case "admin/resources:archiveJurisdiction": { const now = Date.now(); const id = await ctx.db.insert("jurisdictions", { code: `M${crypto.randomUUID().slice(0, 8).toUpperCase()}`, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
@@ -537,7 +627,7 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/reviews:rejectVersion": { const submitter = (await fixtureActor(ctx, input.tag, "content_manager")).userId; const item = await createMatrixVersion(ctx, input.tag, input.key, input.path.endsWith("approveVersion") ? "approve" : "reject", "ready_for_review", submitter); Object.assign(args, { versionId: item.versionId, checklistAnswers: { sourceAuthentic: true, metadataAccurate: true, extractionReviewed: true, citationsVerified: true, evaluationPassed: true }, evaluationRunId: `${input.key}.evaluation`, reason, idempotencyKey: input.key }); break; }
     case "admin/publication:publishVersion":
     case "admin/publication:unpublishVersion":
-    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await ctx.db.insert("documentVersions", { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", groundxStagingDocumentId: `${marker}-active-stage`, groundxProductionDocumentId: `${marker}-active-prod`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
+    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await ctx.db.insert("documentVersions", { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", groundxStagingDocumentId: `${marker}-active-stage`, groundxProductionDocumentId: `${marker}-active-prod`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
     case "admin/billing:grantQuotaOverride": Object.assign(args, { userId: `fixture:${input.tag}:${input.key}`, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, reason, confirmation: "", idempotencyKey: input.key }); break;
     case "admin/billing:revokeQuotaOverride": { const operationId = await ctx.db.insert("adminOperations", { actorId: `fixture:${input.tag}`, action: "e2e.fixture", targetId: input.tag, idempotencyKey: `${input.key}.grant`, requestFingerprint: "{}", correlationId: `${marker}-grant`, status: "succeeded", createdAt: Date.now(), updatedAt: Date.now() }); const overrideId = await ctx.db.insert("quotaOverrides", { userId: `fixture:${input.tag}:${input.key}`, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, grantedBy: `fixture:${input.tag}`, reason, active: true, grantOperationId: operationId, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { overrideId, reason, idempotencyKey: input.key }); break; }
     case "admin/jobs:enqueueJob": Object.assign(args, { type: "poll_process", targetType: "e2e_fixture", targetId: marker, payload: { processId: `${marker}-process` }, idempotencyKey: input.key }); break;
@@ -653,8 +743,7 @@ async function readMatrixOperation(ctx: MutationCtx, input: { tag: string; path:
 }
 
 const controlOperationValidator = v.union(
-  v.literal("publication_failed"),
-  v.literal("publication_succeeded"),
+  v.literal("arm_provider_outcome"),
   v.literal("expire_conversation_grant"),
   v.literal("read_state"),
   v.literal("run_retention"),
@@ -663,7 +752,12 @@ const controlOperationValidator = v.union(
 );
 
 export const applyControl = internalMutation({
-  args: { tag: v.string(), operation: controlOperationValidator, versionId: v.optional(v.id("documentVersions")), path: v.optional(v.string()), role: v.optional(matrixRoleValidator), key: v.optional(v.string()), payload: v.optional(v.any()) },
+  args: {
+    tag: v.string(), operation: controlOperationValidator, versionId: v.optional(v.id("documentVersions")),
+    publicationOperation: v.optional(v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish"))),
+    providerOutcome: v.optional(v.union(v.literal("succeeded"), v.literal("failed"))),
+    path: v.optional(v.string()), role: v.optional(matrixRoleValidator), key: v.optional(v.string()), payload: v.optional(v.any()),
+  },
   returns: v.any(),
   handler: async (ctx, args) => {
     requireFixtureEnvironment(); requireTag(args.tag);
@@ -674,6 +768,17 @@ export const applyControl = internalMutation({
     if (args.operation === "read_matrix_operation") {
       if (!args.path || !args.role || !args.key) throw new ConvexError("E2E_MATRIX_ARGUMENTS_REQUIRED");
       return await readMatrixOperation(ctx, { tag: args.tag, path: args.path, role: args.role, key: args.key, payload: args.payload });
+    }
+    if (args.operation === "arm_provider_outcome") {
+      if (!args.versionId || !args.publicationOperation || !args.providerOutcome) {
+        throw new ConvexError("E2E_PROVIDER_OUTCOME_ARGUMENTS_REQUIRED");
+      }
+      return await armProviderOutcome(ctx, {
+        tag: args.tag,
+        versionId: args.versionId,
+        operation: args.publicationOperation,
+        outcome: args.providerOutcome,
+      });
     }
     const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", args.tag)).unique();
     if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
@@ -701,31 +806,6 @@ export const applyControl = internalMutation({
       const matching = grants.filter((row) => row.chatSessionId === chat._id && fixtureUserIds.has(row.adminId));
       if (matching.length === 0) throw new ConvexError("E2E_FIXTURE_GRANT_NOT_FOUND");
       for (const grant of matching) await ctx.db.patch(grant._id, { expiresAt: Date.now() - 1 });
-    } else if (args.operation !== "read_state") {
-      if (!args.versionId) throw new ConvexError("E2E_FIXTURE_VERSION_REQUIRED");
-      const version = await ctx.db.get(args.versionId);
-      if (!version || version.resourceId !== resource._id) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
-      const jobs = await ctx.db.query("integrationJobs")
-        .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", version._id)).take(20);
-      const job = jobs.sort((a, b) => b.createdAt - a.createdAt)[0];
-      if (!job) throw new ConvexError("E2E_FIXTURE_JOB_NOT_FOUND");
-      const outcome = args.operation === "publication_succeeded" ? "succeeded" : "failed";
-      if (job.status !== outcome) {
-        if (!["queued", "running", "manual_review", "waiting_callback"].includes(job.status)) {
-          throw new ConvexError("E2E_FIXTURE_JOB_STATE_INVALID");
-        }
-        const processId = `${args.tag}-${args.operation}-${job._id}`;
-        await ctx.db.patch(job._id, {
-          status: outcome,
-          processId,
-          leaseToken: undefined,
-          leaseExpiresAt: undefined,
-          nextAttemptAt: undefined,
-          retentionPending: true,
-          updatedAt: Date.now(),
-        });
-        await applyPublicationJobOutcome(ctx, job, outcome, processId);
-      }
     }
 
     const versions = await ctx.db.query("documentVersions")
@@ -735,12 +815,17 @@ export const applyControl = internalMutation({
     const grants = chat ? await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt").take(500) : [];
     const callbackJob = await ctx.db.query("integrationJobs")
       .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", args.tag)).unique();
+    const publicationJobs = args.versionId
+      ? await ctx.db.query("integrationJobs").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", args.versionId!)).take(20)
+      : [];
+    const latestPublicationJob = publicationJobs.sort((left, right) => right.createdAt - left.createdAt)[0];
     return {
       activeVersionId: resource.activeVersionId ?? null,
       versions: versions.map((row) => ({ id: row._id, versionNumber: row.versionNumber, status: row.status, failureSummary: row.failureSummary ?? null })),
       grantActive: grants.some((row) => row.chatSessionId === chat?._id && row.correlationId === `${args.tag}-grant` && row.expiresAt > Date.now() && row.revokedAt === undefined),
       retention: { deletedTotal: callbackJob?.retentionRedactedAt ? 1 : 0, lastSuccessfulAt: callbackJob?.retentionRedactedAt ?? null },
       callbackJob: callbackJob ? { status: callbackJob.status, payload: callbackJob.payload, retentionRedactedAt: callbackJob.retentionRedactedAt ?? null } : null,
+      publicationJob: latestPublicationJob ? { id: latestPublicationJob._id, status: latestPublicationJob.status, processId: latestPublicationJob.processId ?? null, lastErrorKind: latestPublicationJob.lastErrorKind ?? null } : null,
     };
   },
 });
@@ -751,6 +836,8 @@ export const control = internalAction({
     tag: v.string(),
     operation: v.union(controlOperationValidator, v.literal("run_retention")),
     versionId: v.optional(v.id("documentVersions")),
+    publicationOperation: v.optional(v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish"))),
+    providerOutcome: v.optional(v.union(v.literal("succeeded"), v.literal("failed"))),
     path: v.optional(v.string()),
     role: v.optional(matrixRoleValidator),
     key: v.optional(v.string()),

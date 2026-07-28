@@ -82,15 +82,17 @@ async function readFixtureControl(request: Request) {
   if (!bytes) return null;
   try {
     const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-    const operations = ["publication_failed", "publication_succeeded", "expire_conversation_grant", "run_retention", "read_state", "prepare_matrix_operation", "read_matrix_operation"];
+    const operations = ["arm_provider_outcome", "expire_conversation_grant", "run_retention", "read_state", "prepare_matrix_operation", "read_matrix_operation"];
     if (typeof body.tag !== "string" || typeof body.operation !== "string" || !operations.includes(body.operation)) return null;
     return {
       tag: body.tag,
-      operation: body.operation as "publication_failed" | "publication_succeeded" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
+      operation: body.operation as "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
       ...(typeof body.versionId === "string" ? { versionId: body.versionId } : {}),
       ...(typeof body.path === "string" ? { path: body.path } : {}),
       ...(typeof body.role === "string" ? { role: body.role } : {}),
       ...(typeof body.key === "string" ? { key: body.key } : {}),
+      ...(typeof body.publicationOperation === "string" ? { publicationOperation: body.publicationOperation } : {}),
+      ...(typeof body.providerOutcome === "string" ? { providerOutcome: body.providerOutcome } : {}),
       ...(body.payload !== undefined ? { payload: body.payload } : {}),
     };
   } catch { return null; }

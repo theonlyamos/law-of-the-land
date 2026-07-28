@@ -369,6 +369,25 @@ export default defineSchema({
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
+  e2eFixtureOwnership: defineTable({
+    tag: v.string(),
+    kind: v.literal("better_auth_user"),
+    targetId: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_tag_and_kind", ["tag", "kind"])
+    .index("by_targetId", ["targetId"]),
+  e2eProviderStubOutcomes: defineTable({
+    tag: v.string(),
+    targetId: v.string(),
+    operation: v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish")),
+    outcome: v.union(v.literal("succeeded"), v.literal("failed")),
+    armedAt: v.number(),
+    consumedAt: v.optional(v.number()),
+    jobId: v.optional(v.id("integrationJobs")),
+  })
+    .index("by_tag", ["tag"])
+    .index("by_targetId_and_operation", ["targetId", "operation"]),
   adminAccessGrants: defineTable({
     adminId: v.string(),
     chatSessionId: v.id("chatSessions"),
