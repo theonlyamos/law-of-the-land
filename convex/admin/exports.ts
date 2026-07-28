@@ -1,15 +1,19 @@
+import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
-import { mutation, type MutationCtx } from "../_generated/server";
+import { internalMutation, internalQuery, mutation, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { validateAuditReason, writeAudit } from "./audit";
-import { validateConversationAccessGrant } from "./conversations";
+import { maskSensitiveFields, validateConversationAccessGrant } from "./conversations";
 import { requireEnabledAdminPermission } from "./featureFlags";
 
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
+const EXPORT_TTL_MS = 24 * 60 * 60 * 1_000;
+const DOWNLOAD_REFERENCE_TTL_MS = 10 * 60 * 1_000;
+const buildConversationExportRef = makeFunctionReference<"action">("admin/exportActions:buildConversationExport");
 
 const exportResultValidator = v.object({
   status: v.literal("queued"),
@@ -217,6 +221,17 @@ export const queueConversationExport = mutation({
       result,
       updatedAt: Date.now(),
     });
+    const exportId = await ctx.db.insert("adminExports", {
+      correlationId,
+      requesterId: actor.userId,
+      chatSessionId: args.chatId,
+      accessGrantId: args.grantId,
+      status: "queued",
+      expiresAt: now + EXPORT_TTL_MS,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await ctx.scheduler.runAfter(0, buildConversationExportRef, { exportId });
     await writeExportAudit(ctx, actor, {
       action: "admin.conversation_export.success",
       chatId: args.chatId,
@@ -224,5 +239,93 @@ export const queueConversationExport = mutation({
       correlationId,
     });
     return result;
+  },
+});
+
+async function hashReference(reference: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(reference));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+const finalizedExportValidator = v.object({ exportId: v.id("adminExports"), status: v.literal("ready"), expiresAt: v.number() });
+
+export const finalizeConversationExport = internalMutation({
+  args: { correlationId: v.string(), storageId: v.id("_storage") },
+  returns: finalizedExportValidator,
+  handler: async (ctx, args) => {
+    const rows = await ctx.db.query("adminExports").withIndex("by_correlationId", (q) => q.eq("correlationId", args.correlationId)).take(2);
+    if (rows.length !== 1) throw new ConvexError("ADMIN_EXPORT_NOT_FOUND");
+    const item = rows[0];
+    if (item.status === "ready") {
+      if (item.storageId !== args.storageId) throw new ConvexError("ADMIN_EXPORT_FINALIZATION_CONFLICT");
+      return { exportId: item._id, status: "ready" as const, expiresAt: item.expiresAt };
+    }
+    if (item.status !== "queued" || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_FINALIZABLE");
+    if (!(await ctx.db.system.get("_storage", args.storageId))) throw new ConvexError("ADMIN_EXPORT_STORAGE_NOT_FOUND");
+    await ctx.db.patch(item._id, { status: "ready", storageId: args.storageId, updatedAt: Date.now() });
+    return { exportId: item._id, status: "ready" as const, expiresAt: item.expiresAt };
+  },
+});
+
+export const failConversationExport = internalMutation({
+  args: { exportId: v.id("adminExports") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const item = await ctx.db.get(args.exportId);
+    if (item?.status === "queued") await ctx.db.patch(item._id, { status: "failed", updatedAt: Date.now() });
+    return null;
+  },
+});
+
+export const getConversationExportPage = internalQuery({
+  args: { exportId: v.id("adminExports"), paginationOpts: paginationOptsValidator },
+  returns: v.object({ correlationId: v.string(), page: v.array(v.object({ role: v.union(v.literal("user"), v.literal("assistant")), content: v.string(), createdAt: v.number() })), isDone: v.boolean(), continueCursor: v.string() }),
+  handler: async (ctx, args) => {
+    const item = await ctx.db.get(args.exportId);
+    if (!item || item.status !== "queued" || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_BUILDABLE");
+    const result = await ctx.db.query("messages").withIndex("by_session_and_createdAt", (q) => q.eq("sessionId", item.chatSessionId)).order("asc").paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 100), maximumRowsRead: 101 });
+    return { correlationId: item.correlationId, page: result.page.map((row) => ({ role: row.role, content: maskSensitiveFields(row.content), createdAt: row.createdAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+  },
+});
+
+export const issueConversationExportReference = mutation({
+  args: { correlationId: v.string(), grantId: v.id("adminAccessGrants") },
+  returns: v.object({ reference: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "conversation", "export");
+    const rows = await ctx.db.query("adminExports").withIndex("by_correlationId", (q) => q.eq("correlationId", args.correlationId)).take(2);
+    if (rows.length !== 1) throw new ConvexError("ADMIN_EXPORT_NOT_FOUND");
+    const item = rows[0];
+    if (item.requesterId !== actor.userId || item.accessGrantId !== args.grantId || item.status !== "ready" || !item.storageId || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_AVAILABLE");
+    await validateConversationAccessGrant(ctx, { grantId: args.grantId, chatId: item.chatSessionId, adminId: actor.userId });
+    const existing = await ctx.db.query("exportDownloadReferences").withIndex("by_exportId_and_createdAt", (q) => q.eq("exportId", item._id)).order("desc").take(1);
+    if (existing[0] && existing[0].consumedAt === undefined && existing[0].expiresAt > Date.now()) throw new ConvexError("ADMIN_EXPORT_REFERENCE_ALREADY_ISSUED");
+    const reference = `exp_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+    const expiresAt = Math.min(item.expiresAt, Date.now() + DOWNLOAD_REFERENCE_TTL_MS);
+    await ctx.db.insert("exportDownloadReferences", { exportId: item._id, requesterId: actor.userId, referenceHash: await hashReference(reference), expiresAt, createdAt: Date.now() });
+    await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: "admin.conversation_export_reference_issued", targetType: "chatSession", targetId: item.chatSessionId, reason: "Issue one-time conversation export download", correlationId: item.correlationId, outcome: "success" });
+    return { reference, expiresAt };
+  },
+});
+
+export const consumeConversationExportReference = mutation({
+  args: { reference: v.string() },
+  returns: v.object({ downloadUrl: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "conversation", "export");
+    if (!/^exp_[A-Za-z0-9_-]{64}$/.test(args.reference)) throw new ConvexError("ADMIN_EXPORT_REFERENCE_INVALID");
+    const referenceHash = await hashReference(args.reference);
+    const rows = await ctx.db.query("exportDownloadReferences").withIndex("by_referenceHash", (q) => q.eq("referenceHash", referenceHash)).take(2);
+    if (rows.length !== 1) throw new ConvexError("ADMIN_EXPORT_REFERENCE_INVALID");
+    const reference = rows[0];
+    if (reference.requesterId !== actor.userId || reference.consumedAt !== undefined || reference.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_REFERENCE_EXPIRED");
+    const item = await ctx.db.get(reference.exportId);
+    if (!item || item.requesterId !== actor.userId || item.status !== "ready" || !item.storageId || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_AVAILABLE");
+    await validateConversationAccessGrant(ctx, { grantId: item.accessGrantId, chatId: item.chatSessionId, adminId: actor.userId });
+    const downloadUrl = await ctx.storage.getUrl(item.storageId);
+    if (!downloadUrl) throw new ConvexError("ADMIN_EXPORT_STORAGE_NOT_FOUND");
+    await ctx.db.patch(reference._id, { consumedAt: Date.now() });
+    await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: "admin.conversation_export_downloaded", targetType: "chatSession", targetId: item.chatSessionId, reason: "Consume one-time conversation export download", correlationId: item.correlationId, outcome: "success" });
+    return { downloadUrl, expiresAt: reference.expiresAt };
   },
 });

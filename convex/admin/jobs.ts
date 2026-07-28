@@ -1,9 +1,9 @@
 import { ConvexError, v } from "convex/values";
-import { makeFunctionReference } from "convex/server";
+import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import type { Doc, Id } from "../_generated/dataModel";
-import { internalMutation, internalQuery, mutation, type MutationCtx } from "../_generated/server";
+import { internalMutation, internalQuery, mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
-import { writeAudit } from "./audit";
+import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 import { applyPublicationJobOutcome } from "./publicationState";
 
@@ -93,6 +93,7 @@ const jobDocumentValidator = v.object({
   attemptCount: v.number(),
   nextAttemptAt: v.optional(v.number()),
   lastErrorKind: v.optional(providerErrorKindValidator),
+  retentionRedactedAt: v.optional(v.number()),
   createdAt: v.number(),
   updatedAt: v.number(),
 });
@@ -610,5 +611,158 @@ export const reconcileStaleJobs = internalMutation({
       await ctx.scheduler.runAfter(0, reconcileStaleJobsRef, {});
     }
     return { scheduled, hasMore };
+  },
+});
+
+const controlledJobResultValidator = v.object({
+  jobId: v.id("integrationJobs"),
+  status: jobStatusValidator,
+  correlationId: v.string(),
+});
+
+function validateOperationKey(value: string): string {
+  if (value.length < 8 || value.length > 128 || !SAFE_IDENTIFIER.test(value)) {
+    throw new ConvexError("INTEGRATION_IDEMPOTENCY_INVALID");
+  }
+  return value;
+}
+
+async function existingJobControl(
+  ctx: MutationCtx,
+  actorId: string,
+  idempotencyKey: string,
+  action: "job_retry" | "job_cancel",
+  targetId: string,
+  fingerprint: string,
+) {
+  const rows = await ctx.db
+    .query("adminOperations")
+    .withIndex("by_actorId_and_idempotencyKey", (q) =>
+      q.eq("actorId", actorId).eq("idempotencyKey", idempotencyKey),
+    )
+    .take(2);
+  if (rows.length > 1) throw new ConvexError("ADMIN_IDEMPOTENCY_STATE_INVALID");
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  if (row.action !== action || row.targetId !== targetId || row.requestFingerprint !== fingerprint) {
+    throw new ConvexError("ADMIN_IDEMPOTENCY_CONFLICT");
+  }
+  if (!row.result) throw new ConvexError("ADMIN_OPERATION_IN_PROGRESS");
+  const job = await ctx.db.get(row.result.targetId as Id<"integrationJobs">);
+  if (!job) throw new ConvexError("Integration job was not found");
+  return { jobId: job._id, status: job.status, correlationId: row.correlationId };
+}
+
+async function recordJobControl(
+  ctx: MutationCtx,
+  actor: { userId: string; roles: AdminRole[] },
+  input: { action: "job_retry" | "job_cancel"; job: Doc<"integrationJobs">; reason: string; idempotencyKey: string; fingerprint: string; status: Doc<"integrationJobs">["status"] },
+) {
+  const now = Date.now();
+  const correlationId = `op_${crypto.randomUUID().replaceAll("-", "")}`;
+  const result = { status: "succeeded" as const, correlationId, action: input.action, targetId: input.job._id };
+  await ctx.db.insert("adminOperations", {
+    actorId: actor.userId, action: input.action, targetId: input.job._id,
+    idempotencyKey: input.idempotencyKey, requestFingerprint: input.fingerprint,
+    correlationId, status: "succeeded", result, createdAt: now, updatedAt: now,
+  });
+  await writeAudit(ctx, {
+    actorId: actor.userId, actorRoles: actor.roles,
+    action: input.action === "job_retry" ? "integration.job_retry" : "integration.job_cancel",
+    targetType: "integrationJob", targetId: input.job._id, reason: input.reason,
+    beforeSummary: JSON.stringify({ status: input.job.status }),
+    afterSummary: JSON.stringify({ status: input.status }), correlationId, outcome: "success",
+  });
+  return { jobId: input.job._id, status: input.status, correlationId };
+}
+
+export const retryJob = mutation({
+  args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
+  returns: controlledJobResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "retry");
+    const reason = validateAuditReason(args.reason);
+    const idempotencyKey = validateOperationKey(args.idempotencyKey);
+    const fingerprint = JSON.stringify({ jobId: args.jobId, reason });
+    const replay = await existingJobControl(ctx, actor.userId, idempotencyKey, "job_retry", args.jobId, fingerprint);
+    if (replay) return replay;
+    const job = await ctx.db.get(args.jobId);
+    if (!job) throw new ConvexError("Integration job was not found");
+
+    let status: Doc<"integrationJobs">["status"];
+    if (job.status === "manual_review") {
+      if (!job.processId || !job.lastErrorKind || !["network", "timeout", "rate_limit"].includes(job.lastErrorKind)) {
+        throw new ConvexError("Integration job is not retryable");
+      }
+      const claim = await claimJobDocument(ctx, job, false, true);
+      if (!claim) throw new ConvexError("Integration job is not retryable");
+      await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId: job._id, leaseToken: claim.leaseToken });
+      status = "running";
+    } else if (
+      job.status === "failed" &&
+      job.processId === undefined &&
+      job.leaseToken === undefined &&
+      job.targetType !== "documentVersion" &&
+      job.lastErrorKind !== undefined &&
+      ["network", "timeout", "rate_limit"].includes(job.lastErrorKind)
+    ) {
+      status = "queued";
+      await ctx.db.patch(job._id, {
+        status, attemptCount: 0, nextAttemptAt: Date.now(), lastErrorKind: undefined,
+        leaseToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now(),
+      });
+      await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId: job._id });
+    } else {
+      throw new ConvexError("Integration job is not retryable");
+    }
+    return await recordJobControl(ctx, actor, { action: "job_retry", job, reason, idempotencyKey, fingerprint, status });
+  },
+});
+
+export const cancelJob = mutation({
+  args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
+  returns: controlledJobResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "write");
+    const reason = validateAuditReason(args.reason);
+    const idempotencyKey = validateOperationKey(args.idempotencyKey);
+    const fingerprint = JSON.stringify({ jobId: args.jobId, reason });
+    const replay = await existingJobControl(ctx, actor.userId, idempotencyKey, "job_cancel", args.jobId, fingerprint);
+    if (replay) return replay;
+    const job = await ctx.db.get(args.jobId);
+    if (!job) throw new ConvexError("Integration job was not found");
+    if (job.processId || job.status === "manual_review" || job.status === "running" || job.status === "waiting_callback") {
+      throw new ConvexError("Integration job provider outcome is uncertain");
+    }
+    if (job.status !== "queued" || job.leaseToken || job.targetType === "documentVersion") {
+      throw new ConvexError("Integration job is not cancellable");
+    }
+    await ctx.db.patch(job._id, { status: "cancelled", nextAttemptAt: undefined, updatedAt: Date.now() });
+    return await recordJobControl(ctx, actor, { action: "job_cancel", job, reason, idempotencyKey, fingerprint, status: "cancelled" });
+  },
+});
+
+const jobListRowValidator = v.object({
+  id: v.id("integrationJobs"), type: jobTypeValidator, targetType: v.string(), targetId: v.string(),
+  status: jobStatusValidator, attemptCount: v.number(), lastErrorKind: v.optional(providerErrorKindValidator),
+  correlationId: v.string(), createdAt: v.number(), updatedAt: v.number(),
+});
+
+export const listJobs = query({
+  args: { paginationOpts: paginationOptsValidator, status: v.optional(jobStatusValidator), type: v.optional(jobTypeValidator) },
+  returns: v.object({ page: v.array(jobListRowValidator), isDone: v.boolean(), continueCursor: v.string() }),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminPermission(ctx, "operations", "read");
+    if (!Number.isInteger(args.paginationOpts.numItems) || args.paginationOpts.numItems < 1) throw new ConvexError("INVALID_ADMIN_PAGINATION");
+    const opts = { ...args.paginationOpts, numItems: Math.min(args.paginationOpts.numItems, 50), maximumRowsRead: 51 };
+    const base = args.status && args.type
+      ? ctx.db.query("integrationJobs").withIndex("by_status_and_type_and_createdAt", (q) => q.eq("status", args.status!).eq("type", args.type!))
+      : args.status
+        ? ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", (q) => q.eq("status", args.status!))
+        : args.type
+          ? ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", args.type!))
+          : ctx.db.query("integrationJobs").withIndex("by_createdAt");
+    const result = await base.order("desc").paginate(opts);
+    return { page: result.page.map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
   },
 });

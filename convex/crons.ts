@@ -7,12 +7,22 @@ const reconcileStaleJobs = makeFunctionReference<"mutation">(
 const rollupDailyMetrics = makeFunctionReference<"mutation">(
   "telemetry:rollupDailyMetrics",
 );
+const runRetentionBatch = makeFunctionReference<"mutation">(
+  "admin/operations:runRetentionBatch",
+);
 
 crons.interval(
   "reconcile stale GroundX jobs",
   { minutes: 15 },
   reconcileStaleJobs,
   {},
+);
+
+crons.interval(
+  "enforce bounded retention policy",
+  { hours: 1 },
+  runRetentionBatch,
+  { cursor: null },
 );
 
 crons.interval(

@@ -1,6 +1,9 @@
 import { paginationOptsValidator } from "convex/server";
-import { v } from "convex/values";
-import { query } from "../_generated/server";
+import { makeFunctionReference } from "convex/server";
+import { ConvexError, v } from "convex/values";
+import { internalMutation, mutation, query, type MutationCtx } from "../_generated/server";
+import type { AdminRole } from "../lib/adminPermissions";
+import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 
 const MAX_PAGE_SIZE = 20;
@@ -96,5 +99,210 @@ export const listIntegrationHealth = query({
       isDone: end >= INTEGRATIONS.length,
       continueCursor: `${CURSOR_PREFIX}${end}`,
     };
+  },
+});
+
+const incidentSeverityValidator = v.union(v.literal("low"), v.literal("medium"), v.literal("high"), v.literal("critical"));
+const incidentStatusValidator = v.union(v.literal("open"), v.literal("investigating"), v.literal("monitoring"), v.literal("resolved"));
+const incidentTimelineKindValidator = v.union(v.literal("created"), v.literal("note"), v.literal("status"), v.literal("ownership"), v.literal("severity"));
+const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const MAX_INCIDENT_TEXT = 500;
+
+function incidentText(value: string, field: string): string {
+  if (value.trim() !== value || value.length < 3 || value.length > MAX_INCIDENT_TEXT || /https?:\/\//i.test(value)) {
+    throw new ConvexError(`Invalid incident ${field}`);
+  }
+  return value;
+}
+
+async function findIncidentOperation(ctx: MutationCtx, actorId: string, idempotencyKey: string, action: string, fingerprint: string) {
+  if (!SAFE_KEY.test(idempotencyKey)) throw new ConvexError("ADMIN_INVALID_IDEMPOTENCY_KEY");
+  const rows = await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actorId).eq("idempotencyKey", idempotencyKey)).take(2);
+  if (rows.length > 1) throw new ConvexError("ADMIN_IDEMPOTENCY_STATE_INVALID");
+  if (!rows[0]) return null;
+  if (rows[0].action !== action || rows[0].requestFingerprint !== fingerprint) throw new ConvexError("ADMIN_IDEMPOTENCY_CONFLICT");
+  if (!rows[0].result) throw new ConvexError("ADMIN_OPERATION_IN_PROGRESS");
+  return { incidentId: rows[0].result.targetId, correlationId: rows[0].correlationId };
+}
+
+async function completeIncidentOperation(ctx: MutationCtx, actor: { userId: string; roles: AdminRole[] }, input: { action: string; incidentId: string; idempotencyKey: string; fingerprint: string; reason: string; auditAction: string; beforeSummary?: string; afterSummary?: string }) {
+  const now = Date.now();
+  const correlationId = `op_${crypto.randomUUID().replaceAll("-", "")}`;
+  await ctx.db.insert("adminOperations", { actorId: actor.userId, action: input.action, targetId: input.incidentId, idempotencyKey: input.idempotencyKey, requestFingerprint: input.fingerprint, correlationId, status: "succeeded", result: { status: "succeeded", correlationId, action: input.action, targetId: input.incidentId }, createdAt: now, updatedAt: now });
+  await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: input.auditAction, targetType: "systemIncident", targetId: input.incidentId, reason: input.reason, beforeSummary: input.beforeSummary, afterSummary: input.afterSummary, correlationId, outcome: "success" });
+  return { incidentId: input.incidentId, correlationId };
+}
+
+const incidentMutationResultValidator = v.object({ incidentId: v.string(), correlationId: v.string() });
+
+export const createIncident = mutation({
+  args: { title: v.string(), severity: incidentSeverityValidator, reason: v.string(), idempotencyKey: v.string() },
+  returns: incidentMutationResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "write");
+    const title = incidentText(args.title, "title");
+    const reason = validateAuditReason(args.reason);
+    const fingerprint = JSON.stringify({ title, severity: args.severity, reason });
+    const replay = await findIncidentOperation(ctx, actor.userId, args.idempotencyKey, "incident_create", fingerprint);
+    if (replay) return replay;
+    const now = Date.now();
+    const incidentId = await ctx.db.insert("systemIncidents", { title, severity: args.severity, status: "open", createdBy: actor.userId, createdAt: now, updatedAt: now });
+    await ctx.db.insert("incidentTimeline", { incidentId, kind: "created", actorId: actor.userId, summary: `Incident opened at ${args.severity} severity`, createdAt: now });
+    return await completeIncidentOperation(ctx, actor, { action: "incident_create", incidentId, idempotencyKey: args.idempotencyKey, fingerprint, reason, auditAction: "incident.created", afterSummary: JSON.stringify({ severity: args.severity, status: "open" }) });
+  },
+});
+
+export const addIncidentNote = mutation({
+  args: { incidentId: v.id("systemIncidents"), note: v.string(), reason: v.string(), idempotencyKey: v.string() },
+  returns: incidentMutationResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "write");
+    const note = incidentText(args.note, "note");
+    const reason = validateAuditReason(args.reason);
+    const fingerprint = JSON.stringify({ incidentId: args.incidentId, note, reason });
+    const replay = await findIncidentOperation(ctx, actor.userId, args.idempotencyKey, "incident_note", fingerprint);
+    if (replay) return replay;
+    const incident = await ctx.db.get(args.incidentId);
+    if (!incident) throw new ConvexError("Incident was not found");
+    await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "note", actorId: actor.userId, summary: note, createdAt: Date.now() });
+    await ctx.db.patch(incident._id, { updatedAt: Date.now() });
+    return await completeIncidentOperation(ctx, actor, { action: "incident_note", incidentId: incident._id, idempotencyKey: args.idempotencyKey, fingerprint, reason, auditAction: "incident.note_added", afterSummary: JSON.stringify({ noteAdded: true }) });
+  },
+});
+
+export const updateIncident = mutation({
+  args: { incidentId: v.id("systemIncidents"), status: v.optional(incidentStatusValidator), severity: v.optional(incidentSeverityValidator), ownerId: v.optional(v.union(v.string(), v.null())), reason: v.string(), idempotencyKey: v.string() },
+  returns: incidentMutationResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "write");
+    const reason = validateAuditReason(args.reason);
+    const fingerprint = JSON.stringify({ incidentId: args.incidentId, status: args.status, severity: args.severity, ownerId: args.ownerId, reason });
+    const replay = await findIncidentOperation(ctx, actor.userId, args.idempotencyKey, "incident_update", fingerprint);
+    if (replay) return replay;
+    const incident = await ctx.db.get(args.incidentId);
+    if (!incident) throw new ConvexError("Incident was not found");
+    if (args.status === undefined && args.severity === undefined && args.ownerId === undefined) throw new ConvexError("Incident update is empty");
+    const now = Date.now();
+    if (args.status !== undefined && args.status !== incident.status) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "status", actorId: actor.userId, summary: `Status changed from ${incident.status} to ${args.status}`, createdAt: now });
+    if (args.severity !== undefined && args.severity !== incident.severity) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "severity", actorId: actor.userId, summary: `Severity changed from ${incident.severity} to ${args.severity}`, createdAt: now });
+    if (args.ownerId !== undefined && args.ownerId !== (incident.ownerId ?? null)) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "ownership", actorId: actor.userId, summary: args.ownerId === null ? "Incident ownership cleared" : "Incident owner assigned", createdAt: now });
+    await ctx.db.patch(incident._id, { status: args.status, severity: args.severity, ownerId: args.ownerId === null ? undefined : args.ownerId, resolvedAt: args.status === "resolved" ? now : incident.resolvedAt, updatedAt: now });
+    return await completeIncidentOperation(ctx, actor, { action: "incident_update", incidentId: incident._id, idempotencyKey: args.idempotencyKey, fingerprint, reason, auditAction: "incident.updated", beforeSummary: JSON.stringify({ status: incident.status, severity: incident.severity, hasOwner: incident.ownerId !== undefined }), afterSummary: JSON.stringify({ status: args.status ?? incident.status, severity: args.severity ?? incident.severity, hasOwner: args.ownerId === undefined ? incident.ownerId !== undefined : args.ownerId !== null }) });
+  },
+});
+
+const incidentRowValidator = v.object({ id: v.id("systemIncidents"), title: v.string(), severity: incidentSeverityValidator, status: incidentStatusValidator, ownerId: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number() });
+export const listIncidents = query({
+  args: { paginationOpts: paginationOptsValidator, status: v.optional(incidentStatusValidator), severity: v.optional(incidentSeverityValidator) },
+  returns: v.object({ page: v.array(incidentRowValidator), isDone: v.boolean(), continueCursor: v.string() }),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminPermission(ctx, "operations", "read");
+    if (!Number.isInteger(args.paginationOpts.numItems) || args.paginationOpts.numItems < 1) throw new ConvexError("INVALID_ADMIN_PAGINATION");
+    const opts = { ...args.paginationOpts, numItems: Math.min(args.paginationOpts.numItems, 50), maximumRowsRead: 51 };
+    const base = args.status && args.severity ? ctx.db.query("systemIncidents").withIndex("by_status_and_severity_and_updatedAt", (q) => q.eq("status", args.status!).eq("severity", args.severity!)) : args.status ? ctx.db.query("systemIncidents").withIndex("by_status_and_updatedAt", (q) => q.eq("status", args.status!)) : args.severity ? ctx.db.query("systemIncidents").withIndex("by_severity_and_updatedAt", (q) => q.eq("severity", args.severity!)) : ctx.db.query("systemIncidents").withIndex("by_status_and_updatedAt");
+    const result = await base.order("desc").paginate(opts);
+    return { page: result.page.map((row) => ({ id: row._id, title: row.title, severity: row.severity, status: row.status, ownerId: row.ownerId, createdAt: row.createdAt, updatedAt: row.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+  },
+});
+
+export const listIncidentTimeline = query({
+  args: { incidentId: v.id("systemIncidents"), paginationOpts: paginationOptsValidator },
+  returns: v.object({ page: v.array(v.object({ id: v.id("incidentTimeline"), kind: incidentTimelineKindValidator, actorId: v.string(), summary: v.string(), createdAt: v.number() })), isDone: v.boolean(), continueCursor: v.string() }),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminPermission(ctx, "operations", "read");
+    const result = await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", args.incidentId)).order("asc").paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 50), maximumRowsRead: 51 });
+    return { page: result.page.map((row) => ({ id: row._id, kind: row.kind, actorId: row.actorId, summary: row.summary, createdAt: row.createdAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+  },
+});
+
+const RETENTION_LIMIT = 200;
+const RETENTION_SLICE = 40;
+const DAY_MS = 24 * 60 * 60_000;
+const runRetentionBatchRef = makeFunctionReference<"mutation">("admin/operations:runRetentionBatch");
+const retentionResultValidator = v.object({ deleted: v.number(), done: v.boolean(), cursor: v.union(v.string(), v.null()) });
+
+export const runRetentionBatch = internalMutation({
+  args: { cursor: v.union(v.string(), v.null()) },
+  returns: retentionResultValidator,
+  handler: async (ctx, _args) => {
+    const now = Date.now();
+    const state = await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique();
+    const stateId = state?._id ?? await ctx.db.insert("retentionState", { key: "default", phase: "records", deletedTotal: 0, lastStartedAt: now, updatedAt: now });
+    let deleted = 0;
+    let madeProgress = true;
+    while (deleted < RETENTION_LIMIT && madeProgress) {
+      madeProgress = false;
+      const capacity = Math.min(RETENTION_SLICE, RETENTION_LIMIT - deleted);
+      const grants = await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(capacity);
+      for (const row of grants) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
+      if (deleted >= RETENTION_LIMIT) break;
+      const refs = await ctx.db.query("exportDownloadReferences").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
+      for (const row of refs) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
+      if (deleted >= RETENTION_LIMIT) break;
+      for (const status of ["queued", "ready", "failed", "expired"] as const) {
+        const exports = await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
+        for (const row of exports) { if (row.storageId) await ctx.storage.delete(row.storageId); await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
+        if (deleted >= RETENTION_LIMIT) break;
+      }
+      if (deleted >= RETENTION_LIMIT) break;
+      const runs = await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
+      for (const row of runs) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
+      if (deleted >= RETENTION_LIMIT) break;
+      for (const status of ["succeeded", "failed", "cancelled"] as const) {
+        const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", (q) => q.eq("status", status).lt("createdAt", now - 90 * DAY_MS)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
+        for (const row of rows) {
+          if (row.retentionRedactedAt !== undefined) continue;
+          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionRedactedAt: now, updatedAt: now }); deleted += 1; madeProgress = true;
+          if (deleted >= RETENTION_LIMIT) break;
+        }
+        if (deleted >= RETENTION_LIMIT) break;
+      }
+    }
+
+    let storageDone = false;
+    let storageCursor: string | null = state?.cursor ?? null;
+    if (deleted < RETENTION_LIMIT) {
+      const storagePage = await ctx.db.system.query("_storage").order("asc").paginate({ numItems: Math.min(RETENTION_SLICE, RETENTION_LIMIT - deleted), cursor: storageCursor });
+      storageCursor = storagePage.continueCursor;
+      storageDone = storagePage.isDone;
+      for (const blob of storagePage.page) {
+        if (blob._creationTime >= now - DAY_MS || deleted >= RETENTION_LIMIT) continue;
+        const attached = await ctx.db.query("documentVersions").withIndex("by_originalStorageId", (q) => q.eq("originalStorageId", blob._id)).take(1);
+        const exportArtifact = await ctx.db.query("adminExports").withIndex("by_storageId", (q) => q.eq("storageId", blob._id)).take(1);
+        if (attached.length === 0 && exportArtifact.length === 0) {
+          await ctx.storage.delete(blob._id); deleted += 1;
+        }
+      }
+    }
+
+    const hasExpiredGrant = (await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(1)).length > 0;
+    const hasOldRun = (await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(1)).length > 0;
+    const hasExpiredReference = (await ctx.db.query("exportDownloadReferences").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(1)).length > 0;
+    let hasExpiredExport = false;
+    for (const status of ["queued", "ready", "failed", "expired"] as const) {
+      if ((await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(1)).length > 0) { hasExpiredExport = true; break; }
+    }
+    let hasOldJobDetail = false;
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", (q) => q.eq("status", status).lt("createdAt", now - 90 * DAY_MS)).take(2);
+      if (rows.some((row) => row.retentionRedactedAt === undefined)) { hasOldJobDetail = true; break; }
+    }
+    const done = deleted < RETENTION_LIMIT && !hasExpiredGrant && !hasExpiredReference && !hasExpiredExport && !hasOldRun && !hasOldJobDetail && storageDone;
+    const cursor = done ? null : `retention_${crypto.randomUUID().replaceAll("-", "")}`;
+    const current = await ctx.db.get(stateId);
+    await ctx.db.patch(stateId, { phase: done ? "complete" : "records", cursor: storageDone ? undefined : storageCursor ?? undefined, deletedTotal: (current?.deletedTotal ?? 0) + deleted, lastStartedAt: current?.lastStartedAt ?? now, lastSuccessfulAt: done ? now : current?.lastSuccessfulAt, updatedAt: now });
+    await writeAudit(ctx, { actorId: "system", actorRoles: [], action: done ? "retention.batch_completed" : "retention.batch_continued", targetType: "retention", targetId: "default", reason: "Enforce configured data retention policy", afterSummary: JSON.stringify({ deleted, done }), outcome: "success" }, { actorType: "system", actorUserId: "system", metadata: {} });
+    if (!done) await ctx.scheduler.runAfter(0, runRetentionBatchRef, { cursor });
+    return { deleted, done, cursor };
+  },
+});
+
+export const getRetentionPolicy = query({
+  args: {},
+  returns: v.object({ queryRunDays: v.number(), exportHours: v.number(), unattachedStorageHours: v.number(), maxPerInvocation: v.number(), lastSuccessfulAt: v.union(v.number(), v.null()), deletedTotal: v.number() }),
+  handler: async (ctx) => {
+    await requireEnabledAdminPermission(ctx, "operations", "read");
+    const state = await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique();
+    return { queryRunDays: 90, exportHours: 24, unattachedStorageHours: 24, maxPerInvocation: RETENTION_LIMIT, lastSuccessfulAt: state?.lastSuccessfulAt ?? null, deletedTotal: state?.deletedTotal ?? 0 };
   },
 });

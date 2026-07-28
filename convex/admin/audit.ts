@@ -1,3 +1,4 @@
+import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
 import { query, type MutationCtx } from "../_generated/server";
@@ -373,5 +374,41 @@ export const listAudit = query({
       outcome: event.outcome ?? "success",
       createdAt: event.createdAt,
     }));
+  },
+});
+
+export const listAuditPage = query({
+  args: {
+    paginationOpts: paginationOptsValidator,
+    action: v.optional(v.string()),
+    outcome: v.optional(v.union(v.literal("success"), v.literal("failure"), v.literal("denied"))),
+    targetType: v.optional(v.string()),
+  },
+  returns: v.object({ page: v.array(maskedAuditEventValidator), isDone: v.boolean(), continueCursor: v.string() }),
+  handler: async (ctx, args) => {
+    await requireAdminPermission(ctx, "audit", "read_masked");
+    if (!Number.isInteger(args.paginationOpts.numItems) || args.paginationOpts.numItems < 1) throw new ConvexError("INVALID_ADMIN_PAGINATION");
+    const filterCount = Number(args.action !== undefined) + Number(args.outcome !== undefined) + Number(args.targetType !== undefined);
+    if (filterCount > 1) throw new ConvexError("Select only one indexed audit filter");
+    if (args.action !== undefined) assertLexeme(args.action, "action", ACTION_PATTERN, MAX_AUDIT_ACTION_LENGTH);
+    if (args.targetType !== undefined) assertLexeme(args.targetType, "target type", TARGET_TYPE_PATTERN, MAX_AUDIT_TARGET_TYPE_LENGTH);
+    const opts = { ...args.paginationOpts, numItems: Math.min(args.paginationOpts.numItems, MAX_AUDIT_LIST_LIMIT), maximumRowsRead: MAX_AUDIT_LIST_LIMIT + 1 };
+    const base = args.action !== undefined
+      ? ctx.db.query("auditEvents").withIndex("by_action_and_createdAt", (q) => q.eq("action", args.action!))
+      : args.outcome !== undefined
+        ? ctx.db.query("auditEvents").withIndex("by_outcome_and_createdAt", (q) => q.eq("outcome", args.outcome!))
+        : args.targetType !== undefined
+          ? ctx.db.query("auditEvents").withIndex("by_targetType_and_createdAt", (q) => q.eq("targetType", args.targetType!))
+          : ctx.db.query("auditEvents").withIndex("by_createdAt");
+    const result = await base.order("desc").paginate(opts);
+    return {
+      page: result.page.filter(isSafeStoredAuditEvent).map((event) => ({
+        actorId: maskAuditIdentifier(event.actorId ?? event.actorUserId ?? "system"),
+        actorRoles: event.actorRoles ?? [], action: event.action, targetType: event.targetType,
+        targetId: maskAuditIdentifier(event.targetId), outcome: event.outcome ?? "success", createdAt: event.createdAt,
+      })),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
+    };
   },
 });

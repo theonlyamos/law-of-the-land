@@ -1,0 +1,10 @@
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const mocks = vi.hoisted(() => ({ authorizeAdminPage: vi.fn(), fetchAuthQuery: vi.fn(), redirect: vi.fn() }));
+vi.mock("@/lib/admin/server", () => ({ authorizeAdminPage: mocks.authorizeAdminPage }));
+vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
+vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
+import AuditPage from "./page";
+beforeEach(() => { mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor", roles: ["auditor"] } }); mocks.fetchAuthQuery.mockResolvedValue({ page: [{ actorId: "adm…123", actorRoles: ["super_admin"], action: "integration.job_retry", targetType: "integrationJob", targetId: "job…789", outcome: "success", createdAt: 1 }], isDone: true, continueCursor: "" }); mocks.redirect.mockImplementation(() => { throw new Error("NEXT_REDIRECT"); }); });
+afterEach(cleanup);
+describe("masked audit register", () => { it("shows only masked bounded audit fields and exact indexed filters", async () => { render(await AuditPage({ searchParams: Promise.resolve({ outcome: "success" }) })); expect(screen.getByRole("heading", { name: "Audit log" })).toBeVisible(); expect(screen.getByRole("table", { name: "Masked audit events" })).toBeVisible(); expect(screen.getByText("adm…123")).toBeVisible(); expect(document.body.textContent).not.toContain("reason"); }); });

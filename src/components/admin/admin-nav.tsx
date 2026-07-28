@@ -55,6 +55,7 @@ const NAV_GROUPS: ReadonlyArray<{
       { label: "Billing", href: "/admin/billing", permissions: [["billing", "read"]] },
       { label: "Analytics", href: "/admin/analytics", permissions: [["analytics", "read"]] },
       { label: "Operations", href: "/admin/operations", permissions: [["operations", "read"]] },
+      { label: "Incidents", href: "/admin/incidents", permissions: [["operations", "read"]] },
       { label: "Audit", href: "/admin/audit", permissions: [["audit", "read_masked"]] },
     ],
   },

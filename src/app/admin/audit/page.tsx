@@ -1,0 +1,18 @@
+import { api } from "../../../../convex/_generated/api";
+import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
+import { DataTable, readAdminTableNavigation, type AdminTableSearchParams } from "@/components/admin/data-table";
+import { authorizeAdminPage } from "@/lib/admin/server";
+import { fetchAuthQuery } from "@/lib/auth-server";
+import { redirect } from "next/navigation";
+const OUTCOMES = ["success", "failure", "denied"] as const;
+function text(value: string | string[] | undefined) { return typeof value === "string" && value.length <= 128 ? value : value === undefined ? undefined : null; }
+export default async function AuditPage({ searchParams }: { searchParams: Promise<AdminTableSearchParams> }) {
+  const parameters = await searchParams; const navigation = readAdminTableNavigation(parameters);
+  const action = text(parameters.action); const targetType = text(parameters.targetType); const rawOutcome = text(parameters.outcome);
+  const outcome = rawOutcome === undefined ? undefined : rawOutcome !== null && OUTCOMES.includes(rawOutcome as never) ? rawOutcome as typeof OUTCOMES[number] : null;
+  const access = await authorizeAdminPage(); if (access.status === "denied" || !hasRolePermission(access.currentAdmin.roles, "audit", "read_masked")) redirect("/admin/forbidden");
+  let failed = !navigation.isValid || action === null || targetType === null || outcome === null || [action, targetType, outcome].filter(Boolean).length > 1;
+  let result = { page: [] as Array<{ actorId: string; actorRoles: string[]; action: string; targetType: string; targetId: string; outcome: string; createdAt: number }>, isDone: true, continueCursor: "" };
+  if (!failed) try { result = await fetchAuthQuery(api.admin.audit.listAuditPage, { paginationOpts: { numItems: 50, cursor: navigation.cursor }, action: action || undefined, targetType: targetType || undefined, outcome: outcome || undefined }) as never; } catch { failed = true; }
+  return <div className="mx-auto max-w-[88rem]"><header className="border-b-2 border-slate-700 pb-7"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-amber-800">Control · immutable evidence</p><h1 className="mt-3 text-5xl font-semibold tracking-[-0.05em]">Audit log</h1><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-700">Append-only governance evidence with masked principals and targets. Sensitive content and download references are excluded.</p></header><div className="mt-8"><DataTable ariaLabel="Masked audit events" basePath="/admin/audit" columns={[{ key: "time", label: "UTC time" }, { key: "actor", label: "Actor" }, { key: "action", label: "Action" }, { key: "target", label: "Target" }, { key: "outcome", label: "Outcome" }]} filters={[{ name: "action", label: "Exact action", value: action ?? "", placeholder: "integration.job_retry" }, { name: "outcome", label: "Outcome", value: outcome ?? "", options: [{ value: "", label: "All outcomes" }, ...OUTCOMES.map((value) => ({ value, label: value }))] }, { name: "targetType", label: "Exact target type", value: targetType ?? "", placeholder: "integrationJob" }]} rows={result.page.map((row, index) => ({ id: `${row.createdAt}-${index}`, cells: { time: new Date(row.createdAt).toISOString(), actor: <><span className="font-mono">{row.actorId}</span><span className="block text-xs">{row.actorRoles.join(", ") || "system"}</span></>, action: row.action, target: `${row.targetType} · ${row.targetId}`, outcome: row.outcome } }))} currentCursor={navigation.cursor} previousCursors={navigation.previousCursors} nextCursor={result.continueCursor} isDone={result.isDone} state={failed ? "error" : "ready"} /></div></div>;
+}

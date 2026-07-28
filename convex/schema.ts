@@ -133,7 +133,8 @@ export default defineSchema({
     .index("by_resourceId_and_versionNumber", ["resourceId", "versionNumber"])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
     .index("by_resourceId_and_sha256", ["resourceId", "sha256"])
-    .index("by_resourceId_and_status", ["resourceId", "status"]),
+    .index("by_resourceId_and_status", ["resourceId", "status"])
+    .index("by_originalStorageId", ["originalStorageId"]),
   reviewDecisions: defineTable({
     documentVersionId: v.id("documentVersions"),
     reviewerId: v.string(),
@@ -200,6 +201,8 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_actorId_and_createdAt", ["actorId", "createdAt"])
     .index("by_action_and_createdAt", ["action", "createdAt"])
+    .index("by_outcome_and_createdAt", ["outcome", "createdAt"])
+    .index("by_targetType_and_createdAt", ["targetType", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
   adminOperations: defineTable({
     actorId: v.string(),
@@ -351,6 +354,7 @@ export default defineSchema({
         v.literal("provider"),
       ),
     ),
+    retentionRedactedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -358,6 +362,10 @@ export default defineSchema({
     .index("by_callbackTokenHash", ["callbackTokenHash"])
     .index("by_processId", ["processId"])
     .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
+    .index("by_createdAt", ["createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_type_and_createdAt", ["type", "createdAt"])
+    .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
   adminAccessGrants: defineTable({
     adminId: v.string(),
@@ -371,7 +379,66 @@ export default defineSchema({
     "adminId",
     "chatSessionId",
     "expiresAt",
-  ]),
+  ]).index("by_expiresAt", ["expiresAt"]),
+  adminExports: defineTable({
+    correlationId: v.string(),
+    requesterId: v.string(),
+    chatSessionId: v.id("chatSessions"),
+    accessGrantId: v.id("adminAccessGrants"),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("ready"),
+      v.literal("failed"),
+      v.literal("expired"),
+    ),
+    storageId: v.optional(v.id("_storage")),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_correlationId", ["correlationId"])
+    .index("by_storageId", ["storageId"])
+    .index("by_status_and_expiresAt", ["status", "expiresAt"]),
+  exportDownloadReferences: defineTable({
+    exportId: v.id("adminExports"),
+    requesterId: v.string(),
+    referenceHash: v.string(),
+    expiresAt: v.number(),
+    consumedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_referenceHash", ["referenceHash"])
+    .index("by_exportId_and_createdAt", ["exportId", "createdAt"])
+    .index("by_expiresAt", ["expiresAt"]),
+  systemIncidents: defineTable({
+    title: v.string(),
+    severity: v.union(v.literal("low"), v.literal("medium"), v.literal("high"), v.literal("critical")),
+    status: v.union(v.literal("open"), v.literal("investigating"), v.literal("monitoring"), v.literal("resolved")),
+    ownerId: v.optional(v.string()),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index("by_status_and_updatedAt", ["status", "updatedAt"])
+    .index("by_severity_and_updatedAt", ["severity", "updatedAt"])
+    .index("by_status_and_severity_and_updatedAt", ["status", "severity", "updatedAt"]),
+  incidentTimeline: defineTable({
+    incidentId: v.id("systemIncidents"),
+    kind: v.union(v.literal("created"), v.literal("note"), v.literal("status"), v.literal("ownership"), v.literal("severity")),
+    actorId: v.string(),
+    summary: v.string(),
+    createdAt: v.number(),
+  }).index("by_incidentId_and_createdAt", ["incidentId", "createdAt"]),
+  retentionState: defineTable({
+    key: v.literal("default"),
+    phase: v.string(),
+    cursor: v.optional(v.string()),
+    deletedTotal: v.number(),
+    lastStartedAt: v.number(),
+    lastSuccessfulAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
   featureFlags: defineTable({
     key: v.literal("admin_panel"),
     environment: v.string(),
