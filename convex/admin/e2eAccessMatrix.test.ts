@@ -4,6 +4,7 @@ import { E2E_PRIVILEGED_FUNCTIONS, E2E_PROTECTED_ROUTES } from "./e2eAccessMatri
 
 describe("admin E2E authorization matrix", () => {
   const publicPrivilegedPaths = [
+    "admin/featureFlags:setAdminPanel",
     "admin/roles:setAdminRoles",
     "admin/users:assignRoles",
     "admin/users:banUser",
@@ -62,11 +63,15 @@ describe("admin E2E authorization matrix", () => {
     }
   });
 
+  it("keeps the canonical privileged mutation surface at exactly 37 operations", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS).toHaveLength(37);
+  });
+
   it("contains no duplicate route or function entries and includes every required domain", () => {
     expect(new Set(E2E_PROTECTED_ROUTES.map((entry) => entry.path)).size).toBe(E2E_PROTECTED_ROUTES.length);
     expect(new Set(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).size).toBe(E2E_PRIVILEGED_FUNCTIONS.length);
     expect(new Set(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path.split("/")[1].split(":")[0]))).toEqual(
-      new Set(["roles", "users", "conversations", "exports", "documents", "resources", "reviews", "publication", "billing", "jobs", "operations"]),
+      new Set(["featureFlags", "roles", "users", "conversations", "exports", "documents", "resources", "reviews", "publication", "billing", "jobs", "operations"]),
     );
   });
 
@@ -86,6 +91,10 @@ describe("admin E2E authorization matrix", () => {
     expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin/documents/:resourceId")).toMatchObject({
       permissions: [["resource", "read"], ["resource", "write"]],
       allowed: ["super_admin", "content_manager", "auditor"],
+    });
+    expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin-recovery")).toMatchObject({
+      permissions: [["user", "set_role"]],
+      allowed: ["super_admin"],
     });
   });
 });

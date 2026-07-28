@@ -12,6 +12,7 @@ type StepUpDialogProps = {
   title: string;
   description: string;
   submitLabel: string;
+  cancelLabel?: string;
   targetId: string;
   idempotencyKey: string;
   stepUpAction?: string;
@@ -28,6 +29,7 @@ export function StepUpDialog({
   title,
   description,
   submitLabel,
+  cancelLabel = "Keep this user unchanged",
   targetId,
   idempotencyKey,
   stepUpAction,
@@ -194,7 +196,7 @@ export function StepUpDialog({
             onClick={onClose}
             className="min-h-11 px-5 text-sm font-semibold underline decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50"
           >
-            Keep this user unchanged
+            {cancelLabel}
           </button>
           <button
             type="submit"

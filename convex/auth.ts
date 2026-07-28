@@ -51,6 +51,7 @@ const stepUpActions = new Set([
   "impersonation_start",
   "user_deletion_queue",
   "conversation_export",
+  "admin_panel_set",
 ]);
 const stepUpKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const recordAdminStepUpProofReference =

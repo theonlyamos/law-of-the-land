@@ -24,9 +24,11 @@ export const E2E_PROTECTED_ROUTES = [
   protectedRoute("/admin/users/:userId", [["user", "read"]]),
   protectedRoute("/admin/conversations/:chatId", [["conversation", "read_content"]]),
   protectedRoute("/admin/documents/:resourceId", [["resource", "read"], ["resource", "write"]]),
+  protectedRoute("/admin-recovery", [["user", "set_role"]]),
 ] as const satisfies ReadonlyArray<{ path: string; permissions: ReadonlyArray<readonly [string, string]>; adminOnly: boolean; allowed: readonly AdminRole[] }>;
 
 export const E2E_PRIVILEGED_FUNCTIONS = [
+  { path: "admin/featureFlags:setAdminPanel", resource: "user", action: "set_role", allowed: ["super_admin"], success: "admin_panel_flag_set" },
   { path: "admin/roles:setAdminRoles", resource: "user", action: "set_role", allowed: ["super_admin"], success: "roles_changed" },
   { path: "admin/users:assignRoles", resource: "user", action: "set_role", allowed: ["super_admin"], success: "roles_assign_succeeded" },
   { path: "admin/users:banUser", resource: "user", action: "ban", allowed: ["super_admin"], success: "user_ban_succeeded" },

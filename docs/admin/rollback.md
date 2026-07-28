@@ -2,22 +2,29 @@
 
 ## Document rollback
 
-**Owner:** Super Admin or Content Reviewer with `document:rollback`. **Abort:** target is not `superseded`, it is already active, no healthy active version exists, step-up is absent, or the provider outcome of another lifecycle job is uncertain.
+**Owner:** Super Admin or Content Reviewer with `document:rollback`. **Abort:** target is not `superseded`, target is active, no healthy active version exists, step-up fails, or another lifecycle outcome is uncertain.
 
-Invoke `admin/publication:rollbackVersion` only after step-up authentication, with the exact confirmation `ROLLBACK <versionId>`, an audit reason, and a new idempotency key. It queues a GroundX `copy_documents` job from the target's staging document to the jurisdiction production bucket. Expected success: the target becomes `published`, the formerly active version becomes `superseded`, and the resource pointer changes atomically. Failure leaves the target `superseded` with `Rollback copy failed` and preserves the active version.
-
-For a failed publication, do not use rollback: the prior production version never moved, so correct the fault and re-run the approved publish flow. For a failed rollback, keep the currently active version and use the outage runbook if GroundX is unavailable.
+In `/admin/review`, choose rollback for `versionId`. Password verification must issue action `document_rollback` for that target and a fresh UUID idempotency key. Invoke `admin/publication:rollbackVersion({ versionId, confirmation: "ROLLBACK <versionId>", reason, idempotencyKey })`. Expected state is `publishing`, then target `published`, former active version `superseded`, and one atomic pointer change. Failure leaves the target `superseded` with `Rollback copy failed` and preserves the active version. Abort on a missing correlation ID or unexpected status; recover through the provider-outage runbook, never by full re-ingest.
 
 ## Compromised administrator
 
-**Owner:** a different active Super Admin. **Abort:** do not remove the last active Super Admin; role management refuses this. Do not rely on the compromised session to remediate itself.
+**Owner:** a different active, 2FA-assured, non-impersonated Super Admin. **Abort:** never remove the last active Super Admin and never use the compromised session to remediate itself.
 
-1. Set `ADMIN_PANEL_ENABLED=false` in the affected Convex deployment immediately. This disables admin functions even if the database flag is enabled.
-2. Use the Better Auth administration flow to ban the account and revoke its sessions. Preserve audit and incident records; do not copy session tokens, export references, provider keys, chats, or document contents into notes.
-3. Review role changes, exports, document jobs, and incidents by actor/correlation ID. Revoke any active conversation grants and allow export references to expire; retention removes expired grants and references.
-4. Rotate the compromised Better Auth secret or provider credential in the Convex deployment when exposure is credible, then invalidate affected sessions according to the identity response plan. For a suspected GroundX callback-token disclosure, cancel only a still-queued safe job or create a fresh job after confirming the old provider outcome; each new job has a new callback token.
-5. Require verified email and 2FA before restoring any administrative role. Re-enable the deployment gate only after a different Super Admin reviews the incident, access changes, exports, and provider health, then confirms the matching `admin_panel` feature flag remains the sole enabled row for `ADMIN_ENVIRONMENT`.
+1. Before disabling either panel gate, open `/admin/users/<userId>` from the different Super Admin session. Choose **Suspend user**, provide a reason, type `BAN <userId>`, and invoke `admin/users:banUser({ userId, reason, confirmation, idempotencyKey })` with a fresh UUID. Expected state is banned with sessions revoked and a correlation ID. If any session remains, choose **Revoke all sessions**, type `REVOKE ALL <userId>`, and invoke `admin/users:revokeAllSessions` with a different UUID. Abort if the target is the last Super Admin or either result is not `succeeded`.
+2. Still signed in as the different Super Admin, open `/admin-recovery`; select **Disable persisted flag**, provide the incident reason, type `ADMIN_PANEL <ADMIN_ENVIRONMENT> DISABLE`, confirm the current password, and submit. Expected state is `Disabled` plus a correlation ID.
+3. Disable the deployment gate on the exact target:
+
+   ```powershell
+   npx convex env set ADMIN_PANEL_ENABLED false --deployment staging
+   ```
+
+4. Review role changes, exports, document jobs, incidents, and conversation grants by actor/correlation ID. Do not place tokens, references, keys, chats, document contents, or raw provider bodies in incident notes. Exports and references expire within 10 minutes.
+5. Rotate a Better Auth/provider secret only when exposure is credible, then invalidate affected sessions. For a callback-token disclosure, wait for the known provider outcome; a fresh remote-ingest job creates a fresh token after claim.
+
+Recovery requires incident review by another Super Admin, verified email and 2FA for any restored administrator, and an authorized provider smoke. Follow [bootstrap](bootstrap.md#persisted-flag-enable-disable-and-recovery): enable the persisted row through `/admin-recovery` while the deployment gate remains false, then set the deployment gate true. Abort and keep it false if environment, confirmation, correlation, audit, or provider checks differ.
 
 ## Full feature rollback
 
-**Owner:** release manager with a Super Admin. Set `ADMIN_PANEL_ENABLED=false` first, then disable the matching `admin_panel` feature flag. This is the full supported rollback because every gated admin query and mutation requires both controls. Do not delete jurisdictions, documents, audit events, or jobs as a release rollback. Keep Ghana bucket `11833` mapped as its production bucket and leave public search on the last healthy governed mapping. Recover by fixing the release in preview, rerunning the release checklist, and enabling both gates only after approval.
+**Owner:** release manager with an assured Super Admin. First disable the persisted row through `/admin-recovery` using exact confirmation `ADMIN_PANEL <ADMIN_ENVIRONMENT> DISABLE`, a reason, password proof, and a fresh key. Then run `npx convex env set ADMIN_PANEL_ENABLED false --deployment staging`. Expected state: ordinary `/admin` requests fail closed while `/admin-recovery` remains available only to an assured non-impersonated Super Admin.
+
+Do not delete jurisdictions, documents, audit events, jobs, or Ghana production mapping `11833`. Recover by fixing preview, rerunning the release checklist, enabling the persisted row with exact `ADMIN_PANEL <ADMIN_ENVIRONMENT> ENABLE`, and only then setting the deployment gate true. Use `--prod` instead of `--deployment staging` only during an explicitly approved production incident.

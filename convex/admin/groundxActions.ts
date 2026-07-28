@@ -12,6 +12,7 @@ const getJobRef = makeFunctionReference<"query">("admin/jobs:getJobForRun");
 const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
 const resultRef = makeFunctionReference<"mutation">("admin/jobs:applyProviderResult");
 const failureRef = makeFunctionReference<"mutation">("admin/jobs:recordProviderFailure");
+const armCallbackRef = makeFunctionReference<"mutation">("admin/jobs:armGroundxCallback");
 const evidenceTargetRef = makeFunctionReference<"query">("admin/documents:getStagingEvidenceTarget");
 const consumeE2EProviderOutcomeRef = makeFunctionReference<"mutation">("admin/e2eFixtures:consumeProviderOutcome");
 
@@ -37,13 +38,38 @@ const payloadSchemas = {
 
 type Adapter = Pick<GroundxAdapter, "createBucket" | "ingestRemote" | "copyDocuments" | "deleteDocuments" | "getProcess">;
 
+type ArmCallback = (input: {
+  jobId: Doc<"integrationJobs">["_id"];
+  leaseToken: string;
+  tokenHash: string;
+}) => Promise<unknown>;
+
+async function callbackTokenHash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function mintCallbackToken(): string {
+  return `gx_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
 function normalizedFileSize(value: string | undefined): number | undefined {
   if (value === undefined || !/^\d+$/.test(value)) return undefined;
   const size = Number(value);
   return Number.isSafeInteger(size) ? size : undefined;
 }
 
-export async function executeGroundxJob(adapter: Adapter, job: Doc<"integrationJobs">) {
+export async function executeGroundxJob(
+  adapter: Adapter,
+  job: Doc<"integrationJobs">,
+  callbackUrl?: string,
+) {
   const raw: unknown = JSON.parse(job.payload);
   if (job.processId !== undefined || job.type === "poll_process") {
     const processId = job.processId ?? payloadSchemas.poll_process.parse(raw).processId;
@@ -55,12 +81,63 @@ export async function executeGroundxJob(adapter: Adapter, job: Doc<"integrationJ
       return { processId: `bucket-${result.bucketId}`, status: "complete" as const };
     }
     case "ingest_remote":
-      return await adapter.ingestRemote(payloadSchemas.ingest_remote.parse(raw));
+      return await adapter.ingestRemote({
+        ...payloadSchemas.ingest_remote.parse(raw),
+        ...(callbackUrl
+          ? {
+              callbackUrl,
+              callbackData: { targetType: job.targetType, targetId: job.targetId },
+            }
+          : {}),
+      });
     case "copy_documents":
       return await adapter.copyDocuments(payloadSchemas.copy_documents.parse(raw));
     case "delete_documents":
       return await adapter.deleteDocuments(payloadSchemas.delete_documents.parse(raw));
   }
+}
+
+/**
+ * Executes the provider portion of an already-claimed job. Remote ingestion
+ * fails closed unless its one-time callback hash is durably armed before the
+ * adapter receives the callback URL. Copy/delete never enter this branch
+ * because their provider endpoints do not support callbacks.
+ */
+export async function executeClaimedGroundxJob(input: {
+  adapter: Adapter;
+  job: Doc<"integrationJobs">;
+  leaseToken: string;
+  callbackSiteUrl?: string;
+  armCallback: ArmCallback;
+  tokenFactory?: () => string;
+}) {
+  let callbackUrl: string | undefined;
+  if (input.job.type === "ingest_remote") {
+    let origin: string;
+    try {
+      const site = new URL(input.callbackSiteUrl ?? "");
+      if (site.protocol !== "https:") throw new Error("HTTPS required");
+      origin = site.origin;
+    } catch {
+      throw new ProviderError(
+        "validation",
+        false,
+        null,
+        "GroundX callback origin is not configured",
+      );
+    }
+    const token = (input.tokenFactory ?? mintCallbackToken)();
+    if (!/^gx_[a-f0-9]{64}$/.test(token)) {
+      throw new ProviderError("validation", false, null, "GroundX callback token is invalid");
+    }
+    await input.armCallback({
+      jobId: input.job._id,
+      leaseToken: input.leaseToken,
+      tokenHash: await callbackTokenHash(token),
+    });
+    callbackUrl = `${origin}/groundx/callback/${token}`;
+  }
+  return await executeGroundxJob(input.adapter, input.job, callbackUrl);
 }
 
 export const runGroundxJob = internalAction({
@@ -114,7 +191,13 @@ export const runGroundxJob = internalAction({
     let result: Awaited<ReturnType<typeof executeGroundxJob>>;
     const adapter = new GroundxAdapter({ apiKey });
     try {
-      result = await executeGroundxJob(adapter, job);
+      result = await executeClaimedGroundxJob({
+        adapter,
+        job,
+        leaseToken,
+        callbackSiteUrl: process.env.NEXT_PUBLIC_CONVEX_SITE_URL,
+        armCallback: async (callback) => await ctx.runMutation(armCallbackRef, callback),
+      });
     } catch (error) {
       const kind = error instanceof ProviderError ? error.kind : "invalid_response";
       await ctx.runMutation(failureRef, {

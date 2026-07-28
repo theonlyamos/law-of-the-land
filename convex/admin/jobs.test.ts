@@ -6,7 +6,7 @@ import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
-import { executeGroundxJob } from "./groundxActions";
+import { executeClaimedGroundxJob, executeGroundxJob } from "./groundxActions";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -32,6 +32,9 @@ const recordProviderFailure = makeFunctionReference<"mutation">(
 );
 const completeGroundxCallback = makeFunctionReference<"mutation">(
   "admin/jobs:completeGroundxCallback",
+);
+const armGroundxCallback = makeFunctionReference<"mutation">(
+  "admin/jobs:armGroundxCallback",
 );
 const reconcileStaleJobs = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileStaleJobs",
@@ -182,7 +185,9 @@ describe("durable GroundX jobs", () => {
     ]);
 
     expect(second.jobId).toBe(first.jobId);
-    expect([first.callbackToken, second.callbackToken].filter(Boolean)).toHaveLength(1);
+    expect(first.callbackToken).toBeNull();
+    expect(second.callbackToken).toBeNull();
+    expect(second.callbackTokenHash).toBe(first.callbackTokenHash);
     expect(
       await t.run(async (ctx) => ctx.db.query("integrationJobs").take(3)),
     ).toHaveLength(1);
@@ -213,9 +218,11 @@ describe("durable GroundX jobs", () => {
     const snapshot = await t.run(async (ctx) => ({
       jobs: await ctx.db.query("integrationJobs").take(2),
       audits: await ctx.db.query("auditEvents").take(4),
+      scheduled: await ctx.db.system.query("_scheduled_functions").take(4),
     }));
     const persisted = JSON.stringify(snapshot);
-    expect(persisted).not.toContain(created.callbackToken);
+    expect(created.callbackToken).toBeNull();
+    expect(persisted).not.toMatch(/gx_[a-f0-9]{64}/);
     expect(persisted).not.toContain("never-store-me");
     expect(snapshot.jobs[0]).toMatchObject({ actorId: "system", actorRoles: [] });
     expect(snapshot.audits).toHaveLength(1);
@@ -252,6 +259,12 @@ describe("durable GroundX jobs", () => {
       }),
     ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
     const leaseToken = await claimLease(t, created.jobId);
+    const callbackTokenHash = "a".repeat(64);
+    await t.mutation(armGroundxCallback, {
+      jobId: created.jobId,
+      leaseToken,
+      tokenHash: callbackTokenHash,
+    });
     await t.mutation(applyProviderResult, {
       jobId: created.jobId,
       leaseToken,
@@ -259,7 +272,7 @@ describe("durable GroundX jobs", () => {
       status: "processing",
     });
     const accepted = await t.mutation(completeGroundxCallback, {
-      tokenHash: created.callbackTokenHash,
+      tokenHash: callbackTokenHash,
       processId: "process-1",
       targetType: "documentVersion",
       targetId: "version_01",
@@ -268,7 +281,7 @@ describe("durable GroundX jobs", () => {
     expect(accepted).toEqual({ accepted: true, duplicate: false });
     await expect(
       t.mutation(completeGroundxCallback, {
-        tokenHash: created.callbackTokenHash,
+        tokenHash: callbackTokenHash,
         processId: "process-1",
         targetType: "documentVersion",
         targetId: "version_01",
@@ -395,6 +408,16 @@ describe("durable GroundX jobs", () => {
     const t = convexTest(schema, modules);
     const created = await t.mutation(enqueueJob, request());
     const leaseToken = await claimLease(t, created.jobId);
+    const callbackToken = `gx_${"c".repeat(64)}`;
+    const callbackTokenHash = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(callbackToken))),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+    await t.mutation(armGroundxCallback, {
+      jobId: created.jobId,
+      leaseToken,
+      tokenHash: callbackTokenHash,
+    });
     await t.mutation(applyProviderResult, {
       jobId: created.jobId,
       leaseToken,
@@ -409,31 +432,31 @@ describe("durable GroundX jobs", () => {
       })).status,
     ).toBe(404);
     expect(
-      (await t.fetch(`/groundx/callback/${created.callbackToken}`, {
+      (await t.fetch(`/groundx/callback/${callbackToken}`, {
         method: "POST",
         body: JSON.stringify({ processId: "other", targetType: "documentVersion", targetId: "version_01", status: "complete" }),
       })).status,
     ).toBe(404);
     expect(
-      (await t.fetch(`/groundx/callback/${created.callbackToken}`, {
+      (await t.fetch(`/groundx/callback/${callbackToken}`, {
         method: "POST",
         body: JSON.stringify({ processId: "process-7", targetType: "documentVersion", targetId: "wrong-target", status: "complete" }),
       })).status,
     ).toBe(404);
     expect(
-      (await t.fetch(`/groundx/callback/${created.callbackToken}`, {
+      (await t.fetch(`/groundx/callback/${callbackToken}`, {
         method: "POST",
         body: "x".repeat(16_385),
       })).status,
     ).toBe(400);
     expect(
-      (await t.fetch(`/groundx/callback/${created.callbackToken}`, {
+      (await t.fetch(`/groundx/callback/${callbackToken}`, {
         method: "POST",
         body: "{",
       })).status,
     ).toBe(400);
     expect(
-      (await t.fetch(`/groundx/callback/${created.callbackToken}`, {
+      (await t.fetch(`/groundx/callback/${callbackToken}`, {
         method: "POST",
         body: JSON.stringify({}),
       })).status,
@@ -445,13 +468,13 @@ describe("durable GroundX jobs", () => {
       status: "complete",
       rawBody: "provider-sensitive-body",
     });
-    expect((await t.fetch(`/groundx/callback/${created.callbackToken}`, { method: "POST", body })).status).toBe(202);
-    expect((await t.fetch(`/groundx/callback/${created.callbackToken}`, { method: "POST", body })).status).toBe(202);
+    expect((await t.fetch(`/groundx/callback/${callbackToken}`, { method: "POST", body })).status).toBe(202);
+    expect((await t.fetch(`/groundx/callback/${callbackToken}`, { method: "POST", body })).status).toBe(202);
     const persisted = JSON.stringify(await t.run(async (ctx) => ({
       jobs: await ctx.db.query("integrationJobs").take(2),
       audits: await ctx.db.query("auditEvents").take(10),
     })));
-    expect(persisted).not.toContain(created.callbackToken);
+    expect(persisted).not.toContain(callbackToken);
     expect(persisted).not.toContain("provider-sensitive-body");
   }, 20_000);
 
@@ -523,6 +546,45 @@ describe("durable GroundX jobs", () => {
     expect(adapter.ingestRemote).toHaveBeenCalledWith({
       documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
     });
+  });
+
+  it("arms the callback hash before the claimed action calls the remote ingest adapter", async () => {
+    const t = convexTest(schema, modules);
+    const created = await t.mutation(enqueueJob, request({ idempotencyKey: "callback-order" }));
+    const job = await t.run(async (ctx) => ctx.db.get(created.jobId as Id<"integrationJobs">));
+    if (!job) throw new Error("missing fixture job");
+    const order: string[] = [];
+    const adapter = {
+      createBucket: vi.fn(),
+      ingestRemote: vi.fn(async () => {
+        order.push("adapter");
+        return { processId: "process-callback", status: "processing" as const };
+      }),
+      copyDocuments: vi.fn(),
+      deleteDocuments: vi.fn(),
+      getProcess: vi.fn(),
+    };
+    const arm = vi.fn(async ({ tokenHash }: { tokenHash: string }) => {
+      expect(tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      order.push("arm");
+    });
+
+    await expect(executeClaimedGroundxJob({
+      adapter,
+      job: { ...job, status: "running" as const, leaseToken: "lease_callback" },
+      leaseToken: "lease_callback",
+      callbackSiteUrl: "https://law.example.convex.site/ignored/path",
+      armCallback: arm,
+      tokenFactory: () => `gx_${"b".repeat(64)}`,
+    })).resolves.toEqual({ processId: "process-callback", status: "processing" });
+
+    expect(order).toEqual(["arm", "adapter"]);
+    expect(adapter.ingestRemote).toHaveBeenCalledWith({
+      documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
+      callbackUrl: `https://law.example.convex.site/groundx/callback/gx_${"b".repeat(64)}`,
+      callbackData: { targetType: "documentVersion", targetId: "version_01" },
+    });
+    expect(JSON.stringify(arm.mock.calls)).not.toContain(`gx_${"b".repeat(64)}`);
   });
 
   it("derives the actor from the assured admin session and rejects role spoofing", async () => {

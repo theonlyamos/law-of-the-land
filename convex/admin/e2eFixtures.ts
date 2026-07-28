@@ -662,6 +662,17 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
   };
 
   switch (input.path) {
+    case "admin/featureFlags:setAdminPanel": {
+      await insertStepUp(ctx, actor, "admin_panel_set", "admin_panel:test", input.key);
+      Object.assign(args, {
+        environment: "test",
+        enabled: true,
+        confirmation: "ADMIN_PANEL test ENABLE",
+        reason,
+        idempotencyKey: input.key,
+      });
+      break;
+    }
     case "admin/roles:setAdminRoles": { const target = await user("setroles", { twoFactorEnabled: true }); Object.assign(args, { targetUserId: target.userId, roles: ["content_manager"] }); break; }
     case "admin/users:assignRoles": { const target = await user("assignroles", { twoFactorEnabled: true }); await insertStepUp(ctx, actor, "roles_assign", target.userId, input.key); Object.assign(args, { userId: target.userId, roles: ["content_manager"], reason, idempotencyKey: input.key }); break; }
     case "admin/users:banUser": { const target = await user("ban"); Object.assign(args, { userId: target.userId, reason, confirmation: `BAN ${target.userId}`, idempotencyKey: input.key }); break; }
@@ -733,7 +744,16 @@ async function readMatrixOperation(ctx: MutationCtx, input: { tag: string; path:
   let terminal = false;
   let state: Record<string, unknown> = {};
 
-  if (input.path === "admin/roles:setAdminRoles" || input.path === "admin/users:assignRoles") {
+  if (input.path === "admin/featureFlags:setAdminPanel") {
+    const rows = await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) =>
+      q.eq("key", "admin_panel").eq("environment", String(args.environment)),
+    ).take(2);
+    const audits = await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) =>
+      q.eq("actorId", actor.userId),
+    ).order("desc").take(10);
+    terminal = rows.length === 1 && rows[0].enabled === args.enabled && operation?.status === "succeeded" && proofs[0]?.consumedAt !== undefined && audits.some((row) => row.action === "admin.panel_flag_set" && row.outcome === "success");
+    state = { enabled: rows[0]?.enabled ?? null, operationStatus: operation?.status ?? null, proofConsumed: proofs[0]?.consumedAt !== undefined, audited: audits.some((row) => row.action === "admin.panel_flag_set" && row.outcome === "success") };
+  } else if (input.path === "admin/roles:setAdminRoles" || input.path === "admin/users:assignRoles") {
     const user = await authUser(input.path.includes("roles:set") ? args.targetUserId : args.userId);
     terminal = user?.role === "content_manager" && (input.path.includes("roles:set") || (operation?.status === "succeeded" && proofs[0]?.consumedAt !== undefined));
     state = { role: user?.role ?? null, operationStatus: operation?.status ?? null, proofConsumed: proofs[0]?.consumedAt !== undefined };

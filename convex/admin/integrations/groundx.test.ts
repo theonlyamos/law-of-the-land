@@ -115,6 +115,38 @@ describe("GroundxAdapter SDK bindings", () => {
     );
   });
 
+  it("uses the documented callback transport only when callback delivery is requested", async () => {
+    const sdk = makeSdk();
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(ingestResult), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const adapter = makeAdapter({ sdk, fetch });
+    const callbackUrl = "https://law.example.convex.site/groundx/callback/gx_" + "a".repeat(64);
+
+    await expect(adapter.ingestRemote({
+      documents: [{ bucketId: 7, sourceUrl: "https://documents.example/constitution.pdf" }],
+      callbackUrl,
+      callbackData: { targetType: "documentVersion", targetId: "version_01" },
+    })).resolves.toEqual({ processId: "process-1", status: "queued" });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sdk.documents.ingestRemote).not.toHaveBeenCalled();
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.groundx.ai/api/v1/ingest/documents/remote");
+    expect(init.headers).toMatchObject({
+      "X-API-Key": "groundx-test-secret",
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      documents: [{ bucketId: 7, sourceUrl: "https://documents.example/constitution.pdf" }],
+      callbackUrl,
+      callbackData: { targetType: "documentVersion", targetId: "version_01" },
+    });
+  });
+
   it("gets normalized process progress through the SDK", async () => {
     const sdk = makeSdk();
     const adapter = makeAdapter({ sdk });

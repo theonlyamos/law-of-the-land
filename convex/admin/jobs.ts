@@ -236,8 +236,11 @@ export async function persistJob(
       return { jobId: existing[0]._id, callbackToken: null, callbackTokenHash: existing[0].callbackTokenHash, duplicate: true };
     }
 
-    const callbackToken = `gx_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
-    const callbackTokenHash = await hashCallbackToken(callbackToken);
+    // The live callback token is minted only after an action claims the job.
+    // This sentinel hash is never a usable callback credential.
+    const callbackTokenHash = await hashCallbackToken(
+      `unarmed_${crypto.randomUUID()}${crypto.randomUUID()}`,
+    );
     const now = Date.now();
     const correlationId = `job_${crypto.randomUUID().replaceAll("-", "")}`;
     const jobId = await ctx.db.insert("integrationJobs", {
@@ -261,7 +264,7 @@ export async function persistJob(
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     await auditJob(ctx, job, "success", "integration.job_queued");
     await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId });
-    return { jobId, callbackToken, callbackTokenHash, duplicate: false };
+    return { jobId, callbackToken: null, callbackTokenHash, duplicate: false };
 }
 
 const enqueueArgs = {
@@ -330,6 +333,34 @@ export const getJobForRun = internalQuery({
       return null;
     }
     return job;
+  },
+});
+
+export const armGroundxCallback = internalMutation({
+  args: {
+    jobId: v.id("integrationJobs"),
+    leaseToken: v.string(),
+    tokenHash: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    if (!/^[a-f0-9]{64}$/.test(args.tokenHash)) {
+      throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
+    }
+    const job = await ctx.db.get(args.jobId);
+    if (
+      !job ||
+      job.type !== "ingest_remote" ||
+      job.status !== "running" ||
+      job.leaseToken !== args.leaseToken
+    ) {
+      throw new ConvexError("INTEGRATION_CALLBACK_NOT_READY");
+    }
+    await ctx.db.patch(job._id, {
+      callbackTokenHash: args.tokenHash,
+      updatedAt: Date.now(),
+    });
+    return null;
   },
 });
 

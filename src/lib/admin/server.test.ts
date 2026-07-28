@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ADMIN_ROLES, hasRolePermission } from "../../../convex/lib/adminPermissions";
 import {
+  authorizeAdminRecoveryPage,
   authorizeAdminPage,
   isAdminAccessDenial,
   loadAdminOverview,
@@ -14,6 +15,32 @@ const denialCodes = [
 ] as const;
 
 describe("server-side admin request sequencing", () => {
+  it("loads only the narrow recovery state through the ungated recovery query", async () => {
+    const state = { environment: "preview", enabled: false };
+    const fetchQuery = vi.fn().mockResolvedValue(state);
+
+    await expect(authorizeAdminRecoveryPage(fetchQuery)).resolves.toEqual({
+      status: "authorized",
+      state,
+    });
+    expect(fetchQuery).toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      {},
+    );
+    expect(fetchQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the recovery page closed on structured authorization denial", async () => {
+    const denial = Object.assign(new Error("Administrative access denied"), {
+      data: { code: "ADMIN_FORBIDDEN", message: "Restricted" },
+    });
+    const fetchQuery = vi.fn().mockRejectedValue(denial);
+
+    await expect(authorizeAdminRecoveryPage(fetchQuery)).resolves.toEqual({
+      status: "denied",
+    });
+  });
+
   it.each(ADMIN_ROLES)("authorizes the /admin workspace for %s while loading operations content only when granted", async (role) => {
     const currentAdmin = { userId: `${role}_1`, roles: [role] };
     const overview = { counters: [], failedJobs: [], reviewItems: [], highRiskEvents: [] };

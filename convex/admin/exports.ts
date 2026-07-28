@@ -12,7 +12,7 @@ const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
-const EXPORT_TTL_MS = 24 * 60 * 60 * 1_000;
+const EXPORT_TTL_MS = 10 * 60 * 1_000;
 const DOWNLOAD_REFERENCE_TTL_MS = 10 * 60 * 1_000;
 const buildConversationExportRef = makeFunctionReference<"action">("admin/exportActions:buildConversationExport");
 

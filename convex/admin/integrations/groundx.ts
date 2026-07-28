@@ -3,6 +3,7 @@ import { z } from "zod";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const COPY_ENDPOINT = "https://api.groundx.ai/api/v1/ingest/copy";
+const REMOTE_INGEST_ENDPOINT = "https://api.groundx.ai/api/v1/ingest/documents/remote";
 
 const processingStatusSchema = z.enum([
   "queued",
@@ -111,6 +112,13 @@ const remoteDocumentSchema = z.object({
 });
 const ingestRemoteInputSchema = z.object({
   documents: z.array(remoteDocumentSchema).min(1).max(100),
+  callbackUrl: z.string().url().optional(),
+  callbackData: z
+    .object({
+      targetType: z.string().min(1).max(64),
+      targetId: z.string().min(1).max(256),
+    })
+    .optional(),
 });
 const copyDocumentsInputSchema = documentIdsInputSchema.extend({
   fromBucket: z.number().int().positive(),
@@ -284,16 +292,55 @@ export class GroundxAdapter {
     }
   }
 
-  async ingestRemote(input: { documents: RemoteDocument[] }): Promise<NormalizedProcess> {
+  async ingestRemote(input: {
+    documents: RemoteDocument[];
+    callbackUrl?: string;
+    callbackData?: { targetType: string; targetId: string };
+  }): Promise<NormalizedProcess> {
     const request = parseInput(ingestRemoteInputSchema, input);
+    if (request.callbackUrl !== undefined) {
+      if (request.callbackData === undefined) throw invalidRequest();
+      return await this.postRemoteIngestWithCallback(request);
+    }
     try {
       const response = parseResponse(
         processEnvelopeSchema,
-        await this.sdk.documents.ingestRemote(request, { timeout: this.timeoutMs }),
+        await this.sdk.documents.ingestRemote(
+          { documents: request.documents },
+          { timeout: this.timeoutMs },
+        ),
       );
       return response.data.ingest;
     } catch (error) {
       throw translateError(error);
+    }
+  }
+
+  private async postRemoteIngestWithCallback(input: z.infer<typeof ingestRemoteInputSchema>): Promise<NormalizedProcess> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.fetchImpl(REMOTE_INGEST_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "X-API-Key": this.apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(input),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw errorForStatus(response.status);
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw invalidResponse(response.status);
+      }
+      return parseResponse(processEnvelopeSchema, body, response.status).data.ingest;
+    } catch (error) {
+      throw translateError(error);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

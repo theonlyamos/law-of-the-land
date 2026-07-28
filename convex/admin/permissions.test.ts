@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest, type TestConvex } from "convex-test";
+import { makeFunctionReference } from "convex/server";
 import { describe, expect, it } from "vitest";
 import { api, components, internal } from "../_generated/api";
 import { createAuthOptions } from "../auth";
@@ -33,6 +34,10 @@ type AuthFixture = {
   sessionId: string;
 };
 
+const setAdminPanel = makeFunctionReference<"mutation">(
+  "admin/featureFlags:setAdminPanel",
+);
+
 async function createAuthFixture(
   t: TestConvex<typeof schema>,
   options: {
@@ -43,8 +48,24 @@ async function createAuthFixture(
   },
 ): Promise<AuthFixture> {
   const now = Date.now();
+  process.env.ADMIN_PANEL_ENABLED = "true";
+  process.env.ADMIN_ENVIRONMENT = "test";
 
   return await t.run(async (ctx) => {
+    const flag = await ctx.db
+      .query("featureFlags")
+      .withIndex("by_key_and_environment", (q) =>
+        q.eq("key", "admin_panel").eq("environment", "test"),
+      )
+      .unique();
+    if (!flag) {
+      await ctx.db.insert("featureFlags", {
+        key: "admin_panel",
+        environment: "test",
+        enabled: true,
+        updatedAt: now,
+      });
+    }
     const user = await ctx.runMutation(components.betterAuth.adapter.create, {
       input: {
         model: "user",
@@ -112,6 +133,90 @@ function createTestBackend() {
 }
 
 describe("admin permission registry", () => {
+  it.each(ADMIN_ROLES)("enforces the recovery mutation and query matrix for %s while the deployment panel gate is off", async (role) => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, { role, twoFactorEnabled: true });
+    const key = `flag-matrix-${role}`;
+    await t.run((ctx) => ctx.db.insert("adminStepUpProofs", {
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      action: "admin_panel_set",
+      targetId: "admin_panel:test",
+      idempotencyKey: key,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    }));
+    process.env.ADMIN_PANEL_ENABLED = "false";
+    const client = t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId });
+    const mutation = client.mutation(setAdminPanel, {
+      environment: "test",
+      enabled: false,
+      confirmation: "ADMIN_PANEL test DISABLE",
+      reason: "Exercise exact recovery role matrix",
+      idempotencyKey: key,
+    });
+    if (role === "super_admin") {
+      await expect(mutation).resolves.toMatchObject({ environment: "test", enabled: false });
+      await expect(client.query(api.admin.featureFlags.getAdminPanelRecoveryState, {})).resolves.toEqual({ environment: "test", enabled: false });
+    } else {
+      await expect(mutation).rejects.toThrow("Admin permission required");
+      await expect(client.query(api.admin.featureFlags.getAdminPanelRecoveryState, {})).rejects.toThrow("Admin permission required");
+    }
+  });
+
+  it("rejects recovery from an impersonated Super Admin session even while the panel is disabled", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+      impersonatedBy: "original-admin",
+    });
+    process.env.ADMIN_PANEL_ENABLED = "false";
+    const client = t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId });
+
+    await expect(
+      client.query(api.admin.featureFlags.getAdminPanelRecoveryState, {}),
+    ).rejects.toThrow("Impersonated sessions cannot perform this admin action");
+  });
+
+  it("lets an assured Super Admin toggle only the current environment flag while the panel is off", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, { role: "super_admin", twoFactorEnabled: true });
+    const addProof = async (key: string) =>
+      await t.run((ctx) =>
+        ctx.db.insert("adminStepUpProofs", {
+          actorId: actor.userId,
+          sessionId: actor.sessionId,
+          action: "admin_panel_set",
+          targetId: "admin_panel:test",
+          idempotencyKey: key,
+          issuedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+        }),
+      );
+    const client = t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId });
+    await addProof("flag-disable-1");
+    await expect(client.mutation(setAdminPanel, {
+      environment: "test", enabled: false, confirmation: "ADMIN_PANEL test DISABLE",
+      reason: "Contain an administrative incident", idempotencyKey: "flag-disable-1",
+    })).resolves.toMatchObject({ environment: "test", enabled: false });
+    await expect(client.query(api.admin.featureFlags.isAdminEnabled, {})).resolves.toBe(false);
+    await addProof("flag-enable-1");
+    await expect(client.mutation(setAdminPanel, {
+      environment: "test", enabled: true, confirmation: "ADMIN_PANEL test ENABLE",
+      reason: "Restore verified administrative access", idempotencyKey: "flag-enable-1",
+    })).resolves.toMatchObject({ environment: "test", enabled: true });
+    const replay = await client.mutation(setAdminPanel, {
+      environment: "test", enabled: true, confirmation: "ADMIN_PANEL test ENABLE",
+      reason: "Restore verified administrative access", idempotencyKey: "flag-enable-1",
+    });
+    expect(replay).toMatchObject({ environment: "test", enabled: true });
+    await expect(client.query(api.admin.featureFlags.isAdminEnabled, {})).resolves.toBe(true);
+    await expect(t.run(async (ctx) => ({
+      operations: await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actor.userId).eq("idempotencyKey", "flag-enable-1")).take(2),
+      audits: (await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", actor.userId)).take(10)).filter((row) => row.action === "admin.panel_flag_set" && row.correlationId === replay.correlationId),
+    }))).resolves.toMatchObject({ operations: [expect.any(Object)], audits: [expect.any(Object)] });
+  });
   it("grants only the fixed role permissions", () => {
     expect(
       hasRolePermission(["support_agent"], "conversation", "read_content"),

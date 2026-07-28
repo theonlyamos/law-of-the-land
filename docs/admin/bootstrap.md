@@ -1,41 +1,81 @@
 # Admin bootstrap
 
-**Owner:** release manager, with a Super Admin candidate present. **Abort:** a production target, missing isolated non-production target, a migration conflict, missing 2FA, missing GroundX configuration, or a failed test/build. Keep `ADMIN_PANEL_ENABLED=false` until every gate below passes.
+**Owner:** release manager, with a Super Admin candidate present. **Abort:** production target, missing isolated non-production target, migration conflict, missing verified email or 2FA, missing provider configuration, or a failed test/build. Keep `ADMIN_PANEL_ENABLED=false` until every gate passes.
 
-## Configuration matrix
+## Configuration ownership matrix
 
-| Setting | Local | Preview | Production |
-| --- | --- | --- | --- |
-| `CONVEX_DEPLOYMENT`, `NEXT_PUBLIC_CONVEX_URL`, `NEXT_PUBLIC_CONVEX_SITE_URL` | Required | Required | Required |
-| `NEXT_PUBLIC_SITE_URL`, `SITE_URL` | Required | Required | Required |
-| `BETTER_AUTH_SECRET` | Required | Required | Required |
-| `GROUNDX_API_KEY`, `GOOGLE_AI_API_KEY` | Required for provider smoke tests | Required | Required |
-| `ADMIN_MAX_DOCUMENT_BYTES` | Required to enable uploads | Required | Required |
-| `ADMIN_PANEL_ENABLED` | Required and `false` during bootstrap | Required and `false` during bootstrap | Required and `false` during bootstrap |
-| `ADMIN_ENVIRONMENT` | Required when the panel is later enabled | Required when the panel is later enabled | Required when the panel is later enabled |
-| `INITIAL_SUPER_ADMIN_IDS` | Required only while bootstrapping roles | Required only while bootstrapping roles | Required only while bootstrapping roles |
+`Vercel` means project environment variables; `Convex` means the selected deployment environment. Secrets belong only to Convex. `Local`, `Preview`, and `Production` state whether the variable is required in that environment.
 
-Set secrets only in the relevant Convex deployment. `GROUNDX_API_KEY` is the only GroundX secret in the application. Bucket IDs are governed `jurisdictions` records, not environment variables: each jurisdiction has separate `stagingBucketId` and `productionBucketId`. Ghana's migration preserves production bucket `11833`; create and validate a distinct Ghana staging bucket before document work. Do not put bucket IDs or callback tokens in browser variables.
+| Variable | Owner | Local | Preview | Production |
+| --- | --- | --- | --- | --- |
+| `GROUNDX_API_KEY` | Convex | Required for provider work | Required | Required |
+| `GOOGLE_AI_API_KEY` | Convex | Required for generated answers | Required | Required |
+| `CONVEX_DEPLOYMENT` | local shell / Vercel build | Required | Required | Required |
+| `NEXT_PUBLIC_CONVEX_URL` | Vercel | Required | Required | Required |
+| `NEXT_PUBLIC_CONVEX_SITE_URL` | Vercel and Convex | Required | Required | Required |
+| `NEXT_PUBLIC_SITE_URL` | Vercel | Required | Required | Required |
+| `ADMIN_MAX_DOCUMENT_BYTES` | Convex | Required for admin upload | Required | Required |
+| `BETTER_AUTH_SECRET` | Convex | Required | Required | Required |
+| `SITE_URL` | Convex | Required | Required | Required |
+| `INITIAL_SUPER_ADMIN_IDS` | Convex | Temporary bootstrap only | Temporary bootstrap only | Temporary bootstrap only |
+| `GITHUB_CLIENT_ID` | Convex | Optional | Optional | Optional |
+| `GITHUB_CLIENT_SECRET` | Convex | Required with GitHub OAuth | Required with GitHub OAuth | Required with GitHub OAuth |
+| `GOOGLE_CLIENT_ID` | Convex | Optional | Optional | Optional |
+| `GOOGLE_CLIENT_SECRET` | Convex | Required with Google OAuth | Required with Google OAuth | Required with Google OAuth |
+| `RESEND_API_KEY` | Convex | Optional | Required for email delivery | Required for email delivery |
+| `EMAIL_FROM` | Convex | Required with Resend | Required with Resend | Required with Resend |
+| `ADMIN_PANEL_ENABLED` | Convex | Required; `false` during bootstrap | Required; `false` during bootstrap | Required; `false` during bootstrap |
+| `ADMIN_ENVIRONMENT` | Convex | Required | Required | Required |
+| `BILLING_ENABLED` | Convex | Required; normally `false` | Required | Required |
+| `POLAR_ORGANIZATION_TOKEN` | Convex | Required when billing is enabled | Required when billing is enabled | Required when billing is enabled |
+| `POLAR_WEBHOOK_SECRET` | Convex | Required when billing is enabled | Required when billing is enabled | Required when billing is enabled |
+| `POLAR_SERVER` | Convex | Required; `sandbox` | Required; `sandbox` | Required; approved live value |
+| `POLAR_PRO_MONTHLY_PRODUCT_ID` | Convex | Required when billing is enabled | Required when billing is enabled | Required when billing is enabled |
+
+Bucket IDs are governed `jurisdictions` rows, not environment variables. Ghana must retain production bucket `11833` and use a distinct staging bucket. The Polar webhook is the selected Convex Site origin plus `/polar/events`.
 
 ## Callback and export controls
 
-Each provider job creates one opaque `gx_` callback token and stores only its SHA-256 hash. Configure the provider callback URL as the Convex site route `/groundx/callback/` followed by that job's token. The callback accepts `processId`, `targetType`, `targetId`, and terminal status, and is idempotent. Rotation means creating a new job and using its newly issued callback URL; there is no deployment-wide callback-token environment variable to rotate.
+Remote staging ingest is callback-primary. Only after claiming an `ingest_remote` job, the action creates a one-time `gx_` token, stores its SHA-256 hash, and sends top-level GroundX `callbackUrl` and safe `callbackData`. The raw token never enters a job, scheduler argument, audit event, or log. Copy and delete do not support callbacks and therefore use the bounded 15-minute polling reconciler. A missing or non-HTTPS callback origin fails remote ingest as validation; do not silently downgrade it to polling.
 
-Conversation exports are protected by a randomly generated, hashed, one-time `exp_` reference. The browser posts that reference to `/admin/export-download`; the response is a private, no-store NDJSON download. There is no export-signing environment variable. References expire in at most five minutes and the export itself in 24 hours.
+Conversation exports use a hashed, one-time `exp_` reference. The browser posts it to the authenticated Next.js proxy `/api/admin/exports/download`, which forwards it to private Convex route `/admin/export-download`. Both export and reference expire within 10 minutes.
 
-## Controlled bootstrap sequence
+## Isolated bootstrap procedure
 
-Use only an isolated local or preview deployment. In the Convex deployment, set the allowlist to the already-created Better Auth user IDs, confirm each candidate has verified email and 2FA, and leave both the deployment gate and `admin_panel` feature flag disabled. Then run:
+Use the checked-in local CLIs and the explicit `staging` deployment reference. These commands mutate the selected deployment; verify `staging` is isolated before running them.
 
-```bash
-bun install --frozen-lockfile
-bunx convex dev --once
-bunx convex run admin/migrations:seedGhanaJurisdiction
-bunx convex run admin/migrations:bootstrapSuperAdmins
-bun run test
-bun run build
+```powershell
+npx convex env set ADMIN_PANEL_ENABLED false --deployment staging
+npx convex env set ADMIN_ENVIRONMENT preview --deployment staging
+npx convex env set INITIAL_SUPER_ADMIN_IDS --deployment staging
+npx convex run admin/migrations:seedGhanaJurisdiction '{}' --deployment staging --codegen disable
+npx convex run admin/migrations:bootstrapSuperAdmins '{}' --deployment staging --codegen disable
+npm test -- --maxWorkers=1
+npm run build
 ```
 
-Expected migration result: Ghana is enabled/default, `productionBucketId` is `11833`, `providerSyncState` is `synced`, and the seed is idempotent. Expected role result: only allowlisted existing users are promoted, and role assignment refuses a user without 2FA. Clear `INITIAL_SUPER_ADMIN_IDS` after recording the audited bootstrap result; it is not a standing access mechanism.
+Expected migration state: Ghana is enabled/default, `productionBucketId` is `11833`, the separate staging bucket is present, and a repeat seed is idempotent. Expected bootstrap state: only listed existing Better Auth users with verified email and 2FA receive `super_admin`. Abort on any unexpected row or authorization failure. Clear the allowlist immediately:
 
-Before release, confirm the distinct staging bucket, provider callback delivery, and admin smoke tests. Only then set the deployment gate to `true` and create exactly one enabled `featureFlags` `admin_panel` row whose environment equals the exact, non-blank `ADMIN_ENVIRONMENT` value. If any check fails, leave the gate false, remove the temporary allowlist, preserve the audit evidence, and resolve the failed check before repeating the non-production sequence.
+```powershell
+npx convex env remove INITIAL_SUPER_ADMIN_IDS --deployment staging
+```
+
+Record GroundX as **configured**, not healthy or smoke-passed, until an authorized remote-ingest callback actually completes. The external smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
+
+## Persisted flag enable, disable, and recovery
+
+Auth-gated public mutations are not an unauthenticated CLI recovery mechanism. A different assured, non-impersonated Super Admin must sign in and open `/admin-recovery`.
+
+To enable the persisted row, select **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the current password, and submit **Verify and enable**. Expected state is `Enabled` plus a correlation ID and one `admin.panel_flag_set` audit event. Then enable the deployment gate:
+
+```powershell
+npx convex env set ADMIN_PANEL_ENABLED true --deployment staging
+```
+
+To disable safely, keep the deployment gate on long enough to open `/admin-recovery`, select **Disable persisted flag**, enter a reason, type `ADMIN_PANEL preview DISABLE`, confirm the current password, and submit **Verify and disable**. Expected state is `Disabled` plus a correlation ID. Then run:
+
+```powershell
+npx convex env set ADMIN_PANEL_ENABLED false --deployment staging
+```
+
+Every attempt uses a newly generated idempotency key. Abort if the page reports the wrong environment, the session is impersonated/unassured, the exact confirmation differs, or no correlation ID is returned. Recovery after an aborted attempt is to leave the deployment gate false, sign in as another assured Super Admin, and retry from `/admin-recovery` with a new key.

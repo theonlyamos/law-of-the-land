@@ -10,6 +10,7 @@ import {
 } from "../lib/adminPermissions";
 import { appendAuditEvent } from "../lib/audit";
 import { requireAdminPermission } from "../lib/requireAdmin";
+import { requireEnabledAdminPermission } from "./featureFlags";
 
 const adminRoleValidator = v.union(
   v.literal("super_admin"),
@@ -205,7 +206,7 @@ export const setAdminRoles = mutation({
     roles: v.array(adminRoleValidator),
   }),
   handler: async (ctx, args) => {
-    const actor = await requireAdminPermission(ctx, "user", "set_role");
+    const actor = await requireEnabledAdminPermission(ctx, "user", "set_role");
     return await writeAdminRoles(ctx, {
       actorType: "user",
       actorUserId: actor.userId,

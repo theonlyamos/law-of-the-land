@@ -11,11 +11,15 @@ export type CurrentAdmin = FunctionReturnType<
   typeof api.admin.overview.currentAdmin
 >;
 export type AdminOverview = FunctionReturnType<typeof api.admin.overview.get>;
+export type AdminRecoveryState = FunctionReturnType<
+  typeof api.admin.featureFlags.getAdminPanelRecoveryState
+>;
 
 type AdminQuery =
   | typeof api.admin.overview.currentAdmin
-  | typeof api.admin.overview.get;
-type AdminQueryResult = CurrentAdmin | AdminOverview;
+  | typeof api.admin.overview.get
+  | typeof api.admin.featureFlags.getAdminPanelRecoveryState;
+type AdminQueryResult = CurrentAdmin | AdminOverview | AdminRecoveryState;
 
 export type AdminQueryFetcher = (
   query: AdminQuery,
@@ -26,6 +30,10 @@ const defaultFetcher = fetchAuthQuery as AdminQueryFetcher;
 
 export type AdminPageAccess =
   | { status: "authorized"; currentAdmin: CurrentAdmin }
+  | { status: "denied" };
+
+export type AdminRecoveryPageAccess =
+  | { status: "authorized"; state: AdminRecoveryState }
   | { status: "denied" };
 
 type ClassifiedAdminQuery<T> =
@@ -76,6 +84,19 @@ export async function authorizeAdminPage(
     return result;
   }
   return { status: "authorized", currentAdmin: result.value };
+}
+
+export async function authorizeAdminRecoveryPage(
+  fetchQuery: AdminQueryFetcher = defaultFetcher,
+): Promise<AdminRecoveryPageAccess> {
+  const result = await withAdminAccessClassification(() =>
+    fetchQuery(
+      api.admin.featureFlags.getAdminPanelRecoveryState,
+      {},
+    ) as Promise<AdminRecoveryState>,
+  );
+  if (result.status === "denied") return result;
+  return { status: "authorized", state: result.value };
 }
 
 export async function loadAdminOverview(

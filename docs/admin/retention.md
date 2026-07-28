@@ -1,9 +1,15 @@
 # Retention operations
 
-**Owner:** Operations owner. **Abort manual intervention:** do not delete records or storage outside the internal retention job; it is the bounded, resumable authority.
+**Owner:** Operations owner. **Abort manual intervention:** never delete records/storage directly or reset `retentionState`; the internal bounded job is authoritative.
 
-`admin/operations:runRetentionBatch` is an internal mutation scheduled hourly. It processes at most 200 retention units per invocation and self-schedules until `done` is true. Its `retentionState` stores phase, cursor, totals, and `lastSuccessfulAt`; the supplied cursor is not an authorization token.
+`admin/operations:runRetentionBatch({ cursor: null })` runs hourly, processes at most 200 units, and self-schedules until `done` is `true`. It removes expired conversation grants, export references, and 10-minute export artifacts; processed query telemetry after 90 days; terminal job payload/error data after 90 days; expired correlations; and unattached storage older than 24 hours. Attached legal originals are never deleted.
 
-The implementation removes expired conversation grants and export references, expires/deletes 24-hour export artifacts, removes processed query telemetry after 90 days, redacts terminal job payload/error data after 90 days, removes expired telemetry correlations, and deletes unattached storage older than 24 hours. It does not delete legal originals attached to document versions. Each continuation writes a retention audit event; completion writes `retention.batch_completed`.
+For an authorized isolated recovery drill only, select the target explicitly and run:
 
-For a retention failure, create and assign an incident, inspect `retentionState.lastSuccessfulAt`, phase, cursor, and the retention audit outcome, then restore scheduler/deployment health. Expected recovery is a later scheduled batch that resumes from the persisted state and eventually sets phase `complete` with a new `lastSuccessfulAt`. Do not reset state, erase backlog, or run direct storage deletion to force completion. Escalate when `lastSuccessfulAt` remains stale across more than one hourly interval after scheduler health is restored, or when an attached legal original is at risk; keep the admin deployment gate false if the issue follows a release that could broaden deletion.
+```powershell
+npx convex run admin/operations:runRetentionBatch '{"cursor":null}' --deployment staging --codegen disable
+```
+
+Expected output is `{ deleted, done, cursor }`; continuation is automatic, and completion sets `retentionState.phase` to `complete`, advances `lastSuccessfulAt`, and writes `retention.batch_completed`. Abort if the target is production, an attached original is at risk, or audit/state does not advance.
+
+On failure, create an incident with `admin/operations:createIncident({ title, severity, reason, idempotencyKey })`, assign it with `updateIncident`, and inspect phase/cursor/`lastSuccessfulAt` plus the audit outcome. Each action uses a fresh UUID; no confirmation phrase applies. Recovery is a later scheduled batch resuming persisted state. Escalate if `lastSuccessfulAt` remains stale for more than one hourly interval after scheduler health returns. If the fault followed a release that could broaden deletion, keep the deployment gate false.
