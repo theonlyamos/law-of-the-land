@@ -413,7 +413,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       try {
-        const searchData = await postJson<{ result: string }>("/api/search", {
+        const searchData = await postJson<{
+          result: string;
+          correlationToken: string;
+          jurisdictionCode: string;
+        }>("/api/search", {
           query: trimmed,
           country: chatCountry,
         }, controller.signal);
@@ -423,6 +427,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
           query: trimmed,
           messages: priorForApi,
           context: searchData.result,
+          correlationToken: searchData.correlationToken,
+          country: searchData.jurisdictionCode,
         }, controller.signal);
         if (!isCurrentRequest()) return;
 

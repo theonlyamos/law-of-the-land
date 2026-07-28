@@ -43,6 +43,7 @@ const gh = {
 describe("POST /api/search governed jurisdiction lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
     authMocks.isAuthenticated.mockResolvedValue(true);
     authMocks.fetchAuthMutation.mockResolvedValue(undefined);
     authMocks.fetchAuthQuery.mockResolvedValue(gh);
@@ -55,7 +56,9 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     const response = await POST(request({ query: "What is the law?", country: "gh" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ result: "governed answer" });
+    const payload = await response.json();
+    expect(payload).toMatchObject({ result: "governed answer", jurisdictionCode: "GH" });
+    expect(payload.correlationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(authMocks.fetchAuthQuery).toHaveBeenCalledWith(
       expect.anything(),
       { code: "GH" },
@@ -67,6 +70,58 @@ describe("POST /api/search governed jurisdiction lookup", () => {
       id: 11833,
       query: "What is the law?",
     });
+    const telemetryCalls = authMocks.fetchAuthMutation.mock.calls.filter(
+      ([reference]) => getFunctionName(reference).startsWith("telemetry:"),
+    );
+    expect(telemetryCalls.map(([reference]) => getFunctionName(reference))).toEqual([
+      "telemetry:issueCorrelation",
+      "telemetry:recordSearchPhase",
+    ]);
+    expect(telemetryCalls[0][1]).toMatchObject({
+      token: payload.correlationToken,
+      jurisdictionCode: "GH",
+      serviceProof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    expect(telemetryCalls[1][1]).toMatchObject({
+      token: payload.correlationToken,
+      providerStatus: "success",
+      resultCount: 1,
+      latencyMs: expect.any(Number),
+      serviceProof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+  });
+
+  it("records one sanitized terminal search failure without returning its correlation token", async () => {
+    groundxMocks.searchContent.mockRejectedValue(new Error("provider token secret-provider-value"));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await POST(request({ query: "What is the law?", country: "GH" }));
+
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(await response.json())).not.toContain("secret-provider-value");
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("secret-provider-value");
+    const telemetryCalls = authMocks.fetchAuthMutation.mock.calls.filter(
+      ([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase",
+    );
+    expect(telemetryCalls).toHaveLength(1);
+    expect(telemetryCalls[0][1]).toMatchObject({
+      providerStatus: "failure",
+      resultCount: 0,
+    });
+    expect(telemetryCalls[0][1]).not.toHaveProperty("error");
+    errorLog.mockRestore();
+  });
+
+  it("does not rewrite a successful provider outcome as failure when telemetry delivery fails", async () => {
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      if (getFunctionName(reference) === "telemetry:recordSearchPhase") throw new Error("transport unavailable");
+      return undefined;
+    });
+    const response = await POST(request({ query: "What is the law?", country: "GH" }));
+    expect(response.status).toBe(500);
+    const telemetryCalls = authMocks.fetchAuthMutation.mock.calls.filter(([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase");
+    expect(telemetryCalls).toHaveLength(1);
+    expect(telemetryCalls[0][1]).toMatchObject({ providerStatus: "success" });
   });
 
   it("rejects an unknown jurisdiction before quota or GroundX calls", async () => {

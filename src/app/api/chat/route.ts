@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server'
 import { GoogleGenAI } from "@google/genai"
-import { api } from '@/convex/_generated/api'
-import { fetchAuthQuery, isAuthenticated } from '@/lib/auth-server'
+import { makeFunctionReference } from "convex/server"
+import { api } from '../../../../convex/_generated/api'
+import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from '@/lib/auth-server'
 import { clientKey, rateLimit } from '@/lib/rate-limit'
+import { createTelemetryServiceProof, isOpaqueTelemetryToken } from '../../../../convex/lib/telemetryProof'
 
 interface Message {
     id?: string
@@ -17,6 +19,8 @@ const MAX_MESSAGE_LENGTH = 16000
 // client — oversized values are truncated, not rejected.
 const MAX_CONTEXT_LENGTH = 120000
 const REQUESTS_PER_MINUTE = 15
+const claimChatPhase = makeFunctionReference<"mutation">("telemetry:claimChatPhase")
+const finalizeChatPhase = makeFunctionReference<"mutation">("telemetry:finalizeChatPhase")
 
 const callLLM = async (instruction: string, query: string, model: string = "gemini-3.1-flash-lite-preview", history: Message[] = []) => {
     try {
@@ -45,21 +49,20 @@ const callLLM = async (instruction: string, query: string, model: string = "gemi
         })
 
         return response.text;
-    } catch (error) {
-        console.error('Error calling LLM:', error);
-        throw error;
-    }
+    } catch (error) { throw error }
 }
 
-function parseBody(body: unknown): { query: string; messages: Message[]; context: string } | null {
+function parseBody(body: unknown): { query: string; messages: Message[]; context: string; correlationToken: string; country: string } | null {
     if (typeof body !== 'object' || body === null) return null
-    const { query, messages, context } = body as Record<string, unknown>
+    const { query, messages, context, correlationToken, country } = body as Record<string, unknown>
 
     if (typeof query !== 'string') return null
     const trimmedQuery = query.trim()
     if (!trimmedQuery || trimmedQuery.length > MAX_QUERY_LENGTH) return null
 
     if (typeof context !== 'string') return null
+    if (typeof correlationToken !== 'string' || !isOpaqueTelemetryToken(correlationToken)) return null
+    if (typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country.trim())) return null
 
     if (!Array.isArray(messages) || messages.length > MAX_HISTORY_MESSAGES) return null
     const history: Message[] = []
@@ -71,7 +74,7 @@ function parseBody(body: unknown): { query: string; messages: Message[]; context
         history.push({ role, content })
     }
 
-    return { query: trimmedQuery, messages: history, context: context.slice(0, MAX_CONTEXT_LENGTH) }
+    return { query: trimmedQuery, messages: history, context: context.slice(0, MAX_CONTEXT_LENGTH), correlationToken, country: country.trim().toUpperCase() }
 }
 
 export async function POST(request: Request) {
@@ -91,6 +94,15 @@ export async function POST(request: Request) {
             )
         }
 
+        const parsed = parseBody(await request.json())
+        if (!parsed) {
+            return NextResponse.json(
+                { error: 'That question could not be processed. Shorten it and try again.' },
+                { status: 400 }
+            )
+        }
+        const { query, messages, context, correlationToken, country } = parsed
+
         // The search endpoint already counted this question; verify allowance only.
         const allowance = await fetchAuthQuery(api.usage.checkAllowance, {})
         if (!allowance.allowed) {
@@ -100,14 +112,19 @@ export async function POST(request: Request) {
             )
         }
 
-        const parsed = parseBody(await request.json())
-        if (!parsed) {
+        let claim: { claimNonce: string }
+        try {
+            claim = await fetchAuthMutation(claimChatPhase, {
+                token: correlationToken,
+                jurisdictionCode: country,
+                serviceProof: await createTelemetryServiceProof(["claim", correlationToken, country]),
+            })
+        } catch {
             return NextResponse.json(
-                { error: 'That question could not be processed. Shorten it and try again.' },
+                { error: 'That search result has expired or was already used. Search again.' },
                 { status: 400 }
             )
         }
-        const { query, messages, context } = parsed
 
         const instruction = `Today's date is ${new Date().toISOString().split('T')[0]}.
 
@@ -124,11 +141,48 @@ export async function POST(request: Request) {
 
         Current query: ${query}`
 
-        const response = await callLLM(instruction, query, "gemini-3.1-flash-lite-preview", messages)
-
+        const startedAt = performance.now()
+        let response: string | undefined
+        try {
+            response = await callLLM(instruction, query, "gemini-3.1-flash-lite-preview", messages)
+        } catch {
+            const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
+            try {
+                await fetchAuthMutation(finalizeChatPhase, {
+                    token: correlationToken,
+                    claimNonce: claim.claimNonce,
+                    providerStatus: "failure",
+                    latencyMs,
+                    serviceProof: await createTelemetryServiceProof(["finalize", correlationToken, claim.claimNonce, "failure", latencyMs]),
+                })
+            } catch {
+                // The claim expiry finalizer remains the terminal fallback.
+            }
+            console.error("Chat provider request failed")
+            return NextResponse.json(
+                { error: 'We couldn\'t process your request. Please try again.' },
+                { status: 500 }
+            )
+        }
+        const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
+        try {
+            await fetchAuthMutation(finalizeChatPhase, {
+                token: correlationToken,
+                claimNonce: claim.claimNonce,
+                providerStatus: "success",
+                latencyMs,
+                serviceProof: await createTelemetryServiceProof(["finalize", correlationToken, claim.claimNonce, "success", latencyMs]),
+            })
+        } catch {
+            console.error("Chat telemetry finalization failed")
+            return NextResponse.json(
+                { error: 'We couldn\'t process your request. Please try again.' },
+                { status: 500 }
+            )
+        }
         return NextResponse.json({ result: response })
-    } catch (error) {
-        console.error('Chat error:', error)
+    } catch {
+        console.error("Chat request failed")
         return NextResponse.json(
             { error: 'We couldn\'t process your request. Please try again.' },
             { status: 500 }

@@ -425,6 +425,81 @@ export default defineSchema({
     .index("by_expiresAt", ["expiresAt"])
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
+  telemetryCorrelations: defineTable({
+    tokenHash: v.string(),
+    ownerId: v.string(),
+    sessionId: v.string(),
+    jurisdictionCode: v.string(),
+    status: v.union(
+      v.literal("issued"),
+      v.literal("search_complete"),
+      v.literal("chat_claimed"),
+      v.literal("finalized"),
+    ),
+    issuedAt: v.number(),
+    expiresAt: v.number(),
+    searchProviderStatus: v.optional(
+      v.union(v.literal("success"), v.literal("no_result"), v.literal("failure")),
+    ),
+    searchLatencyMs: v.optional(v.number()),
+    resultCount: v.optional(v.number()),
+    claimNonceHash: v.optional(v.string()),
+  })
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_status_and_expiresAt", ["status", "expiresAt"]),
+  queryRuns: defineTable({
+    correlationId: v.string(),
+    day: v.string(),
+    jurisdictionCode: v.string(),
+    outcome: v.union(
+      v.literal("success"),
+      v.literal("failure"),
+      v.literal("aborted"),
+    ),
+    searchProviderStatus: v.union(
+      v.literal("success"),
+      v.literal("no_result"),
+      v.literal("failure"),
+    ),
+    generationProviderStatus: v.union(
+      v.literal("success"),
+      v.literal("failure"),
+      v.literal("skipped"),
+    ),
+    searchLatencyMs: v.number(),
+    generationLatencyMs: v.number(),
+    totalLatencyMs: v.number(),
+    resultCount: v.number(),
+    completedAt: v.number(),
+    rollupStatus: v.union(v.literal("pending"), v.literal("processed")),
+    rolledUpAt: v.optional(v.number()),
+  })
+    .index("by_correlationId", ["correlationId"])
+    .index("by_rollupStatus_and_completedAt", ["rollupStatus", "completedAt"])
+    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"]),
+  dailyMetrics: defineTable({
+    day: v.string(),
+    jurisdictionCode: v.string(),
+    totalQuestions: v.number(),
+    successCount: v.number(),
+    failureCount: v.number(),
+    abortedCount: v.number(),
+    providerFailureCount: v.number(),
+    noResultCount: v.number(),
+    latencyLe250: v.number(),
+    latencyLe500: v.number(),
+    latencyLe1000: v.number(),
+    latencyLe2500: v.number(),
+    latencyLe5000: v.number(),
+    latencyGt5000: v.number(),
+    latencyHistogram: v.optional(v.array(v.number())),
+    p50LatencyMs: v.number(),
+    p95LatencyMs: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_day", ["day"])
+    .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
+    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"]),
   messages: defineTable({
     sessionId: v.id("chatSessions"),
     role: v.union(v.literal("user"), v.literal("assistant")),
