@@ -22,6 +22,18 @@ function readPayload(job: Doc<"integrationJobs">): PublicationPayload | null {
   };
 }
 
+async function releaseLifecycleLock(
+  ctx: MutationCtx,
+  job: Doc<"integrationJobs">,
+  resourceId: Id<"legalResources">,
+) {
+  const locks = await ctx.db.query("documentLifecycleLocks")
+    .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+    .take(2);
+  if (locks.length > 1) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
+  if (locks[0]?.jobId === job._id) await ctx.db.delete(locks[0]._id);
+}
+
 export async function applyPublicationJobOutcome(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
@@ -52,6 +64,7 @@ export async function applyPublicationJobOutcome(
       correlationId: job.correlationId,
       outcome: "failure",
     });
+    await releaseLifecycleLock(ctx, job, resource._id);
     return;
   }
 
@@ -99,4 +112,5 @@ export async function applyPublicationJobOutcome(
     correlationId: job.correlationId,
     outcome: "success",
   });
+  await releaseLifecycleLock(ctx, job, resource._id);
 }

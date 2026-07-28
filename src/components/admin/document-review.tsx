@@ -27,6 +27,7 @@ export type ReviewItem = {
   status: "ready_for_review" | "approved" | "published" | "superseded";
   stagingDocumentId?: string;
   stagingProcessId?: string;
+  xrayEvidence: { status: "ready" | "unavailable"; fileType: string; byteSize: number };
   submittedBy: string;
   submittedAt?: number;
   previousVersion?: { versionNumber: number; filename: string; sha256: string; effectiveDate?: string };
@@ -106,12 +107,13 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
                 <dl className="mt-3 grid gap-x-6 gap-y-4 border-y border-[oklch(75%_0.025_78)] py-5 sm:grid-cols-2">
                   <div><dt className="text-xs font-semibold">File</dt><dd className="mt-1 break-all text-sm">{item.filename} / {item.mimeType} / {item.byteSize.toLocaleString()} bytes</dd></div>
                   <div><dt className="text-xs font-semibold">Official source host</dt><dd className="mt-1 text-sm">{item.sourceHost}</dd></div>
-                  <div className="sm:col-span-2"><dt className="text-xs font-semibold">Checksum</dt><dd className="mt-1 break-all text-sm">SHA-256 {item.sha256.slice(0, 12)}...{item.sha256.slice(-8)}</dd></div>
+                  <div className="sm:col-span-2"><dt className="text-xs font-semibold">Checksum</dt><dd className="mt-1 break-all text-sm">SHA-256 {item.sha256}</dd></div>
                 </dl>
               </section>
               <section aria-labelledby={`${item.id}-xray`}>
                 <h3 id={`${item.id}-xray`} className="text-sm font-semibold uppercase tracking-[0.14em]">X-Ray evidence</h3>
                 <p className="mt-3 text-sm leading-6">Staging document <strong>{item.stagingDocumentId ?? "Not available"}</strong>; process <strong>{item.stagingProcessId ?? "Completed before submission"}</strong>.</p>
+                <p className="mt-2 text-sm leading-6"><strong>{item.xrayEvidence.status === "ready" ? "Ready" : "Unavailable"}</strong> / {item.xrayEvidence.fileType} / {item.xrayEvidence.byteSize.toLocaleString()} bytes. Safe normalized fields only; provider links and extracted bodies are excluded.</p>
               </section>
               <section aria-labelledby={`${item.id}-diff`}>
                 <h3 id={`${item.id}-diff`} className="text-sm font-semibold uppercase tracking-[0.14em]">Metadata-only version diff</h3>
@@ -120,7 +122,11 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
                   <dt className="font-semibold">Version</dt><dd>{item.previousVersion?.versionNumber ?? "None"}</dd><dd>{item.versionNumber}</dd>
                   <dt className="font-semibold">Filename</dt><dd className="break-all">{item.previousVersion?.filename ?? "None"}</dd><dd className="break-all">{item.filename}</dd>
                   <dt className="font-semibold">Effective</dt><dd>{item.previousVersion?.effectiveDate ?? "Not set"}</dd><dd>{item.effectiveDate ?? "Not set"}</dd>
+                  <dt className="font-semibold">Checksum</dt>
+                  <dd className="break-all">{item.previousVersion ? `Previous SHA-256 ${item.previousVersion.sha256}` : "No previous checksum"}</dd>
+                  <dd className="break-all">Current SHA-256 {item.sha256}</dd>
                 </dl>
+                <p className="mt-3 text-sm font-semibold">{item.previousVersion?.sha256 === item.sha256 ? "Unchanged" : "Changed"}</p>
               </section>
               <section aria-labelledby={`${item.id}-decisions`}>
                 <h3 id={`${item.id}-decisions`} className="text-sm font-semibold uppercase tracking-[0.14em]">Immutable decisions and evaluations</h3>

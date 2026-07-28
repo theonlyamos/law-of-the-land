@@ -130,6 +130,21 @@ export default defineSchema({
       "createdAt",
     ])
     .index("by_decision_and_createdAt", ["decision", "createdAt"]),
+  documentLifecycleLocks: defineTable({
+    resourceId: v.id("legalResources"),
+    versionId: v.id("documentVersions"),
+    operation: v.union(
+      v.literal("publish"),
+      v.literal("unpublish"),
+      v.literal("rollback"),
+    ),
+    actorId: v.string(),
+    idempotencyKey: v.string(),
+    jobId: v.optional(v.id("integrationJobs")),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_resourceId", ["resourceId"]),
   resourceVersionCounters: defineTable({
     resourceId: v.id("legalResources"),
     nextVersionNumber: v.number(),

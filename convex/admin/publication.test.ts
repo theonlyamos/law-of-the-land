@@ -34,6 +34,7 @@ const recordProviderFailure = makeFunctionReference<"mutation">("admin/jobs:reco
 const completeGroundxCallback = makeFunctionReference<"mutation">("admin/jobs:completeGroundxCallback");
 const recordAdminStepUpProof = makeFunctionReference<"mutation">("admin/users:recordAdminStepUpProof");
 const listReviewQueue = makeFunctionReference<"query">("admin/reviews:listReviewQueue");
+const expireLifecycleLock = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -278,8 +279,12 @@ describe("governed document publication", () => {
       officialCitation: "Act 843",
       sourceHost: "laws.example.gov",
       status: "approved",
+      sha256: "1".repeat(64),
+      xrayEvidence: { status: "ready", fileType: "application/pdf", byteSize: 9 },
     });
     expect(JSON.stringify(docket.page[0])).not.toContain("https://");
+    expect(JSON.stringify(docket.page[0])).not.toContain("xrayUrl");
+    expect(JSON.stringify(docket.page[0])).not.toContain("extractedBody");
   });
 
   it("bounds checklist/evaluation fields and permits a reasoned rejection only from review", async () => {
@@ -441,9 +446,14 @@ describe("governed document publication", () => {
       jobId: unpublish.jobId, leaseToken: unpublishClaim.leaseToken,
       processId: "delete-process", status: "complete",
     });
-    const finalState = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), version: await ctx.db.get(ids[0]) }));
+    const finalState = await t.run(async (ctx) => ({
+      resource: await ctx.db.get(resourceId),
+      version: await ctx.db.get(ids[0]),
+      locks: await ctx.db.query("documentLifecycleLocks").take(2),
+    }));
     expect(finalState.resource?.activeVersionId).toBeUndefined();
     expect(finalState.version?.status).toBe("unpublished");
+    expect(finalState.locks).toHaveLength(0);
   });
 
   it("rechecks feature, permission, and impersonation authority without accepting actor spoofing", async () => {
@@ -517,5 +527,167 @@ describe("governed document publication", () => {
     expect(results.map((result) => result.duplicate).sort()).toEqual([false, true]);
     expect(results[0].jobId).toBe(results[1].jobId);
     expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(3))).toHaveLength(1);
+  });
+
+  it("serializes competing lifecycle commands across versions, actors, and keys", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const firstReviewer = await asAdmin(t, "content_reviewer");
+    const secondReviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager-1", ["published", "superseded", "approved"]);
+    await addStepUp(t, firstReviewer, "document_publish", ids[2], "resource-publish-1");
+    await addStepUp(t, secondReviewer, "document_rollback", ids[1], "resource-rollback-1");
+    const publishRequest = {
+      versionId: ids[2], confirmation: `PUBLISH ${ids[2]}`,
+      reason: "Promote the newly approved version", idempotencyKey: "resource-publish-1",
+    };
+    const rollbackRequest = {
+      versionId: ids[1], confirmation: `ROLLBACK ${ids[1]}`,
+      reason: "Restore the prior verified version", idempotencyKey: "resource-rollback-1",
+    };
+    const settled = await Promise.allSettled([
+      firstReviewer.client.mutation(publishVersion, publishRequest),
+      secondReviewer.client.mutation(rollbackVersion, rollbackRequest),
+    ]);
+
+    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(settled.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(String((settled.find((result) => result.status === "rejected") as PromiseRejectedResult).reason)).toContain("DOCUMENT_LIFECYCLE_BUSY");
+    const state = await t.run(async (ctx) => ({
+      resource: await ctx.db.get(resourceId),
+      jobs: await ctx.db.query("integrationJobs").take(5),
+    }));
+    expect(state.jobs).toHaveLength(1);
+    expect(state.resource?.activeVersionId).toBe(ids[0]);
+
+    const winnerIndex = settled.findIndex((result) => result.status === "fulfilled");
+    const winner = (settled[winnerIndex] as PromiseFulfilledResult<{ jobId: Id<"integrationJobs"> }>).value;
+    const winnerJob = await t.run(async (ctx) => {
+      const job = await ctx.db.get(winner.jobId);
+      if (!job) throw new Error("expected winning job");
+      await ctx.db.patch(job._id, { status: "waiting_callback", processId: "resource-winner", nextAttemptAt: Date.now() + 60_000 });
+      return job;
+    });
+    await t.mutation(completeGroundxCallback, {
+      tokenHash: winnerJob.callbackTokenHash,
+      processId: "resource-winner",
+      targetType: "documentVersion",
+      targetId: winnerJob.targetId,
+      status: "complete",
+    });
+    const loserRetry = winnerIndex === 0
+      ? await secondReviewer.client.mutation(rollbackVersion, rollbackRequest)
+      : await firstReviewer.client.mutation(publishVersion, publishRequest);
+    expect(loserRetry).toMatchObject({ duplicate: false, type: "groundx_copy" });
+    expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(5))).toHaveLength(2);
+  });
+
+  it("finds the active resource lifecycle operation beyond historical job volume", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const rollbackReviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager-1", ["published", "superseded", "approved"]);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 30; index += 1) {
+        await ctx.db.insert("integrationJobs", {
+          type: "copy_documents",
+          targetType: "documentVersion",
+          targetId: ids[2],
+          payload: JSON.stringify({ operation: "publish", documentIds: [`history-${index}`], fromBucket: 101, toBucket: 202 }),
+          actorId: `historical-${index}`,
+          actorRoles: ["content_reviewer"],
+          idempotencyKey: `historical-key-${index}`,
+          requestFingerprint: `${index}`.repeat(64).slice(0, 64),
+          correlationId: `job_history_${index}`,
+          callbackTokenHash: `${index % 10}`.repeat(64),
+          processId: `historical-process-${index}`,
+          status: "succeeded",
+          attemptCount: 1,
+          createdAt: now - 60_000 + index,
+          updatedAt: now - 60_000 + index,
+        });
+      }
+    });
+    await addStepUp(t, publisher, "document_publish", ids[2], "history-publish-1");
+    await publisher.client.mutation(publishVersion, {
+      versionId: ids[2], confirmation: `PUBLISH ${ids[2]}`,
+      reason: "Start the current production promotion", idempotencyKey: "history-publish-1",
+    });
+    await addStepUp(t, rollbackReviewer, "document_rollback", ids[1], "history-rollback-1");
+    await expect(rollbackReviewer.client.mutation(rollbackVersion, {
+      versionId: ids[1], confirmation: `ROLLBACK ${ids[1]}`,
+      reason: "Competing rollback must wait", idempotencyKey: "history-rollback-1",
+    })).rejects.toThrow("DOCUMENT_LIFECYCLE_BUSY");
+    const jobs = await t.run(async (ctx) => ctx.db.query("integrationJobs").take(40));
+    expect(jobs).toHaveLength(31);
+    expect(jobs.filter((job) => ["queued", "running", "waiting_callback"].includes(job.status))).toHaveLength(1);
+    expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);
+  });
+
+  it("releases a failed rollback for a safe retry while preserving the active pointer", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager-1", ["superseded", "published"]);
+    await addStepUp(t, reviewer, "document_rollback", ids[0], "rollback-failure-lock-1");
+    const queued = await reviewer.client.mutation(rollbackVersion, {
+      versionId: ids[0], confirmation: `ROLLBACK ${ids[0]}`,
+      reason: "Restore the earlier verified legal text", idempotencyKey: "rollback-failure-lock-1",
+    });
+    const claim = await t.mutation(claimJob, { jobId: queued.jobId });
+    if (!claim) throw new Error("expected rollback claim");
+    await t.mutation(recordProviderFailure, {
+      jobId: queued.jobId, leaseToken: claim.leaseToken, kind: "validation",
+    });
+    const failed = await t.run(async (ctx) => ({
+      resource: await ctx.db.get(resourceId),
+      candidate: await ctx.db.get(ids[0]),
+    }));
+    expect(failed.resource?.activeVersionId).toBe(ids[1]);
+    expect(failed.candidate?.status).toBe("superseded");
+
+    await addStepUp(t, reviewer, "document_rollback", ids[0], "rollback-failure-lock-2");
+    await expect(reviewer.client.mutation(rollbackVersion, {
+      versionId: ids[0], confirmation: `ROLLBACK ${ids[0]}`,
+      reason: "Retry the earlier verified legal text", idempotencyKey: "rollback-failure-lock-2",
+    })).resolves.toMatchObject({ duplicate: false, type: "groundx_copy" });
+    expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(5))).toHaveLength(2);
+  });
+
+  it("cancels an expired lifecycle lock safely before allowing a new command", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager-1", ["published", "approved"]);
+    await addStepUp(t, reviewer, "document_publish", ids[1], "stale-publish-1");
+    const queued = await reviewer.client.mutation(publishVersion, {
+      versionId: ids[1], confirmation: `PUBLISH ${ids[1]}`,
+      reason: "Start a production promotion", idempotencyKey: "stale-publish-1",
+    });
+    const lockId = await t.run(async (ctx) => {
+      const lock = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId)).unique();
+      if (!lock) throw new Error("expected lifecycle lock");
+      await ctx.db.patch(lock._id, { expiresAt: Date.now() - 1 });
+      return lock._id;
+    });
+    await t.mutation(expireLifecycleLock, { lockId });
+    const expired = await t.run(async (ctx) => ({
+      locks: await ctx.db.query("documentLifecycleLocks").take(2),
+      job: await ctx.db.get(queued.jobId as Id<"integrationJobs">),
+      candidate: await ctx.db.get(ids[1]),
+      resource: await ctx.db.get(resourceId),
+    }));
+    expect(expired.locks).toHaveLength(0);
+    expect(expired.job?.status).toBe("cancelled");
+    expect(expired.candidate?.status).toBe("approved");
+    expect(expired.resource?.activeVersionId).toBe(ids[0]);
+
+    await addStepUp(t, reviewer, "document_publish", ids[1], "stale-publish-2");
+    await expect(reviewer.client.mutation(publishVersion, {
+      versionId: ids[1], confirmation: `PUBLISH ${ids[1]}`,
+      reason: "Retry after stale cancellation", idempotencyKey: "stale-publish-2",
+    })).resolves.toMatchObject({ duplicate: false });
   });
 });

@@ -1,10 +1,12 @@
+import { makeFunctionReference } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import type { Id } from "../_generated/dataModel";
-import { mutation, type MutationCtx } from "../_generated/server";
+import type { Doc, Id } from "../_generated/dataModel";
+import { internalMutation, mutation, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 import { hashCallbackToken, persistJob } from "./jobs";
+import { applyPublicationJobOutcome } from "./publicationState";
 
 const resultValidator = v.object({
   jobId: v.id("integrationJobs"),
@@ -14,6 +16,8 @@ const resultValidator = v.object({
 });
 type Actor = { userId: string; roles: AdminRole[] };
 type Operation = "publish" | "unpublish" | "rollback";
+const LIFECYCLE_LOCK_MS = 24 * 60 * 60_000;
+const expireLifecycleLockRef = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
 
 async function existingPublication(
   ctx: MutationCtx,
@@ -78,13 +82,52 @@ async function consumeStepUp(
   await ctx.db.patch(proofs[0]._id, { consumedAt: Date.now() });
 }
 
-async function assertNoOtherActiveJob(ctx: MutationCtx, versionId: Id<"documentVersions">, ownJobId: Id<"integrationJobs">) {
-  const jobs = await ctx.db.query("integrationJobs")
-    .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", versionId))
-    .take(26);
-  if (jobs.some((job) => job._id !== ownJobId && ["queued", "running", "waiting_callback"].includes(job.status))) {
-    throw new ConvexError("DOCUMENT_PUBLICATION_IN_PROGRESS");
+async function cancelExpiredLock(
+  ctx: MutationCtx,
+  lock: Doc<"documentLifecycleLocks">,
+) {
+  if (lock.jobId) {
+    const job = await ctx.db.get(lock.jobId);
+    if (job && ["queued", "running", "waiting_callback", "manual_review"].includes(job.status)) {
+      await ctx.db.patch(job._id, {
+        status: "cancelled",
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+        nextAttemptAt: undefined,
+        updatedAt: Date.now(),
+      });
+      await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
+    }
   }
+  const current = await ctx.db.get(lock._id);
+  if (current) await ctx.db.delete(lock._id);
+}
+
+async function claimLifecycleLock(
+  ctx: MutationCtx,
+  input: {
+    resourceId: Id<"legalResources">;
+    versionId: Id<"documentVersions">;
+    operation: Operation;
+    actorId: string;
+    idempotencyKey: string;
+  },
+) {
+  const locks = await ctx.db.query("documentLifecycleLocks")
+    .withIndex("by_resourceId", (q) => q.eq("resourceId", input.resourceId))
+    .take(2);
+  if (locks.length > 1) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
+  if (locks[0]) {
+    if (locks[0].expiresAt > Date.now()) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
+    await cancelExpiredLock(ctx, locks[0]);
+  }
+  const now = Date.now();
+  return await ctx.db.insert("documentLifecycleLocks", {
+    ...input,
+    expiresAt: now + LIFECYCLE_LOCK_MS,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 async function queuePublication(
@@ -128,6 +171,18 @@ async function queuePublication(
   if (payload.documentIds.some((id) => typeof id !== "string" || id.length === 0)) {
     throw new ConvexError("GROUNDX_DOCUMENT_NOT_READY");
   }
+  const requiredState = operation === "publish" ? "approved" : operation === "rollback" ? "superseded" : "published";
+  if (version.status !== requiredState) throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
+  if (operation === "unpublish" && resource.activeVersionId !== version._id) throw new ConvexError("DOCUMENT_ACTIVE_POINTER_INVALID");
+  if (operation === "rollback" && (!resource.activeVersionId || resource.activeVersionId === version._id)) throw new ConvexError("DOCUMENT_ROLLBACK_TARGET_INVALID");
+  await consumeStepUp(ctx, actor.userId, identity.sessionId, `document_${operation}`, version._id, args.idempotencyKey);
+  const lockId = await claimLifecycleLock(ctx, {
+    resourceId: resource._id,
+    versionId: version._id,
+    operation,
+    actorId: actor.userId,
+    idempotencyKey: args.idempotencyKey,
+  });
   const queued = await persistJob(ctx, {
     type: operation === "unpublish" ? "delete_documents" : "copy_documents",
     targetType: "documentVersion",
@@ -137,15 +192,8 @@ async function queuePublication(
   }, { id: actor.userId, roles: actor.roles });
   const job = await ctx.db.get(queued.jobId);
   if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
-  if (queued.duplicate) {
-    return { jobId: job._id, type: operation === "unpublish" ? "groundx_delete" as const : "groundx_copy" as const, duplicate: true, correlationId: job.correlationId };
-  }
-  await assertNoOtherActiveJob(ctx, version._id, job._id);
-  const requiredState = operation === "publish" ? "approved" : operation === "rollback" ? "superseded" : "published";
-  if (version.status !== requiredState) throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
-  if (operation === "unpublish" && resource.activeVersionId !== version._id) throw new ConvexError("DOCUMENT_ACTIVE_POINTER_INVALID");
-  if (operation === "rollback" && (!resource.activeVersionId || resource.activeVersionId === version._id)) throw new ConvexError("DOCUMENT_ROLLBACK_TARGET_INVALID");
-  await consumeStepUp(ctx, actor.userId, identity.sessionId, `document_${operation}`, version._id, args.idempotencyKey);
+  await ctx.db.patch(lockId, { jobId: job._id, updatedAt: Date.now() });
+  await ctx.scheduler.runAfter(LIFECYCLE_LOCK_MS, expireLifecycleLockRef, { lockId });
   if (operation !== "unpublish") await ctx.db.patch(version._id, { status: "publishing", failureSummary: undefined, updatedAt: Date.now() });
   await writeAudit(ctx, {
     actorId: actor.userId,
@@ -178,4 +226,30 @@ export const unpublishVersion = mutation({
 export const rollbackVersion = mutation({
   args, returns: resultValidator,
   handler: async (ctx, values) => queuePublication(ctx, await requireEnabledAdminPermission(ctx, "document", "rollback"), values, "rollback"),
+});
+
+export const expireLifecycleLock = internalMutation({
+  args: { lockId: v.id("documentLifecycleLocks") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const lock = await ctx.db.get(args.lockId);
+    if (!lock || lock.expiresAt > Date.now()) return null;
+    const job = lock.jobId ? await ctx.db.get(lock.jobId) : null;
+    await cancelExpiredLock(ctx, lock);
+    await writeAudit(ctx, {
+      actorId: "system",
+      actorRoles: [],
+      action: "document.lifecycle_lock_expired",
+      targetType: "legalResource",
+      targetId: lock.resourceId,
+      reason: "Expired lifecycle operation cancelled safely",
+      correlationId: job?.correlationId,
+      outcome: "failure",
+    }, {
+      actorType: "system",
+      actorUserId: "system",
+      metadata: {},
+    });
+    return null;
+  },
 });

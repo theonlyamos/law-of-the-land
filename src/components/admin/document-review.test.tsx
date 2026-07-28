@@ -26,6 +26,7 @@ const item = {
   status: "ready_for_review" as const,
   stagingDocumentId: "gx-staging-2",
   stagingProcessId: "gx-process-2",
+  xrayEvidence: { status: "ready" as const, fileType: "application/pdf", byteSize: 1240 },
   submittedBy: "manager-1",
   submittedAt: 1_700_000_000_000,
   previousVersion: { versionNumber: 1, filename: "act-843-v1.pdf", sha256: "b".repeat(64), effectiveDate: "2025-01-01" },
@@ -37,12 +38,19 @@ describe("document review workbench", () => {
     render(<AdminPermissionProvider permissions={["document:review", "document:publish", "document:rollback"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     expect(screen.getByRole("heading", { name: "Data Protection Act" })).toBeVisible();
     expect(screen.getByText("Act 843")).toBeVisible();
-    expect(screen.getByText(/SHA-256 a{12}/)).toBeVisible();
+    expect(screen.getByText(`SHA-256 ${"a".repeat(64)}`)).toBeVisible();
     expect(screen.getByRole("heading", { name: "X-Ray evidence" })).toBeVisible();
     expect(screen.getByText("gx-staging-2")).toBeVisible();
+    expect(screen.getByText((_, node) =>
+      node?.tagName === "P" && node.textContent?.includes("Ready / application/pdf / 1,240 bytes") === true,
+    )).toBeVisible();
     expect(screen.getByRole("heading", { name: "Metadata-only version diff" })).toBeVisible();
     expect(screen.getByText(/Original file bodies are never loaded/)).toBeVisible();
+    expect(screen.getByText("Changed")).toBeVisible();
+    expect(screen.getByText(`Previous SHA-256 ${"b".repeat(64)}`)).toBeVisible();
+    expect(screen.getByText(`Current SHA-256 ${"a".repeat(64)}`)).toBeVisible();
     expect(screen.getByText("Citation mismatch")).toBeVisible();
+    expect(JSON.stringify(document.body.textContent)).not.toContain("xrayUrl");
     expect(screen.getByRole("button", { name: "Approve version" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Reject version" })).toBeVisible();
   });
