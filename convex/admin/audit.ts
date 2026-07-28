@@ -19,6 +19,7 @@ const ACTION_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
 const TARGET_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const METADATA_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
 const RAW_URI_PATTERN = /(?:^|[^A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\/\/)?\S+/i;
+const EMAIL_LIKE_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const SENSITIVE_TERM_PATTERN =
   /\b(?:token|auth|password|passwd|cookie|credentials?|signature|authorization|bearer|secret|private\s+key|api\s+key|(?:access|refresh|id|session)\s+token)\b/i;
 
@@ -74,7 +75,7 @@ function assertSafeAuditText(
   if (RAW_URI_PATTERN.test(value)) {
     throw new ConvexError("Audit text must not contain raw URIs");
   }
-  if (hasSensitiveTerm(value)) {
+  if (hasSensitiveTerm(value) || EMAIL_LIKE_PATTERN.test(value)) {
     throw new ConvexError("Audit text must not contain secrets");
   }
 }

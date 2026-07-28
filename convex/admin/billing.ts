@@ -31,6 +31,7 @@ const allowanceProjection = v.object({
   baseLimit: v.number(),
   effectiveLimit: v.number(),
   allowed: v.boolean(),
+  canRecord: v.boolean(),
   isPro: v.boolean(),
   override: v.union(v.null(), overrideProjection),
 });
@@ -90,37 +91,34 @@ export const getEffectiveAllowanceForUser = query({
     await requireEnabledAdminPermission(ctx, "billing", "read");
     if (!args.userId || args.userId.trim() !== args.userId) throw new ConvexError("INVALID_USER_ID");
     const allowance = await getEffectiveAllowance(ctx, args.userId, args.now ?? Date.now());
-    return { userId: args.userId, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, isPro: allowance.isPro, override: projectOverride(allowance.override) };
+    return { userId: args.userId, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, canRecord: allowance.canRecord, isPro: allowance.isPro, override: projectOverride(allowance.override) };
   },
 });
 
 export const listUsage = query({
-  args: { paginationOpts: paginationOptsValidator, day: v.optional(v.string()) },
+  args: { paginationOpts: paginationOptsValidator },
   returns: v.object({ page: v.array(allowanceProjection), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "billing", "read");
-    const options = validatePage(args.paginationOpts);
-    const day = args.day ?? new Date().toISOString().slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new ConvexError("INVALID_USAGE_DAY");
-    const page = await ctx.db.query("dailyUsage").withIndex("by_day_and_userId", (q) => q.eq("day", day)).paginate(options);
+    const page = await ctx.runQuery(components.betterAuth.adapter.findMany, { model: "user", select: ["id"], sortBy: { field: "createdAt", direction: "desc" }, paginationOpts: validatePage(args.paginationOpts) }) as { page: Array<{ _id: string }>; isDone: boolean; continueCursor: string };
     const now = Date.now();
-    return { isDone: page.isDone, continueCursor: page.continueCursor, page: await Promise.all(page.page.map(async (row) => {
-      const allowance = await getEffectiveAllowance(ctx, row.userId, now);
-      return { userId: row.userId, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, isPro: allowance.isPro, override: projectOverride(allowance.override) };
+    return { isDone: page.isDone, continueCursor: page.continueCursor, page: await Promise.all(page.page.map(async (user) => {
+      const allowance = await getEffectiveAllowance(ctx, user._id, now);
+      return { userId: user._id, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, canRecord: allowance.canRecord, isPro: allowance.isPro, override: projectOverride(allowance.override) };
     })) };
   },
 });
 
 export const listSubscriptions = query({
   args: { paginationOpts: paginationOptsValidator },
-  returns: v.object({ page: v.array(v.object({ userId: v.string(), plan: v.union(v.literal("free"), v.literal("pro")), status: v.union(v.string(), v.null()), currentPeriodStart: v.union(v.string(), v.null()), currentPeriodEnd: v.union(v.string(), v.null()), used: v.number(), baseLimit: v.number(), effectiveLimit: v.number(), allowed: v.boolean(), override: v.union(v.null(), overrideProjection) })), isDone: v.boolean(), continueCursor: v.string() }),
+  returns: v.object({ page: v.array(v.object({ userId: v.string(), plan: v.union(v.literal("free"), v.literal("pro")), status: v.union(v.string(), v.null()), currentPeriodStart: v.union(v.string(), v.null()), currentPeriodEnd: v.union(v.string(), v.null()), used: v.number(), baseLimit: v.number(), effectiveLimit: v.number(), allowed: v.boolean(), canRecord: v.boolean(), override: v.union(v.null(), overrideProjection) })), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "billing", "read");
     const result = await ctx.runQuery(components.betterAuth.adapter.findMany, { model: "user", select: ["id"], sortBy: { field: "createdAt", direction: "desc" }, paginationOpts: validatePage(args.paginationOpts) }) as { page: Array<{ _id: string }>; isDone: boolean; continueCursor: string };
     const now = Date.now();
     return { isDone: result.isDone, continueCursor: result.continueCursor, page: await Promise.all(result.page.map(async (user) => {
       const [subscription, allowance] = await Promise.all([polar.getCurrentSubscription(ctx, { userId: user._id }), getEffectiveAllowance(ctx, user._id, now)]);
-      return { userId: user._id, plan: subscription ? "pro" as const : "free" as const, status: subscription?.status ?? null, currentPeriodStart: subscription?.currentPeriodStart ?? null, currentPeriodEnd: subscription?.currentPeriodEnd ?? null, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, override: projectOverride(allowance.override) };
+      return { userId: user._id, plan: subscription ? "pro" as const : "free" as const, status: subscription?.status ?? null, currentPeriodStart: subscription?.currentPeriodStart ?? null, currentPeriodEnd: subscription?.currentPeriodEnd ?? null, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, canRecord: allowance.canRecord, override: projectOverride(allowance.override) };
     })) };
   },
 });
@@ -134,17 +132,20 @@ export const grantQuotaOverride = mutation({
     const key = validateKey(args.idempotencyKey);
     if (!args.userId || args.userId.trim() !== args.userId || args.userId.length > 256) throw new ConvexError("INVALID_USER_ID");
     if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > MAX_LIMIT) throw new ConvexError("INVALID_QUOTA_LIMIT");
-    const now = Date.now();
-    const startsAt = args.startsAt < now ? now : args.startsAt;
-    const duration = args.expiresAt - startsAt;
-    if (![args.startsAt, args.expiresAt].every(Number.isSafeInteger) || args.startsAt < now - 60_000 || startsAt > now + MAX_FUTURE_START_MS || duration < 1_000 || duration > MAX_DURATION_MS) throw new ConvexError("INVALID_QUOTA_INTERVAL");
+    if (![args.startsAt, args.expiresAt].every(Number.isSafeInteger)) throw new ConvexError("INVALID_QUOTA_INTERVAL");
+    const requestedDuration = args.expiresAt - args.startsAt;
+    if (requestedDuration < 1_000 || requestedDuration > MAX_DURATION_MS) throw new ConvexError("INVALID_QUOTA_INTERVAL");
     const expectedConfirmation = `CONFIRM_QUOTA_OVERRIDE ${args.userId}`;
-    if ((args.limit > LARGE_LIMIT || duration > LONG_DURATION_MS) && args.confirmation !== expectedConfirmation) throw new ConvexError(expectedConfirmation);
+    if ((args.limit > LARGE_LIMIT || requestedDuration > LONG_DURATION_MS) && args.confirmation !== expectedConfirmation) throw new ConvexError(expectedConfirmation);
     const requestFingerprint = fingerprint([args.userId, args.limit, args.startsAt, args.expiresAt, reason, args.confirmation]);
     const prior = await replay(ctx, actor.userId, key, requestFingerprint, "quota_override_grant");
     if (prior) return prior;
-    const outstanding = await ctx.db.query("quotaOverrides").withIndex("by_userId_and_active_and_expiresAt", (q) => q.eq("userId", args.userId).eq("active", true).gt("expiresAt", now)).take(1);
-    if (outstanding.length > 0) throw new ConvexError("OVERLAPPING_QUOTA_OVERRIDE");
+    const now = Date.now();
+    const startsAt = args.startsAt < now ? now : args.startsAt;
+    if (args.startsAt < now - 60_000 || startsAt > now + MAX_FUTURE_START_MS || args.expiresAt - startsAt < 1_000) throw new ConvexError("INVALID_QUOTA_INTERVAL");
+    const candidates = await ctx.db.query("quotaOverrides").withIndex("by_userId_and_active_and_expiresAt", (q) => q.eq("userId", args.userId).eq("active", true).gt("expiresAt", startsAt)).take(51);
+    if (candidates.length > 50) throw new ConvexError("QUOTA_OVERRIDE_SCHEDULE_LIMIT");
+    if (candidates.some((existing) => existing.startsAt < args.expiresAt && startsAt < existing.expiresAt)) throw new ConvexError("OVERLAPPING_QUOTA_OVERRIDE");
     const correlation = correlationId();
     const operationId = await ctx.db.insert("adminOperations", { actorId: actor.userId, action: "quota_override_grant", targetId: args.userId, idempotencyKey: key, requestFingerprint, correlationId: correlation, status: "succeeded", result: { status: "succeeded", correlationId: correlation, action: "quota_override_grant", targetId: args.userId }, createdAt: now, updatedAt: now });
     const overrideId = await ctx.db.insert("quotaOverrides", { userId: args.userId, limit: args.limit, startsAt, expiresAt: args.expiresAt, grantedBy: actor.userId, reason, active: true, grantOperationId: operationId, createdAt: now, updatedAt: now });

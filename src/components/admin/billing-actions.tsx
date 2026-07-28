@@ -7,6 +7,20 @@ import { useMemo, useState, type FormEvent } from "react";
 
 const LONG_MS = 30 * 24 * 60 * 60 * 1_000;
 
+export function BillingAllowanceSummary({ used, effectiveLimit, allowed, canRecord, override }: {
+  used: number;
+  effectiveLimit: number;
+  allowed: boolean;
+  canRecord: boolean;
+  override: null | { limit: number; expiresAt: number; grantedBy: string; reason: string };
+}) {
+  return <div className="grid gap-1">
+    <span className="font-semibold">{used} / {effectiveLimit}</span>
+    <span className="text-xs">{canRecord ? "Another question can be recorded" : allowed ? "At limit — another question cannot be recorded" : "Over limit — recording is blocked"}</span>
+    {override ? <span className="text-xs">Override {override.limit} · Expires {new Date(override.expiresAt).toISOString()}<br />Granted by {override.grantedBy} · {override.reason}</span> : <span className="text-xs">No temporary override</span>}
+  </div>;
+}
+
 export function BillingActions({ userId, activeOverrideId }: { userId: string; activeOverrideId?: Id<"quotaOverrides"> }) {
   const grant = useMutation(api.admin.billing.grantQuotaOverride);
   const revoke = useMutation(api.admin.billing.revokeQuotaOverride);

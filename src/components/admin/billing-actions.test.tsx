@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BillingActions } from "./billing-actions";
+import { BillingActions, BillingAllowanceSummary } from "./billing-actions";
 
 const mutate = vi.fn();
 vi.mock("convex/react", () => ({ useMutation: () => mutate }));
@@ -21,5 +21,14 @@ describe("BillingActions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Grant temporary override" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
     expect(mutate.mock.calls[0][0]).toMatchObject({ userId: "user-7", limit: 1001, confirmation: "CONFIRM_QUOTA_OVERRIDE user-7", reason: "Temporary account remediation" });
+  });
+
+  it("renders the effective decision and complete active override provenance", () => {
+    render(<BillingAllowanceSummary used={10} effectiveLimit={10} allowed canRecord={false} override={{ limit: 25, expiresAt: Date.parse("2026-08-01T00:00:00.000Z"), grantedBy: "admin-7", reason: "Temporary remediation" }} />);
+    expect(screen.getByText("10 / 10")).toBeVisible();
+    expect(screen.getByText("At limit — another question cannot be recorded")).toBeVisible();
+    expect(screen.getByText(/Expires 2026-08-01T00:00:00.000Z/)).toBeVisible();
+    expect(screen.getByText(/Granted by admin-7/)).toBeVisible();
+    expect(screen.getByText(/Temporary remediation/)).toBeVisible();
   });
 });

@@ -38,6 +38,7 @@ export type EffectiveAllowance = {
   override: Doc<"quotaOverrides"> | null;
   effectiveLimit: number;
   allowed: boolean;
+  canRecord: boolean;
 };
 
 /**
@@ -55,11 +56,11 @@ export async function getEffectiveAllowance(
     planFor(ctx, userId),
     ctx.db
       .query("quotaOverrides")
-      .withIndex("by_userId_and_startsAt", (q) =>
-        q.eq("userId", userId).lte("startsAt", now),
+      .withIndex("by_userId_and_active_and_startsAt", (q) =>
+        q.eq("userId", userId).eq("active", true).lte("startsAt", now),
       )
       .order("desc")
-      .take(20),
+      .take(1),
   ]);
   const active = candidates
     .filter((candidate) => candidate.revokedAt === undefined && now < candidate.expiresAt)
@@ -73,6 +74,7 @@ export async function getEffectiveAllowance(
     override: active,
     effectiveLimit,
     allowed: !billingEnabled() || used <= effectiveLimit,
+    canRecord: !billingEnabled() || used < effectiveLimit,
   };
 }
 
@@ -90,7 +92,7 @@ export const recordQuestion = mutation({
     const row = await usedToday(ctx, userId, now);
     const used = allowance.used;
 
-    if (billingEnabled() && used >= allowance.effectiveLimit) {
+    if (!allowance.canRecord) {
       throw new ConvexError({
         code: "QUOTA_EXCEEDED",
         limit: allowance.effectiveLimit,
@@ -116,20 +118,20 @@ export const recordQuestion = mutation({
  * already counted this question). */
 export const checkAllowance = query({
   args: {},
-  returns: v.object({ allowed: v.boolean(), limit: v.number(), isPro: v.boolean() }),
+  returns: v.object({ allowed: v.boolean(), canRecord: v.boolean(), used: v.number(), limit: v.number(), isPro: v.boolean() }),
   handler: async (ctx) => {
     const userId = await optionalUserId(ctx);
-    if (!userId) return { allowed: false, limit: 0, isPro: false };
+    if (!userId) return { allowed: false, canRecord: false, used: 0, limit: 0, isPro: false };
 
     const allowance = await getEffectiveAllowance(ctx, userId, Date.now());
-    return { allowed: allowance.allowed, limit: allowance.effectiveLimit, isPro: allowance.isPro };
+    return { allowed: allowance.allowed, canRecord: allowance.canRecord, used: allowance.used, limit: allowance.effectiveLimit, isPro: allowance.isPro };
   },
 });
 
 /** Plan + usage snapshot for the billing page. */
 export const summary = query({
   args: {},
-  returns: v.union(v.null(), v.object({ usedToday: v.number(), limit: v.number(), isPro: v.boolean(), billingEnabled: v.boolean() })),
+  returns: v.union(v.null(), v.object({ usedToday: v.number(), limit: v.number(), allowed: v.boolean(), canRecord: v.boolean(), isPro: v.boolean(), billingEnabled: v.boolean() })),
   handler: async (ctx) => {
     const userId = await optionalUserId(ctx);
     if (!userId) return null;
@@ -138,6 +140,8 @@ export const summary = query({
     return {
       usedToday: allowance.used,
       limit: allowance.effectiveLimit,
+      allowed: allowance.allowed,
+      canRecord: allowance.canRecord,
       isPro: allowance.isPro,
       billingEnabled: billingEnabled(),
     };

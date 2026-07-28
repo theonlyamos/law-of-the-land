@@ -421,6 +421,7 @@ export default defineSchema({
     .index("by_userId_and_startsAt", ["userId", "startsAt"])
     .index("by_userId_and_expiresAt", ["userId", "expiresAt"])
     .index("by_userId_and_active_and_expiresAt", ["userId", "active", "expiresAt"])
+    .index("by_userId_and_active_and_startsAt", ["userId", "active", "startsAt"])
     .index("by_expiresAt", ["expiresAt"])
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
