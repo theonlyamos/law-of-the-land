@@ -768,6 +768,106 @@ describe("governed document publication", () => {
     },
   );
 
+  it.each([
+    { terminalStatus: "complete" as const, candidateStatus: "published" as const, activatesCandidate: true },
+    { terminalStatus: "error" as const, candidateStatus: "approved" as const, activatesCandidate: false },
+  ])(
+    "keeps exhausted observation uncertainty locked until delayed $terminalStatus callback resolves it",
+    async ({ terminalStatus, candidateStatus, activatesCandidate }) => {
+      const t = createBackend();
+      await enablePanel(t);
+      const publisher = await asAdmin(t, "content_reviewer");
+      const competitor = await asAdmin(t, "content_reviewer");
+      const { resourceId, ids } = await seedCatalog(t, "manager-1", ["published", "superseded", "approved"]);
+      const publishKey = `manual-review-${terminalStatus}-publish`;
+      await addStepUp(t, publisher, "document_publish", ids[2], publishKey);
+      const queued = await publisher.client.mutation(publishVersion, {
+        versionId: ids[2], confirmation: `PUBLISH ${ids[2]}`,
+        reason: "Promote after authoritative provider confirmation", idempotencyKey: publishKey,
+      });
+      const initialLease = await t.mutation(claimJob, { jobId: queued.jobId });
+      if (!initialLease) throw new Error("expected initial publication lease");
+      await t.mutation(applyProviderResult, {
+        jobId: queued.jobId,
+        leaseToken: initialLease.leaseToken,
+        processId: `manual-review-${terminalStatus}-process`,
+        status: "processing",
+      });
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await t.run(async (ctx) => {
+          await ctx.db.patch(queued.jobId, { nextAttemptAt: Date.now() - 1 });
+        });
+        const claim = await t.mutation(claimJob, { jobId: queued.jobId });
+        if (!claim) throw new Error(`expected observation retry ${attempt + 1}`);
+        const failure = await t.mutation(recordProviderFailure, {
+          jobId: queued.jobId,
+          leaseToken: claim.leaseToken,
+          kind: attempt % 2 === 0 ? "network" : "timeout",
+        });
+        expect(failure.status).toBe(attempt < 3 ? "queued" : "manual_review");
+      }
+
+      const uncertain = await t.run(async (ctx) => ({
+        job: await ctx.db.get(queued.jobId as Id<"integrationJobs">),
+        candidate: await ctx.db.get(ids[2]),
+        resource: await ctx.db.get(resourceId),
+        locks: await ctx.db.query("documentLifecycleLocks").take(2),
+      }));
+      expect(uncertain.job).toMatchObject({
+        status: "manual_review",
+        processId: `manual-review-${terminalStatus}-process`,
+        callbackTokenHash: expect.any(String),
+      });
+      expect(uncertain.candidate?.status).toBe("publishing");
+      expect(uncertain.resource?.activeVersionId).toBe(ids[0]);
+      expect(uncertain.locks).toHaveLength(1);
+
+      const competingKey = `manual-review-${terminalStatus}-rollback`;
+      await addStepUp(t, competitor, "document_rollback", ids[1], competingKey);
+      await expect(competitor.client.mutation(rollbackVersion, {
+        versionId: ids[1], confirmation: `ROLLBACK ${ids[1]}`,
+        reason: "Do not overlap an unresolved provider outcome", idempotencyKey: competingKey,
+      })).rejects.toThrow("DOCUMENT_LIFECYCLE_BUSY");
+      await expect(t.mutation(completeGroundxCallback, {
+        tokenHash: uncertain.job?.callbackTokenHash,
+        processId: "wrong-process",
+        targetType: "documentVersion",
+        targetId: ids[2],
+        status: terminalStatus,
+      })).rejects.toThrow("INTEGRATION_CALLBACK_NOT_FOUND");
+      await expect(t.mutation(completeGroundxCallback, {
+        tokenHash: uncertain.job?.callbackTokenHash,
+        processId: `manual-review-${terminalStatus}-process`,
+        targetType: "documentVersion",
+        targetId: ids[1],
+        status: terminalStatus,
+      })).rejects.toThrow("INTEGRATION_CALLBACK_NOT_FOUND");
+
+      const callback = {
+        tokenHash: uncertain.job?.callbackTokenHash,
+        processId: `manual-review-${terminalStatus}-process`,
+        targetType: "documentVersion",
+        targetId: ids[2],
+        status: terminalStatus,
+      };
+      await expect(t.mutation(completeGroundxCallback, callback)).resolves.toEqual({ accepted: true, duplicate: false });
+      await expect(t.mutation(completeGroundxCallback, callback)).resolves.toEqual({ accepted: true, duplicate: true });
+      const resolved = await t.run(async (ctx) => ({
+        job: await ctx.db.get(queued.jobId as Id<"integrationJobs">),
+        candidate: await ctx.db.get(ids[2]),
+        resource: await ctx.db.get(resourceId),
+        locks: await ctx.db.query("documentLifecycleLocks").take(2),
+        jobs: await ctx.db.query("integrationJobs").take(5),
+      }));
+      expect(resolved.job?.status).toBe(terminalStatus === "complete" ? "succeeded" : "failed");
+      expect(resolved.candidate?.status).toBe(candidateStatus);
+      expect(resolved.resource?.activeVersionId).toBe(activatesCandidate ? ids[2] : ids[0]);
+      expect(resolved.locks).toHaveLength(0);
+      expect(resolved.jobs).toHaveLength(1);
+    },
+  );
+
   it("shows provider-derived X-Ray evidence and never infers it from staging metadata", async () => {
     const t = createBackend();
     await enablePanel(t);

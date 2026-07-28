@@ -336,11 +336,13 @@ async function claimJobDocument(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
   allowStaleRunning = false,
+  allowUncertainManualReview = false,
 ) {
     if (
       job.status !== "queued" &&
       job.status !== "waiting_callback" &&
-      !(allowStaleRunning && job.status === "running")
+      !(allowStaleRunning && job.status === "running") &&
+      !(allowUncertainManualReview && job.status === "manual_review")
     ) {
       return null;
     }
@@ -384,6 +386,31 @@ export const claimJob = internalMutation({
   },
 });
 
+export const reconcileManualReviewJob = internalMutation({
+  args: { jobId: v.id("integrationJobs") },
+  returns: claimResultValidator,
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (
+      !job ||
+      job.status !== "manual_review" ||
+      job.processId === undefined ||
+      job.lastErrorKind === undefined ||
+      !["rate_limit", "timeout", "network"].includes(job.lastErrorKind)
+    ) {
+      return null;
+    }
+    const claim = await claimJobDocument(ctx, job, false, true);
+    if (claim) {
+      await ctx.scheduler.runAfter(0, runGroundxJobRef, {
+        jobId: job._id,
+        leaseToken: claim.leaseToken,
+      });
+    }
+    return claim;
+  },
+});
+
 function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string) {
   if (
     job.status !== "running" ||
@@ -403,10 +430,20 @@ async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, proces
     if (job.status === expected) return { accepted: true, duplicate: true };
     throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
   }
-  if (job.status !== "running" && job.status !== "waiting_callback") {
+  const uncertainManualReview =
+    job.status === "manual_review" &&
+    job.processId !== undefined &&
+    job.lastErrorKind !== undefined &&
+    ["rate_limit", "timeout", "network"].includes(job.lastErrorKind);
+  if (
+    job.status !== "running" &&
+    job.status !== "waiting_callback" &&
+    !uncertainManualReview
+  ) {
     throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
   }
   if (status === "queued" || status === "processing") {
+    if (uncertainManualReview) throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
     await ctx.db.patch(job._id, {
       processId,
       status: "waiting_callback",
@@ -525,7 +562,7 @@ export const recordProviderFailure = internalMutation({
       lastErrorKind: args.kind,
       updatedAt: Date.now(),
     });
-    if (job.targetType === "documentVersion") {
+    if (status === "failed" && job.targetType === "documentVersion") {
       await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
     }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");

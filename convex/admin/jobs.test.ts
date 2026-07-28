@@ -36,6 +36,9 @@ const completeGroundxCallback = makeFunctionReference<"mutation">(
 const reconcileStaleJobs = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileStaleJobs",
 );
+const reconcileManualReviewJob = makeFunctionReference<"mutation">(
+  "admin/jobs:reconcileManualReviewJob",
+);
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -268,6 +271,44 @@ describe("durable GroundX jobs", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("explicitly reclaims transport-uncertain manual review work for a durable provider poll", async () => {
+    const t = convexTest(schema, modules);
+    const created = await t.mutation(enqueueJob, request({
+      targetType: "operation",
+      targetId: "uncertain-operation",
+      idempotencyKey: "uncertain-operation",
+    }));
+    const initialLease = await claimLease(t, created.jobId);
+    await t.mutation(applyProviderResult, {
+      jobId: created.jobId,
+      leaseToken: initialLease,
+      processId: "uncertain-process",
+      status: "processing",
+    });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await t.run(async (ctx) => ctx.db.patch(created.jobId, { nextAttemptAt: Date.now() - 1 }));
+      const leaseToken = await claimLease(t, created.jobId);
+      await t.mutation(recordProviderFailure, {
+        jobId: created.jobId,
+        leaseToken,
+        kind: "network",
+      });
+    }
+
+    const reclaimed = await t.mutation(reconcileManualReviewJob, { jobId: created.jobId });
+    expect(reclaimed).toMatchObject({
+      workKind: "poll",
+      leaseToken: expect.any(String),
+      job: { status: "running", processId: "uncertain-process" },
+    });
+    await expect(t.mutation(applyProviderResult, {
+      jobId: created.jobId,
+      leaseToken: reclaimed?.leaseToken,
+      processId: "uncertain-process",
+      status: "complete",
+    })).resolves.toEqual({ accepted: true, duplicate: false });
   });
 
   it("fails non-retryable provider errors without scheduling another attempt", async () => {
