@@ -5,6 +5,7 @@ import { internalMutation, internalQuery, mutation, type MutationCtx } from "../
 import type { AdminRole } from "../lib/adminPermissions";
 import { writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
+import { applyPublicationJobOutcome } from "./publicationState";
 
 const MAX_PAYLOAD_BYTES = 8_192;
 const MAX_PAYLOAD_DEPTH = 5;
@@ -196,7 +197,7 @@ type EnqueueInput = {
   idempotencyKey: string;
 };
 
-async function persistJob(
+export async function persistJob(
   ctx: MutationCtx,
   args: EnqueueInput,
   actor: { id: string; roles: AdminRole[] },
@@ -413,6 +414,9 @@ async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, proces
     nextAttemptAt: undefined,
     updatedAt: Date.now(),
   });
+  if (job.targetType === "documentVersion") {
+    await applyPublicationJobOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId);
+  }
   await auditJob(ctx, job, nextStatus === "succeeded" ? "success" : "failure", `integration.job_${nextStatus}`);
   return { accepted: true, duplicate: false };
 }
@@ -484,6 +488,9 @@ export const recordProviderFailure = internalMutation({
       lastErrorKind: args.kind,
       updatedAt: Date.now(),
     });
+    if (job.targetType === "documentVersion") {
+      await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
+    }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");
     return { status, nextAttemptAt: null };
   },

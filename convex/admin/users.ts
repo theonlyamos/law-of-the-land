@@ -88,6 +88,9 @@ const STEP_UP_ACTIONS = new Set([
   "impersonation_start",
   "user_deletion_queue",
   "conversation_export",
+  "document_publish",
+  "document_unpublish",
+  "document_rollback",
 ]);
 
 function validateIdempotencyKey(value: string): string {
@@ -1147,6 +1150,16 @@ export const recordAdminStepUpProof = internalMutation({
         grant.chatSessionId !== chatId ||
         grant.revokedAt !== undefined ||
         grant.expiresAt <= Date.now()
+      ) {
+        throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+      }
+    } else if (args.action.startsWith("document_")) {
+      const permission = args.action === "document_rollback" ? "rollback" : "publish";
+      const version = await ctx.db.get(args.targetId as Id<"documentVersions">);
+      if (
+        typeof session.impersonatedBy === "string" ||
+        !hasRolePermission(parseAdminRoles(actor.role), "document", permission) ||
+        !version
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
       }

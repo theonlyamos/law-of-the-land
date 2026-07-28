@@ -121,6 +121,8 @@ export default defineSchema({
     notes: v.string(),
     checklistAnswers: v.record(v.string(), v.boolean()),
     evaluationRunId: v.optional(v.string()),
+    reason: v.string(),
+    correlationId: v.string(),
     createdAt: v.number(),
   })
     .index("by_documentVersionId_and_createdAt", [
