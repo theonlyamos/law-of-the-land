@@ -46,8 +46,19 @@ export function IncidentActions({ incidentId, canWrite, status, severity, ownerI
   async function change(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const submittedStatus = String(form.get("status")) as IncidentStatus;
+    const submittedSeverity = String(form.get("severity")) as IncidentSeverity;
+    const submittedOwner = String(form.get("ownerId") || "") || null;
+    const input: { incidentId: Id<"systemIncidents">; status?: IncidentStatus; severity?: IncidentSeverity; ownerId?: string | null; reason: string; idempotencyKey: string } = { incidentId, reason: String(form.get("reason")), idempotencyKey: `incident_${crypto.randomUUID().replaceAll("-", "")}` };
+    if (submittedStatus !== status) input.status = submittedStatus;
+    if (submittedSeverity !== severity) input.severity = submittedSeverity;
+    if (submittedOwner !== (ownerId ?? null)) input.ownerId = submittedOwner;
+    if (input.status === undefined && input.severity === undefined && input.ownerId === undefined) {
+      setMessage("Choose at least one incident change.");
+      return;
+    }
     try {
-      await update({ incidentId, status: String(form.get("status")) as IncidentStatus, severity: String(form.get("severity")) as IncidentSeverity, ownerId: String(form.get("ownerId") || "") || null, reason: String(form.get("reason")), idempotencyKey: `incident_${crypto.randomUUID().replaceAll("-", "")}` });
+      await update(input);
       setMessage("Incident transition recorded.");
     } catch { setMessage("The incident transition was refused."); }
   }

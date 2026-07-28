@@ -186,7 +186,14 @@ export const updateIncident = mutation({
     if (args.status !== undefined && args.status !== incident.status) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "status", actorId: actor.userId, summary: `Status changed from ${incident.status} to ${args.status}`, createdAt: now });
     if (args.severity !== undefined && args.severity !== incident.severity) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "severity", actorId: actor.userId, summary: `Severity changed from ${incident.severity} to ${args.severity}`, createdAt: now });
     if (args.ownerId !== undefined && args.ownerId !== (incident.ownerId ?? null)) await ctx.db.insert("incidentTimeline", { incidentId: incident._id, kind: "ownership", actorId: actor.userId, summary: args.ownerId === null ? "Incident ownership cleared" : "Incident owner assigned", createdAt: now });
-    await ctx.db.patch(incident._id, { status: args.status, severity: args.severity, ownerId: args.ownerId === null ? undefined : args.ownerId, resolvedAt: args.status === "resolved" ? now : incident.resolvedAt, updatedAt: now });
+    const patch: { status?: "open" | "investigating" | "monitoring" | "resolved"; severity?: "low" | "medium" | "high" | "critical"; ownerId?: string; resolvedAt?: number; updatedAt: number } = { updatedAt: now };
+    if (args.status !== undefined) {
+      patch.status = args.status;
+      if (args.status === "resolved") patch.resolvedAt = now;
+    }
+    if (args.severity !== undefined) patch.severity = args.severity;
+    if (args.ownerId !== undefined) patch.ownerId = args.ownerId === null ? undefined : args.ownerId;
+    await ctx.db.patch(incident._id, patch);
     return await completeIncidentOperation(ctx, actor, { action: "incident_update", incidentId: incident._id, idempotencyKey: args.idempotencyKey, fingerprint, reason, auditAction: "incident.updated", beforeSummary: JSON.stringify({ status: incident.status, severity: incident.severity, hasOwner: incident.ownerId !== undefined }), afterSummary: JSON.stringify({ status: args.status ?? incident.status, severity: args.severity ?? incident.severity, hasOwner: args.ownerId === undefined ? incident.ownerId !== undefined : args.ownerId !== null }) });
   },
 });
@@ -254,6 +261,12 @@ export const runRetentionBatch = internalMutation({
       if (phase === "storage" && storageVisited) break;
       const capacity = Math.min(RETENTION_SLICE, RETENTION_LIMIT - deleted);
       const before = deleted;
+      let phaseBlocked = false;
+      const reserveBudget = (cost: number) => {
+        if (deleted + cost <= RETENTION_LIMIT) return true;
+        phaseBlocked = true;
+        return false;
+      };
       if (phase === "grants") {
         const rows = await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(capacity);
         for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
@@ -265,7 +278,7 @@ export const runRetentionBatch = internalMutation({
         const rows = await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(capacity);
         for (const row of rows) {
           const cost = row.storageId ? 2 : 1;
-          if (deleted + cost > RETENTION_LIMIT) break;
+          if (!reserveBudget(cost)) break;
           if (row.storageId) await ctx.storage.delete(row.storageId);
           await ctx.db.delete(row._id); deleted += cost;
         }
@@ -296,10 +309,11 @@ export const runRetentionBatch = internalMutation({
           if (attached.length === 0 && exportArtifact.length === 0) { await ctx.storage.delete(blob._id); deleted += 1; }
         }
       }
-      if (deleted > before) {
+      if (deleted > before || phaseBlocked) {
         cycleHadChanges = true;
         if (phase === "storage") storagePassHadChanges = true;
       }
+      if (phaseBlocked) break;
       phaseIndex = (phaseIndex + 1) % RETENTION_PHASES.length;
       if (phaseIndex === 0) {
         if (storageCursor === null && !cycleHadChanges && !storagePassHadChanges) done = true;

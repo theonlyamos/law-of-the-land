@@ -53,14 +53,13 @@ describe("incident administration controls", () => {
     fireEvent.change(screen.getByLabelText("Reason for incident transition"), { target: { value: "Assign the active incident commander" } });
     fireEvent.click(screen.getByRole("button", { name: "Record transition" }));
 
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith({
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    expect(mocks.update.mock.calls[0]?.[0]).toEqual({
       incidentId: "incident_1",
-      status: "investigating",
-      severity: "high",
       ownerId: "admin_next",
       reason: "Assign the active incident commander",
       idempotencyKey: expect.stringMatching(/^incident_/),
-    }));
+    });
     fireEvent.click(screen.getByRole("button", { name: "Load older timeline" }));
     expect(mocks.loadMore).toHaveBeenCalledWith(20);
   });

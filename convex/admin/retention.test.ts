@@ -26,6 +26,7 @@ const retryJob = makeFunctionReference<"mutation">("admin/jobs:retryJob");
 const cancelJob = makeFunctionReference<"mutation">("admin/jobs:cancelJob");
 const runRetentionBatch = makeFunctionReference<"mutation">("admin/operations:runRetentionBatch");
 const createIncident = makeFunctionReference<"mutation">("admin/operations:createIncident");
+const updateIncident = makeFunctionReference<"mutation">("admin/operations:updateIncident");
 const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addIncidentNote");
 const listIncidentTimeline = makeFunctionReference<"query">("admin/operations:listIncidentTimeline");
 const finalizeExport = makeFunctionReference<"mutation">("admin/exports:finalizeConversationExport");
@@ -165,6 +166,17 @@ describe("authoritative job controls", () => {
 });
 
 describe("incidents and immutable timeline", () => {
+  it("preserves newer status and severity when a stale operator changes only ownership", async () => {
+    const t = createBackend(); await enablePanel(t);
+    const staleOperator = await asAdmin(t); const newerOperator = await asAdmin(t);
+    const created = await staleOperator.client.mutation(createIncident, { title: "Concurrent incident", severity: "low", reason: "Open a concurrent incident regression", idempotencyKey: "incident-concurrent-create" });
+    await newerOperator.client.mutation(updateIncident, { incidentId: created.incidentId, status: "investigating", severity: "high", reason: "Escalate from fresh operational evidence", idempotencyKey: "incident-concurrent-escalate" });
+    await staleOperator.client.mutation(updateIncident, { incidentId: created.incidentId, ownerId: "incident_commander", reason: "Assign ownership from a stale register page", idempotencyKey: "incident-concurrent-owner" });
+
+    const incident = await t.run((ctx) => ctx.db.get(created.incidentId as Id<"systemIncidents">));
+    expect(incident).toMatchObject({ status: "investigating", severity: "high", ownerId: "incident_commander" });
+  });
+
   it("creates an incident and append-only, bounded notes without exposing mutable audit fields", async () => {
     const t = createBackend(); await enablePanel(t); const admin = await asAdmin(t);
     const incident = await admin.client.mutation(createIncident, {
@@ -308,6 +320,49 @@ describe("one-time conversation export references", () => {
 });
 
 describe("bounded retention", () => {
+  it("keeps a multi-operation export phase when only one budget unit remains", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const t = createBackend();
+    const old = Date.now() - 100 * 24 * 60 * 60_000;
+    const fixture = await t.run(async (ctx) => {
+      const chatId = await ctx.db.insert("chatSessions", { userId: "no_fit_user", externalId: "no-fit", title: "No fit", lastMessage: "safe", messageCount: 0, updatedAt: old });
+      const grantId = await ctx.db.insert("adminAccessGrants", { adminId: "no_fit_admin", chatSessionId: chatId, purpose: "Expired no-fit anchor", issuedAt: old, expiresAt: old, correlationId: "no_fit_anchor" });
+      for (let index = 0; index < 39; index += 1) await ctx.db.insert("adminAccessGrants", { adminId: "no_fit_admin", chatSessionId: chatId, purpose: "Expired no-fit grant", issuedAt: old, expiresAt: old, correlationId: `no_fit_grant_${index}` });
+      const referenceExportId = await ctx.db.insert("adminExports", { correlationId: "no_fit_reference_anchor", requesterId: "no_fit_admin", requesterSessionId: "no_fit_session", chatSessionId: chatId, accessGrantId: grantId, status: "queued", expiresAt: Date.now() + 400 * 24 * 60 * 60_000, createdAt: old, updatedAt: old });
+      for (let index = 0; index < 40; index += 1) await ctx.db.insert("exportDownloadReferences", { exportId: referenceExportId, requesterId: "no_fit_admin", referenceHash: `no_fit_ref_${index}`.padEnd(64, "f"), expiresAt: old, createdAt: old });
+      for (const [status, count] of [["queued", 40], ["ready", 40], ["failed", 39]] as const) {
+        for (let index = 0; index < count; index += 1) await ctx.db.insert("adminExports", { correlationId: `no_fit_${status}_${index}`, requesterId: "no_fit_admin", requesterSessionId: "no_fit_session", chatSessionId: chatId, accessGrantId: grantId, status, expiresAt: old, createdAt: old, updatedAt: old });
+      }
+      const storageId = await ctx.storage.store(new Blob(["stored-expired-export"]));
+      const exportId = await ctx.db.insert("adminExports", { correlationId: "no_fit_stored_expired", requesterId: "no_fit_admin", requesterSessionId: "no_fit_session", chatSessionId: chatId, accessGrantId: grantId, status: "expired", storageId, expiresAt: old, createdAt: old, updatedAt: old });
+      return { exportId, storageId };
+    });
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+
+    const first = await t.mutation(runRetentionBatch, { cursor: null });
+    expect(first).toMatchObject({ deleted: 199, done: false });
+    const blocked = await t.run(async (ctx) => ({ state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(), exportRow: await ctx.db.get(fixture.exportId), blob: await ctx.db.system.get("_storage", fixture.storageId) }));
+    expect(blocked.state).toMatchObject({ phase: "exports_expired", cycleHadChanges: true });
+    expect(blocked.state?.lastSuccessfulAt).toBeUndefined();
+    expect(blocked.exportRow).not.toBeNull();
+    expect(blocked.blob).not.toBeNull();
+
+    const second = await t.mutation(runRetentionBatch, { cursor: first.cursor });
+    expect(second.deleted).toBe(2);
+    expect(second.done).toBe(false);
+    const consumed = await t.run(async (ctx) => ({ state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(), exportRow: await ctx.db.get(fixture.exportId), blob: await ctx.db.system.get("_storage", fixture.storageId) }));
+    expect(consumed.state?.lastSuccessfulAt).toBeUndefined();
+    expect(consumed.exportRow).toBeNull();
+    expect(consumed.blob).toBeNull();
+
+    const concurrent = await Promise.all([t.mutation(runRetentionBatch, { cursor: second.cursor }), t.mutation(runRetentionBatch, { cursor: "duplicate_after_no_fit" })]);
+    expect(concurrent.every((result) => result.deleted <= 200)).toBe(true);
+    let result = concurrent[1];
+    while (!result.done) result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+    const finalState = await t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique());
+    expect(finalState).toMatchObject({ phase: "complete", lastSuccessfulAt: Date.now() });
+  });
+
   it("resumes the persisted phase across stale and concurrent continuation attempts", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const t = createBackend();
