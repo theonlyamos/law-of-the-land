@@ -31,6 +31,7 @@ import {
   requireEnabledAdminPermission,
 } from "./featureFlags";
 import { writeAdminRoles } from "./roles";
+import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 
 const MAX_PAGE_SIZE = 50;
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
@@ -942,6 +943,13 @@ export const sendQueuedVerificationEmail = internalAction({
       requestId: args.requestId,
     });
     if (!claimed) {
+      return null;
+    }
+    if (resolveE2EProviderIsolation() === "stub") {
+      await ctx.runMutation(finalizeVerificationEmailReference, {
+        requestId: args.requestId,
+        succeeded: true,
+      });
       return null;
     }
     let succeeded = false;

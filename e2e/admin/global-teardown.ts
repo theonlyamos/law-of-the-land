@@ -8,7 +8,6 @@ export default async function globalTeardown(_config: FullConfig) {
     await cleanupAdminFixtures({ environment: process.env, manifestPath });
   } finally {
     delete process.env.ADMIN_E2E_SESSION_MANIFEST;
-    delete process.env.ADMIN_E2E_ROLE_SESSIONS_JSON;
     delete process.env.ADMIN_E2E_FIXTURE_TAG;
   }
 }

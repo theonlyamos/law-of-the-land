@@ -13,6 +13,5 @@ export default async function globalSetup(_config: FullConfig) {
     manifestPath,
   });
   process.env.ADMIN_E2E_SESSION_MANIFEST = manifestPath;
-  process.env.ADMIN_E2E_ROLE_SESSIONS_JSON = JSON.stringify(manifest.sessions);
   process.env.ADMIN_E2E_FIXTURE_TAG = manifest.tag;
 }

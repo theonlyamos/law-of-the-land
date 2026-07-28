@@ -44,6 +44,9 @@ export function assertIsolatedWebServerEnvironment(environment) {
   if (environment.ADMIN_E2E_ISOLATED_TARGET_MARKER !== "isolated-admin-e2e") {
     throw new Error("Admin E2E browser server requires the isolated target marker.");
   }
+  if (environment.ADMIN_E2E_PROVIDER_STUB_MODE !== "true") {
+    throw new Error("Admin E2E browser server requires ADMIN_E2E_PROVIDER_STUB_MODE=true.");
+  }
   if (/^prod(?:uction)?:/i.test(environment.CONVEX_DEPLOYMENT ?? "")) {
     throw new Error("Admin E2E browser server refuses a production Convex deployment.");
   }

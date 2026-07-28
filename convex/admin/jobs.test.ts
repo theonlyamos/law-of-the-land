@@ -39,6 +39,7 @@ const reconcileStaleJobs = makeFunctionReference<"mutation">(
 const reconcileManualReviewJob = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileManualReviewJob",
 );
+const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -131,6 +132,48 @@ async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
 }
 
 describe("durable GroundX jobs", () => {
+  it("claims and terminalizes a stubbed E2E job without constructing a provider transport", async () => {
+    const t = convexTest(schema, modules);
+    Object.assign(process.env, {
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "test",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+    });
+    delete process.env.GROUNDX_API_KEY;
+    try {
+      const created = await t.mutation(enqueueJob, request({
+        type: "poll_process",
+        targetType: "e2e_fixture",
+        targetId: "e2e_stub_transport",
+        payload: { processId: "never-sent-to-provider" },
+        idempotencyKey: "e2e-stub-transport",
+      }));
+      await t.action(runGroundxJob, { jobId: created.jobId });
+      await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({
+        status: "succeeded",
+        processId: expect.stringMatching(/^e2e_stub_/),
+      });
+    } finally {
+      for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE"]) delete process.env[key];
+    }
+  });
+
+  it("refuses a partially configured E2E job before provider construction", async () => {
+    const t = convexTest(schema, modules);
+    const created = await t.mutation(enqueueJob, request({
+      type: "poll_process", targetType: "e2e_fixture", targetId: "e2e_partial_transport",
+      payload: { processId: "never-sent-to-provider" }, idempotencyKey: "e2e-partial-transport",
+    }));
+    process.env.ADMIN_E2E_FIXTURE_MODE = "true";
+    delete process.env.GROUNDX_API_KEY;
+    try {
+      await expect(t.action(runGroundxJob, { jobId: created.jobId })).rejects.toThrow("E2E_PROVIDER_ISOLATION_MISCONFIGURED");
+    } finally {
+      delete process.env.ADMIN_E2E_FIXTURE_MODE;
+    }
+  });
+
   it("collapses concurrent identical enqueue attempts into one job", async () => {
     const t = convexTest(schema, modules);
     const [first, second] = await Promise.all([

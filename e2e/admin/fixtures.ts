@@ -45,18 +45,24 @@ export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManife
 
 export async function controlBrowserFixtures(
   fixture: BrowserFixtureManifest,
-  operation: "publication_failed" | "publication_succeeded" | "expire_conversation_grant" | "run_retention" | "read_state",
-  versionId?: string,
+  operation: "publication_failed" | "publication_succeeded" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
+  input: string | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } } = "",
 ) {
   const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
   if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
   const response = await fetch(`${fixture.convexSiteUrl}/admin/e2e-fixtures/control`, {
     method: "POST",
     headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
-    body: JSON.stringify({ tag: fixture.tag, operation, ...(versionId ? { versionId } : {}) }),
+    body: JSON.stringify({ tag: fixture.tag, operation, ...(typeof input === "string" ? (input ? { versionId: input } : {}) : input) }),
   });
   if (!response.ok) throw new Error(`Guarded fixture control failed (${response.status}).`);
   return await response.json() as {
+    path?: string;
+    role?: FixedAdminRole;
+    args?: Record<string, unknown>;
+    success?: string;
+    terminal?: boolean;
+    state?: Record<string, unknown>;
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
     grantActive: boolean;
@@ -65,23 +71,9 @@ export async function controlBrowserFixtures(
   };
 }
 
-function roleSessionCookies(): Partial<Record<FixedAdminRole, string>> {
-  const raw = process.env.ADMIN_E2E_ROLE_SESSIONS_JSON;
-  if (!raw) {
-    throw new Error(
-      "Authenticated admin browser acceptance requires the guarded global fixture bootstrap to provide ADMIN_E2E_ROLE_SESSIONS_JSON. Set the explicit ADMIN_E2E fixture target variables; this gate fails closed instead of using an inherited app deployment.",
-    );
-  }
-  try {
-    return JSON.parse(raw) as Partial<Record<FixedAdminRole, string>>;
-  } catch {
-    throw new Error("ADMIN_E2E_ROLE_SESSIONS_JSON must be valid JSON.");
-  }
-}
-
-export function roleCookie(role: FixedAdminRole) {
-  const cookie = roleSessionCookies()[role];
-  if (!cookie) throw new Error(`ADMIN_E2E_ROLE_SESSIONS_JSON is missing the ${role} assured-session cookie.`);
+export async function roleCookie(role: FixedAdminRole) {
+  const cookie = (await loadBrowserFixtureManifest()).sessions[role];
+  if (!cookie) throw new Error(`Guarded fixture manifest is missing the ${role} assured-session cookie.`);
   return cookie;
 }
 
@@ -106,7 +98,7 @@ export async function openAuthenticatedRolePage(
   pathname: string,
   heading: string,
 ) {
-  const cookie = roleCookie(role);
+  const cookie = await roleCookie(role);
   await installSessionCookie(context, cookie);
   await page.goto(pathname);
   await expect(page).toHaveURL(new RegExp(`${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));

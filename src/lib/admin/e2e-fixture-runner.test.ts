@@ -15,6 +15,7 @@ const safeEnvironment = {
   ADMIN_E2E_FIXTURE_MODE: "true",
   ADMIN_E2E_TARGET_ENV: "test",
   ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+  ADMIN_E2E_PROVIDER_STUB_MODE: "true",
   ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210",
   ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
@@ -67,6 +68,7 @@ describe("admin E2E fixture lifecycle", () => {
       }
       return new Response(JSON.stringify({
         tag: "e2e_runnerfixture1",
+        providerTransport: "stub",
         sessions: {
           super_admin: { userId: "super", sessionToken: "raw-super-token" },
           content_manager: { userId: "manager", sessionToken: "raw-manager-token" },
@@ -102,7 +104,7 @@ describe("admin E2E fixture lifecycle", () => {
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
   });
 
-  it("cleans up the exact manifest tag and removes the manifest even when cleanup fails", async () => {
+  it("cleans up the exact manifest tag and retains a private recovery manifest when cleanup fails", async () => {
     const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
     const manifest: FixtureManifest = {
       version: 1,
@@ -119,6 +121,7 @@ describe("admin E2E fixture lifecycle", () => {
     };
     const setupRequest = async () => new Response(JSON.stringify({
       tag: manifest.tag,
+      providerTransport: "stub",
       sessions: {
         super_admin: { userId: "super", sessionToken: "a" }, content_manager: { userId: "manager", sessionToken: "b" },
         content_reviewer: { userId: "reviewer", sessionToken: "c" }, support_agent: { userId: "support", sessionToken: "d" },
@@ -143,7 +146,8 @@ describe("admin E2E fixture lifecycle", () => {
     })).rejects.toThrow(/cleanup failed/i);
 
     expect(cleanupBody).toBe('{"tag":"e2e_exactfixture1"}');
-    await expect(readFile(manifestPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain(manifest.tag);
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: manifest.tag, deleted: 0 }), { status: 200 }) });
   });
 });
 

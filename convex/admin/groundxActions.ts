@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { Doc } from "../_generated/dataModel";
 import { internalAction } from "../_generated/server";
 import { GroundxAdapter, ProviderError } from "./integrations/groundx";
+import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 
 const getJobRef = makeFunctionReference<"query">("admin/jobs:getJobForRun");
 const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
@@ -82,6 +83,15 @@ export const runGroundxJob = internalAction({
     const job = args.leaseToken
       ? (claim as Doc<"integrationJobs">)
       : (claim as { job: Doc<"integrationJobs"> }).job;
+    if (resolveE2EProviderIsolation() === "stub") {
+      await ctx.runMutation(resultRef, {
+        jobId: args.jobId,
+        leaseToken,
+        processId: `e2e_stub_${job._id}`,
+        status: "complete",
+      });
+      return null;
+    }
     const apiKey = process.env.GROUNDX_API_KEY;
     if (!apiKey) {
       await ctx.runMutation(failureRef, {

@@ -1024,6 +1024,33 @@ describe("audited administrative user actions", () => {
     ]);
   });
 
+  it("claims and completes an isolated stub verification without constructing Better Auth email transport", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const target = await createUser(t, { emailVerified: false });
+    const queued = await admin.client.mutation(resendVerification, {
+      userId: target._id,
+      reason: "Exercise isolated verification delivery",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const requestId = await t.run(async (ctx) => (await ctx.db.query("verificationEmailRequests").withIndex("by_targetUserId_and_createdAt", (q) => q.eq("targetUserId", target._id)).unique())!._id);
+    Object.assign(process.env, {
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "test",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+    });
+    delete process.env.RESEND_API_KEY;
+    try {
+      await t.action(sendQueuedVerificationEmail, { requestId });
+      await expect(t.run((ctx) => ctx.db.get(requestId))).resolves.toMatchObject({ status: "completed" });
+      expect(queued).toMatchObject({ status: "queued", action: "verification_resend" });
+    } finally {
+      for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE"]) delete process.env[key];
+    }
+  });
+
   it("fails closed when the admin feature gate is disabled", async () => {
     const t = createBackend();
     process.env.ADMIN_PANEL_ENABLED = "false";

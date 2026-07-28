@@ -41,6 +41,7 @@ export type FixtureManifest = {
 
 type BootstrapResponse = {
   tag: string;
+  providerTransport: "stub";
   sessions: Record<FixedRole, { userId: string; sessionToken: string }>;
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
   records: Record<string, unknown>;
@@ -87,6 +88,9 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
   }
   if (environment.ADMIN_E2E_ISOLATED_TARGET_MARKER !== "isolated-admin-e2e") {
     throw new Error("ADMIN_E2E_ISOLATED_TARGET_MARKER must confirm the isolated target marker.");
+  }
+  if (environment.ADMIN_E2E_PROVIDER_STUB_MODE !== "true") {
+    throw new Error("ADMIN_E2E_PROVIDER_STUB_MODE must be true for isolated provider transport.");
   }
   if (/^prod(?:uction)?:/i.test(environment.CONVEX_DEPLOYMENT ?? "")) {
     throw new Error("Admin E2E fixtures refuse a production Convex deployment.");
@@ -160,6 +164,7 @@ export async function bootstrapAdminFixtures(options: {
   });
   const payload = await responseJson<BootstrapResponse>(response, "bootstrap");
   if (payload.tag !== options.fixtureTag) throw new Error("Admin E2E bootstrap returned a mismatched fixture tag.");
+  if (payload.providerTransport !== "stub") throw new Error("Admin E2E bootstrap did not confirm isolated provider stubs.");
   const sessions: Partial<Record<FixedRole, string>> = {};
   for (const role of FIXED_ROLES) {
     const token = payload.sessions?.[role]?.sessionToken;
@@ -212,8 +217,12 @@ export async function cleanupAdminFixtures(options: {
     if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
       throw new Error("Admin E2E cleanup returned an invalid deletion count.");
     }
-  } finally {
     await rm(options.manifestPath, { force: true });
+  } catch (error) {
+    // Keep the manifest as the only recovery handle when the target did not
+    // confirm cleanup. It is private (0600) and lets a later teardown retry
+    // the exact same tag rather than broadening cleanup scope.
+    throw error;
   }
 }
 
