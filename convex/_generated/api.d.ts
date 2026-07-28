@@ -9,6 +9,7 @@
  */
 
 import type * as admin_audit from "../admin/audit.js";
+import type * as admin_billing from "../admin/billing.js";
 import type * as admin_conversations from "../admin/conversations.js";
 import type * as admin_documents from "../admin/documents.js";
 import type * as admin_exports from "../admin/exports.js";
@@ -43,6 +44,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "admin/audit": typeof admin_audit;
+  "admin/billing": typeof admin_billing;
   "admin/conversations": typeof admin_conversations;
   "admin/documents": typeof admin_documents;
   "admin/exports": typeof admin_exports;

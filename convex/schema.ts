@@ -399,7 +399,31 @@ export default defineSchema({
     // UTC day key, e.g. "2026-06-11".
     day: v.string(),
     count: v.number(),
-  }).index("by_user_day", ["userId", "day"]),
+  })
+    .index("by_user_day", ["userId", "day"])
+    .index("by_day_and_userId", ["day", "userId"]),
+  quotaOverrides: defineTable({
+    userId: v.string(),
+    limit: v.number(),
+    startsAt: v.number(),
+    expiresAt: v.number(),
+    grantedBy: v.string(),
+    reason: v.string(),
+    active: v.boolean(),
+    revokedAt: v.optional(v.number()),
+    revokedBy: v.optional(v.string()),
+    revokeReason: v.optional(v.string()),
+    grantOperationId: v.id("adminOperations"),
+    revokeOperationId: v.optional(v.id("adminOperations")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_userId_and_startsAt", ["userId", "startsAt"])
+    .index("by_userId_and_expiresAt", ["userId", "expiresAt"])
+    .index("by_userId_and_active_and_expiresAt", ["userId", "active", "expiresAt"])
+    .index("by_expiresAt", ["expiresAt"])
+    .index("by_grantOperationId", ["grantOperationId"])
+    .index("by_revokeOperationId", ["revokeOperationId"]),
   messages: defineTable({
     sessionId: v.id("chatSessions"),
     role: v.union(v.literal("user"), v.literal("assistant")),
