@@ -60,6 +60,19 @@ const versionDocValidator = v.object({
   mimeType: v.string(), byteSize: v.number(), sha256: v.string(), sourceUrl: v.string(),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: versionStatusValidator,
   groundxStagingDocumentId: v.optional(v.string()), groundxStagingProcessId: v.optional(v.string()),
+  xrayEvidence: v.optional(v.object({
+    status: v.union(
+      v.literal("queued"), v.literal("processing"), v.literal("complete"),
+      v.literal("error"), v.literal("cancelled"),
+    ),
+    documentId: v.string(), processId: v.string(),
+    fileType: v.optional(v.union(
+      v.literal("txt"), v.literal("docx"), v.literal("pptx"),
+      v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
+      v.literal("jpg"), v.literal("csv"), v.literal("tsv"), v.literal("json"),
+    )),
+    fileSize: v.optional(v.number()), observedAt: v.number(),
+  })),
   groundxProductionDocumentId: v.optional(v.string()), groundxProductionProcessId: v.optional(v.string()),
   submittedBy: v.string(), reviewedBy: v.optional(v.string()), submittedAt: v.optional(v.number()),
   reviewedAt: v.optional(v.number()), publishedAt: v.optional(v.number()), unpublishedAt: v.optional(v.number()),

@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
-import type { Doc } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import { internalMutation, internalQuery, mutation, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { writeAudit } from "./audit";
@@ -33,6 +33,18 @@ const providerStatusValidator = v.union(
   v.literal("error"),
   v.literal("cancelled"),
 );
+const documentTypeValidator = v.union(
+  v.literal("txt"), v.literal("docx"), v.literal("pptx"),
+  v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
+  v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
+  v.literal("json"),
+);
+const documentEvidenceValidator = v.object({
+  documentId: v.string(),
+  status: providerStatusValidator,
+  fileType: v.optional(documentTypeValidator),
+  fileSize: v.optional(v.number()),
+});
 const providerErrorKindValidator = v.union(
   v.literal("invalid_request"),
   v.literal("validation"),
@@ -427,13 +439,38 @@ export const applyProviderResult = internalMutation({
     leaseToken: v.string(),
     processId: v.string(),
     status: providerStatusValidator,
+    documentEvidence: v.optional(documentEvidenceValidator),
   },
   returns: completionResultValidator,
   handler: async (ctx, args) => {
     const job = await ctx.db.get(args.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     assertCurrentLease(job, args.leaseToken);
-    return await completeJob(ctx, job, assertIdentifier(args.processId, "INTEGRATION_PROCESS_INVALID"), args.status as ProviderStatus);
+    const processId = assertIdentifier(args.processId, "INTEGRATION_PROCESS_INVALID");
+    if (args.documentEvidence !== undefined) {
+      if (job.targetType !== "documentVersion" || !["ingest_remote", "poll_process"].includes(job.type)) {
+        throw new ConvexError("INTEGRATION_EVIDENCE_TARGET_INVALID");
+      }
+      const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
+      if (
+        !version ||
+        version.groundxStagingDocumentId !== args.documentEvidence.documentId ||
+        args.documentEvidence.status !== args.status ||
+        (args.documentEvidence.fileSize !== undefined &&
+          (!Number.isSafeInteger(args.documentEvidence.fileSize) || args.documentEvidence.fileSize < 0))
+      ) {
+        throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
+      }
+      await ctx.db.patch(version._id, {
+        xrayEvidence: {
+          ...args.documentEvidence,
+          processId,
+          observedAt: Date.now(),
+        },
+        updatedAt: Date.now(),
+      });
+    }
+    return await completeJob(ctx, job, processId, args.status as ProviderStatus);
   },
 });
 

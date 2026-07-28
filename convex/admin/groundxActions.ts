@@ -11,6 +11,7 @@ const getJobRef = makeFunctionReference<"query">("admin/jobs:getJobForRun");
 const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
 const resultRef = makeFunctionReference<"mutation">("admin/jobs:applyProviderResult");
 const failureRef = makeFunctionReference<"mutation">("admin/jobs:recordProviderFailure");
+const evidenceTargetRef = makeFunctionReference<"query">("admin/documents:getStagingEvidenceTarget");
 
 const payloadSchemas = {
   create_bucket: z.object({ name: z.string().trim().min(1).max(200) }),
@@ -33,6 +34,12 @@ const payloadSchemas = {
 } as const;
 
 type Adapter = Pick<GroundxAdapter, "createBucket" | "ingestRemote" | "copyDocuments" | "deleteDocuments" | "getProcess">;
+
+function normalizedFileSize(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const size = Number(value);
+  return Number.isSafeInteger(size) ? size : undefined;
+}
 
 export async function executeGroundxJob(adapter: Adapter, job: Doc<"integrationJobs">) {
   const raw: unknown = JSON.parse(job.payload);
@@ -85,8 +92,9 @@ export const runGroundxJob = internalAction({
       return null;
     }
     let result: Awaited<ReturnType<typeof executeGroundxJob>>;
+    const adapter = new GroundxAdapter({ apiKey });
     try {
-      result = await executeGroundxJob(new GroundxAdapter({ apiKey }), job);
+      result = await executeGroundxJob(adapter, job);
     } catch (error) {
       const kind = error instanceof ProviderError ? error.kind : "invalid_response";
       await ctx.runMutation(failureRef, {
@@ -96,11 +104,43 @@ export const runGroundxJob = internalAction({
       });
       return null;
     }
+    let documentEvidence:
+      | {
+          documentId: string;
+          status: "queued" | "processing" | "complete" | "error" | "cancelled";
+          fileType?: "txt" | "docx" | "pptx" | "xlsx" | "pdf" | "png" | "jpg" | "csv" | "tsv" | "json";
+          fileSize?: number;
+        }
+      | undefined;
+    if (job.targetType === "documentVersion" && ["ingest_remote", "poll_process"].includes(job.type)) {
+      try {
+        const target = (await ctx.runQuery(evidenceTargetRef, {
+          versionId: job.targetId,
+        })) as { documentId: string } | null;
+        if (target) {
+          const document = await adapter.getDocument(target);
+          if (document.documentId === target.documentId) {
+            documentEvidence = {
+              documentId: document.documentId,
+              status: document.status ?? result.status,
+              ...(document.fileType === undefined ? {} : { fileType: document.fileType }),
+              ...(normalizedFileSize(document.fileSize) === undefined
+                ? {}
+                : { fileSize: normalizedFileSize(document.fileSize) }),
+            };
+          }
+        }
+      } catch {
+        // Evidence is supplementary. A failed lookup must remain unavailable
+        // rather than replacing the authoritative provider job outcome.
+      }
+    }
     await ctx.runMutation(resultRef, {
       jobId: args.jobId,
       leaseToken,
       processId: result.processId,
       status: result.status,
+      ...(documentEvidence?.status === result.status ? { documentEvidence } : {}),
     });
     return null;
   },

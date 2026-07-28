@@ -27,7 +27,15 @@ export type ReviewItem = {
   status: "ready_for_review" | "approved" | "published" | "superseded";
   stagingDocumentId?: string;
   stagingProcessId?: string;
-  xrayEvidence: { status: "ready" | "unavailable"; fileType: string; byteSize: number };
+  xrayEvidence:
+    | { status: "unavailable" }
+    | {
+        status: "queued" | "processing" | "complete" | "error" | "cancelled";
+        documentId: string;
+        processId: string;
+        fileType?: string;
+        fileSize?: number;
+      };
   submittedBy: string;
   submittedAt?: number;
   previousVersion?: { versionNumber: number; filename: string; sha256: string; effectiveDate?: string };
@@ -112,8 +120,14 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
               </section>
               <section aria-labelledby={`${item.id}-xray`}>
                 <h3 id={`${item.id}-xray`} className="text-sm font-semibold uppercase tracking-[0.14em]">X-Ray evidence</h3>
-                <p className="mt-3 text-sm leading-6">Staging document <strong>{item.stagingDocumentId ?? "Not available"}</strong>; process <strong>{item.stagingProcessId ?? "Completed before submission"}</strong>.</p>
-                <p className="mt-2 text-sm leading-6"><strong>{item.xrayEvidence.status === "ready" ? "Ready" : "Unavailable"}</strong> / {item.xrayEvidence.fileType} / {item.xrayEvidence.byteSize.toLocaleString()} bytes. Safe normalized fields only; provider links and extracted bodies are excluded.</p>
+                {item.xrayEvidence.status === "unavailable" ? (
+                  <p className="mt-3 text-sm leading-6">Provider-derived X-Ray evidence is unavailable.</p>
+                ) : (
+                  <div className="mt-3 space-y-2 text-sm leading-6">
+                    <p>Provider document <strong>{item.xrayEvidence.documentId}</strong>; process <strong>{item.xrayEvidence.processId}</strong>.</p>
+                    <p><strong>{item.xrayEvidence.status[0].toUpperCase()}{item.xrayEvidence.status.slice(1)}</strong> / {item.xrayEvidence.fileType ?? "type unavailable"} / {item.xrayEvidence.fileSize === undefined ? "size unavailable" : `${item.xrayEvidence.fileSize.toLocaleString()} bytes`}. Safe normalized fields only; provider links and extracted bodies are excluded.</p>
+                  </div>
+                )}
               </section>
               <section aria-labelledby={`${item.id}-diff`}>
                 <h3 id={`${item.id}-diff`} className="text-sm font-semibold uppercase tracking-[0.14em]">Metadata-only version diff</h3>

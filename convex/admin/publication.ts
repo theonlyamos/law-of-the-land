@@ -17,7 +17,9 @@ const resultValidator = v.object({
 type Actor = { userId: string; roles: AdminRole[] };
 type Operation = "publish" | "unpublish" | "rollback";
 const LIFECYCLE_LOCK_MS = 24 * 60 * 60_000;
+const UNCERTAIN_RECHECK_MS = 15 * 60_000;
 const expireLifecycleLockRef = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
+const reconcileStaleJobsRef = makeFunctionReference<"mutation">("admin/jobs:reconcileStaleJobs");
 
 async function existingPublication(
   ctx: MutationCtx,
@@ -88,7 +90,13 @@ async function cancelExpiredLock(
 ) {
   if (lock.jobId) {
     const job = await ctx.db.get(lock.jobId);
-    if (job && ["queued", "running", "waiting_callback", "manual_review"].includes(job.status)) {
+    if (
+      job &&
+      job.status === "queued" &&
+      job.leaseToken === undefined &&
+      job.leaseExpiresAt === undefined &&
+      job.processId === undefined
+    ) {
       await ctx.db.patch(job._id, {
         status: "cancelled",
         leaseToken: undefined,
@@ -97,10 +105,13 @@ async function cancelExpiredLock(
         updatedAt: Date.now(),
       });
       await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
+    } else if (job && !["succeeded", "failed", "cancelled"].includes(job.status)) {
+      return false;
     }
   }
   const current = await ctx.db.get(lock._id);
   if (current) await ctx.db.delete(lock._id);
+  return true;
 }
 
 async function claimLifecycleLock(
@@ -119,7 +130,9 @@ async function claimLifecycleLock(
   if (locks.length > 1) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
   if (locks[0]) {
     if (locks[0].expiresAt > Date.now()) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
-    await cancelExpiredLock(ctx, locks[0]);
+    if (!(await cancelExpiredLock(ctx, locks[0]))) {
+      throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
+    }
   }
   const now = Date.now();
   return await ctx.db.insert("documentLifecycleLocks", {
@@ -235,7 +248,28 @@ export const expireLifecycleLock = internalMutation({
     const lock = await ctx.db.get(args.lockId);
     if (!lock || lock.expiresAt > Date.now()) return null;
     const job = lock.jobId ? await ctx.db.get(lock.jobId) : null;
-    await cancelExpiredLock(ctx, lock);
+    const released = await cancelExpiredLock(ctx, lock);
+    if (!released) {
+      const expiresAt = Date.now() + UNCERTAIN_RECHECK_MS;
+      await ctx.db.patch(lock._id, { expiresAt, updatedAt: Date.now() });
+      await ctx.scheduler.runAfter(0, reconcileStaleJobsRef, {});
+      await ctx.scheduler.runAfter(UNCERTAIN_RECHECK_MS, expireLifecycleLockRef, { lockId: lock._id });
+      await writeAudit(ctx, {
+        actorId: "system",
+        actorRoles: [],
+        action: "document.lifecycle_lock_uncertain",
+        targetType: "legalResource",
+        targetId: lock.resourceId,
+        reason: "Provider outcome remains uncertain; resource stays locked",
+        correlationId: job?.correlationId,
+        outcome: "failure",
+      }, {
+        actorType: "system",
+        actorUserId: "system",
+        metadata: {},
+      });
+      return null;
+    }
     await writeAudit(ctx, {
       actorId: "system",
       actorRoles: [],

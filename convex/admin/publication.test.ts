@@ -280,7 +280,7 @@ describe("governed document publication", () => {
       sourceHost: "laws.example.gov",
       status: "approved",
       sha256: "1".repeat(64),
-      xrayEvidence: { status: "ready", fileType: "application/pdf", byteSize: 9 },
+      xrayEvidence: { status: "unavailable" },
     });
     expect(JSON.stringify(docket.page[0])).not.toContain("https://");
     expect(JSON.stringify(docket.page[0])).not.toContain("xrayUrl");
@@ -689,5 +689,144 @@ describe("governed document publication", () => {
       versionId: ids[1], confirmation: `PUBLISH ${ids[1]}`,
       reason: "Retry after stale cancellation", idempotencyKey: "stale-publish-2",
     })).resolves.toMatchObject({ duplicate: false });
+  });
+
+  it.each(["running", "waiting_callback"] as const)(
+    "keeps an expired %s provider operation locked until its authoritative terminal result",
+    async (providerState) => {
+      const t = createBackend();
+      await enablePanel(t);
+      const publisher = await asAdmin(t, "content_reviewer");
+      const rollbackReviewer = await asAdmin(t, "content_reviewer");
+      const { resourceId, ids } = await seedCatalog(t, "manager-1", ["published", "superseded", "approved"]);
+      await addStepUp(t, publisher, "document_publish", ids[2], `uncertain-${providerState}-1`);
+      const queued = await publisher.client.mutation(publishVersion, {
+        versionId: ids[2], confirmation: `PUBLISH ${ids[2]}`,
+        reason: "Start an uncertain provider operation", idempotencyKey: `uncertain-${providerState}-1`,
+      });
+      const provider = await t.run(async (ctx) => {
+        const lock = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId)).unique();
+        const job = await ctx.db.get(queued.jobId as Id<"integrationJobs">);
+        if (!lock || !job) throw new Error("expected active lifecycle operation");
+        const leaseToken = "lease_authoritative_result";
+        await ctx.db.patch(lock._id, { expiresAt: Date.now() - 1 });
+        await ctx.db.patch(job._id, providerState === "running" ? {
+          status: "running",
+          leaseToken,
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now() + 60_000,
+        } : {
+          status: "waiting_callback",
+          processId: "provider-uncertain-process",
+          leaseToken: undefined,
+          leaseExpiresAt: undefined,
+          nextAttemptAt: Date.now() + 60_000,
+        });
+        return { lockId: lock._id, leaseToken, callbackTokenHash: job.callbackTokenHash };
+      });
+      await t.mutation(expireLifecycleLock, { lockId: provider.lockId });
+      const uncertain = await t.run(async (ctx) => ({
+        locks: await ctx.db.query("documentLifecycleLocks").take(2),
+        job: await ctx.db.get(queued.jobId as Id<"integrationJobs">),
+        candidate: await ctx.db.get(ids[2]),
+        resource: await ctx.db.get(resourceId),
+      }));
+      expect(uncertain.locks).toHaveLength(1);
+      expect(uncertain.job?.status).toBe(providerState);
+      expect(uncertain.candidate?.status).toBe("publishing");
+      expect(uncertain.resource?.activeVersionId).toBe(ids[0]);
+
+      await addStepUp(t, rollbackReviewer, "document_rollback", ids[1], `uncertain-${providerState}-rollback`);
+      await expect(rollbackReviewer.client.mutation(rollbackVersion, {
+        versionId: ids[1], confirmation: `ROLLBACK ${ids[1]}`,
+        reason: "Do not overlap uncertain provider work", idempotencyKey: `uncertain-${providerState}-rollback`,
+      })).rejects.toThrow("DOCUMENT_LIFECYCLE_BUSY");
+      expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(5))).toHaveLength(1);
+
+      if (providerState === "running") {
+        await t.mutation(applyProviderResult, {
+          jobId: queued.jobId,
+          leaseToken: provider.leaseToken,
+          processId: "provider-delayed-success",
+          status: "complete",
+        });
+        expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[2]);
+      } else {
+        await t.mutation(completeGroundxCallback, {
+          tokenHash: provider.callbackTokenHash,
+          processId: "provider-uncertain-process",
+          targetType: "documentVersion",
+          targetId: ids[2],
+          status: "error",
+        });
+        const failed = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), candidate: await ctx.db.get(ids[2]) }));
+        expect(failed.resource?.activeVersionId).toBe(ids[0]);
+        expect(failed.candidate?.status).toBe("approved");
+      }
+      expect(await t.run(async (ctx) => ctx.db.query("documentLifecycleLocks").take(2))).toHaveLength(0);
+      expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(5))).toHaveLength(1);
+    },
+  );
+
+  it("shows provider-derived X-Ray evidence and never infers it from staging metadata", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { ids } = await seedCatalog(t, "manager-1", ["ready_for_review"]);
+    const absent = await reviewer.client.query(listReviewQueue, {
+      status: "ready_for_review",
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(absent.page[0].xrayEvidence).toEqual({ status: "unavailable" });
+
+    const jobId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("integrationJobs", {
+        type: "ingest_remote",
+        targetType: "documentVersion",
+        targetId: ids[0],
+        payload: JSON.stringify({ documents: [{ bucketId: 101, sourceUrl: "https://laws.example.gov/act-843" }] }),
+        actorId: "system",
+        actorRoles: [],
+        idempotencyKey: "xray-evidence-ingest",
+        requestFingerprint: "e".repeat(64),
+        correlationId: "job_xray_evidence",
+        callbackTokenHash: "f".repeat(64),
+        status: "queued",
+        attemptCount: 0,
+        nextAttemptAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    const claim = await t.mutation(claimJob, { jobId });
+    if (!claim) throw new Error("expected evidence job claim");
+    await t.mutation(applyProviderResult, {
+      jobId,
+      leaseToken: claim.leaseToken,
+      processId: "xray-process-1",
+      status: "complete",
+      documentEvidence: {
+        documentId: "staging-doc-1",
+        status: "complete",
+        fileType: "pdf",
+        fileSize: 4096,
+      },
+    });
+    const available = await reviewer.client.query(listReviewQueue, {
+      status: "ready_for_review",
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(available.page[0].xrayEvidence).toEqual({
+      status: "complete",
+      documentId: "staging-doc-1",
+      processId: "xray-process-1",
+      fileType: "pdf",
+      fileSize: 4096,
+    });
+    const persisted = JSON.stringify(await t.run(async (ctx) => ctx.db.get(ids[0])));
+    expect(persisted).not.toContain("xrayUrl");
+    expect(persisted).not.toContain("sourceUrl\":\"https://provider");
+    expect(persisted).not.toContain("extractedBody");
   });
 });

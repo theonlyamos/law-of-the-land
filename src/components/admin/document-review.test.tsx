@@ -26,7 +26,13 @@ const item = {
   status: "ready_for_review" as const,
   stagingDocumentId: "gx-staging-2",
   stagingProcessId: "gx-process-2",
-  xrayEvidence: { status: "ready" as const, fileType: "application/pdf", byteSize: 1240 },
+  xrayEvidence: {
+    status: "complete" as const,
+    documentId: "gx-staging-2",
+    processId: "gx-process-2",
+    fileType: "pdf",
+    fileSize: 4096,
+  },
   submittedBy: "manager-1",
   submittedAt: 1_700_000_000_000,
   previousVersion: { versionNumber: 1, filename: "act-843-v1.pdf", sha256: "b".repeat(64), effectiveDate: "2025-01-01" },
@@ -42,7 +48,7 @@ describe("document review workbench", () => {
     expect(screen.getByRole("heading", { name: "X-Ray evidence" })).toBeVisible();
     expect(screen.getByText("gx-staging-2")).toBeVisible();
     expect(screen.getByText((_, node) =>
-      node?.tagName === "P" && node.textContent?.includes("Ready / application/pdf / 1,240 bytes") === true,
+      node?.tagName === "P" && node.textContent?.includes("Complete / pdf / 4,096 bytes") === true,
     )).toBeVisible();
     expect(screen.getByRole("heading", { name: "Metadata-only version diff" })).toBeVisible();
     expect(screen.getByText(/Original file bodies are never loaded/)).toBeVisible();
@@ -59,5 +65,15 @@ describe("document review workbench", () => {
     render(<AdminPermissionProvider permissions={["document:read"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     expect(screen.queryByRole("button", { name: "Approve version" })).toBeNull();
     expect(screen.getByText(/Read-only review evidence/)).toBeVisible();
+  });
+
+  it("labels missing provider evidence as unavailable instead of synthesizing it", () => {
+    render(<AdminPermissionProvider permissions={["document:read"]}><DocumentReview items={[{
+      ...item,
+      id: "version_without_evidence",
+      xrayEvidence: { status: "unavailable" as const },
+    }]} /></AdminPermissionProvider>);
+    expect(screen.getByText("Provider-derived X-Ray evidence is unavailable.")).toBeVisible();
+    expect(screen.queryByText(/Complete \/ pdf \/ 4,096 bytes/)).toBeNull();
   });
 });

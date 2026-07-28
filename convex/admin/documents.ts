@@ -1,11 +1,22 @@
 import { ConvexError, v } from "convex/values";
 import type { Doc } from "../_generated/dataModel";
-import { mutation } from "../_generated/server";
+import { internalQuery, mutation } from "../_generated/server";
 import { writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 
 const MAX_FILENAME_LENGTH = 180;
 const MAX_SOURCE_URL_LENGTH = 500;
+
+export const getStagingEvidenceTarget = internalQuery({
+  args: { versionId: v.id("documentVersions") },
+  returns: v.union(v.null(), v.object({ documentId: v.string() })),
+  handler: async (ctx, args) => {
+    const version = await ctx.db.get(args.versionId);
+    return version?.groundxStagingDocumentId
+      ? { documentId: version.groundxStagingDocumentId }
+      : null;
+  },
+});
 
 // GroundX SDK 1.3.x DocumentType, narrowed to exact browser MIME pairings.
 const DOCUMENT_TYPES = {

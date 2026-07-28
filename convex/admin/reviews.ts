@@ -226,11 +226,24 @@ const queueRowValidator = v.object({
   status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("published"), v.literal("superseded")),
   stagingDocumentId: v.optional(v.string()),
   stagingProcessId: v.optional(v.string()),
-  xrayEvidence: v.object({
-    status: v.union(v.literal("ready"), v.literal("unavailable")),
-    fileType: v.string(),
-    byteSize: v.number(),
-  }),
+  xrayEvidence: v.union(
+    v.object({ status: v.literal("unavailable") }),
+    v.object({
+      status: v.union(
+        v.literal("queued"), v.literal("processing"), v.literal("complete"),
+        v.literal("error"), v.literal("cancelled"),
+      ),
+      documentId: v.string(),
+      processId: v.string(),
+      fileType: v.optional(v.union(
+        v.literal("txt"), v.literal("docx"), v.literal("pptx"),
+        v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
+        v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
+        v.literal("json"),
+      )),
+      fileSize: v.optional(v.number()),
+    }),
+  ),
   submittedBy: v.string(),
   submittedAt: v.optional(v.number()),
   previousVersion: v.optional(v.object({
@@ -279,11 +292,15 @@ export const listReviewQueue = query({
         status,
         stagingDocumentId: version.groundxStagingDocumentId,
         stagingProcessId: version.groundxStagingProcessId,
-        xrayEvidence: {
-          status: version.groundxStagingDocumentId ? "ready" as const : "unavailable" as const,
-          fileType: version.mimeType,
-          byteSize: version.byteSize,
-        },
+        xrayEvidence: version.xrayEvidence
+          ? {
+              status: version.xrayEvidence.status,
+              documentId: version.xrayEvidence.documentId,
+              processId: version.xrayEvidence.processId,
+              ...(version.xrayEvidence.fileType === undefined ? {} : { fileType: version.xrayEvidence.fileType }),
+              ...(version.xrayEvidence.fileSize === undefined ? {} : { fileSize: version.xrayEvidence.fileSize }),
+            }
+          : { status: "unavailable" as const },
         submittedBy: version.submittedBy,
         submittedAt: version.submittedAt,
         ...(previous ? { previousVersion: { versionNumber: previous.versionNumber, filename: previous.filename, sha256: previous.sha256, effectiveDate: previous.effectiveDate } } : {}),
