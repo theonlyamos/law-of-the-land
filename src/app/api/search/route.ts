@@ -1,9 +1,9 @@
 import { Groundx } from "groundx-typescript-sdk"
 import { ConvexError } from "convex/values"
 import { NextResponse } from "next/server"
-import { api } from "@/convex/_generated/api"
-import { fetchAuthMutation, isAuthenticated } from "@/lib/auth-server"
-import { DEFAULT_COUNTRY, findCountry } from "@/lib/countries"
+import { api } from "../../../../convex/_generated/api"
+import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from "@/lib/auth-server"
+import { DEFAULT_COUNTRY } from "@/lib/countries"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
 
 const MAX_QUERY_LENGTH = 4000
@@ -35,11 +35,29 @@ export async function POST(request: Request) {
             )
         }
 
-        const country =
+        const countryCode =
             body?.country === undefined || body?.country === null
-                ? DEFAULT_COUNTRY
-                : findCountry(typeof body.country === "string" ? body.country : null)
-        if (!country) {
+                ? DEFAULT_COUNTRY.code
+                : typeof body.country === "string"
+                  ? body.country.trim().toUpperCase()
+                  : ""
+        if (!/^[A-Z]{2}$/.test(countryCode)) {
+            return NextResponse.json(
+                { error: "That country is not supported yet." },
+                { status: 400 }
+            )
+        }
+
+        const jurisdiction = await fetchAuthQuery(
+            api.jurisdictions.getPublicByCode,
+            { code: countryCode }
+        )
+        const productionBucketId = jurisdiction?.productionBucketId?.trim()
+        if (
+            jurisdiction?.enabled !== true ||
+            !productionBucketId ||
+            !/^\d+$/.test(productionBucketId)
+        ) {
             return NextResponse.json(
                 { error: "That country is not supported yet." },
                 { status: 400 }
@@ -70,7 +88,7 @@ export async function POST(request: Request) {
         })
 
         const response = await groundx.search.content({
-            id: country.groundxBucketId,
+            id: Number(productionBucketId),
             query
         })
 

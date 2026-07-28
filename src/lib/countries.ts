@@ -1,7 +1,6 @@
 /**
- * Supported jurisdictions. Each country maps to the GroundX bucket that holds
- * its legal document library — adding a country is one entry here (the IDs are
- * not secret; they are unusable without the server's API key).
+ * Static display metadata for supported jurisdictions. Runtime availability
+ * and provider configuration are resolved from the governed Convex catalog.
  *
  * The country code is stored on each chat session so conversations stay
  * scoped to the jurisdiction they were started in.
@@ -10,11 +9,10 @@ export interface Country {
   /** ISO 3166-1 alpha-2 code, e.g. "GH". */
   code: string;
   name: string;
-  groundxBucketId: number;
 }
 
 export const COUNTRIES: Country[] = [
-  { code: "GH", name: "Ghana", groundxBucketId: 11833 },
+  { code: "GH", name: "Ghana" },
 ];
 
 export const DEFAULT_COUNTRY = COUNTRIES[0];
