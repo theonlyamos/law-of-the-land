@@ -2,7 +2,7 @@ import { makeFunctionReference } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { hashPassword } from "better-auth/crypto";
 import { components } from "../_generated/api";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { internalAction, internalMutation } from "../_generated/server";
 import { hashCallbackToken } from "./jobs";
@@ -78,10 +78,23 @@ async function listFixtureUsers(ctx: MutationCtx, tag: string) {
 
 async function cleanupFixture(ctx: MutationCtx, tag: string) {
   let deleted = 0;
+  const fixtureOwnership = await ctx.db.query("e2eFixtureOwnership")
+    .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
+    .take(500);
   const fixtureUsers = await listFixtureUsers(ctx, tag);
   const fixtureUserIds = new Set(fixtureUsers.map((user) => user.userId));
+  const fixtureOwnerIds = new Set([`fixture:${tag}`, ...fixtureUserIds]);
+  const registeredIncidentIds = new Set(
+    fixtureOwnership.filter((row) => row.kind === "system_incident").map((row) => row.targetId),
+  );
+  const registeredOperationIds = new Set(
+    fixtureOwnership.filter((row) => row.kind === "admin_operation").map((row) => row.targetId),
+  );
+  const registeredOverrideIds = new Set(
+    fixtureOwnership.filter((row) => row.kind === "quota_override").map((row) => row.targetId),
+  );
   const fixtureVersionIds = new Set<string>();
-  const fixtureOperationIds = new Set<string>();
+  const fixtureOperationIds = new Set<Id<"adminOperations">>();
   const fixtureStorageIds = new Set<Id<"_storage">>();
   for (const user of fixtureUsers) {
     const paginationOpts = { numItems: 100, cursor: null, maximumRowsRead: 100 };
@@ -142,19 +155,36 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     await ctx.db.delete(jurisdiction._id); deleted += 1;
   }
 
-  // UI mutations use fixture actors and/or tagged target records, rather than
-  // a separate table. Restrict cleanup to those exact identities and IDs.
-  for (const incident of await ctx.db.query("systemIncidents").take(500)) {
-    if (!incident.title.startsWith(tag) && !fixtureUserIds.has(incident.createdBy)) continue;
+  const fixtureIncidentIds = new Set(registeredIncidentIds);
+  const incidentActions = new Set(["incident_create", "incident_note", "incident_update"]);
+  const rememberOperation = (operation: Doc<"adminOperations">) => {
+    fixtureOperationIds.add(operation._id);
+    if (incidentActions.has(operation.action)) fixtureIncidentIds.add(operation.targetId);
+  };
+  for (const actorId of fixtureOwnerIds) {
+    for (const operation of await ctx.db.query("adminOperations")
+      .withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actorId)).take(500)) {
+      rememberOperation(operation);
+    }
+  }
+  for (const operationId of registeredOperationIds) {
+    const operation = await ctx.db.get(operationId as Id<"adminOperations">);
+    if (operation) rememberOperation(operation);
+  }
+  // Recover seed operations written before exact ownership registration was
+  // introduced. Both action and target are fixture-control constants.
+  for (const operation of await ctx.db.query("adminOperations")
+    .withIndex("by_action_and_targetId_and_createdAt", (q) => q.eq("action", "e2e.fixture").eq("targetId", tag)).take(100)) {
+    rememberOperation(operation);
+  }
+
+  for (const incidentId of fixtureIncidentIds) {
+    const incident = await ctx.db.get(incidentId as Id<"systemIncidents">);
+    if (!incident) continue;
     for (const row of await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", incident._id)).take(500)) {
       await ctx.db.delete(row._id); deleted += 1;
     }
     await ctx.db.delete(incident._id); deleted += 1;
-  }
-  for (const row of await ctx.db.query("adminOperations").take(500)) {
-    if (!fixtureUserIds.has(row.actorId) && !row.targetId.startsWith(tag) && !fixtureVersionIds.has(row.targetId)) continue;
-    fixtureOperationIds.add(row._id);
-    await ctx.db.delete(row._id); deleted += 1;
   }
   for (const row of await ctx.db.query("adminStepUpProofs").take(500)) {
     if (fixtureUserIds.has(row.actorId) || fixtureVersionIds.has(row.targetId)) { await ctx.db.delete(row._id); deleted += 1; }
@@ -164,6 +194,12 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
   }
   for (const row of await ctx.db.query("verificationEmailRequests").take(500)) {
     if (fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) { await ctx.db.delete(row._id); deleted += 1; }
+  }
+  for (const operationId of fixtureOperationIds) {
+    for (const row of await ctx.db.query("jobControlResults").withIndex("by_operationId", (q) => q.eq("operationId", operationId)).take(20)) {
+      await ctx.db.delete(row._id); deleted += 1;
+    }
+    if (await ctx.db.get(operationId)) { await ctx.db.delete(operationId); deleted += 1; }
   }
   const fixtureExports = (await ctx.db.query("adminExports").take(500)).filter((row) => fixtureUserIds.has(row.requesterId) || fixtureChatIds.has(row.chatSessionId));
   const fixtureExportIds = new Set(fixtureExports.map((row) => row._id));
@@ -180,17 +216,34 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     if (!taggedJob && job.targetId !== tag && !fixtureVersionIds.has(job.targetId) && !fixtureUserIds.has(job.actorId)) continue;
     await ctx.db.delete(job._id); deleted += 1;
   }
-  for (const userId of new Set([`fixture:${tag}`, ...fixtureUserIds])) {
+  for (const userId of fixtureOwnerIds) {
     for (const usage of await ctx.db.query("dailyUsage").withIndex("by_user_day", (q) => q.eq("userId", userId)).take(500)) {
       await ctx.db.delete(usage._id); deleted += 1;
     }
   }
-  for (const override of await ctx.db.query("quotaOverrides").take(500)) {
-    if (override.userId !== `fixture:${tag}` && !fixtureUserIds.has(override.userId)) continue;
-    await ctx.db.delete(override._id); deleted += 1;
+  const fixtureOverrideIds = new Set<Id<"quotaOverrides">>();
+  for (const userId of fixtureOwnerIds) {
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_userId_and_startsAt", (q) => q.eq("userId", userId)).take(500)) {
+      fixtureOverrideIds.add(override._id);
+    }
   }
-  for (const operation of await ctx.db.query("adminOperations").withIndex("by_action_and_targetId_and_createdAt", (q) => q.eq("action", "e2e.fixture").eq("targetId", tag)).take(100)) {
-    await ctx.db.delete(operation._id); deleted += 1;
+  for (const overrideId of registeredOverrideIds) {
+    const override = await ctx.db.get(overrideId as Id<"quotaOverrides">);
+    if (override) fixtureOverrideIds.add(override._id);
+  }
+  for (const operationId of fixtureOperationIds) {
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_grantOperationId", (q) => q.eq("grantOperationId", operationId)).take(500)) {
+      fixtureOverrideIds.add(override._id);
+    }
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_revokeOperationId", (q) => q.eq("revokeOperationId", operationId)).take(500)) {
+      fixtureOverrideIds.add(override._id);
+    }
+  }
+  for (const overrideId of fixtureOverrideIds) {
+    await ctx.db.delete(overrideId); deleted += 1;
   }
   for (const userId of fixtureUserIds) {
     for (const event of await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", userId)).take(200)) {
@@ -200,7 +253,7 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
   for (const outcome of await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(500)) {
     await ctx.db.delete(outcome._id); deleted += 1;
   }
-  for (const ownership of await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag).eq("kind", "better_auth_user")).take(500)) {
+  for (const ownership of fixtureOwnership) {
     await ctx.db.delete(ownership._id); deleted += 1;
   }
   for (const storageId of fixtureStorageIds) {
@@ -435,6 +488,15 @@ async function createMatrixUser(
   return { userId: user._id, sessionId };
 }
 
+async function recordFixtureOwnership(
+  ctx: MutationCtx,
+  tag: string,
+  kind: Doc<"e2eFixtureOwnership">["kind"],
+  targetId: string,
+) {
+  await ctx.db.insert("e2eFixtureOwnership", { tag, kind, targetId, createdAt: Date.now() });
+}
+
 async function mainFixtureRecords(ctx: MutationCtx, tag: string) {
   const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", tag)).unique();
   if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
@@ -628,14 +690,31 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/publication:publishVersion":
     case "admin/publication:unpublishVersion":
     case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await ctx.db.insert("documentVersions", { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", groundxStagingDocumentId: `${marker}-active-stage`, groundxProductionDocumentId: `${marker}-active-prod`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
-    case "admin/billing:grantQuotaOverride": Object.assign(args, { userId: `fixture:${input.tag}:${input.key}`, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, reason, confirmation: "", idempotencyKey: input.key }); break;
-    case "admin/billing:revokeQuotaOverride": { const operationId = await ctx.db.insert("adminOperations", { actorId: `fixture:${input.tag}`, action: "e2e.fixture", targetId: input.tag, idempotencyKey: `${input.key}.grant`, requestFingerprint: "{}", correlationId: `${marker}-grant`, status: "succeeded", createdAt: Date.now(), updatedAt: Date.now() }); const overrideId = await ctx.db.insert("quotaOverrides", { userId: `fixture:${input.tag}:${input.key}`, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, grantedBy: `fixture:${input.tag}`, reason, active: true, grantOperationId: operationId, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { overrideId, reason, idempotencyKey: input.key }); break; }
+    case "admin/billing:grantQuotaOverride": {
+      const target = await user("quota_grant");
+      Object.assign(args, { userId: target.userId, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, reason, confirmation: "", idempotencyKey: input.key });
+      break;
+    }
+    case "admin/billing:revokeQuotaOverride": {
+      const target = await user("quota_revoke");
+      const operationId = await ctx.db.insert("adminOperations", { actorId: `fixture:${input.tag}`, action: "e2e.fixture", targetId: input.tag, idempotencyKey: `${input.key}.grant`, requestFingerprint: "{}", correlationId: `${marker}-grant`, status: "succeeded", createdAt: Date.now(), updatedAt: Date.now() });
+      await recordFixtureOwnership(ctx, input.tag, "admin_operation", operationId);
+      const overrideId = await ctx.db.insert("quotaOverrides", { userId: target.userId, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, grantedBy: `fixture:${input.tag}`, reason, active: true, grantOperationId: operationId, createdAt: Date.now(), updatedAt: Date.now() });
+      await recordFixtureOwnership(ctx, input.tag, "quota_override", overrideId);
+      Object.assign(args, { overrideId, reason, idempotencyKey: input.key });
+      break;
+    }
     case "admin/jobs:enqueueJob": Object.assign(args, { type: "poll_process", targetType: "e2e_fixture", targetId: marker, payload: { processId: `${marker}-process` }, idempotencyKey: input.key }); break;
     case "admin/jobs:retryJob":
     case "admin/jobs:cancelJob": { const retry = input.path.endsWith("retryJob"); const jobId = await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "e2e_fixture", targetId: marker, payload: JSON.stringify({ processId: `${marker}-process` }), actorId: actor.userId, actorRoles: [input.role], idempotencyKey: `${input.key}.seed`, requestFingerprint: "{}", correlationId: `${marker}-seed`, callbackTokenHash: "0".repeat(64), status: retry ? "failed" : "queued", attemptCount: retry ? 1 : 0, ...(retry ? { lastErrorKind: "network" as const } : { nextAttemptAt: Date.now() }), createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { jobId, reason, idempotencyKey: input.key }); break; }
     case "admin/operations:createIncident": Object.assign(args, { title: `${marker} incident`, severity: "low", reason, idempotencyKey: input.key }); break;
     case "admin/operations:addIncidentNote":
-    case "admin/operations:updateIncident": { const incidentId = await ctx.db.insert("systemIncidents", { title: `${marker} incident`, severity: "low", status: "open", createdBy: `fixture:${input.tag}`, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, input.path.endsWith("addIncidentNote") ? { incidentId, note: "Tagged fixture incident note", reason, idempotencyKey: input.key } : { incidentId, status: "investigating", severity: "medium", ownerId: actor.userId, reason, idempotencyKey: input.key }); break; }
+    case "admin/operations:updateIncident": {
+      const incidentId = await ctx.db.insert("systemIncidents", { title: `${marker} incident`, severity: "low", status: "open", createdBy: `fixture:${input.tag}`, createdAt: Date.now(), updatedAt: Date.now() });
+      await recordFixtureOwnership(ctx, input.tag, "system_incident", incidentId);
+      Object.assign(args, input.path.endsWith("addIncidentNote") ? { incidentId, note: "Tagged fixture incident note", reason, idempotencyKey: input.key } : { incidentId, status: "investigating", severity: "medium", ownerId: actor.userId, reason, idempotencyKey: input.key });
+      break;
+    }
   }
   return { path: input.path, role: input.role, args, success: entry.success };
 }

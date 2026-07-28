@@ -371,7 +371,12 @@ export default defineSchema({
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
   e2eFixtureOwnership: defineTable({
     tag: v.string(),
-    kind: v.literal("better_auth_user"),
+    kind: v.union(
+      v.literal("better_auth_user"),
+      v.literal("system_incident"),
+      v.literal("admin_operation"),
+      v.literal("quota_override"),
+    ),
     targetId: v.string(),
     createdAt: v.number(),
   })

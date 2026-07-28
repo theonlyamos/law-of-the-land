@@ -25,6 +25,10 @@ const authModules = Object.fromEntries(
 const bootstrap = makeFunctionReference<"action">("admin/e2eFixtures:bootstrap");
 const cleanup = makeFunctionReference<"mutation">("admin/e2eFixtures:cleanup");
 const control = makeFunctionReference<"action">("admin/e2eFixtures:control");
+const grantQuotaOverride = makeFunctionReference<"mutation">("admin/billing:grantQuotaOverride");
+const revokeQuotaOverride = makeFunctionReference<"mutation">("admin/billing:revokeQuotaOverride");
+const createIncident = makeFunctionReference<"mutation">("admin/operations:createIncident");
+const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addIncidentNote");
 const createJurisdiction = makeFunctionReference<"mutation">("admin/resources:createJurisdiction");
 const publishVersion = makeFunctionReference<"mutation">("admin/publication:publishVersion");
 const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
@@ -272,6 +276,193 @@ describe("isolated admin E2E fixture control plane", () => {
     await expect(t.run((ctx) => ctx.runQuery(components.betterAuth.adapter.findOne, { model: "user", where: [{ field: "_id", operator: "eq", value: foreignUser._id }] }))).resolves.toMatchObject({ _id: foreignUser._id });
     const survivor = await t.run((ctx) => ctx.db.query("chatSessions").withIndex("by_user_externalId", (q) => q.eq("userId", "other").eq("externalId", "e2e_cleanupfixture1-suffix")).unique());
     expect(survivor?.title).toBe("Must survive");
+  });
+
+  it("deletes exact matrix-owned cleanup records while preserving tag lookalikes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_cleanupfixture2";
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag });
+    const sessionIds = await t.run(async (ctx) => {
+      const findSession = async (userId: string) => {
+        const sessions = await ctx.runQuery(components.betterAuth.adapter.findMany, {
+          model: "session",
+          where: [{ field: "userId", operator: "eq", value: userId }],
+          select: ["id"],
+          paginationOpts: { numItems: 2, cursor: null },
+        }) as { page: Array<{ _id: string }> };
+        if (!sessions.page[0]) throw new Error(`fixture session missing for ${userId}`);
+        return sessions.page[0]._id;
+      };
+      return {
+        billingManager: await findSession(fixture.sessions.billing_manager.userId),
+        superAdmin: await findSession(fixture.sessions.super_admin.userId),
+      };
+    });
+    const billingManager = t.withIdentity({ subject: fixture.sessions.billing_manager.userId, sessionId: sessionIds.billingManager });
+    const superAdmin = t.withIdentity({ subject: fixture.sessions.super_admin.userId, sessionId: sessionIds.superAdmin });
+
+    const preparedGrant = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/billing:grantQuotaOverride",
+      role: "billing_manager",
+      key: "cleanup_grant_billing",
+    });
+    const granted = await billingManager.mutation(grantQuotaOverride, preparedGrant.args);
+    const preparedRevoke = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/billing:revokeQuotaOverride",
+      role: "billing_manager",
+      key: "cleanup_revoke_billing",
+    });
+    const revoked = await billingManager.mutation(revokeQuotaOverride, preparedRevoke.args);
+    const preparedCreateIncident = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/operations:createIncident",
+      role: "super_admin",
+      key: "cleanup_create_incident",
+    });
+    const createdIncident = await superAdmin.mutation(createIncident, preparedCreateIncident.args);
+    const preparedNote = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/operations:addIncidentNote",
+      role: "super_admin",
+      key: "cleanup_note_incident",
+    });
+    const notedIncident = await superAdmin.mutation(addIncidentNote, preparedNote.args);
+
+    const records = await t.run(async (ctx) => {
+      const grantedOverride = await ctx.db.get(granted.overrideId);
+      const revokedOverride = await ctx.db.get(revoked.overrideId);
+      if (!grantedOverride || !revokedOverride || !revokedOverride.revokeOperationId) throw new Error("matrix quota records missing");
+      const createdOperation = await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", fixture.sessions.super_admin.userId).eq("idempotencyKey", "cleanup_create_incident")).unique();
+      const notedOperation = await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", fixture.sessions.super_admin.userId).eq("idempotencyKey", "cleanup_note_incident")).unique();
+      if (!createdOperation || !notedOperation) throw new Error("matrix incident operations missing");
+      const ownedTimelines = [
+        ...await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", createdIncident.incidentId)).take(20),
+        ...await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", notedIncident.incidentId)).take(20),
+      ];
+      const ownedJobControlResultId = await ctx.db.insert("jobControlResults", {
+        operationId: grantedOverride.grantOperationId,
+        jobId: fixture.records.callbackJobId,
+        status: "queued",
+        correlationId: "owned-cleanup-control-result",
+        createdAt: Date.now(),
+      });
+      const legacyOwnedOperationId = await ctx.db.insert("adminOperations", {
+        actorId: `fixture:${tag}`,
+        action: "e2e.fixture",
+        targetId: tag,
+        idempotencyKey: "legacy-owned-quota-operation",
+        requestFingerprint: "{}",
+        correlationId: "legacy-owned-quota-operation",
+        status: "succeeded",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const legacyOwnedQuotaId = await ctx.db.insert("quotaOverrides", {
+        userId: `fixture:${tag}:legacy-owned-user`,
+        limit: 25,
+        startsAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        grantedBy: `fixture:${tag}`,
+        reason: "Legacy exact operation ownership",
+        active: true,
+        grantOperationId: legacyOwnedOperationId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const lookalikeOperationId = await ctx.db.insert("adminOperations", {
+        actorId: "foreign-admin",
+        action: "foreign_action",
+        targetId: `${tag}-unrelated-target`,
+        idempotencyKey: "foreign-lookalike-operation",
+        requestFingerprint: "{}",
+        correlationId: "foreign-lookalike-operation",
+        status: "succeeded",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const lookalikeIncidentId = await ctx.db.insert("systemIncidents", {
+        title: `${tag}-unrelated incident`,
+        severity: "low",
+        status: "open",
+        createdBy: "foreign-admin",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const lookalikeTimelineId = await ctx.db.insert("incidentTimeline", {
+        incidentId: lookalikeIncidentId,
+        kind: "created",
+        actorId: "foreign-admin",
+        summary: "unrelated",
+        createdAt: Date.now(),
+      });
+      const lookalikeQuotaId = await ctx.db.insert("quotaOverrides", {
+        userId: `fixture:${tag}:unrelated-user`,
+        limit: 99,
+        startsAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        grantedBy: "foreign-admin",
+        reason: "Unrelated lookalike",
+        active: true,
+        grantOperationId: lookalikeOperationId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      return {
+        ownedOverrideIds: [granted.overrideId, revoked.overrideId, legacyOwnedQuotaId],
+        ownedOperationIds: [grantedOverride.grantOperationId, revokedOverride.grantOperationId, revokedOverride.revokeOperationId, createdOperation._id, notedOperation._id, legacyOwnedOperationId],
+        ownedIncidentIds: [createdIncident.incidentId, notedIncident.incidentId],
+        ownedTimelineIds: ownedTimelines.map((row) => row._id),
+        ownedJobControlResultId,
+        quotaTargetOwnership: await Promise.all([grantedOverride.userId, revokedOverride.userId].map((userId) => ctx.db.query("e2eFixtureOwnership").withIndex("by_targetId", (q) => q.eq("targetId", userId)).unique())),
+        lookalikeOperationId,
+        lookalikeIncidentId,
+        lookalikeTimelineId,
+        lookalikeQuotaId,
+      };
+    });
+    expect(records.quotaTargetOwnership).toMatchObject([
+      { tag, kind: "better_auth_user" },
+      { tag, kind: "better_auth_user" },
+    ]);
+
+    const first = await t.mutation(cleanup, { tag });
+    const second = await t.mutation(cleanup, { tag });
+    expect(first.deleted).toBeGreaterThan(0);
+    expect(second.deleted).toBe(0);
+    expect.soft(await t.run(async (ctx) => ({
+      ownedOverrides: await Promise.all(records.ownedOverrideIds.map((id) => ctx.db.get(id))),
+      ownedOperations: await Promise.all(records.ownedOperationIds.map((id) => ctx.db.get(id))),
+      ownedIncidents: await Promise.all(records.ownedIncidentIds.map((id) => ctx.db.get(id))),
+      ownedTimelines: await Promise.all(records.ownedTimelineIds.map((id) => ctx.db.get(id))),
+      ownedJobControlResult: await ctx.db.get(records.ownedJobControlResultId),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(500),
+    }))).toEqual({
+      ownedOverrides: [null, null, null],
+      ownedOperations: [null, null, null, null, null, null],
+      ownedIncidents: [null, null],
+      ownedTimelines: records.ownedTimelineIds.map(() => null),
+      ownedJobControlResult: null,
+      ownership: [],
+    });
+    expect.soft(await t.run(async (ctx) => ({
+      operation: await ctx.db.get(records.lookalikeOperationId),
+      incident: await ctx.db.get(records.lookalikeIncidentId),
+      timeline: await ctx.db.get(records.lookalikeTimelineId),
+      quota: await ctx.db.get(records.lookalikeQuotaId),
+    }))).toMatchObject({
+      operation: { actorId: "foreign-admin", targetId: `${tag}-unrelated-target` },
+      incident: { createdBy: "foreign-admin", title: `${tag}-unrelated incident` },
+      timeline: { actorId: "foreign-admin", summary: "unrelated" },
+      quota: { userId: `fixture:${tag}:unrelated-user`, grantedBy: "foreign-admin" },
+    });
   });
 
   it("redacts only the tagged callback job without touching global retention state", async () => {
