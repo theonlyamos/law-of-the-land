@@ -1,11 +1,12 @@
 import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { internalMutation, internalQuery, mutation, type MutationCtx } from "../_generated/server";
-import type { AdminRole } from "../lib/adminPermissions";
+import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "../_generated/server";
+import { hasRolePermission, parseAdminRoles, type AdminRole } from "../lib/adminPermissions";
 import { validateAuditReason, writeAudit } from "./audit";
 import { maskSensitiveFields, validateConversationAccessGrant } from "./conversations";
-import { requireEnabledAdminPermission } from "./featureFlags";
+import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags";
 
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -191,6 +192,8 @@ export const queueConversationExport = mutation({
     }
 
     const now = Date.now();
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity || typeof identity.sessionId !== "string") throw new ConvexError("ADMIN_AUTH_REQUIRED");
     const correlationId = `op_${crypto.randomUUID().replaceAll("-", "")}`;
     const operationId = await ctx.db.insert("adminOperations", {
       actorId: actor.userId,
@@ -224,6 +227,7 @@ export const queueConversationExport = mutation({
     const exportId = await ctx.db.insert("adminExports", {
       correlationId,
       requesterId: actor.userId,
+      requesterSessionId: identity.sessionId,
       chatSessionId: args.chatId,
       accessGrantId: args.grantId,
       status: "queued",
@@ -261,11 +265,26 @@ export const finalizeConversationExport = internalMutation({
       return { exportId: item._id, status: "ready" as const, expiresAt: item.expiresAt };
     }
     if (item.status !== "queued" || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_FINALIZABLE");
+    await validateBuilderAuthority(ctx, item);
     if (!(await ctx.db.system.get("_storage", args.storageId))) throw new ConvexError("ADMIN_EXPORT_STORAGE_NOT_FOUND");
     await ctx.db.patch(item._id, { status: "ready", storageId: args.storageId, updatedAt: Date.now() });
     return { exportId: item._id, status: "ready" as const, expiresAt: item.expiresAt };
   },
 });
+
+async function validateBuilderAuthority(ctx: QueryCtx | MutationCtx, item: { requesterId: string; requesterSessionId: string; accessGrantId: Id<"adminAccessGrants">; chatSessionId: Id<"chatSessions">; expiresAt: number }) {
+  if (item.expiresAt <= Date.now() || !(await readAdminEnabled(ctx))) throw new ConvexError("ADMIN_EXPORT_AUTHORITY_EXPIRED");
+  const [user, session, grant, chat] = await Promise.all([
+    ctx.runQuery(components.betterAuth.adapter.findOne, { model: "user", where: [{ field: "_id", operator: "eq", value: item.requesterId }] }),
+    ctx.runQuery(components.betterAuth.adapter.findOne, { model: "session", where: [{ field: "_id", operator: "eq", value: item.requesterSessionId }] }),
+    ctx.db.get(item.accessGrantId),
+    ctx.db.get(item.chatSessionId),
+  ]);
+  const roles = parseAdminRoles(user?.role);
+  if (!user || user.banned === true || user.emailVerified !== true || user.twoFactorEnabled !== true || !hasRolePermission(roles, "conversation", "export") || !session || session.userId !== item.requesterId || session.expiresAt <= Date.now() || typeof session.adminTwoFactorVerifiedAt !== "number" || typeof session.impersonatedBy === "string" || !grant || grant.adminId !== item.requesterId || grant.chatSessionId !== item.chatSessionId || grant.revokedAt !== undefined || grant.expiresAt <= Date.now() || !chat) {
+    throw new ConvexError("ADMIN_EXPORT_AUTHORITY_EXPIRED");
+  }
+}
 
 export const failConversationExport = internalMutation({
   args: { exportId: v.id("adminExports") },
@@ -283,8 +302,21 @@ export const getConversationExportPage = internalQuery({
   handler: async (ctx, args) => {
     const item = await ctx.db.get(args.exportId);
     if (!item || item.status !== "queued" || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_BUILDABLE");
+    await validateBuilderAuthority(ctx, item);
     const result = await ctx.db.query("messages").withIndex("by_session_and_createdAt", (q) => q.eq("sessionId", item.chatSessionId)).order("asc").paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 100), maximumRowsRead: 101 });
     return { correlationId: item.correlationId, page: result.page.map((row) => ({ role: row.role, content: maskSensitiveFields(row.content), createdAt: row.createdAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+  },
+});
+
+export const getConversationExportStatus = query({
+  args: { correlationId: v.string(), grantId: v.id("adminAccessGrants") },
+  returns: v.object({ status: v.union(v.literal("queued"), v.literal("ready"), v.literal("failed"), v.literal("expired")), expiresAt: v.number() }),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "conversation", "export");
+    const rows = await ctx.db.query("adminExports").withIndex("by_correlationId", (q) => q.eq("correlationId", args.correlationId)).take(2);
+    if (rows.length !== 1 || rows[0].requesterId !== actor.userId || rows[0].accessGrantId !== args.grantId) throw new ConvexError("ADMIN_EXPORT_NOT_FOUND");
+    await validateConversationAccessGrant(ctx, { grantId: args.grantId, chatId: rows[0].chatSessionId, adminId: actor.userId });
+    return { status: rows[0].expiresAt <= Date.now() ? "expired" as const : rows[0].status, expiresAt: rows[0].expiresAt };
   },
 });
 
@@ -308,9 +340,9 @@ export const issueConversationExportReference = mutation({
   },
 });
 
-export const consumeConversationExportReference = mutation({
+export const claimConversationExportReference = internalMutation({
   args: { reference: v.string() },
-  returns: v.object({ downloadUrl: v.string(), expiresAt: v.number() }),
+  returns: v.object({ storageId: v.id("_storage"), expiresAt: v.number() }),
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "conversation", "export");
     if (!/^exp_[A-Za-z0-9_-]{64}$/.test(args.reference)) throw new ConvexError("ADMIN_EXPORT_REFERENCE_INVALID");
@@ -322,10 +354,9 @@ export const consumeConversationExportReference = mutation({
     const item = await ctx.db.get(reference.exportId);
     if (!item || item.requesterId !== actor.userId || item.status !== "ready" || !item.storageId || item.expiresAt <= Date.now()) throw new ConvexError("ADMIN_EXPORT_NOT_AVAILABLE");
     await validateConversationAccessGrant(ctx, { grantId: item.accessGrantId, chatId: item.chatSessionId, adminId: actor.userId });
-    const downloadUrl = await ctx.storage.getUrl(item.storageId);
-    if (!downloadUrl) throw new ConvexError("ADMIN_EXPORT_STORAGE_NOT_FOUND");
+    if (!(await ctx.db.system.get("_storage", item.storageId))) throw new ConvexError("ADMIN_EXPORT_STORAGE_NOT_FOUND");
     await ctx.db.patch(reference._id, { consumedAt: Date.now() });
     await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: "admin.conversation_export_downloaded", targetType: "chatSession", targetId: item.chatSessionId, reason: "Consume one-time conversation export download", correlationId: item.correlationId, outcome: "success" });
-    return { downloadUrl, expiresAt: reference.expiresAt };
+    return { storageId: item.storageId, expiresAt: reference.expiresAt };
   },
 });

@@ -15,6 +15,26 @@ const MAX_GROUNDX_CALLBACK_BYTES = 16_384;
 const completeGroundxCallback = makeFunctionReference<"mutation">(
   "admin/jobs:completeGroundxCallback",
 );
+const claimConversationExportReference = makeFunctionReference<"mutation">(
+  "admin/exports:claimConversationExportReference",
+);
+
+http.route({
+  path: "/admin/export-download",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (Number(request.headers.get("content-length") ?? "0") > 256) return new Response(null, { status: 400 });
+    let reference = "";
+    try { reference = String((await request.json() as { reference?: unknown }).reference ?? ""); } catch { return new Response(null, { status: 400 }); }
+    if (!/^exp_[A-Za-z0-9_-]{64}$/.test(reference)) return new Response(null, { status: 404 });
+    try {
+      const claim: { storageId: import("./_generated/dataModel").Id<"_storage">; expiresAt: number } = await ctx.runMutation(claimConversationExportReference, { reference });
+      const blob = await ctx.storage.get(claim.storageId);
+      if (!blob) return new Response(null, { status: 404 });
+      return new Response(blob.stream(), { status: 200, headers: { "content-type": "application/x-ndjson", "content-disposition": "attachment; filename=\"conversation-export.ndjson\"", "cache-control": "no-store, private", "x-content-type-options": "nosniff", "content-length": String(blob.size) } });
+    } catch { return new Response(null, { status: 404, headers: { "cache-control": "no-store" } }); }
+  }),
+});
 
 async function readBoundedCallbackBody(request: Request): Promise<Uint8Array | null> {
   if (!request.body) return new Uint8Array();

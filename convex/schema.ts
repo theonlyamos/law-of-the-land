@@ -354,6 +354,7 @@ export default defineSchema({
         v.literal("provider"),
       ),
     ),
+    retentionPending: v.optional(v.boolean()),
     retentionRedactedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -364,6 +365,7 @@ export default defineSchema({
     .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"]),
@@ -383,6 +385,7 @@ export default defineSchema({
   adminExports: defineTable({
     correlationId: v.string(),
     requesterId: v.string(),
+    requesterSessionId: v.string(),
     chatSessionId: v.id("chatSessions"),
     accessGrantId: v.id("adminAccessGrants"),
     status: v.union(
@@ -439,6 +442,13 @@ export default defineSchema({
     lastSuccessfulAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_key", ["key"]),
+  jobControlResults: defineTable({
+    operationId: v.id("adminOperations"),
+    jobId: v.id("integrationJobs"),
+    status: v.union(v.literal("queued"), v.literal("running"), v.literal("cancelled")),
+    correlationId: v.string(),
+    createdAt: v.number(),
+  }).index("by_operationId", ["operationId"]),
   featureFlags: defineTable({
     key: v.literal("admin_panel"),
     environment: v.string(),

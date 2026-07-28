@@ -15,6 +15,7 @@ export const buildConversationExport = internalAction({
   args: { exportId: v.id("adminExports") },
   returns: v.null(),
   handler: async (ctx, args) => {
+    let storedId: Id<"_storage"> | null = null;
     try {
       let cursor: string | null = null;
       let correlationId = "";
@@ -30,14 +31,16 @@ export const buildConversationExport = internalAction({
           lines.push(line);
         }
         if (result.isDone) {
-          const storageId: Id<"_storage"> = await ctx.storage.store(new Blob(lines, { type: "application/x-ndjson" }));
-          await ctx.runMutation(finalizeRef, { correlationId, storageId });
+          storedId = await ctx.storage.store(new Blob(lines, { type: "application/x-ndjson" }));
+          await ctx.runMutation(finalizeRef, { correlationId, storageId: storedId });
+          storedId = null;
           return null;
         }
         cursor = result.continueCursor;
       }
       throw new Error("export page limit exceeded");
     } catch {
+      if (storedId) await ctx.storage.delete(storedId);
       await ctx.runMutation(failRef, { exportId: args.exportId });
       return null;
     }

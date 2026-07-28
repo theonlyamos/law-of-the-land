@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const convex = vi.hoisted(() => ({
   createGrant: vi.fn(),
   queueExport: vi.fn(),
+  issueExport: vi.fn(),
+  exportStatus: undefined as undefined | { status: string; expiresAt: number },
   queryArgs: undefined as unknown,
   queryOptions: undefined as unknown,
   loadMore: vi.fn(),
@@ -14,7 +16,10 @@ vi.mock("convex/react", () => ({
   useMutation: () => (args: Record<string, unknown>) =>
     "purpose" in args
       ? convex.createGrant(args)
-      : convex.queueExport(args),
+      : "correlationId" in args
+        ? convex.issueExport(args)
+        : convex.queueExport(args),
+  useQuery: () => convex.exportStatus,
   usePaginatedQuery: (_reference: unknown, args: unknown, options: unknown) => {
     convex.queryArgs = args;
     convex.queryOptions = options;
@@ -42,6 +47,8 @@ import { ConversationViewer } from "./conversation-viewer";
 beforeEach(() => {
   convex.createGrant.mockReset();
   convex.queueExport.mockReset();
+  convex.issueExport.mockReset();
+  convex.exportStatus = undefined;
   convex.loadMore.mockReset();
   convex.queryArgs = undefined;
   convex.queryOptions = undefined;
@@ -59,6 +66,7 @@ beforeEach(() => {
     action: "conversation_export",
     targetId: "chat_42",
   });
+  convex.issueExport.mockResolvedValue({ reference: `exp_${"a".repeat(64)}`, expiresAt: 1_900_000_900_000 });
 });
 
 afterEach(() => {

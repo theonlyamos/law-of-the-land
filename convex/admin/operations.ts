@@ -249,10 +249,14 @@ export const runRetentionBatch = internalMutation({
       for (const row of runs) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
       if (deleted >= RETENTION_LIMIT) break;
       for (const status of ["succeeded", "failed", "cancelled"] as const) {
-        const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", (q) => q.eq("status", status).lt("createdAt", now - 90 * DAY_MS)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
+        const limit = Math.min(capacity, RETENTION_LIMIT - deleted);
+        const [pending, legacy] = await Promise.all([
+          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", true).lt("createdAt", now - 90 * DAY_MS)).take(limit),
+          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(limit),
+        ]);
+        const rows = [...pending, ...legacy].sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
         for (const row of rows) {
-          if (row.retentionRedactedAt !== undefined) continue;
-          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionRedactedAt: now, updatedAt: now }); deleted += 1; madeProgress = true;
+          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionPending: false, retentionRedactedAt: now, updatedAt: now }); deleted += 1; madeProgress = true;
           if (deleted >= RETENTION_LIMIT) break;
         }
         if (deleted >= RETENTION_LIMIT) break;
@@ -284,8 +288,9 @@ export const runRetentionBatch = internalMutation({
     }
     let hasOldJobDetail = false;
     for (const status of ["succeeded", "failed", "cancelled"] as const) {
-      const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", (q) => q.eq("status", status).lt("createdAt", now - 90 * DAY_MS)).take(2);
-      if (rows.some((row) => row.retentionRedactedAt === undefined)) { hasOldJobDetail = true; break; }
+      const pending = await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", true).lt("createdAt", now - 90 * DAY_MS)).take(1);
+      const legacy = await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(1);
+      if (pending.length > 0 || legacy.length > 0) { hasOldJobDetail = true; break; }
     }
     const done = deleted < RETENTION_LIMIT && !hasExpiredGrant && !hasExpiredReference && !hasExpiredExport && !hasOldRun && !hasOldJobDetail && storageDone;
     const cursor = done ? null : `retention_${crypto.randomUUID().replaceAll("-", "")}`;

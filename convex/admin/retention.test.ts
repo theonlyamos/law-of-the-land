@@ -6,6 +6,7 @@ import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
+import { buildConversationExport } from "./exportActions";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -28,8 +29,8 @@ const createIncident = makeFunctionReference<"mutation">("admin/operations:creat
 const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addIncidentNote");
 const listIncidentTimeline = makeFunctionReference<"query">("admin/operations:listIncidentTimeline");
 const finalizeExport = makeFunctionReference<"mutation">("admin/exports:finalizeConversationExport");
+const getExportPage = makeFunctionReference<"query">("admin/exports:getConversationExportPage");
 const issueExportReference = makeFunctionReference<"mutation">("admin/exports:issueConversationExportReference");
-const consumeExportReference = makeFunctionReference<"mutation">("admin/exports:consumeConversationExportReference");
 const queueConversationExport = makeFunctionReference<"mutation">("admin/exports:queueConversationExport");
 
 function createBackend() {
@@ -76,6 +77,42 @@ async function seedJob(t: Backend, status: "queued" | "succeeded" | "failed" | "
   } as never));
 }
 
+async function queueExportFixture(t: Backend, suffix: string) {
+  const admin = await asAdmin(t, "support_agent");
+  const chatId = await t.run(async (ctx) => {
+    const id = await ctx.db.insert("chatSessions", { userId: `user_${suffix}`, externalId: `export-${suffix}`, title: "Export", lastMessage: "safe", messageCount: 1, updatedAt: Date.now() });
+    await ctx.db.insert("messages", { sessionId: id, role: "user", content: "private export body", createdAt: Date.now() });
+    return id;
+  });
+  const grantId = await t.run((ctx) => ctx.db.insert("adminAccessGrants", { adminId: admin.userId, chatSessionId: chatId, purpose: "Approved export race test", issuedAt: Date.now(), expiresAt: Date.now() + 15 * 60_000, correlationId: `grant_${suffix}` }));
+  const idempotencyKey = `export-race-${suffix}`;
+  await t.run((ctx) => ctx.db.insert("adminStepUpProofs", { actorId: admin.userId, sessionId: admin.sessionId, action: "conversation_export", targetId: `${chatId}:${grantId}`, idempotencyKey, issuedAt: Date.now(), expiresAt: Date.now() + 5 * 60_000 }));
+  const queued = await admin.client.mutation(queueConversationExport, { chatId, grantId, reason: "Attach transcript to approved support case", idempotencyKey, confirmation: `EXPORT ${chatId}` });
+  const exportRow = await t.run((ctx) => ctx.db.query("adminExports").withIndex("by_correlationId", (q) => q.eq("correlationId", queued.correlationId)).unique());
+  if (!exportRow) throw new Error("queued export fixture was not created");
+  return { admin, chatId, grantId, queued, exportRow };
+}
+
+type ExportAuthorityChange = "grant revoked" | "grant expired" | "requester demoted" | "session invalid" | "session impersonated" | "2FA lost";
+
+async function invalidateExportAuthority(t: Backend, fixture: Awaited<ReturnType<typeof queueExportFixture>>, change: ExportAuthorityChange) {
+  await t.run(async (ctx) => {
+    if (change === "grant revoked") {
+      await ctx.db.patch(fixture.grantId, { revokedAt: Date.now() });
+    } else if (change === "grant expired") {
+      await ctx.db.patch(fixture.grantId, { expiresAt: Date.now() - 1 });
+    } else if (change === "requester demoted") {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, { input: { model: "user", where: [{ field: "_id", operator: "eq", value: fixture.admin.userId }], update: { role: "user" } } });
+    } else if (change === "session invalid") {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, { input: { model: "session", where: [{ field: "_id", operator: "eq", value: fixture.admin.sessionId }], update: { expiresAt: Date.now() - 1 } } });
+    } else if (change === "session impersonated") {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, { input: { model: "session", where: [{ field: "_id", operator: "eq", value: fixture.admin.sessionId }], update: { impersonatedBy: "original-admin" } } });
+    } else {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, { input: { model: "session", where: [{ field: "_id", operator: "eq", value: fixture.admin.sessionId }], update: { adminTwoFactorVerifiedAt: null } } });
+    }
+  });
+}
+
 const previousEnabled = process.env.ADMIN_PANEL_ENABLED;
 const previousEnvironment = process.env.ADMIN_ENVIRONMENT;
 afterEach(() => {
@@ -109,6 +146,21 @@ describe("authoritative job controls", () => {
     expect(await admin.client.mutation(cancelJob, input)).toEqual(await admin.client.mutation(cancelJob, input));
     const uncertain = await seedJob(t, "manual_review", { processId: "provider-process", lastErrorKind: "timeout" });
     await expect(admin.client.mutation(cancelJob, { jobId: uncertain, reason: "Do not guess provider outcome", idempotencyKey: "cancel-uncertain-1" })).rejects.toThrow("provider outcome is uncertain");
+  });
+
+  it("replays the recorded retry and cancellation results after the jobs advance", async () => {
+    const t = createBackend(); await enablePanel(t); const admin = await asAdmin(t);
+    const failed = await seedJob(t, "failed", { lastErrorKind: "network" });
+    const retryInput = { jobId: failed, reason: "Retry transient provider failure", idempotencyKey: "retry-advanced-1" };
+    const retryResult = await admin.client.mutation(retryJob, retryInput);
+    await t.run((ctx) => ctx.db.patch(failed, { status: "succeeded", updatedAt: Date.now() }));
+    expect(await admin.client.mutation(retryJob, retryInput)).toEqual(retryResult);
+
+    const queued = await seedJob(t, "queued");
+    const cancelInput = { jobId: queued, reason: "Cancel duplicate queued work", idempotencyKey: "cancel-advanced-1" };
+    const cancelResult = await admin.client.mutation(cancelJob, cancelInput);
+    await t.run((ctx) => ctx.db.patch(queued, { status: "failed", updatedAt: Date.now() }));
+    expect(await admin.client.mutation(cancelJob, cancelInput)).toEqual(cancelResult);
   });
 });
 
@@ -156,18 +208,146 @@ describe("one-time conversation export references", () => {
     await t.mutation(finalizeExport, { correlationId: queued.correlationId, storageId });
     const issued = await admin.client.mutation(issueExportReference, { correlationId: queued.correlationId, grantId });
     expect(issued.reference).toMatch(/^exp_[A-Za-z0-9_-]+$/);
-    const [first, second] = await Promise.allSettled([
-      admin.client.mutation(consumeExportReference, { reference: issued.reference }),
-      admin.client.mutation(consumeExportReference, { reference: issued.reference }),
+    const [first, second] = await Promise.all([
+      admin.client.fetch("/admin/export-download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reference: issued.reference }) }),
+      admin.client.fetch("/admin/export-download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reference: issued.reference }) }),
     ]);
-    expect([first, second].filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    expect([first, second].filter((item) => item.status === 200)).toHaveLength(1);
+    const winner = [first, second].find((item) => item.status === 200)!;
+    expect(winner.headers.get("content-disposition")).toBe('attachment; filename="conversation-export.ndjson"');
+    expect(winner.headers.get("cache-control")).toContain("no-store");
+    expect(await winner.text()).toBe("transcript");
+    expect((await admin.client.fetch("/admin/export-download", { method: "POST", body: JSON.stringify({ reference: issued.reference }) })).status).toBe(404);
     const persisted = JSON.stringify(await t.run(async (ctx) => ({ exports: await ctx.db.query("adminExports").take(5), refs: await ctx.db.query("exportDownloadReferences").take(5), audits: await ctx.db.query("auditEvents").take(20) })));
     expect(persisted).not.toContain(issued.reference);
     expect(persisted).not.toMatch(/https?:\/\//);
   });
+
+  it.each([
+    "grant revoked",
+    "grant expired",
+    "requester demoted",
+    "session invalid",
+    "session impersonated",
+    "2FA lost",
+  ] as const)("fails a queued export safely when %s before the next page", async (change) => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    const t = createBackend(); await enablePanel(t);
+    const fixture = await queueExportFixture(t, `page-${change.replaceAll(" ", "-")}`);
+    await invalidateExportAuthority(t, fixture, change);
+
+    await expect(t.query(getExportPage, { exportId: fixture.exportRow._id, paginationOpts: { numItems: 100, cursor: null } })).rejects.toThrow("ADMIN_EXPORT_AUTHORITY_EXPIRED");
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    const exportRow = await t.run((ctx) => ctx.db.get(fixture.exportRow._id));
+    expect(exportRow).toMatchObject({ status: "failed" });
+    expect(exportRow).not.toHaveProperty("storageId");
+    expect(await t.run((ctx) => ctx.db.system.query("_storage").take(1))).toHaveLength(0);
+  });
+
+  it.each([
+    "grant revoked",
+    "grant expired",
+    "requester demoted",
+    "session invalid",
+    "session impersonated",
+    "2FA lost",
+  ] as const)("refuses finalization when %s after build authorization", async (change) => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    const t = createBackend(); await enablePanel(t);
+    const fixture = await queueExportFixture(t, `finalize-${change.replaceAll(" ", "-")}`);
+    const candidate = await t.run((ctx) => ctx.storage.store(new Blob(["candidate"] as BlobPart[], { type: "application/x-ndjson" })));
+    await invalidateExportAuthority(t, fixture, change);
+
+    await expect(t.mutation(finalizeExport, { correlationId: fixture.queued.correlationId, storageId: candidate })).rejects.toThrow("ADMIN_EXPORT_AUTHORITY_EXPIRED");
+    const exportRow = await t.run((ctx) => ctx.db.get(fixture.exportRow._id));
+    expect(exportRow).toMatchObject({ status: "queued" });
+    expect(exportRow).not.toHaveProperty("storageId");
+    await t.run((ctx) => ctx.storage.delete(candidate));
+  });
+
+  it("deletes the newly stored artifact when finalization finds a conflicting artifact", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    const t = createBackend(); await enablePanel(t);
+    const fixture = await queueExportFixture(t, "finalization-conflict");
+    const winner = await t.run((ctx) => ctx.storage.store(new Blob(["winner"] as BlobPart[], { type: "application/x-ndjson" })));
+    let candidateId: Id<"_storage"> | null = null;
+    const handler = (buildConversationExport as unknown as { _handler: (ctx: unknown, args: { exportId: Id<"adminExports"> }) => Promise<null> })._handler;
+    await handler({
+      runQuery: (reference: Parameters<Backend["query"]>[0], args: Parameters<Backend["query"]>[1]) => t.query(reference, args),
+      runMutation: (reference: Parameters<Backend["mutation"]>[0], args: Parameters<Backend["mutation"]>[1]) => t.mutation(reference, args),
+      storage: {
+        store: async (blob: Blob) => {
+          candidateId = await t.run((ctx) => ctx.storage.store(blob));
+          await t.mutation(finalizeExport, { correlationId: fixture.queued.correlationId, storageId: winner });
+          return candidateId;
+        },
+        delete: (storageId: Id<"_storage">) => t.run((ctx) => ctx.storage.delete(storageId)),
+      },
+    }, { exportId: fixture.exportRow._id });
+
+    expect(candidateId).not.toBeNull();
+    const exportRow = await t.run((ctx) => ctx.db.get(fixture.exportRow._id));
+    expect(exportRow).toMatchObject({ status: "ready", storageId: winner });
+    const blobs = await t.run((ctx) => ctx.db.system.query("_storage").take(3));
+    expect(blobs.map((blob) => blob._id)).toEqual([winner]);
+  });
 });
 
 describe("bounded retention", () => {
+  it("redacts more than 200 eligible jobs per terminal status across invocations and completes only after exhaustion", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const t = createBackend();
+    const old = Date.now() - 100 * 24 * 60 * 60_000;
+    await t.run(async (ctx) => {
+      for (const status of ["succeeded", "failed", "cancelled"] as const) {
+        for (let index = 0; index < 201; index += 1) {
+          await ctx.db.insert("integrationJobs", {
+            type: "poll_process", targetType: "operation", targetId: `${status}_${index}`,
+            payload: JSON.stringify({ secret: `${status}-${index}` }), actorId: "system", actorRoles: [],
+            idempotencyKey: `${status}_${index}_${crypto.randomUUID()}`, requestFingerprint: "{}",
+            correlationId: `retention_${status}_${index}`, callbackTokenHash: "a".repeat(64),
+            status, attemptCount: 1, lastErrorKind: "network", retentionPending: true,
+            createdAt: old + index, updatedAt: old + index,
+          });
+        }
+        for (let index = 0; index < 3; index += 1) {
+          await ctx.db.insert("integrationJobs", {
+            type: "poll_process", targetType: "operation", targetId: `redacted_${status}_${index}`,
+            payload: "{}", actorId: "system", actorRoles: [], idempotencyKey: `redacted_${status}_${index}_${crypto.randomUUID()}`,
+            requestFingerprint: "{}", correlationId: `redacted_${status}_${index}`, callbackTokenHash: "a".repeat(64),
+            status, attemptCount: 1, retentionPending: false, retentionRedactedAt: old,
+            createdAt: old + index, updatedAt: old + index,
+          });
+        }
+      }
+    });
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+
+    let result = await t.mutation(runRetentionBatch, { cursor: null });
+    expect(result).toMatchObject({ deleted: 200, done: false });
+    expect((await t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique()))?.lastSuccessfulAt).toBeUndefined();
+    let invocations = 1;
+    while (!result.done && invocations < 10) {
+      result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+      invocations += 1;
+      if (!result.done) {
+        expect((await t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique()))?.lastSuccessfulAt).toBeUndefined();
+      }
+    }
+
+    expect(result.done).toBe(true);
+    expect(invocations).toBeGreaterThan(3);
+    const jobs = await t.run((ctx) => ctx.db.query("integrationJobs").take(700));
+    expect(jobs).toHaveLength(612);
+    expect(jobs.filter((job) => job.retentionPending === true)).toHaveLength(0);
+    expect(jobs.filter((job) => job.retentionPending === false)).toHaveLength(612);
+    expect(jobs.filter((job) => job.retentionRedactedAt === old)).toHaveLength(9);
+    expect(jobs.every((job) => job.payload === "{}" && job.lastErrorKind === undefined)).toBe(true);
+    const state = await t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique());
+    expect(state).toMatchObject({ lastSuccessfulAt: Date.now(), deletedTotal: 603 });
+  });
+
   it("deletes at most 200 globally, resumes fairly, and preserves audit, aggregates, published originals, and attached blobs", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const t = createBackend();

@@ -2,7 +2,7 @@
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { useMutation, usePaginatedQuery } from "convex/react";
+import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import {
   useState,
   type FormEvent,
@@ -47,6 +47,7 @@ export function ConversationViewer({
 }) {
   const createGrant = useMutation(api.admin.conversations.createAccessGrant);
   const queueExport = useMutation(api.admin.exports.queueConversationExport);
+  const issueExportReference = useMutation(api.admin.exports.issueConversationExportReference);
   const [grant, setGrant] = useState<AccessGrant | null>(null);
   const [accessState, setAccessState] = useState<"idle" | "working" | "error">("idle");
   const [accessError, setAccessError] = useState("");
@@ -54,6 +55,8 @@ export function ConversationViewer({
   const [exportKey, setExportKey] = useState("");
   const [exportState, setExportState] = useState<"idle" | "working" | "queued" | "error">("idle");
   const [exportError, setExportError] = useState("");
+  const [exportCorrelationId, setExportCorrelationId] = useState<string | null>(null);
+  const exportStatus = useQuery(api.admin.exports.getConversationExportStatus, exportCorrelationId && grant ? { correlationId: exportCorrelationId, grantId: grant.grantId } : "skip");
   const {
     results: messages,
     status: messagesStatus,
@@ -122,13 +125,14 @@ export function ConversationViewer({
           "Your password could not be verified. Check it and try again.",
         );
       }
-      await queueExport({
+      const queued = await queueExport({
         chatId,
         grantId: grant.grantId,
         reason,
         idempotencyKey: exportKey,
         confirmation,
       });
+      setExportCorrelationId(queued.correlationId);
       setExportState("queued");
     } catch (error) {
       setExportState("error");
@@ -138,6 +142,18 @@ export function ConversationViewer({
           : "The export could not be queued.",
       );
     }
+  }
+
+  async function downloadExport() {
+    if (!grant || !exportCorrelationId) return;
+    setExportError("");
+    try {
+      const issued = await issueExportReference({ correlationId: exportCorrelationId, grantId: grant.grantId });
+      const response = await fetch("/api/admin/exports/download", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ reference: issued.reference }) });
+      if (!response.ok) throw new Error("The one-time export download was refused. Request a new reference.");
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = "conversation-export.ndjson"; anchor.click(); URL.revokeObjectURL(url);
+    } catch (error) { setExportError(error instanceof Error ? error.message : "The export could not be downloaded."); }
   }
 
   const fieldClass =
@@ -245,7 +261,7 @@ export function ConversationViewer({
             <p role="alert" className="lg:col-span-2 text-sm text-[oklch(34%_0.1_28)]">{exportError}</p>
           ) : null}
           {exportState === "queued" ? (
-            <p role="status" className="lg:col-span-2 border-y border-[oklch(63%_0.07_145)] bg-[oklch(93%_0.035_145)] px-4 py-3 text-sm text-[oklch(34%_0.07_145)]">Export queued for controlled processing.</p>
+            <div role="status" className="lg:col-span-2 border-y border-[oklch(63%_0.07_145)] bg-[oklch(93%_0.035_145)] px-4 py-3 text-sm text-[oklch(34%_0.07_145)]"><p>{exportStatus?.status === "ready" ? "Export ready for one-time download." : exportStatus?.status === "failed" ? "Export processing failed. Prepare a new export to retry." : exportStatus?.status === "expired" ? "Export expired. Prepare a new export." : "Export queued and building."}</p>{exportStatus?.status === "ready" ? <button type="button" onClick={() => void downloadExport()} className="mt-3 min-h-11 border border-current px-4 font-semibold">Download once</button> : null}</div>
           ) : null}
           <div className="flex flex-wrap gap-3 lg:col-span-2">
             <button type="submit" disabled={exportState === "working" || exportState === "queued"} className="min-h-11 bg-[oklch(28%_0.055_252)] px-5 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-60">
