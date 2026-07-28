@@ -42,25 +42,57 @@ Conversation exports use a hashed, one-time `exp_` reference. The browser posts 
 
 ## Isolated bootstrap procedure
 
-Use the checked-in local CLIs and the explicit `staging` deployment reference. These commands mutate the selected deployment; verify `staging` is isolated before running them.
+The release manager must receive the exact isolated deployment identity from the approved change record as a release-shell input named `APPROVED_ISOLATED_CONVEX_DEPLOYMENT`. It is not application configuration or a secret, and its value must use the installed Convex CLI's `dev:<deployment-name>` format. Before starting, verify in the Convex dashboard that this identity is an isolated non-production deployment, `ADMIN_PANEL_ENABLED=false`, `ADMIN_ENVIRONMENT=preview`, and the temporary `INITIAL_SUPER_ADMIN_IDS` allowlist contains only the approved verified, 2FA-enrolled candidates.
+
+Run this required release sequence literally and in order. `bunx convex dev --once` pushes the checked-in functions to the bound target before either migration runs. All three Convex commands read this same process-level `CONVEX_DEPLOYMENT` binding; none may select a different target with a per-command flag.
 
 ```powershell
-npx convex env set ADMIN_PANEL_ENABLED false --deployment staging
-npx convex env set ADMIN_ENVIRONMENT preview --deployment staging
-npx convex env set INITIAL_SUPER_ADMIN_IDS --deployment staging
-npx convex run admin/migrations:seedGhanaJurisdiction '{}' --deployment staging --codegen disable
-npx convex run admin/migrations:bootstrapSuperAdmins '{}' --deployment staging --codegen disable
-npm test -- --maxWorkers=1
-npm run build
+bun install --frozen-lockfile
+
+$ApprovedIsolatedDeployment = $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT
+if (
+  [string]::IsNullOrWhiteSpace($ApprovedIsolatedDeployment) -or
+  $ApprovedIsolatedDeployment -notmatch '^dev:[a-z0-9-]+$'
+) {
+  throw 'Abort: APPROVED_ISOLATED_CONVEX_DEPLOYMENT must be the pre-approved isolated target in dev:<deployment-name> form.'
+}
+
+$ConfirmedIsolatedDeployment = Read-Host "Type the exact pre-approved isolated Convex target ($ApprovedIsolatedDeployment)"
+if ($ConfirmedIsolatedDeployment -cne $ApprovedIsolatedDeployment) {
+  throw 'Abort: the confirmed target does not match the pre-approved isolated target.'
+}
+
+$env:CONVEX_DEPLOYMENT = $ApprovedIsolatedDeployment
+if ($env:CONVEX_DEPLOYMENT -cne $ApprovedIsolatedDeployment) {
+  throw 'Abort: Convex target binding failed.'
+}
+
+bunx convex dev --once
+bunx convex run admin/migrations:seedGhanaJurisdiction
+bunx convex run admin/migrations:bootstrapSuperAdmins
+bun run test
+bun run build
 ```
+
+Abort before `bunx convex dev --once` if the value is missing, malformed, production, or differs from the pre-approved isolated target. If any later command reports a different target identity, stop immediately, keep both admin controls disabled, and open an incident; do not continue or retry against another deployment.
 
 Expected migration state: Ghana is enabled/default, `productionBucketId` is `11833`, the separate staging bucket is present, and a repeat seed is idempotent. Expected bootstrap state: only listed existing Better Auth users with verified email and 2FA receive `super_admin`. Abort on any unexpected row or authorization failure. Clear the allowlist immediately:
 
 ```powershell
-npx convex env remove INITIAL_SUPER_ADMIN_IDS --deployment staging
+bunx convex env remove INITIAL_SUPER_ADMIN_IDS
 ```
 
 Record GroundX as **configured**, not healthy or smoke-passed, until an authorized remote-ingest callback actually completes. The external smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
+
+### Supplemental Windows troubleshooting
+
+The Bun sequence above is the release procedure. The commands below only diagnose a local Windows launcher problem; they do not satisfy or replace any release step. After fixing Bun, restart the required sequence from `bun install --frozen-lockfile`.
+
+```powershell
+npm test -- --maxWorkers=1
+npm run build
+& 'C:\Program Files\nodejs\node.exe' 'node_modules\convex\bin\main.js' dev --help
+```
 
 ## Persisted flag enable, disable, and recovery
 
@@ -69,13 +101,13 @@ Auth-gated public mutations are not an unauthenticated CLI recovery mechanism. A
 To enable the persisted row, select **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the current password, and submit **Verify and enable**. Expected state is `Enabled` plus a correlation ID and one `admin.panel_flag_set` audit event. Then enable the deployment gate:
 
 ```powershell
-npx convex env set ADMIN_PANEL_ENABLED true --deployment staging
+bunx convex env set ADMIN_PANEL_ENABLED true
 ```
 
 To disable safely, keep the deployment gate on long enough to open `/admin-recovery`, select **Disable persisted flag**, enter a reason, type `ADMIN_PANEL preview DISABLE`, confirm the current password, and submit **Verify and disable**. Expected state is `Disabled` plus a correlation ID. Then run:
 
 ```powershell
-npx convex env set ADMIN_PANEL_ENABLED false --deployment staging
+bunx convex env set ADMIN_PANEL_ENABLED false
 ```
 
-Every attempt uses a newly generated idempotency key. Abort if the page reports the wrong environment, the session is impersonated/unassured, the exact confirmation differs, or no correlation ID is returned. Recovery after an aborted attempt is to leave the deployment gate false, sign in as another assured Super Admin, and retry from `/admin-recovery` with a new key.
+Run those environment commands only in the same shell after confirming `$env:CONVEX_DEPLOYMENT -ceq $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT`; otherwise abort and re-establish the approved binding. Every attempt uses a newly generated idempotency key. Abort if the page reports the wrong environment, the session is impersonated/unassured, the exact confirmation differs, or no correlation ID is returned. Recovery after an aborted attempt is to leave the deployment gate false, sign in as another assured Super Admin, and retry from `/admin-recovery` with a new key.

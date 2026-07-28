@@ -2,13 +2,13 @@
 
 **Owner:** release manager. **Initial state:** deployment gate false and persisted row disabled. **Hard abort:** production target, non-isolated preview, absent credentials, missing 2FA, migration/bucket conflict, callback failure, test/build failure, or unresolved incident.
 
-- [ ] Run the exact isolated bootstrap commands in [bootstrap](bootstrap.md); verify Ghana production bucket `11833`, a distinct staging bucket, idempotent seed, and cleared `INITIAL_SUPER_ADMIN_IDS`.
-- [ ] Run `npm test -- --maxWorkers=1`, `npm run build`, and `npm run lint`. Run `npm run test:budgets` only with an authenticated isolated browser session and `npm run test:e2e` only against the guarded fixture target.
+- [ ] Run the exact isolated Bun sequence in [bootstrap](bootstrap.md), in order: frozen install; validated and typed-confirmed `CONVEX_DEPLOYMENT=dev:<deployment-name>` binding; `bunx convex dev --once`; Ghana seed; Super Admin bootstrap; `bun run test`; `bun run build`. Abort if any command resolves a target other than the pre-approved isolated deployment. Verify Ghana production bucket `11833`, a distinct staging bucket, idempotent seed, and cleared `INITIAL_SUPER_ADMIN_IDS`.
+- [ ] Run `bun run lint`. Run `bun run test:budgets` only with an authenticated isolated browser session and `bun run test:e2e` only against the guarded fixture target. npm or direct Windows Node commands are troubleshooting only; after using them, rerun the required Bun release sequence from the beginning.
 - [ ] Verify every privileged server path has a permission test, every high-risk success has one immutable audit/correlation, submitters cannot self-approve, and exports download only through `/api/admin/exports/download` within 10 minutes.
 - [ ] Perform an authorized remote staging ingest and observe the callback success plus duplicate callback replay. Until this happens, record GroundX as **configured**, not healthy or smoke-passed. Confirm copy/delete use polling because those endpoints do not support callbacks.
 - [ ] Exercise failed publication, document rollback, stuck-job recovery, retention continuation, full rollback, and compromised-admin ban/session revocation in isolated preview using each runbook's exact arguments and fresh UUID keys.
 - [ ] As an assured different Super Admin, open `/admin-recovery`, verify environment `preview`, choose **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the password, and require a correlation ID. Abort on any mismatch.
-- [ ] Run `npx convex env set ADMIN_PANEL_ENABLED true --deployment staging`, smoke each fixed role, and monitor jobs/incidents. Recovery for any failure is persisted-flag disable through `/admin-recovery`, then `npx convex env set ADMIN_PANEL_ENABLED false --deployment staging`.
+- [ ] In the same release shell, require `$env:CONVEX_DEPLOYMENT -ceq $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT`, run `bunx convex env set ADMIN_PANEL_ENABLED true`, smoke each fixed role, and monitor jobs/incidents. Recovery for any failure is persisted-flag disable through `/admin-recovery`, then `bunx convex env set ADMIN_PANEL_ENABLED false`. Abort instead of running either command if the binding differs.
 
 ## External dry-run status
 
