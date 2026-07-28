@@ -12,6 +12,7 @@ authComponent.registerRoutes(http, createAuth);
 polar.registerRoutes(http);
 
 const MAX_GROUNDX_CALLBACK_BYTES = 16_384;
+const MAX_EXPORT_REFERENCE_BYTES = 256;
 const completeGroundxCallback = makeFunctionReference<"mutation">(
   "admin/jobs:completeGroundxCallback",
 );
@@ -23,9 +24,10 @@ http.route({
   path: "/admin/export-download",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    if (Number(request.headers.get("content-length") ?? "0") > 256) return new Response(null, { status: 400 });
+    const bytes = await readBoundedBody(request, MAX_EXPORT_REFERENCE_BYTES);
+    if (!bytes || bytes.byteLength === 0) return new Response(null, { status: 400 });
     let reference = "";
-    try { reference = String((await request.json() as { reference?: unknown }).reference ?? ""); } catch { return new Response(null, { status: 400 }); }
+    try { reference = String((JSON.parse(new TextDecoder().decode(bytes)) as { reference?: unknown }).reference ?? ""); } catch { return new Response(null, { status: 400 }); }
     if (!/^exp_[A-Za-z0-9_-]{64}$/.test(reference)) return new Response(null, { status: 404 });
     try {
       const claim: { storageId: import("./_generated/dataModel").Id<"_storage">; expiresAt: number } = await ctx.runMutation(claimConversationExportReference, { reference });
@@ -36,7 +38,9 @@ http.route({
   }),
 });
 
-async function readBoundedCallbackBody(request: Request): Promise<Uint8Array | null> {
+async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array | null> {
+  const declaredSize = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) return null;
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -45,7 +49,7 @@ async function readBoundedCallbackBody(request: Request): Promise<Uint8Array | n
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_GROUNDX_CALLBACK_BYTES) {
+    if (size > maxBytes) {
       await reader.cancel();
       return null;
     }
@@ -72,7 +76,7 @@ http.route({
     if (Number.isFinite(declaredSize) && declaredSize > MAX_GROUNDX_CALLBACK_BYTES) {
       return new Response(null, { status: 400 });
     }
-    const bytes = await readBoundedCallbackBody(request);
+    const bytes = await readBoundedBody(request, MAX_GROUNDX_CALLBACK_BYTES);
     if (!bytes) {
       return new Response(null, { status: 400 });
     }

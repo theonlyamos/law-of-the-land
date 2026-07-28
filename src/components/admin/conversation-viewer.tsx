@@ -4,6 +4,7 @@ import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import {
+  useEffect,
   useState,
   type FormEvent,
 } from "react";
@@ -14,6 +15,7 @@ type AccessGrant = {
   grantId: Id<"adminAccessGrants">;
   expiresAt: number;
 };
+type DownloadReference = { reference: string; expiresAt: number };
 
 function newExportKey(): string {
   return `export_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -56,6 +58,8 @@ export function ConversationViewer({
   const [exportState, setExportState] = useState<"idle" | "working" | "queued" | "error">("idle");
   const [exportError, setExportError] = useState("");
   const [exportCorrelationId, setExportCorrelationId] = useState<string | null>(null);
+  const [downloadReference, setDownloadReference] = useState<DownloadReference | null>(null);
+  const [downloadWorking, setDownloadWorking] = useState(false);
   const exportStatus = useQuery(api.admin.exports.getConversationExportStatus, exportCorrelationId && grant ? { correlationId: exportCorrelationId, grantId: grant.grantId } : "skip");
   const {
     results: messages,
@@ -91,6 +95,7 @@ export function ConversationViewer({
     setExportKey(newExportKey());
     setExportState("idle");
     setExportError("");
+    setDownloadReference(null);
     setExportOpen(true);
   }
 
@@ -133,6 +138,7 @@ export function ConversationViewer({
         confirmation,
       });
       setExportCorrelationId(queued.correlationId);
+      setDownloadReference(null);
       setExportState("queued");
     } catch (error) {
       setExportState("error");
@@ -145,16 +151,34 @@ export function ConversationViewer({
   }
 
   async function downloadExport() {
-    if (!grant || !exportCorrelationId) return;
+    if (!grant || !exportCorrelationId || downloadWorking) return;
+    setDownloadWorking(true);
     setExportError("");
     try {
-      const issued = await issueExportReference({ correlationId: exportCorrelationId, grantId: grant.grantId });
+      let issued = downloadReference;
+      if (!issued || issued.expiresAt <= Date.now()) {
+        setDownloadReference(null);
+        issued = await issueExportReference({ correlationId: exportCorrelationId, grantId: grant.grantId });
+        setDownloadReference(issued);
+      }
       const response = await fetch("/api/admin/exports/download", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ reference: issued.reference }) });
-      if (!response.ok) throw new Error("The one-time export download was refused. Request a new reference.");
+      if (!response.ok) {
+        if (response.status === 404) setDownloadReference(null);
+        throw new Error(response.status === 404 ? "The one-time export reference expired or was already used." : "The export service is temporarily unavailable. Retry this one-time download.");
+      }
+      setDownloadReference(null);
       const url = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a"); anchor.href = url; anchor.download = "conversation-export.ndjson"; anchor.click(); URL.revokeObjectURL(url);
     } catch (error) { setExportError(error instanceof Error ? error.message : "The export could not be downloaded."); }
+    finally { setDownloadWorking(false); }
   }
+
+  useEffect(() => {
+    if (!downloadReference) return;
+    const reference = downloadReference.reference;
+    const timer = window.setTimeout(() => setDownloadReference((current) => current?.reference === reference ? null : current), Math.min(2_147_483_647, Math.max(0, downloadReference.expiresAt - Date.now())));
+    return () => window.clearTimeout(timer);
+  }, [downloadReference]);
 
   const fieldClass =
     "min-h-11 border border-[oklch(61%_0.035_252)] bg-[oklch(99%_0.007_82)] px-3 py-2 font-normal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700";
@@ -261,7 +285,7 @@ export function ConversationViewer({
             <p role="alert" className="lg:col-span-2 text-sm text-[oklch(34%_0.1_28)]">{exportError}</p>
           ) : null}
           {exportState === "queued" ? (
-            <div role="status" className="lg:col-span-2 border-y border-[oklch(63%_0.07_145)] bg-[oklch(93%_0.035_145)] px-4 py-3 text-sm text-[oklch(34%_0.07_145)]"><p>{exportStatus?.status === "ready" ? "Export ready for one-time download." : exportStatus?.status === "failed" ? "Export processing failed. Prepare a new export to retry." : exportStatus?.status === "expired" ? "Export expired. Prepare a new export." : "Export queued and building."}</p>{exportStatus?.status === "ready" ? <button type="button" onClick={() => void downloadExport()} className="mt-3 min-h-11 border border-current px-4 font-semibold">Download once</button> : null}</div>
+            <div role="status" className="lg:col-span-2 border-y border-[oklch(63%_0.07_145)] bg-[oklch(93%_0.035_145)] px-4 py-3 text-sm text-[oklch(34%_0.07_145)]"><p>{exportStatus?.status === "ready" ? "Export ready for one-time download." : exportStatus?.status === "failed" ? "Export processing failed. Prepare a new export to retry." : exportStatus?.status === "expired" ? "Export expired. Prepare a new export." : "Export queued and building."}</p>{exportError ? <p role="alert" className="mt-2">{exportError}</p> : null}{exportStatus?.status === "ready" ? <button type="button" disabled={downloadWorking} onClick={() => void downloadExport()} className="mt-3 min-h-11 border border-current px-4 font-semibold disabled:opacity-60">Download once</button> : null}</div>
           ) : null}
           <div className="flex flex-wrap gap-3 lg:col-span-2">
             <button type="submit" disabled={exportState === "working" || exportState === "queued"} className="min-h-11 bg-[oklch(28%_0.055_252)] px-5 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-60">

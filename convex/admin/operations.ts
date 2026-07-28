@@ -220,6 +220,20 @@ const RETENTION_SLICE = 40;
 const DAY_MS = 24 * 60 * 60_000;
 const runRetentionBatchRef = makeFunctionReference<"mutation">("admin/operations:runRetentionBatch");
 const retentionResultValidator = v.object({ deleted: v.number(), done: v.boolean(), cursor: v.union(v.string(), v.null()) });
+const RETENTION_PHASES = [
+  "grants", "references",
+  "exports_queued", "exports_ready", "exports_failed", "exports_expired",
+  "query_runs",
+  "jobs_succeeded", "jobs_failed", "jobs_cancelled",
+  "correlations_issued", "correlations_search_complete", "correlations_chat_claimed", "correlations_finalized",
+  "storage",
+] as const;
+type RetentionPhase = typeof RETENTION_PHASES[number];
+
+function retentionPhaseIndex(phase: string | undefined): number {
+  const index = RETENTION_PHASES.indexOf(phase as RetentionPhase);
+  return index < 0 ? 0 : index;
+}
 
 export const runRetentionBatch = internalMutation({
   args: { cursor: v.union(v.string(), v.null()) },
@@ -229,73 +243,76 @@ export const runRetentionBatch = internalMutation({
     const state = await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique();
     const stateId = state?._id ?? await ctx.db.insert("retentionState", { key: "default", phase: "records", deletedTotal: 0, lastStartedAt: now, updatedAt: now });
     let deleted = 0;
-    let madeProgress = true;
-    while (deleted < RETENTION_LIMIT && madeProgress) {
-      madeProgress = false;
+    let phaseIndex = state?.phase === "complete" ? 0 : retentionPhaseIndex(state?.phase);
+    let cycleHadChanges = state?.phase === "complete" ? false : (state?.cycleHadChanges ?? false);
+    let storagePassHadChanges = state?.phase === "complete" ? false : (state?.storagePassHadChanges ?? false);
+    let storageCursor: string | null = state?.phase === "complete" ? null : (state?.cursor ?? null);
+    let storageVisited = false;
+    let done = false;
+    while (deleted < RETENTION_LIMIT && !done) {
+      const phase = RETENTION_PHASES[phaseIndex];
+      if (phase === "storage" && storageVisited) break;
       const capacity = Math.min(RETENTION_SLICE, RETENTION_LIMIT - deleted);
-      const grants = await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(capacity);
-      for (const row of grants) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
-      if (deleted >= RETENTION_LIMIT) break;
-      const refs = await ctx.db.query("exportDownloadReferences").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
-      for (const row of refs) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
-      if (deleted >= RETENTION_LIMIT) break;
-      for (const status of ["queued", "ready", "failed", "expired"] as const) {
-        const exports = await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
-        for (const row of exports) { if (row.storageId) await ctx.storage.delete(row.storageId); await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
-        if (deleted >= RETENTION_LIMIT) break;
-      }
-      if (deleted >= RETENTION_LIMIT) break;
-      const runs = await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(Math.min(capacity, RETENTION_LIMIT - deleted));
-      for (const row of runs) { await ctx.db.delete(row._id); deleted += 1; madeProgress = true; }
-      if (deleted >= RETENTION_LIMIT) break;
-      for (const status of ["succeeded", "failed", "cancelled"] as const) {
-        const limit = Math.min(capacity, RETENTION_LIMIT - deleted);
-        const [pending, legacy] = await Promise.all([
-          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", true).lt("createdAt", now - 90 * DAY_MS)).take(limit),
-          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(limit),
-        ]);
-        const rows = [...pending, ...legacy].sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+      const before = deleted;
+      if (phase === "grants") {
+        const rows = await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(capacity);
+        for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
+      } else if (phase === "references") {
+        const rows = await ctx.db.query("exportDownloadReferences").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(capacity);
+        for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
+      } else if (phase.startsWith("exports_")) {
+        const status = phase.slice("exports_".length) as "queued" | "ready" | "failed" | "expired";
+        const rows = await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(capacity);
         for (const row of rows) {
-          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionPending: false, retentionRedactedAt: now, updatedAt: now }); deleted += 1; madeProgress = true;
-          if (deleted >= RETENTION_LIMIT) break;
+          const cost = row.storageId ? 2 : 1;
+          if (deleted + cost > RETENTION_LIMIT) break;
+          if (row.storageId) await ctx.storage.delete(row.storageId);
+          await ctx.db.delete(row._id); deleted += cost;
         }
-        if (deleted >= RETENTION_LIMIT) break;
+      } else if (phase === "query_runs") {
+        const rows = await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(capacity);
+        for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
+      } else if (phase.startsWith("jobs_")) {
+        const status = phase.slice("jobs_".length) as "succeeded" | "failed" | "cancelled";
+        const [pending, legacy] = await Promise.all([
+          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", true).lt("createdAt", now - 90 * DAY_MS)).take(capacity),
+          ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(capacity),
+        ]);
+        for (const row of [...pending, ...legacy].sort((a, b) => a.createdAt - b.createdAt).slice(0, capacity)) {
+          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionPending: false, retentionRedactedAt: now, updatedAt: now }); deleted += 1;
+        }
+      } else if (phase.startsWith("correlations_")) {
+        const status = phase.slice("correlations_".length) as "issued" | "search_complete" | "chat_claimed" | "finalized";
+        const rows = await ctx.db.query("telemetryCorrelations").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(capacity);
+        for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
+      } else {
+        storageVisited = true;
+        const page = await ctx.db.system.query("_storage").order("asc").paginate({ numItems: capacity, cursor: storageCursor });
+        storageCursor = page.isDone ? null : page.continueCursor;
+        for (const blob of page.page) {
+          if (blob._creationTime >= now - DAY_MS || deleted >= RETENTION_LIMIT) continue;
+          const attached = await ctx.db.query("documentVersions").withIndex("by_originalStorageId", (q) => q.eq("originalStorageId", blob._id)).take(1);
+          const exportArtifact = await ctx.db.query("adminExports").withIndex("by_storageId", (q) => q.eq("storageId", blob._id)).take(1);
+          if (attached.length === 0 && exportArtifact.length === 0) { await ctx.storage.delete(blob._id); deleted += 1; }
+        }
+      }
+      if (deleted > before) {
+        cycleHadChanges = true;
+        if (phase === "storage") storagePassHadChanges = true;
+      }
+      phaseIndex = (phaseIndex + 1) % RETENTION_PHASES.length;
+      if (phaseIndex === 0) {
+        if (storageCursor === null && !cycleHadChanges && !storagePassHadChanges) done = true;
+        else {
+          cycleHadChanges = false;
+          if (storageCursor === null) storagePassHadChanges = false;
+        }
       }
     }
 
-    let storageDone = false;
-    let storageCursor: string | null = state?.cursor ?? null;
-    if (deleted < RETENTION_LIMIT) {
-      const storagePage = await ctx.db.system.query("_storage").order("asc").paginate({ numItems: Math.min(RETENTION_SLICE, RETENTION_LIMIT - deleted), cursor: storageCursor });
-      storageCursor = storagePage.continueCursor;
-      storageDone = storagePage.isDone;
-      for (const blob of storagePage.page) {
-        if (blob._creationTime >= now - DAY_MS || deleted >= RETENTION_LIMIT) continue;
-        const attached = await ctx.db.query("documentVersions").withIndex("by_originalStorageId", (q) => q.eq("originalStorageId", blob._id)).take(1);
-        const exportArtifact = await ctx.db.query("adminExports").withIndex("by_storageId", (q) => q.eq("storageId", blob._id)).take(1);
-        if (attached.length === 0 && exportArtifact.length === 0) {
-          await ctx.storage.delete(blob._id); deleted += 1;
-        }
-      }
-    }
-
-    const hasExpiredGrant = (await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(1)).length > 0;
-    const hasOldRun = (await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(1)).length > 0;
-    const hasExpiredReference = (await ctx.db.query("exportDownloadReferences").withIndex("by_expiresAt", (q) => q.lt("expiresAt", now)).take(1)).length > 0;
-    let hasExpiredExport = false;
-    for (const status of ["queued", "ready", "failed", "expired"] as const) {
-      if ((await ctx.db.query("adminExports").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(1)).length > 0) { hasExpiredExport = true; break; }
-    }
-    let hasOldJobDetail = false;
-    for (const status of ["succeeded", "failed", "cancelled"] as const) {
-      const pending = await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", true).lt("createdAt", now - 90 * DAY_MS)).take(1);
-      const legacy = await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(1);
-      if (pending.length > 0 || legacy.length > 0) { hasOldJobDetail = true; break; }
-    }
-    const done = deleted < RETENTION_LIMIT && !hasExpiredGrant && !hasExpiredReference && !hasExpiredExport && !hasOldRun && !hasOldJobDetail && storageDone;
     const cursor = done ? null : `retention_${crypto.randomUUID().replaceAll("-", "")}`;
     const current = await ctx.db.get(stateId);
-    await ctx.db.patch(stateId, { phase: done ? "complete" : "records", cursor: storageDone ? undefined : storageCursor ?? undefined, deletedTotal: (current?.deletedTotal ?? 0) + deleted, lastStartedAt: current?.lastStartedAt ?? now, lastSuccessfulAt: done ? now : current?.lastSuccessfulAt, updatedAt: now });
+    await ctx.db.patch(stateId, { phase: done ? "complete" : RETENTION_PHASES[phaseIndex], cursor: storageCursor ?? undefined, cycleHadChanges: done ? false : cycleHadChanges, storagePassHadChanges: done ? false : storagePassHadChanges, deletedTotal: (current?.deletedTotal ?? 0) + deleted, lastStartedAt: state?.phase === "complete" ? now : (current?.lastStartedAt ?? now), lastSuccessfulAt: done ? now : current?.lastSuccessfulAt, updatedAt: now });
     await writeAudit(ctx, { actorId: "system", actorRoles: [], action: done ? "retention.batch_completed" : "retention.batch_continued", targetType: "retention", targetId: "default", reason: "Enforce configured data retention policy", afterSummary: JSON.stringify({ deleted, done }), outcome: "success" }, { actorType: "system", actorUserId: "system", metadata: {} });
     if (!done) await ctx.scheduler.runAfter(0, runRetentionBatchRef, { cursor });
     return { deleted, done, cursor };

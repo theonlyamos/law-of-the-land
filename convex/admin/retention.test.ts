@@ -178,6 +178,19 @@ describe("incidents and immutable timeline", () => {
 });
 
 describe("one-time conversation export references", () => {
+  it("stream-limits export reference bodies independently of Content-Length", async () => {
+    const t = createBackend();
+    const reference = `exp_${"z".repeat(64)}`;
+    const valid = JSON.stringify({ reference });
+    const oversized = `${valid}${" ".repeat(257 - valid.length)}`;
+    expect((await t.fetch("/admin/export-download", { method: "POST" })).status).toBe(400);
+    expect((await t.fetch("/admin/export-download", { method: "POST", body: oversized })).status).toBe(400);
+    expect((await t.fetch("/admin/export-download", { method: "POST", headers: { "content-length": "1" }, body: oversized })).status).toBe(400);
+    expect((await t.fetch("/admin/export-download", { method: "POST", body: `${valid}${" ".repeat(256 - valid.length)}` })).status).toBe(404);
+    expect((await t.fetch("/admin/export-download", { method: "POST", body: "{not-json" })).status).toBe(400);
+    expect((await t.fetch("/admin/export-download", { method: "POST", body: valid })).status).toBe(404);
+  });
+
   it("builds the queued export artifact asynchronously without placing content in audit", async () => {
     vi.useFakeTimers();
     const t = createBackend(); await enablePanel(t); const admin = await asAdmin(t, "support_agent");
@@ -295,6 +308,92 @@ describe("one-time conversation export references", () => {
 });
 
 describe("bounded retention", () => {
+  it("resumes the persisted phase across stale and concurrent continuation attempts", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const t = createBackend();
+    const old = Date.now() - 100 * 24 * 60 * 60_000;
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 90; index += 1) await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "operation", targetId: `concurrent_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `concurrent_${index}`, requestFingerprint: "{}", correlationId: `concurrent_${index}`, callbackTokenHash: "e".repeat(64), status: "failed", attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
+      await ctx.db.insert("retentionState", { key: "default", phase: "jobs_failed", cycleHadChanges: true, storagePassHadChanges: false, deletedTotal: 0, lastStartedAt: old, updatedAt: old });
+    });
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+
+    const [first, duplicate] = await Promise.all([
+      t.mutation(runRetentionBatch, { cursor: "stale_after_crash" }),
+      t.mutation(runRetentionBatch, { cursor: null }),
+    ]);
+    expect(first.deleted).toBeLessThanOrEqual(200);
+    expect(duplicate.deleted).toBeLessThanOrEqual(200);
+    let result = duplicate;
+    while (!result.done) result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+    const snapshot = await t.run(async (ctx) => ({ states: await ctx.db.query("retentionState").take(2), jobs: await ctx.db.query("integrationJobs").take(100) }));
+    expect(snapshot.states).toHaveLength(1);
+    expect(snapshot.jobs.every((job) => job.retentionPending === false && job.payload === "{}")).toBe(true);
+  });
+
+  it("round-robins every retention category while earlier backlogs are replenished and completes only after a clean cycle", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const t = createBackend();
+    const old = Date.now() - 100 * 24 * 60 * 60_000;
+    const fixture = await t.run(async (ctx) => {
+      const chatId = await ctx.db.insert("chatSessions", { userId: "retention_user", externalId: "retention-fairness", title: "Retention", lastMessage: "safe", messageCount: 0, updatedAt: old });
+      const grantId = await ctx.db.insert("adminAccessGrants", { adminId: "retention_admin", chatSessionId: chatId, purpose: "Expired retention fixture", issuedAt: old, expiresAt: old, correlationId: "retention_grant_anchor" });
+      for (let index = 0; index < 120; index += 1) {
+        await ctx.db.insert("adminAccessGrants", { adminId: "retention_admin", chatSessionId: chatId, purpose: "Replenished early backlog", issuedAt: old, expiresAt: old, correlationId: `retention_grant_${index}` });
+      }
+      for (const status of ["queued", "ready", "failed", "expired"] as const) {
+        for (let index = 0; index < 45; index += 1) {
+          const exportId = await ctx.db.insert("adminExports", { correlationId: `retention_export_${status}_${index}`, requesterId: "retention_admin", requesterSessionId: "retention_session", chatSessionId: chatId, accessGrantId: grantId, status, expiresAt: old, createdAt: old, updatedAt: old });
+          if (status === "queued") await ctx.db.insert("exportDownloadReferences", { exportId, requesterId: "retention_admin", referenceHash: `${status}_${index}`.padEnd(64, "a"), expiresAt: old, createdAt: old });
+        }
+      }
+      for (const status of ["issued", "search_complete", "chat_claimed", "finalized"] as const) {
+        for (let index = 0; index < 45; index += 1) await ctx.db.insert("telemetryCorrelations", { tokenHash: `${status}_${index}`.padEnd(64, "b"), ownerBinding: "owner", sessionBinding: "session", jurisdictionCode: "GH", status, issuedAt: old, expiresAt: old });
+      }
+      for (let index = 0; index < 45; index += 1) await ctx.db.insert("queryRuns", { correlationId: `retention_fair_run_${index}`, day: "2025-01-01", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 1, completedAt: old, rollupStatus: "processed", rolledUpAt: old });
+      for (const status of ["succeeded", "failed", "cancelled"] as const) {
+        for (let index = 0; index < 45; index += 1) await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "operation", targetId: `fair_${status}_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `fair_${status}_${index}`, requestFingerprint: "{}", correlationId: `fair_${status}_${index}`, callbackTokenHash: "c".repeat(64), status, attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
+      }
+      const orphanIds = [] as Id<"_storage">[];
+      for (let index = 0; index < 45; index += 1) orphanIds.push(await ctx.storage.store(new Blob([`orphan-${index}`])));
+      return { chatId, orphanIds };
+    });
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+
+    let result = await t.mutation(runRetentionBatch, { cursor: null });
+    expect(result.deleted).toBeLessThanOrEqual(200);
+    for (let invocation = 0; invocation < 2; invocation += 1) {
+      await t.run(async (ctx) => {
+        for (let index = 0; index < 120; index += 1) await ctx.db.insert("adminAccessGrants", { adminId: "retention_admin", chatSessionId: fixture.chatId, purpose: "Continuously replenished backlog", issuedAt: Date.now() - 100 * 24 * 60 * 60_000, expiresAt: Date.now() - 1, correlationId: `replenished_${invocation}_${index}` });
+      });
+      result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+      expect(result.deleted).toBeLessThanOrEqual(200);
+    }
+
+    const advanced = await t.run(async (ctx) => ({
+      correlations: await ctx.db.query("telemetryCorrelations").take(500),
+      jobs: await ctx.db.query("integrationJobs").take(500),
+      storage: await ctx.db.system.query("_storage").take(500),
+      state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(),
+    }));
+    expect(advanced.correlations.length).toBeLessThan(180);
+    expect(advanced.jobs.filter((job) => job.retentionPending === true).length).toBeLessThan(135);
+    expect(advanced.storage.length).toBeLessThan(45);
+    expect(advanced.state?.lastSuccessfulAt).toBeUndefined();
+
+    let invocations = 3;
+    while (!result.done && invocations < 80) {
+      result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+      expect(result.deleted).toBeLessThanOrEqual(200);
+      invocations += 1;
+    }
+    expect(result.done).toBe(true);
+    const drained = await t.run(async (ctx) => ({
+      grants: await ctx.db.query("adminAccessGrants").take(1), refs: await ctx.db.query("exportDownloadReferences").take(1), exports: await ctx.db.query("adminExports").take(1), correlations: await ctx.db.query("telemetryCorrelations").take(1), runs: await ctx.db.query("queryRuns").take(1), pendingJobs: await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", "failed").eq("retentionPending", true)).take(1), storage: await ctx.db.system.query("_storage").take(1), state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(),
+    }));
+    expect(drained).toMatchObject({ grants: [], refs: [], exports: [], correlations: [], runs: [], pendingJobs: [], storage: [], state: { phase: "complete", lastSuccessfulAt: Date.now() } });
+  }, 20_000);
+
   it("redacts more than 200 eligible jobs per terminal status across invocations and completes only after exhaustion", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const t = createBackend();
@@ -360,10 +459,15 @@ describe("bounded retention", () => {
       await ctx.db.insert("dailyMetrics", { day: "2025-01-01", jurisdictionCode: "GH", totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0, providerFailureCount: 0, noResultCount: 0, latencyLe250: 1, latencyLe500: 0, latencyLe1000: 0, latencyLe2500: 0, latencyLe5000: 0, latencyGt5000: 0, p50UpperBoundMs: 250, p95UpperBoundMs: 250, updatedAt: old });
     });
     vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
-    const first = await t.mutation(runRetentionBatch, { cursor: null });
-    expect(first).toMatchObject({ deleted: 200, done: false });
-    const second = await t.mutation(runRetentionBatch, { cursor: first.cursor });
-    expect(second.deleted).toBe(5);
+    let result = await t.mutation(runRetentionBatch, { cursor: null });
+    let deleted = result.deleted;
+    expect(result.deleted).toBeLessThanOrEqual(200);
+    while (!result.done) {
+      result = await t.mutation(runRetentionBatch, { cursor: result.cursor });
+      expect(result.deleted).toBeLessThanOrEqual(200);
+      deleted += result.deleted;
+    }
+    expect(deleted).toBe(205);
     expect(await t.run((ctx) => ctx.db.query("auditEvents").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "retention").eq("targetId", "protected_audit")).take(1))).toHaveLength(1);
     expect(await t.run((ctx) => ctx.db.query("dailyMetrics").take(2))).toHaveLength(1);
     const state = await t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique());

@@ -437,6 +437,8 @@ export default defineSchema({
     key: v.literal("default"),
     phase: v.string(),
     cursor: v.optional(v.string()),
+    cycleHadChanges: v.optional(v.boolean()),
+    storagePassHadChanges: v.optional(v.boolean()),
     deletedTotal: v.number(),
     lastStartedAt: v.number(),
     lastSuccessfulAt: v.optional(v.number()),

@@ -4,8 +4,15 @@ const mocks = vi.hoisted(() => ({ authorizeAdminPage: vi.fn(), fetchAuthQuery: v
 vi.mock("@/lib/admin/server", () => ({ authorizeAdminPage: mocks.authorizeAdminPage }));
 vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
 vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
-vi.mock("@/components/admin/incident-actions", () => ({ IncidentActions: () => <span>Incident details</span> }));
+vi.mock("convex/react", () => ({ useMutation: () => vi.fn(), usePaginatedQuery: () => ({ results: [], status: "Exhausted", loadMore: vi.fn() }) }));
 import IncidentsPage from "./page";
 beforeEach(() => { mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor", roles: ["auditor"] } }); mocks.fetchAuthQuery.mockResolvedValue({ page: [{ id: "inc-1", title: "Callback backlog", severity: "high", status: "investigating", ownerId: "admin_masked", createdAt: 1, updatedAt: 2 }], isDone: true, continueCursor: "" }); mocks.redirect.mockImplementation(() => { throw new Error("NEXT_REDIRECT"); }); });
 afterEach(cleanup);
-describe("incidents register", () => { it("renders bounded severity and status filters", async () => { render(await IncidentsPage({ searchParams: Promise.resolve({ status: "investigating" }) })); expect(screen.getByRole("heading", { name: "Incidents" })).toBeVisible(); expect(screen.getByRole("table", { name: "System incidents" })).toBeVisible(); expect(screen.getByLabelText("Status")).toHaveValue("investigating"); }); });
+describe("incidents register", () => {
+  it("renders bounded severity and status filters", async () => { render(await IncidentsPage({ searchParams: Promise.resolve({ status: "investigating" }) })); expect(screen.getByRole("heading", { name: "Incidents" })).toBeVisible(); expect(screen.getByRole("table", { name: "System incidents" })).toBeVisible(); expect(screen.getByLabelText("Status")).toHaveValue("investigating"); });
+  it("shows the create-incident form only to administrators with write permission", async () => {
+    mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "root", roles: ["super_admin"] } });
+    render(await IncidentsPage({ searchParams: Promise.resolve({}) }));
+    expect(screen.getByRole("heading", { name: "Open incident" })).toBeVisible();
+  });
+});

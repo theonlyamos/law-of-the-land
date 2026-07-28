@@ -204,4 +204,48 @@ describe("conversation viewer", () => {
     await screen.findByRole("heading", { name: "Finding" });
     expect(screen.queryByRole("button", { name: "Prepare export" })).toBeNull();
   });
+
+  it("retries a non-consuming proxy failure with the same in-memory reference and never exposes the token", async () => {
+    const reference = `exp_${"r".repeat(64)}`;
+    convex.exportStatus = { status: "ready", expiresAt: 1_900_000_900_000 };
+    convex.issueExport.mockResolvedValue({ reference, expiresAt: 1_900_000_900_000 });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValueOnce({ ok: true, status: 200, blob: async () => new Blob(["export"]) });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:export"), revokeObjectURL: vi.fn() }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    localStorage.clear(); sessionStorage.clear();
+    renderViewer();
+    fireEvent.change(screen.getByLabelText("Purpose for access"), { target: { value: "Ticket 42 investigation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    await screen.findByRole("heading", { name: "Finding" });
+    fireEvent.click(screen.getByRole("button", { name: "Prepare export" }));
+    fireEvent.change(screen.getByLabelText("Reason for export"), { target: { value: "Attach transcript to ticket 42" } });
+    fireEvent.change(screen.getByLabelText("Exact export confirmation"), { target: { value: "EXPORT chat_42" } });
+    fireEvent.change(screen.getByLabelText("Confirm your password"), { target: { value: "private-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Queue conversation export" }));
+    const download = await screen.findByRole("button", { name: "Download once" });
+
+    fireEvent.click(download);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(convex.issueExport).toHaveBeenCalledTimes(1);
+    fireEvent.click(download);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    expect(convex.issueExport).toHaveBeenCalledTimes(1);
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    const retryBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    expect(firstBody.reference).toBe(reference);
+    expect(retryBody.reference).toBe(reference);
+    expect(document.body.textContent).not.toContain(reference);
+    expect(JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } })).not.toContain(reference);
+    expect(JSON.stringify([...log.mock.calls, ...warn.mock.calls, ...error.mock.calls])).not.toContain(reference);
+    expect(click).toHaveBeenCalledTimes(1);
+    click.mockRestore(); log.mockRestore(); warn.mockRestore(); error.mockRestore();
+  });
 });
