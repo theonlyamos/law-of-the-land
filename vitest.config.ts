@@ -15,6 +15,9 @@ export default defineConfig({
           name: "convex",
           environment: "edge-runtime",
           include: ["convex/**/*.test.ts"],
+          // Leave headroom for transactional setup when all project files run
+          // concurrently on a constrained CI worker.
+          testTimeout: 10_000,
         },
       }),
       defineProject({
@@ -29,6 +32,7 @@ export default defineConfig({
           environment: "jsdom",
           include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
           setupFiles: ["./vitest.setup.ts"],
+          testTimeout: 10_000,
         },
       }),
     ],
