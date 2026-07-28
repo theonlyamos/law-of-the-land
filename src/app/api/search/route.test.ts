@@ -100,4 +100,24 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
     expect(groundxMocks.searchContent).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["above the JavaScript safe integer limit", "9007199254740992"],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["decimal", "12.5"],
+    ["non-digit", "bucket-1"],
+  ])("rejects a %s production bucket before quota or GroundX", async (_case, bucket) => {
+    authMocks.fetchAuthQuery.mockResolvedValue({
+      ...gh,
+      productionBucketId: bucket,
+    });
+
+    const response = await POST(request({ query: "Question", country: "GH" }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "That country is not supported yet." });
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
 });

@@ -28,7 +28,8 @@ export default defineSchema({
     .index("by_code", ["code"])
     .index("by_slug", ["slug"])
     .index("by_status_and_name", ["status", "name"])
-    .index("by_isDefault", ["isDefault"]),
+    .index("by_isDefault", ["isDefault"])
+    .index("by_isDefault_and_status", ["isDefault", "status"]),
   legalResources: defineTable({
     jurisdictionId: v.id("jurisdictions"),
     type: v.union(

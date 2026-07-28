@@ -46,12 +46,22 @@ async function assertGhanaSeedConflicts(
   ctx: MutationCtx,
   existingId?: Id<"jurisdictions">,
 ) {
-  const activeDefaults = await ctx.db
-    .query("jurisdictions")
-    .withIndex("by_isDefault", (q) => q.eq("isDefault", true))
-    .take(2);
+  const [draftDefaults, enabledDefaults] = await Promise.all([
+    ctx.db
+      .query("jurisdictions")
+      .withIndex("by_isDefault_and_status", (q) =>
+        q.eq("isDefault", true).eq("status", "draft"),
+      )
+      .take(2),
+    ctx.db
+      .query("jurisdictions")
+      .withIndex("by_isDefault_and_status", (q) =>
+        q.eq("isDefault", true).eq("status", "enabled"),
+      )
+      .take(2),
+  ]);
   if (
-    activeDefaults.some(
+    [...draftDefaults, ...enabledDefaults].some(
       (row) => row._id !== existingId && row.status !== "archived",
     )
   ) {

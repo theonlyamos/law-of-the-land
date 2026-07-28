@@ -226,6 +226,75 @@ describe("Ghana governed jurisdiction migration", () => {
     expect(after.audits).toHaveLength(0);
   });
 
+  it("finds an active default even when older archived defaults fill the first bounded page", async () => {
+    const t = convexTest(schema, modules);
+    const before = await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const code of ["AA", "BB"]) {
+        await ctx.db.insert("jurisdictions", {
+          code,
+          name: `Archived ${code}`,
+          slug: `archived-${code.toLowerCase()}`,
+          status: "archived",
+          isDefault: true,
+          providerSyncState: "synced",
+          createdBy: "legacy-migration",
+          updatedBy: "legacy-migration",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      const activeDefaultId = await ctx.db.insert("jurisdictions", {
+        code: "NG",
+        name: "Nigeria",
+        slug: "nigeria",
+        status: "enabled",
+        isDefault: true,
+        productionBucketId: "ng-production",
+        providerSyncState: "synced",
+        createdBy: "user-1",
+        updatedBy: "user-1",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const ghId = await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        name: "User Ghana",
+        slug: "user-ghana",
+        status: "draft",
+        isDefault: false,
+        stagingBucketId: "user-staging",
+        providerSyncState: "pending",
+        createdBy: "user-2",
+        updatedBy: "user-2",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return {
+        ghId,
+        activeDefaultId,
+        gh: await ctx.db.get("jurisdictions", ghId),
+        activeDefault: await ctx.db.get("jurisdictions", activeDefaultId),
+      };
+    });
+
+    await expect(t.mutation(seedGhanaJurisdiction, {})).rejects.toThrow(
+      "GHANA_SEED_DEFAULT_CONFLICT",
+    );
+
+    const after = await t.run(async (ctx) => ({
+      gh: await ctx.db.get("jurisdictions", before.ghId),
+      activeDefault: await ctx.db.get(
+        "jurisdictions",
+        before.activeDefaultId,
+      ),
+      audits: await ctx.db.query("auditEvents").take(5),
+    }));
+    expect(after.gh).toEqual(before.gh);
+    expect(after.activeDefault).toEqual(before.activeDefault);
+    expect(after.audits).toHaveLength(0);
+  });
+
   it("fails closed when duplicate Ghana codes make the migration target ambiguous", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {

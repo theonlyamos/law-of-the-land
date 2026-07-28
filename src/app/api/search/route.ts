@@ -53,10 +53,14 @@ export async function POST(request: Request) {
             { code: countryCode }
         )
         const productionBucketId = jurisdiction?.productionBucketId?.trim()
+        const productionBucket =
+            productionBucketId && /^\d+$/.test(productionBucketId)
+                ? Number(productionBucketId)
+                : Number.NaN
         if (
             jurisdiction?.enabled !== true ||
-            !productionBucketId ||
-            !/^\d+$/.test(productionBucketId)
+            !Number.isSafeInteger(productionBucket) ||
+            productionBucket <= 0
         ) {
             return NextResponse.json(
                 { error: "That country is not supported yet." },
@@ -88,7 +92,7 @@ export async function POST(request: Request) {
         })
 
         const response = await groundx.search.content({
-            id: Number(productionBucketId),
+            id: productionBucket,
             query
         })
 
