@@ -1,0 +1,226 @@
+import { makeSignature } from "better-auth/crypto";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
+const FIXED_ROLES = [
+  "super_admin",
+  "content_manager",
+  "content_reviewer",
+  "support_agent",
+  "billing_manager",
+  "auditor",
+] as const;
+
+type FixedRole = (typeof FIXED_ROLES)[number];
+type Environment = Record<string, string | undefined>;
+type RequestFunction = (url: string, init: RequestInit) => Promise<Response>;
+
+export type AdminE2ETarget = {
+  environment: "test" | "preview";
+  convexUrl: string;
+  convexSiteUrl: string;
+  fixtureSecret: string;
+  betterAuthSecret: string;
+  accountPassword: string;
+};
+
+export type FixtureManifest = {
+  version: 1;
+  tag: string;
+  convexUrl: string;
+  convexSiteUrl: string;
+  sessions: Partial<Record<FixedRole, string>>;
+  variants: {
+    normal: { userId: string; cookie: string };
+    noTwoFactor: { userId: string; cookie: string };
+    unassured: { userId: string; cookie: string };
+  };
+  records: Record<string, unknown>;
+};
+
+type BootstrapResponse = {
+  tag: string;
+  sessions: Record<FixedRole, { userId: string; sessionToken: string }>;
+  variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
+  records: Record<string, unknown>;
+};
+
+function required(environment: Environment, key: string): string {
+  const value = environment[key]?.trim();
+  if (!value) throw new Error(`${key} is required for admin E2E fixtures.`);
+  return value;
+}
+
+function parsedEndpoint(value: string, key: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${key} must be an absolute HTTP(S) URL.`);
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error(`${key} must be a credential-free HTTP(S) origin.`);
+  }
+  return url;
+}
+
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "::1" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+function productionLooking(url: URL): boolean {
+  return /(?:^|[.-])(?:prod|production|live)(?:[.-]|$)/i.test(url.hostname);
+}
+
+function remoteDeploymentName(url: URL, suffix: string): string | null {
+  return url.hostname.endsWith(suffix) ? url.hostname.slice(0, -suffix.length) : null;
+}
+
+export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget {
+  if (environment.ADMIN_E2E_FIXTURE_MODE !== "true") {
+    throw new Error("Admin E2E fixture mode requires ADMIN_E2E_FIXTURE_MODE=true.");
+  }
+  const targetEnvironment = environment.ADMIN_E2E_TARGET_ENV;
+  if (targetEnvironment !== "test" && targetEnvironment !== "preview") {
+    throw new Error("ADMIN_E2E_TARGET_ENV must name the test or preview target environment.");
+  }
+  if (environment.ADMIN_E2E_ISOLATED_TARGET_MARKER !== "isolated-admin-e2e") {
+    throw new Error("ADMIN_E2E_ISOLATED_TARGET_MARKER must confirm the isolated target marker.");
+  }
+  if (/^prod(?:uction)?:/i.test(environment.CONVEX_DEPLOYMENT ?? "")) {
+    throw new Error("Admin E2E fixtures refuse a production Convex deployment.");
+  }
+
+  // Never consult NEXT_PUBLIC_CONVEX_* here: a developer shell may contain a
+  // live app target. Fixture endpoints must always be separately explicit.
+  const convexUrlValue = required(environment, "ADMIN_E2E_CONVEX_URL");
+  const convexSiteUrlValue = required(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrl = parsedEndpoint(convexUrlValue, "ADMIN_E2E_CONVEX_URL");
+  const convexSiteUrl = parsedEndpoint(convexSiteUrlValue, "ADMIN_E2E_CONVEX_SITE_URL");
+  const localBackend = isLocalhost(convexUrl.hostname);
+  const localSite = isLocalhost(convexSiteUrl.hostname);
+  if (localBackend !== localSite) {
+    throw new Error("Admin E2E Convex URLs must address the same isolated deployment.");
+  }
+  if (!localBackend) {
+    if (convexUrl.protocol !== "https:" || convexSiteUrl.protocol !== "https:") {
+      throw new Error("Remote admin E2E targets must use HTTPS.");
+    }
+    if (productionLooking(convexUrl) || productionLooking(convexSiteUrl)) {
+      throw new Error("Admin E2E fixtures refuse production-looking target URLs.");
+    }
+    const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
+    const siteName = remoteDeploymentName(convexSiteUrl, ".convex.site");
+    if (!backendName || backendName !== siteName) {
+      throw new Error("Admin E2E Convex URLs must address the same isolated deployment.");
+    }
+  }
+  const fixtureSecret = required(environment, "ADMIN_E2E_FIXTURE_SECRET");
+  const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");
+  const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
+  if (fixtureSecret.length < 32 || betterAuthSecret.length < 32) {
+    throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
+  }
+  if (accountPassword.length < 12) throw new Error("ADMIN_E2E_ACCOUNT_PASSWORD must be at least 12 characters.");
+  return {
+    environment: targetEnvironment,
+    convexUrl: convexUrl.origin,
+    convexSiteUrl: convexSiteUrl.origin,
+    fixtureSecret,
+    betterAuthSecret,
+    accountPassword,
+  };
+}
+
+async function responseJson<T>(response: Response, operation: string): Promise<T> {
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 512);
+    throw new Error(`Admin E2E fixture ${operation} failed (${response.status}): ${detail}`);
+  }
+  return await response.json() as T;
+}
+
+function authorizationHeaders(secret: string) {
+  return { authorization: `Bearer ${secret}`, "content-type": "application/json" };
+}
+
+export async function bootstrapAdminFixtures(options: {
+  environment: Environment;
+  fixtureTag: string;
+  manifestPath: string;
+  request?: RequestFunction;
+}): Promise<FixtureManifest> {
+  const target = resolveAdminE2ETarget(options.environment);
+  const request = options.request ?? fetch;
+  const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/bootstrap`, {
+    method: "POST",
+    headers: authorizationHeaders(target.fixtureSecret),
+    body: JSON.stringify({ tag: options.fixtureTag }),
+  });
+  const payload = await responseJson<BootstrapResponse>(response, "bootstrap");
+  if (payload.tag !== options.fixtureTag) throw new Error("Admin E2E bootstrap returned a mismatched fixture tag.");
+  const sessions: Partial<Record<FixedRole, string>> = {};
+  for (const role of FIXED_ROLES) {
+    const token = payload.sessions?.[role]?.sessionToken;
+    if (!token) throw new Error(`Admin E2E bootstrap omitted the ${role} session token.`);
+    sessions[role] = `better-auth.session_token=${token}.${await makeSignature(token, target.betterAuthSecret)}`;
+  }
+  const variants = {} as FixtureManifest["variants"];
+  for (const variant of ["normal", "noTwoFactor", "unassured"] as const) {
+    const value = payload.variants?.[variant];
+    if (!value?.userId || !value.sessionToken) throw new Error(`Admin E2E bootstrap omitted the ${variant} variant session.`);
+    variants[variant] = {
+      userId: value.userId,
+      cookie: `better-auth.session_token=${value.sessionToken}.${await makeSignature(value.sessionToken, target.betterAuthSecret)}`,
+    };
+  }
+  const manifest: FixtureManifest = {
+    version: 1,
+    tag: payload.tag,
+    convexUrl: target.convexUrl,
+    convexSiteUrl: target.convexSiteUrl,
+    sessions,
+    variants,
+    records: payload.records,
+  };
+  await mkdir(dirname(options.manifestPath), { recursive: true, mode: 0o700 });
+  await writeFile(options.manifestPath, JSON.stringify(manifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await chmod(options.manifestPath, 0o600);
+  return manifest;
+}
+
+export async function cleanupAdminFixtures(options: {
+  environment: Environment;
+  manifestPath: string;
+  request?: RequestFunction;
+}): Promise<void> {
+  const request = options.request ?? fetch;
+  try {
+    const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureManifest;
+    const target = resolveAdminE2ETarget(options.environment);
+    if (manifest.convexSiteUrl !== target.convexSiteUrl) {
+      throw new Error("Admin E2E manifest target does not match the guarded cleanup target.");
+    }
+    const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
+      method: "DELETE",
+      headers: authorizationHeaders(target.fixtureSecret),
+      body: JSON.stringify({ tag: manifest.tag }),
+    });
+    const payload = await responseJson<{ tag: string; deleted: number }>(response, "cleanup");
+    if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
+    if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
+      throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+    }
+  } finally {
+    await rm(options.manifestPath, { force: true });
+  }
+}
+
+export function createFixtureTag(): string {
+  return `e2e_${Date.now().toString(36)}${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+}
+
+export function defaultManifestPath(): string {
+  return join(tmpdir(), `law-of-the-land-admin-e2e-${process.pid}-${crypto.randomUUID()}.json`);
+}

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 
@@ -27,11 +28,48 @@ export const RESOURCE_FIXTURES = {
 
 type FixedAdminRole = Exclude<(typeof ROLE_FIXTURES)[number]["role"], "user">;
 
+export type BrowserFixtureManifest = {
+  tag: string;
+  convexUrl: string;
+  convexSiteUrl: string;
+  sessions: Record<FixedAdminRole, string>;
+  variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; cookie: string }>;
+  records: Record<string, string>;
+};
+
+export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManifest> {
+  const manifestPath = process.env.ADMIN_E2E_SESSION_MANIFEST;
+  if (!manifestPath) throw new Error("Guarded admin E2E global setup did not publish a session manifest.");
+  return JSON.parse(await readFile(manifestPath, "utf8")) as BrowserFixtureManifest;
+}
+
+export async function controlBrowserFixtures(
+  fixture: BrowserFixtureManifest,
+  operation: "publication_failed" | "publication_succeeded" | "expire_conversation_grant" | "run_retention" | "read_state",
+  versionId?: string,
+) {
+  const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
+  if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
+  const response = await fetch(`${fixture.convexSiteUrl}/admin/e2e-fixtures/control`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+    body: JSON.stringify({ tag: fixture.tag, operation, ...(versionId ? { versionId } : {}) }),
+  });
+  if (!response.ok) throw new Error(`Guarded fixture control failed (${response.status}).`);
+  return await response.json() as {
+    activeVersionId: string | null;
+    versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
+    grantActive: boolean;
+    retention: { deletedTotal: number; lastSuccessfulAt: number | null };
+    callbackJob: null | { status: string; payload: string; retentionRedactedAt: number | null };
+  };
+}
+
 function roleSessionCookies(): Partial<Record<FixedAdminRole, string>> {
   const raw = process.env.ADMIN_E2E_ROLE_SESSIONS_JSON;
   if (!raw) {
     throw new Error(
-      "Authenticated admin browser acceptance requires ADMIN_E2E_ROLE_SESSIONS_JSON: a JSON object mapping every fixed role to a locally pre-provisioned assured Better Auth cookie (name=value). A non-production fixture bootstrap was not available, so this gate fails closed instead of skipping.",
+      "Authenticated admin browser acceptance requires the guarded global fixture bootstrap to provide ADMIN_E2E_ROLE_SESSIONS_JSON. Set the explicit ADMIN_E2E fixture target variables; this gate fails closed instead of using an inherited app deployment.",
     );
   }
   try {
@@ -41,21 +79,15 @@ function roleSessionCookies(): Partial<Record<FixedAdminRole, string>> {
   }
 }
 
-export async function openAuthenticatedRolePage(
-  context: BrowserContext,
-  page: Page,
-  role: FixedAdminRole,
-  pathname: string,
-  heading: string,
-) {
+export function roleCookie(role: FixedAdminRole) {
   const cookie = roleSessionCookies()[role];
-  if (!cookie) {
-    throw new Error(
-      `ADMIN_E2E_ROLE_SESSIONS_JSON is missing the ${role} assured-session cookie.`,
-    );
-  }
+  if (!cookie) throw new Error(`ADMIN_E2E_ROLE_SESSIONS_JSON is missing the ${role} assured-session cookie.`);
+  return cookie;
+}
+
+export async function installSessionCookie(context: BrowserContext, cookie: string) {
   const separator = cookie.indexOf("=");
-  if (separator < 1) throw new Error(`${role} fixture cookie must use name=value format.`);
+  if (separator < 1) throw new Error("Fixture cookie must use name=value format.");
   await context.clearCookies();
   await context.addCookies([{
     name: cookie.slice(0, separator),
@@ -65,6 +97,17 @@ export async function openAuthenticatedRolePage(
     httpOnly: true,
     sameSite: "Lax",
   }]);
+}
+
+export async function openAuthenticatedRolePage(
+  context: BrowserContext,
+  page: Page,
+  role: FixedAdminRole,
+  pathname: string,
+  heading: string,
+) {
+  const cookie = roleCookie(role);
+  await installSessionCookie(context, cookie);
   await page.goto(pathname);
   await expect(page).toHaveURL(new RegExp(`${pathname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
   await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
@@ -105,6 +148,14 @@ export async function runAcceptanceSlice(
 
   const files = [...slice.convex, ...(slice.ui ?? [])];
   const vitest = path.resolve("node_modules/vitest/vitest.mjs");
+  const {
+    ADMIN_E2E_ROLE_SESSIONS_JSON: _roleSessions,
+    ADMIN_E2E_SESSION_MANIFEST: _sessionManifest,
+    ADMIN_E2E_FIXTURE_SECRET: _fixtureSecret,
+    ADMIN_E2E_BETTER_AUTH_SECRET: _authSecret,
+    ADMIN_E2E_ACCOUNT_PASSWORD: _accountPassword,
+    ...safeEnvironment
+  } = process.env;
   const result = spawnSync(
     process.execPath,
     [vitest, "run", "--reporter=verbose", ...files],
@@ -112,7 +163,7 @@ export async function runAcceptanceSlice(
       cwd: process.cwd(),
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...safeEnvironment,
         ADMIN_PANEL_ENABLED: "true",
         ADMIN_ENVIRONMENT: "test",
         BILLING_ENABLED: "true",

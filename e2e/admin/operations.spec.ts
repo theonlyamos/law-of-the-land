@@ -1,11 +1,29 @@
 import { test } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
+import { controlBrowserFixtures, loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
-test("pre-provisioned super administrator reaches operational controls", async ({ context, page }) => {
-  await openAuthenticatedRolePage(context, page, "super_admin", "/admin/operations", "Operations");
-  await expect(page.getByRole("link", { name: "Incidents" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Audit" })).toBeVisible();
+test("super administrator opens an incident and callback replay remains idempotent", async ({ context, page, request }) => {
+  const fixture = await loadBrowserFixtureManifest();
+  await openAuthenticatedRolePage(context, page, "super_admin", "/admin/incidents", "Incidents");
+  const title = `${fixture.tag} provider incident`;
+  await page.getByLabel("Incident title").fill(title);
+  await page.getByLabel("Initial severity").selectOption("high");
+  await page.getByLabel("Reason for opening incident").fill("Fixture provider response drill");
+  await page.getByRole("button", { name: "Open incident" }).click();
+  await expect(page.getByRole("status")).toContainText("Incident opened");
+  await expect(page.getByRole("row").filter({ hasText: title })).toBeVisible();
+
+  const callback = `${fixture.convexSiteUrl}/groundx/callback/${fixture.records.callbackToken}`;
+  const body = { processId: `${fixture.tag}-process`, targetType: "e2e_fixture", targetId: fixture.tag, status: "complete" };
+  expect((await request.post(callback, { data: body })).status()).toBe(202);
+  expect((await request.post(callback, { data: body })).status()).toBe(202);
+
+  const retained = await controlBrowserFixtures(fixture, "run_retention");
+  expect(retained.retention.deletedTotal).toBeGreaterThan(0);
+  expect(retained.callbackJob).toMatchObject({ status: "succeeded", payload: "{}" });
+  expect(retained.callbackJob?.retentionRedactedAt).toEqual(expect.any(Number));
+  await page.goto("/admin/operations");
+  await expect(page.getByRole("region", { name: "Retention policy" })).toContainText("90 days");
 });
 
 test("callbacks, retries, incidents, exports, and retention remain bounded and idempotent", async ({}, testInfo) => {

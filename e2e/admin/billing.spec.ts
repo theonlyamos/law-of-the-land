@@ -1,11 +1,19 @@
 import { test } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
+import { loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
-test("pre-provisioned billing session reaches allowance controls without support tools", async ({ context, page }) => {
+test("billing manager grants a bounded fixture quota override through the UI", async ({ context, page }) => {
+  const fixture = await loadBrowserFixtureManifest();
   await openAuthenticatedRolePage(context, page, "billing_manager", "/admin/billing", "Billing");
-  await expect(page.getByRole("link", { name: "Billing" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Conversations" })).toHaveCount(0);
+  const row = page.getByRole("row").filter({ hasText: fixture.variants.normal.userId }).first();
+  await row.getByText("Adjust temporary allowance").click();
+  await row.getByLabel("Effective question limit").fill("25");
+  await row.getByLabel("Expires").fill(new Date(Date.now() + 24 * 60 * 60_000).toISOString().slice(0, 16));
+  await row.getByLabel("Reason").fill("Fixture allowance verification");
+  await row.getByRole("button", { name: "Grant temporary override" }).click();
+  await expect(row.getByText("Allowance updated.")).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("row").filter({ hasText: fixture.variants.normal.userId }).first()).toContainText("25");
 });
 
 test("billing roles apply bounded quota overrides without leaking secrets", async ({}, testInfo) => {

@@ -1,10 +1,20 @@
 import { test } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
+import { loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
-test("pre-provisioned support session reaches the accessible user register", async ({ context, page }) => {
-  await openAuthenticatedRolePage(context, page, "support_agent", "/admin/users", "Users");
-  await expect(page.getByRole("table", { name: "User directory" })).toBeVisible();
+test("super administrator suspends a fixture user and revokes its sessions through the UI", async ({ context, page }) => {
+  const fixture = await loadBrowserFixtureManifest();
+  const userId = fixture.variants.normal.userId;
+  await openAuthenticatedRolePage(context, page, "super_admin", `/admin/users/${userId}`, "normal E2E fixture");
+  await expect(page.getByText("Active", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Suspend user" }).click();
+  const dialog = page.getByRole("dialog", { name: "Suspend this user?" });
+  await dialog.getByLabel("Reason for this action").fill("Fixture account policy test");
+  await dialog.getByLabel("Exact confirmation").fill(`BAN ${userId}`);
+  await dialog.getByRole("button", { name: "Suspend user" }).click();
+  await expect(page.getByRole("status")).toContainText("administrative action completed");
+  await page.reload();
+  await expect(page.getByText("Suspended", { exact: true })).toBeVisible();
 });
 
 test("user support actions enforce permission, step-up, ban and session revocation", async ({}, testInfo) => {
