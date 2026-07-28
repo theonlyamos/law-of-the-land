@@ -427,8 +427,8 @@ export default defineSchema({
     .index("by_revokeOperationId", ["revokeOperationId"]),
   telemetryCorrelations: defineTable({
     tokenHash: v.string(),
-    ownerId: v.string(),
-    sessionId: v.string(),
+    ownerBinding: v.string(),
+    sessionBinding: v.string(),
     jurisdictionCode: v.string(),
     status: v.union(
       v.literal("issued"),
@@ -457,6 +457,7 @@ export default defineSchema({
       v.literal("aborted"),
     ),
     searchProviderStatus: v.union(
+      v.literal("skipped"),
       v.literal("success"),
       v.literal("no_result"),
       v.literal("failure"),
@@ -493,8 +494,8 @@ export default defineSchema({
     latencyLe5000: v.number(),
     latencyGt5000: v.number(),
     latencyHistogram: v.optional(v.array(v.number())),
-    p50LatencyMs: v.number(),
-    p95LatencyMs: v.number(),
+    p50UpperBoundMs: v.number(),
+    p95UpperBoundMs: v.number(),
     updatedAt: v.number(),
   })
     .index("by_day", ["day"])

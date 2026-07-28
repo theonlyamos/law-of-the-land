@@ -1,13 +1,26 @@
 "use client";
 
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { makeFunctionReference } from "convex/server";
+import { useQuery } from "convex/react";
 import type { AnalyticsMetric } from "./analytics-chart-plot";
 
 const AnalyticsChartPlot = lazy(() => import("./analytics-chart-plot"));
+const listDailyMetrics = makeFunctionReference<
+  "query",
+  { paginationOpts: { numItems: number; cursor: string | null }; jurisdictionCode: string | null; fromDay: string; toDay: string },
+  { page: AnalyticsMetric[]; isDone: boolean; continueCursor: string }
+>("admin/analytics:listDailyMetrics");
 
-export function AnalyticsCharts({ metrics }: { metrics: readonly AnalyticsMetric[] }) {
+export function AnalyticsCharts({ jurisdictionCode, fromDay, toDay }: { jurisdictionCode: string | null; fromDay: string; toDay: string }) {
   const section = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
+  const result = useQuery(
+    listDailyMetrics,
+    visible
+      ? { paginationOpts: { numItems: 50, cursor: null }, jurisdictionCode, fromDay, toDay }
+      : "skip",
+  );
 
   useEffect(() => {
     const node = section.current;
@@ -31,10 +44,12 @@ export function AnalyticsCharts({ metrics }: { metrics: readonly AnalyticsMetric
         <div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-800">Aggregate register</p><h2 id="analytics-trends-heading" className="mt-1 font-serif text-3xl font-semibold">Daily signal</h2></div>
         <p className="max-w-md text-sm leading-6 text-slate-700">UTC totals only. No questions, prompts, retrieved passages, answers, or provider messages enter this view.</p>
       </div>
-      {visible ? (
+      {visible && result ? (
         <Suspense fallback={<p role="status" className="min-h-52 py-10 text-sm text-slate-700">Preparing aggregate charts…</p>}>
-          <AnalyticsChartPlot metrics={metrics} />
+          <AnalyticsChartPlot metrics={result.page} />
         </Suspense>
+      ) : visible ? (
+        <p role="status" className="min-h-52 border-y border-dashed border-slate-400 py-10 text-sm text-slate-700">Loading aggregate chart data…</p>
       ) : (
         <p role="status" className="min-h-52 border-y border-dashed border-slate-400 py-10 text-sm text-slate-700">Charts load when this section enters view.</p>
       )}

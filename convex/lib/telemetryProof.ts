@@ -55,6 +55,13 @@ export async function createTelemetryServiceProof(
   );
 }
 
+export async function createTelemetryPrincipalBinding(
+  kind: "owner" | "session",
+  value: string,
+): Promise<string> {
+  return createTelemetryServiceProof(["principal-binding-v1", kind, value]);
+}
+
 export async function verifyTelemetryServiceProof(
   proof: string,
   parts: readonly (string | number)[],

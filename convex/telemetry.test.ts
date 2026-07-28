@@ -189,6 +189,25 @@ async function recordSearch(
   });
 }
 
+async function expectNoRawTelemetryPrincipals(
+  t: Backend,
+  forbidden: readonly string[],
+) {
+  const tables = await t.run(async (ctx) => ({
+    correlations: await ctx.db.query("telemetryCorrelations").take(50),
+    runs: await ctx.db.query("queryRuns").take(50),
+    metrics: await ctx.db.query("dailyMetrics").take(50),
+  }));
+  const serialized = JSON.stringify(tables);
+  for (const value of forbidden) expect(serialized).not.toContain(value);
+  for (const correlation of tables.correlations) {
+    expect(correlation).not.toHaveProperty("ownerId");
+    expect(correlation).not.toHaveProperty("sessionId");
+    expect(correlation).not.toHaveProperty("token");
+    expect(correlation).not.toHaveProperty("serviceProof");
+  }
+}
+
 const previous = {
   secret: process.env.TELEMETRY_INGEST_SECRET,
   panel: process.env.ADMIN_PANEL_ENABLED,
@@ -214,6 +233,7 @@ describe("privacy-bounded query telemetry", () => {
     const owner = await user(t, "owner");
     const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
     await issueFor(owner.client, token);
+    await expectNoRawTelemetryPrincipals(t, [owner.userId, owner.sessionId, token, SECRET]);
     await recordSearch(owner.client, token);
     const claimed = await owner.client.mutation(claim, {
       token,
@@ -244,6 +264,7 @@ describe("privacy-bounded query telemetry", () => {
       expect(runs[0]).not.toHaveProperty(forbidden);
     }
     expect(JSON.stringify(runs[0])).not.toContain(token);
+    await expectNoRawTelemetryPrincipals(t, [owner.userId, owner.sessionId, token, SECRET]);
   });
 
   it("rejects forged proofs, cross-user/session ownership, wrong jurisdiction, expiry, and replay", async () => {
@@ -294,6 +315,74 @@ describe("privacy-bounded query telemetry", () => {
     const runs = await t.run((ctx) => ctx.db.query("queryRuns").take(10));
     expect(runs).toHaveLength(2);
     expect(runs.map((row) => row.outcome).sort()).toEqual(["aborted", "failure"]);
+    expect(runs.find((row) => row.outcome === "failure")).toMatchObject({
+      searchProviderStatus: "failure",
+      generationProviderStatus: "skipped",
+    });
+    await expectNoRawTelemetryPrincipals(t, [owner.userId, owner.sessionId, failedToken, abandonedToken, SECRET]);
+  });
+
+  it("marks a pre-provider expiry as skipped and counts only explicit empty search outcomes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
+    const t = backend(); await jurisdiction(t); const owner = await user(t, "owner");
+    const issuedOnly = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const issued = await issueFor(owner.client, issuedOnly);
+    vi.setSystemTime(new Date(issued.expiresAt));
+    await owner.client.mutation(expire, { tokenHash: issued.correlationId });
+
+    const emptyToken = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await issueFor(owner.client, emptyToken);
+    await recordSearch(owner.client, emptyToken, "no_result");
+    const claimed = await owner.client.mutation(claim, { token: emptyToken, jurisdictionCode: "GH", serviceProof: await proof(["claim", emptyToken, "GH"]) });
+    await owner.client.mutation(finalize, { token: emptyToken, claimNonce: claimed.claimNonce, providerStatus: "success", latencyMs: 25, serviceProof: await proof(["finalize", emptyToken, claimed.claimNonce, "success", 25]) });
+
+    const zeroButSuccessful = await t.run((ctx) => ctx.db.insert("queryRuns", {
+      correlationId: "successful-zero-not-empty", day: "2026-07-28", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 0, completedAt: Date.now(), rollupStatus: "pending",
+    }));
+    expect(zeroButSuccessful).toBeDefined();
+    await t.mutation(rollup, { cursor: null });
+    const runs = await t.run((ctx) => ctx.db.query("queryRuns").take(10));
+    expect(runs.find((row) => row.correlationId === issued.correlationId)).toMatchObject({ outcome: "aborted", searchProviderStatus: "skipped", generationProviderStatus: "skipped" });
+    const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").take(2));
+    expect(metrics[0].noResultCount).toBe(1);
+    expect(metrics[0].providerFailureCount).toBe(0);
+    await expectNoRawTelemetryPrincipals(t, [owner.userId, owner.sessionId, issuedOnly, emptyToken, SECRET]);
+  });
+
+  it("replays an exact terminal result after a lost response and never overwrites races with expiry", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
+    const t = backend(); await jurisdiction(t); const owner = await user(t, "owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await issueFor(owner.client, token); await recordSearch(owner.client, token);
+    const claimed = await owner.client.mutation(claim, { token, jurisdictionCode: "GH", serviceProof: await proof(["claim", token, "GH"]) });
+    const args = { token, claimNonce: claimed.claimNonce, providerStatus: "success" as const, latencyMs: 42, serviceProof: await proof(["finalize", token, claimed.claimNonce, "success", 42]) };
+    const first = await owner.client.mutation(finalize, args);
+    expect(await owner.client.mutation(finalize, args)).toEqual(first);
+    await expect(owner.client.mutation(finalize, { ...args, latencyMs: 43, serviceProof: await proof(["finalize", token, claimed.claimNonce, "success", 43]) })).rejects.toThrow("TELEMETRY_CORRELATION_REPLAYED");
+    await owner.client.mutation(expire, { tokenHash: claimed.correlationId });
+    await owner.client.mutation(expire, { tokenHash: claimed.correlationId });
+    const runs = await t.run((ctx) => ctx.db.query("queryRuns").withIndex("by_correlationId", (q) => q.eq("correlationId", claimed.correlationId)).take(2));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ outcome: "success", generationLatencyMs: 42 });
+  });
+
+  it("serializes concurrent terminalization with expiry and keeps one stable outcome", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
+    const t = backend(); await jurisdiction(t); const owner = await user(t, "owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await issueFor(owner.client, token); await recordSearch(owner.client, token);
+    const claimed = await owner.client.mutation(claim, { token, jurisdictionCode: "GH", serviceProof: await proof(["claim", token, "GH"]) });
+    vi.setSystemTime(new Date(claimed.expiresAt));
+    const finalizeArgs = { token, claimNonce: claimed.claimNonce, providerStatus: "success" as const, latencyMs: 17, serviceProof: await proof(["finalize", token, claimed.claimNonce, "success", 17]) };
+    await Promise.allSettled([
+      owner.client.mutation(finalize, finalizeArgs),
+      owner.client.mutation(expire, { tokenHash: claimed.correlationId }),
+    ]);
+    await owner.client.mutation(expire, { tokenHash: claimed.correlationId });
+    const runs = await t.run((ctx) => ctx.db.query("queryRuns").withIndex("by_correlationId", (q) => q.eq("correlationId", claimed.correlationId)).take(2));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ outcome: "aborted", generationProviderStatus: "skipped" });
   });
 });
 
@@ -360,7 +449,7 @@ describe("daily telemetry rollups", () => {
     await t.mutation(rollup, { cursor: null });
     const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").withIndex("by_day", (q) => q.gte("day", "2026-07-28").lte("day", "2026-07-29")).take(3));
     expect(metrics.map((row) => [row.day, row.totalQuestions])).toEqual([["2026-07-28", 1], ["2026-07-29", 5]]);
-    expect(metrics[1]).toMatchObject({ p50LatencyMs: 1000, p95LatencyMs: 6000 });
+    expect(metrics[1]).toMatchObject({ p50UpperBoundMs: 1000, p95UpperBoundMs: 6000 });
   });
 });
 
@@ -373,13 +462,13 @@ describe("admin analytics", () => {
       await ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() });
       await ctx.db.insert("dailyMetrics", {
         day: "2026-07-28", jurisdictionCode: "GH", totalQuestions: 7, successCount: 6, failureCount: 1, abortedCount: 0, providerFailureCount: 1, noResultCount: 2,
-        latencyLe250: 1, latencyLe500: 2, latencyLe1000: 2, latencyLe2500: 1, latencyLe5000: 1, latencyGt5000: 0, p50LatencyMs: 1000, p95LatencyMs: 5000, updatedAt: Date.now(),
+        latencyLe250: 1, latencyLe500: 2, latencyLe1000: 2, latencyLe2500: 1, latencyLe5000: 1, latencyGt5000: 0, p50UpperBoundMs: 1000, p95UpperBoundMs: 5000, updatedAt: Date.now(),
       });
       await ctx.db.insert("queryRuns", { correlationId: "raw-run-must-not-leak", day: "2026-07-28", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 99, completedAt: Date.now(), rollupStatus: "pending" });
     });
     const asAuditor = await admin(t);
     const page = await asAuditor.query(list, { paginationOpts: { numItems: 1, cursor: null }, jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31" });
-    expect(page.page).toEqual([expect.objectContaining({ totalQuestions: 7, p95LatencyMs: 5000 })]);
+    expect(page.page).toEqual([expect.objectContaining({ totalQuestions: 7, p95UpperBoundMs: 5000 })]);
     expect(JSON.stringify(page)).not.toContain("raw-run-must-not-leak");
     await expect((await admin(t, "support_agent")).query(list, { paginationOpts: { numItems: 1, cursor: null }, jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31" })).rejects.toThrow("permission");
   });

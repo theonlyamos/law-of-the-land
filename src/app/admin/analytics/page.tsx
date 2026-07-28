@@ -16,8 +16,8 @@ type Metric = {
   abortedCount: number;
   providerFailureCount: number;
   noResultCount: number;
-  p50LatencyMs: number;
-  p95LatencyMs: number;
+  p50UpperBoundMs: number;
+  p95UpperBoundMs: number;
   updatedAt: number;
 };
 const listDailyMetrics = makeFunctionReference<
@@ -67,14 +67,15 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
       <button className="min-h-11 border-2 border-slate-800 bg-slate-900 px-5 font-semibold text-stone-50 hover:bg-amber-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700">Apply range</button>
     </form>
     {failed ? <p role="alert" className="mt-8 border border-red-800 bg-red-50 p-4 text-red-950">Aggregate metrics could not be loaded. Try a shorter range.</p> : null}
-    <dl className="mt-9 grid border-y-2 border-slate-700 sm:grid-cols-3 sm:divide-x sm:divide-slate-400">
-      {[['Questions', totals.questions], ['Provider failures', totals.failures], ['Empty results', totals.empty]].map(([label, value]) => <div key={label} className="px-4 py-5 first:pl-0"><dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-600">{label}</dt><dd className="mt-2 font-serif text-4xl font-semibold tabular-nums">{Number(value).toLocaleString("en-US")}</dd></div>)}
+    <p className="mt-9 text-xs font-semibold uppercase tracking-[0.16em] text-slate-600">Current cursor page totals</p>
+    <dl className="mt-2 grid border-y-2 border-slate-700 sm:grid-cols-3 sm:divide-x sm:divide-slate-400">
+      {[['Questions on this page', totals.questions], ['Provider failures on this page', totals.failures], ['Empty results on this page', totals.empty]].map(([label, value]) => <div key={label} className="px-4 py-5 first:pl-0"><dt className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-600">{label}</dt><dd className="mt-2 font-serif text-4xl font-semibold tabular-nums">{Number(value).toLocaleString("en-US")}</dd></div>)}
     </dl>
-    <AnalyticsCharts metrics={metrics.page} />
+    <AnalyticsCharts jurisdictionCode={jurisdictionCode} fromDay={fromDay} toDay={toDay} />
     <section className="mt-14" aria-labelledby="daily-register-heading">
       <h2 id="daily-register-heading" className="font-serif text-3xl font-semibold">Daily register</h2>
       <p className="mt-2 text-sm text-slate-700">Supporting rows are cursor-paginated; each figure comes from the aggregate table.</p>
-      <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[58rem] border-collapse text-left text-sm"><thead><tr className="border-y-2 border-slate-700"><th className="p-3">UTC day</th><th className="p-3">Jurisdiction</th><th className="p-3">Questions</th><th className="p-3">Provider failures</th><th className="p-3">Empty results</th><th className="p-3">p50</th><th className="p-3">p95</th></tr></thead><tbody>{metrics.page.map((row) => <tr key={row.id} className="border-b border-slate-300"><td className="p-3 font-semibold"><time dateTime={row.day}>{row.day}</time></td><td className="p-3">{row.jurisdictionCode}</td><td className="p-3 tabular-nums">{row.totalQuestions}</td><td className="p-3 tabular-nums">{row.providerFailureCount}</td><td className="p-3 tabular-nums">{row.noResultCount}</td><td className="p-3 tabular-nums">{row.p50LatencyMs} ms</td><td className="p-3 tabular-nums">{row.p95LatencyMs} ms</td></tr>)}</tbody></table></div>
+      <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[58rem] border-collapse text-left text-sm"><thead><tr className="border-y-2 border-slate-700"><th className="p-3">UTC day</th><th className="p-3">Jurisdiction</th><th className="p-3">Questions</th><th className="p-3">Provider failures</th><th className="p-3">Empty results</th><th className="p-3">p50 bound</th><th className="p-3">p95 bound</th></tr></thead><tbody>{metrics.page.map((row) => <tr key={row.id} className="border-b border-slate-300"><td className="p-3 font-semibold"><time dateTime={row.day}>{row.day}</time></td><td className="p-3">{row.jurisdictionCode}</td><td className="p-3 tabular-nums">{row.totalQuestions}</td><td className="p-3 tabular-nums">{row.providerFailureCount}</td><td className="p-3 tabular-nums">{row.noResultCount}</td><td className="p-3 tabular-nums">≤ {row.p50UpperBoundMs} ms</td><td className="p-3 tabular-nums">≤ {row.p95UpperBoundMs} ms</td></tr>)}</tbody></table></div>
       {!metrics.isDone ? <Link href={`/admin/analytics?${next.toString()}`} className="mt-4 inline-flex min-h-11 items-center font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">Next metrics page</Link> : null}
     </section>
   </div>;

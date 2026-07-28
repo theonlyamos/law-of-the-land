@@ -17,8 +17,8 @@ const metricProjection = v.object({
   abortedCount: v.number(),
   providerFailureCount: v.number(),
   noResultCount: v.number(),
-  p50LatencyMs: v.number(),
-  p95LatencyMs: v.number(),
+  p50UpperBoundMs: v.number(),
+  p95UpperBoundMs: v.number(),
   updatedAt: v.number(),
 });
 
@@ -47,8 +47,8 @@ function project(row: Doc<"dailyMetrics">) {
     abortedCount: row.abortedCount,
     providerFailureCount: row.providerFailureCount,
     noResultCount: row.noResultCount,
-    p50LatencyMs: row.p50LatencyMs,
-    p95LatencyMs: row.p95LatencyMs,
+    p50UpperBoundMs: row.p50UpperBoundMs,
+    p95UpperBoundMs: row.p95UpperBoundMs,
     updatedAt: row.updatedAt,
   };
 }

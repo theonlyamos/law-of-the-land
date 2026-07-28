@@ -9,6 +9,7 @@ import {
 } from "./_generated/server";
 import {
   createOpaqueTelemetryToken,
+  createTelemetryPrincipalBinding,
   hashOpaqueTelemetryValue,
   isOpaqueTelemetryToken,
   verifyTelemetryServiceProof,
@@ -79,7 +80,10 @@ async function requireOwner(ctx: MutationCtx) {
   if (!session || session.userId !== identity.subject) {
     throw new ConvexError("TELEMETRY_AUTH_REQUIRED");
   }
-  return { ownerId: identity.subject, sessionId: identity.sessionId };
+  return {
+    ownerBinding: await createTelemetryPrincipalBinding("owner", identity.tokenIdentifier),
+    sessionBinding: await createTelemetryPrincipalBinding("session", identity.sessionId),
+  };
 }
 
 async function correlationByToken(ctx: MutationCtx, token: string) {
@@ -99,9 +103,9 @@ async function correlationByToken(ctx: MutationCtx, token: string) {
 
 function requireCorrelationOwner(
   row: Doc<"telemetryCorrelations">,
-  owner: { ownerId: string; sessionId: string },
+  owner: { ownerBinding: string; sessionBinding: string },
 ) {
-  if (row.ownerId !== owner.ownerId || row.sessionId !== owner.sessionId) {
+  if (row.ownerBinding !== owner.ownerBinding || row.sessionBinding !== owner.sessionBinding) {
     throw new ConvexError("TELEMETRY_CORRELATION_FORBIDDEN");
   }
 }
@@ -124,7 +128,7 @@ async function recordTerminal(
   const completedAt = Date.now();
   const searchLatencyMs = row.searchLatencyMs ?? 0;
   const resultCount = row.resultCount ?? 0;
-  const searchProviderStatus = row.searchProviderStatus ?? "failure";
+  const searchProviderStatus = row.searchProviderStatus ?? "skipped";
   const id = await ctx.db.insert("queryRuns", {
     correlationId: row.tokenHash,
     day: new Date(completedAt).toISOString().slice(0, 10),
@@ -240,12 +244,26 @@ export const finalizeChatPhase = mutation({
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
-    if (row.status === "finalized" && Date.now() >= row.expiresAt) throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
-    if (row.status !== "chat_claimed") throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
-    if (Date.now() >= row.expiresAt) throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
     if (!isOpaqueTelemetryToken(args.claimNonce) || await hashOpaqueTelemetryValue(args.claimNonce) !== row.claimNonceHash) {
       throw new ConvexError("TELEMETRY_CLAIM_INVALID");
     }
+    if (row.status === "finalized") {
+      const existing = await ctx.db.query("queryRuns").withIndex("by_correlationId", (q) => q.eq("correlationId", row.tokenHash)).take(2);
+      if (existing.length === 1 && existing[0].outcome === "aborted" && Date.now() >= row.expiresAt) {
+        throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
+      }
+      if (
+        existing.length === 1 &&
+        existing[0].generationProviderStatus === args.providerStatus &&
+        existing[0].generationLatencyMs === latencyMs &&
+        existing[0].outcome === (args.providerStatus === "success" ? "success" : "failure")
+      ) {
+        return { status: "finalized" as const, correlationId: row.tokenHash };
+      }
+      throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
+    }
+    if (row.status !== "chat_claimed") throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
+    if (Date.now() >= row.expiresAt) throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
     await recordTerminal(ctx, row, {
       outcome: args.providerStatus === "success" ? "success" : "failure",
       generationProviderStatus: args.providerStatus,
@@ -334,7 +352,7 @@ export const rollupDailyMetrics = internalMutation({
         failureCount: (existing?.failureCount ?? 0) + group.filter((row) => row.outcome === "failure").length,
         abortedCount: (existing?.abortedCount ?? 0) + group.filter((row) => row.outcome === "aborted").length,
         providerFailureCount: (existing?.providerFailureCount ?? 0) + group.filter((row) => row.searchProviderStatus === "failure" || row.generationProviderStatus === "failure").length,
-        noResultCount: (existing?.noResultCount ?? 0) + group.filter((row) => row.searchProviderStatus === "no_result" || row.resultCount === 0).length,
+        noResultCount: (existing?.noResultCount ?? 0) + group.filter((row) => row.searchProviderStatus === "no_result").length,
         latencyLe250,
         latencyLe500,
         latencyLe1000,
@@ -342,8 +360,8 @@ export const rollupDailyMetrics = internalMutation({
         latencyLe5000,
         latencyGt5000,
         latencyHistogram: histogram,
-        p50LatencyMs: percentile(histogram, totalQuestions, 0.5),
-        p95LatencyMs: percentile(histogram, totalQuestions, 0.95),
+        p50UpperBoundMs: percentile(histogram, totalQuestions, 0.5),
+        p95UpperBoundMs: percentile(histogram, totalQuestions, 0.95),
         updatedAt: now,
       };
       if (existing) await ctx.db.replace(existing._id, value);
