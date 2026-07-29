@@ -1,6 +1,23 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PublicJurisdiction } from "@/lib/countries";
+
+const publicJurisdictions: PublicJurisdiction[] = [
+  {
+    code: "GH",
+    name: "Ghana",
+    slug: "ghana",
+    isDefault: true,
+  },
+  {
+    code: "NG",
+    name: "Nigeria",
+    slug: "nigeria",
+    isDefault: false,
+  },
+];
+
 const mocks = vi.hoisted(() => ({
   replace: vi.fn(),
   push: vi.fn(),
@@ -36,24 +53,7 @@ beforeEach(() => {
   mocks.sessions = [];
   mocks.sessionsStatus = "Exhausted";
   vi.stubGlobal("crypto", { randomUUID: () => "new-chat" });
-  mocks.useQuery.mockReturnValue([
-    {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      enabled: true,
-      isDefault: true,
-      productionBucketId: "11833",
-    },
-    {
-      code: "NG",
-      name: "Nigeria",
-      slug: "nigeria",
-      enabled: true,
-      isDefault: false,
-      productionBucketId: "22001",
-    },
-  ]);
+  mocks.useQuery.mockReturnValue(publicJurisdictions);
 });
 
 afterEach(() => {
