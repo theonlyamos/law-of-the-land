@@ -14,6 +14,30 @@ const MAX_QUERY_LENGTH = 4000
 const REQUESTS_PER_MINUTE = 15
 const issueCorrelation = makeFunctionReference<"mutation">("telemetry:issueCorrelation")
 const recordSearchPhase = makeFunctionReference<"mutation">("telemetry:recordSearchPhase")
+const SEARCH_JURISDICTION_ENDPOINT = "/internal/search-jurisdiction"
+
+type SearchJurisdiction = {
+    enabled: true
+    productionBucketId: string
+} | null
+
+async function fetchSearchJurisdiction(code: string): Promise<SearchJurisdiction> {
+    const siteUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/$/, "")
+    const secret = process.env.SEARCH_JURISDICTION_SECRET
+    if (!siteUrl || !secret || secret.length < 32) {
+        throw new Error("Search jurisdiction transport is not configured")
+    }
+    const response = await fetch(`${siteUrl}${SEARCH_JURISDICTION_ENDPOINT}`, {
+        method: "POST",
+        headers: {
+            "content-type": "application/json",
+            "x-search-jurisdiction-secret": secret,
+        },
+        body: JSON.stringify({ code }),
+    })
+    if (!response.ok) throw new Error("Search jurisdiction transport failed")
+    return await response.json() as SearchJurisdiction
+}
 
 export async function POST(request: Request) {
     try {
@@ -53,7 +77,7 @@ export async function POST(request: Request) {
               ""
             : suppliedCountryCode
         const jurisdiction = /^[A-Z]{2}$/.test(countryCode)
-            ? await fetchAuthQuery(api.jurisdictions.getPublicByCode, { code: countryCode })
+            ? await fetchSearchJurisdiction(countryCode)
             : null
         const productionBucketId = jurisdiction?.productionBucketId?.trim()
         const productionBucket =

@@ -1,5 +1,6 @@
 import { httpRouter, makeFunctionReference } from "convex/server";
 import { httpAction } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { authComponent, createAuth } from "./auth";
 import { hashCallbackToken } from "./admin/jobs";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
@@ -14,6 +15,7 @@ polar.registerRoutes(http);
 
 const MAX_GROUNDX_CALLBACK_BYTES = 16_384;
 const MAX_EXPORT_REFERENCE_BYTES = 256;
+const MAX_SEARCH_JURISDICTION_BYTES = 64;
 const completeGroundxCallback = makeFunctionReference<"mutation">(
   "admin/jobs:completeGroundxCallback",
 );
@@ -23,6 +25,55 @@ const claimConversationExportReference = makeFunctionReference<"mutation">(
 const bootstrapE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:bootstrap");
 const cleanupE2eFixtures = makeFunctionReference<"mutation">("admin/e2eFixtures:cleanup");
 const controlE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:control");
+const getSearchJurisdiction = internal.jurisdictions.getPublicByCode;
+
+async function secretsMatch(left: string, right: string) {
+  const [leftHash, rightHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(left)),
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(right)),
+  ]);
+  const leftBytes = new Uint8Array(leftHash);
+  const rightBytes = new Uint8Array(rightHash);
+  let difference = 0;
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    difference |= leftBytes[index] ^ rightBytes[index];
+  }
+  return difference === 0;
+}
+
+async function authorizeSearchJurisdictionRequest(request: Request) {
+  const configured = process.env.SEARCH_JURISDICTION_SECRET;
+  const supplied = request.headers.get("x-search-jurisdiction-secret") ?? "";
+  if (!configured || configured.length < 32 || supplied.length < 32) return false;
+  return secretsMatch(configured, supplied);
+}
+
+async function readSearchJurisdictionCode(request: Request) {
+  const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTION_BYTES);
+  if (!bytes) return null;
+  try {
+    const code = (JSON.parse(new TextDecoder().decode(bytes)) as { code?: unknown }).code;
+    return typeof code === "string" && /^[A-Z]{2}$/.test(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+http.route({
+  path: "/internal/search-jurisdiction",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!(await authorizeSearchJurisdictionRequest(request))) {
+      return new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
+    }
+    const code = await readSearchJurisdictionCode(request);
+    if (!code) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
+    const jurisdiction = await ctx.runQuery(getSearchJurisdiction, { code });
+    return Response.json(jurisdiction, {
+      headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" },
+    });
+  }),
+});
 
 http.route({
   path: "/admin/export-download",

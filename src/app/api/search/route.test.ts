@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFunctionName } from "convex/server";
 
 const authMocks = vi.hoisted(() => ({
@@ -9,6 +9,10 @@ const authMocks = vi.hoisted(() => ({
 
 const groundxMocks = vi.hoisted(() => ({
   searchContent: vi.fn(),
+}));
+
+const searchJurisdictionMocks = vi.hoisted(() => ({
+  fetch: vi.fn(),
 }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
@@ -47,13 +51,21 @@ const gh = {
 describe("POST /api/search governed jurisdiction lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", searchJurisdictionMocks.fetch);
+    process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://law-test.convex.site";
+    process.env.SEARCH_JURISDICTION_SECRET = "route-search-secret-with-at-least-32-characters";
     process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
     authMocks.isAuthenticated.mockResolvedValue(true);
     authMocks.fetchAuthMutation.mockResolvedValue(undefined);
     authMocks.fetchAuthQuery.mockResolvedValue(gh);
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(gh)));
     groundxMocks.searchContent.mockResolvedValue({
       data: { search: { text: "governed answer" } },
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("uses the governed production bucket returned by Convex", async () => {
@@ -63,13 +75,19 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     const payload = await response.json();
     expect(payload).toMatchObject({ result: "governed answer", jurisdictionCode: "GH" });
     expect(payload.correlationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(authMocks.fetchAuthQuery).toHaveBeenCalledWith(
-      expect.anything(),
-      { code: "GH" },
+    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
+    expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
+      "https://law-test.convex.site/internal/search-jurisdiction",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-search-jurisdiction-secret": "route-search-secret-with-at-least-32-characters",
+        },
+        body: JSON.stringify({ code: "GH" }),
+      },
     );
-    expect(getFunctionName(authMocks.fetchAuthQuery.mock.calls[0][0])).toBe(
-      "jurisdictions:getPublicByCode",
-    );
+    expect(JSON.stringify(payload)).not.toContain("11833");
     expect(groundxMocks.searchContent).toHaveBeenCalledWith({
       id: 11833,
       query: "What is the law?",
@@ -112,6 +130,7 @@ describe("POST /api/search governed jurisdiction lookup", () => {
         ? [publicNigeria]
         : nigeria,
     );
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(nigeria)));
 
     const response = await POST(request({ query: "What is the law?" }));
 
@@ -119,11 +138,11 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     expect(await response.json()).toMatchObject({ jurisdictionCode: "NG" });
     expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) =>
       getFunctionName(reference),
-    )).toEqual([
-      "jurisdictions:listPublicEnabled",
-      "jurisdictions:getPublicByCode",
-    ]);
-    expect(authMocks.fetchAuthQuery.mock.calls[1][1]).toEqual({ code: "NG" });
+    )).toEqual(["jurisdictions:listPublicEnabled"]);
+    expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
+      "https://law-test.convex.site/internal/search-jurisdiction",
+      expect.objectContaining({ body: JSON.stringify({ code: "NG" }) }),
+    );
     expect(groundxMocks.searchContent).toHaveBeenCalledWith({
       id: 22001,
       query: "What is the law?",
@@ -164,19 +183,13 @@ describe("POST /api/search governed jurisdiction lookup", () => {
   });
 
   it("rejects an unknown jurisdiction before quota or GroundX calls", async () => {
-    authMocks.fetchAuthQuery.mockResolvedValue(null);
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response("null"));
 
     const response = await POST(request({ query: "Question", country: "ZZ" }));
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "That country is not supported yet." });
-    expect(authMocks.fetchAuthQuery).toHaveBeenCalledWith(
-      expect.anything(),
-      { code: "ZZ" },
-    );
-    expect(getFunctionName(authMocks.fetchAuthQuery.mock.calls[0][0])).toBe(
-      "jurisdictions:getPublicByCode",
-    );
+    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
     expect(groundxMocks.searchContent).not.toHaveBeenCalled();
   });
@@ -185,7 +198,7 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     ["disabled", { ...gh, enabled: false }],
     ["missing production bucket", { ...gh, productionBucketId: "" }],
   ])("rejects a %s jurisdiction before GroundX", async (_case, jurisdiction) => {
-    authMocks.fetchAuthQuery.mockResolvedValue(jurisdiction);
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(jurisdiction)));
 
     const response = await POST(request({ query: "Question", country: "GH" }));
 
@@ -202,10 +215,10 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     ["decimal", "12.5"],
     ["non-digit", "bucket-1"],
   ])("rejects a %s production bucket before quota or GroundX", async (_case, bucket) => {
-    authMocks.fetchAuthQuery.mockResolvedValue({
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
       ...gh,
       productionBucketId: bucket,
-    });
+    })));
 
     const response = await POST(request({ query: "Question", country: "GH" }));
 

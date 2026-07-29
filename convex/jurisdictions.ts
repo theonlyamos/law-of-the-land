@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
-import { query } from "./_generated/server";
+import { internalQuery, query } from "./_generated/server";
 
-const publicJurisdictionValidator = v.union(
+const searchJurisdictionValidator = v.union(
   v.null(),
   v.object({
     code: v.string(),
@@ -31,10 +31,10 @@ function normalizeCode(code: string): string {
   return normalized;
 }
 
-/** Returns only configuration that is safe and ready for public retrieval. */
-export const getPublicByCode = query({
+/** Returns provider configuration only to protected server-side callers. */
+export const getPublicByCode = internalQuery({
   args: { code: v.string() },
-  returns: publicJurisdictionValidator,
+  returns: searchJurisdictionValidator,
   handler: async (ctx, args) => {
     const code = normalizeCode(args.code);
     const rows = await ctx.db
