@@ -12,10 +12,9 @@ const mocks = vi.hoisted(() => ({
     code: string;
     name: string;
     slug: string;
-    enabled: true;
     isDefault: boolean;
-    productionBucketId: string;
   }>,
+  session: null as null | { country: string; title: string },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -55,23 +54,20 @@ beforeEach(() => {
       code: "GH",
       name: "Ghana",
       slug: "ghana",
-      enabled: true,
       isDefault: true,
-      productionBucketId: "11833",
     },
     {
       code: "NG",
       name: "Nigeria",
       slug: "nigeria",
-      enabled: true,
       isDefault: false,
-      productionBucketId: "22001",
     },
   ];
+  mocks.session = null;
   mocks.useQuery.mockImplementation((reference, args) => {
     const name = getFunctionName(reference);
     if (name === "jurisdictions:listPublicEnabled") return mocks.catalog;
-    if (name === "chats:getByExternalId") return args === "skip" ? undefined : null;
+    if (name === "chats:getByExternalId") return args === "skip" ? undefined : mocks.session;
     return undefined;
   });
   mocks.useMutation.mockImplementation((reference) =>
@@ -95,7 +91,7 @@ describe("new-chat jurisdiction selector", () => {
   it("renders the governed catalog and selects its configured default", async () => {
     render(<ChatWorkspace chatId={null} initialQuery={null} />);
 
-    const selector = await screen.findByRole("combobox", { name: "Country" });
+    const selector = await screen.findByRole("combobox", { name: "Research jurisdiction" });
     await waitFor(() => expect(selector).toHaveValue("GH"));
     expect(screen.getByRole("option", { name: "Nigeria" })).toBeVisible();
   });
@@ -127,9 +123,7 @@ describe("new-chat jurisdiction selector", () => {
         code: "NG",
         name: "Nigeria",
         slug: "nigeria",
-        enabled: true,
         isDefault: true,
-        productionBucketId: "22001",
       },
     ];
     view.rerender(<ChatWorkspace {...props} />);
@@ -138,5 +132,21 @@ describe("new-chat jurisdiction selector", () => {
       externalId: props.chatId,
       country: "NG",
     }));
+  });
+
+  it("keeps an existing chat bound to its stored jurisdiction", async () => {
+    mocks.session = { country: "NG", title: "Nigerian tenancy" };
+
+    render(
+      <ChatWorkspace
+        chatId="7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c"
+        initialQuery="What is the law?"
+        initialCountry="GH"
+      />,
+    );
+
+    expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(mocks.ensureSession).not.toHaveBeenCalled();
   });
 });

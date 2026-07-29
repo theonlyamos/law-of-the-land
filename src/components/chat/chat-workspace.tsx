@@ -11,7 +11,12 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { findCountry } from "@/lib/countries";
+import { PublicJurisdictionSelector } from "@/components/landing/public-jurisdiction-selector";
+import {
+  chooseJurisdictionCode,
+  findJurisdiction,
+  type PublicJurisdiction,
+} from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import {
   beginComposerBottomScroll,
@@ -110,7 +115,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
-  const countries = publicJurisdictions ?? [];
+  const jurisdictions: readonly PublicJurisdiction[] = publicJurisdictions ?? [];
   const [query, setQuery] = useState("");
   const [selectedCountry, setSelectedCountry] = useState("");
   const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
@@ -163,11 +168,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   useEffect(() => {
     if (publicJurisdictions === undefined) return;
     setSelectedCountry((current) =>
-      findCountry(publicJurisdictions, current)?.code ??
-      findCountry(publicJurisdictions, initialCountry)?.code ??
-      publicJurisdictions.find((jurisdiction) => jurisdiction.isDefault)?.code ??
-      publicJurisdictions[0]?.code ??
-      ""
+      chooseJurisdictionCode(publicJurisdictions, current || initialCountry),
     );
   }, [initialCountry, publicJurisdictions]);
   const persistedMessages = useMemo<PersistedChatMessage[]>(() => {
@@ -199,7 +200,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   // Existing chats answer from the jurisdiction they were started in.
   const chatCountry =
     sessionData?.country ??
-    findCountry(countries, initialCountry)?.code ??
+    findJurisdiction(jurisdictions, initialCountry)?.code ??
     selectedCountry;
 
   const invalidateChatRequests = useCallback(() => {
@@ -659,33 +660,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 Ask about a law in plain language. Answers come from the legal document library and
                 cite the sections they are based on.
               </p>
-              {publicJurisdictions !== undefined && countries.length === 0 ? (
+              {publicJurisdictions !== undefined && jurisdictions.length === 0 ? (
                 <p role="status" className="mx-auto mt-5 max-w-md text-center text-sm text-muted-foreground">
                   No jurisdictions are currently available. Please try again later.
                 </p>
               ) : null}
-              {countries.length > 1 && (
-                <div className="mx-auto mt-6 max-w-xs">
-                  <label
-                    htmlFor="new-chat-country"
-                    className="mb-1.5 block text-center text-xs font-medium uppercase tracking-wider text-muted-foreground"
-                  >
-                    Country
-                  </label>
-                  <select
-                    id="new-chat-country"
-                    value={selectedCountry}
-                    onChange={(event) => setSelectedCountry(event.target.value)}
-                    className="h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    {countries.map((country) => (
-                      <option key={country.code} value={country.code}>
-                        {country.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              {!sessionData && !chatId ? (
+                <PublicJurisdictionSelector
+                  id="new-chat-jurisdiction"
+                  label="Research jurisdiction"
+                  jurisdictions={publicJurisdictions}
+                  value={selectedCountry}
+                  onChange={setSelectedCountry}
+                  className="mx-auto mt-6 max-w-xs text-center"
+                />
+              ) : null}
               <div className="mt-8">
                 <ChatInput
                   query={query}
