@@ -195,8 +195,8 @@ describe("jurisdiction governance", () => {
         isDefault: false,
       },
     ]);
-    expect(publicRows.every((row) => !Object.hasOwn(row, "productionBucketId"))).toBe(true);
-    expect(publicRows.every((row) => !Object.hasOwn(row, "providerSyncState"))).toBe(true);
+    expect(publicRows.every((row: Record<string, unknown>) => !Object.hasOwn(row, "productionBucketId"))).toBe(true);
+    expect(publicRows.every((row: Record<string, unknown>) => !Object.hasOwn(row, "providerSyncState"))).toBe(true);
   });
 
   it("keeps the bounded governed catalog while placing its default first", async () => {
@@ -230,7 +230,7 @@ describe("jurisdiction governance", () => {
       slug: "jurisdiction-249",
       isDefault: true,
     });
-    expect(result.every((jurisdiction) => !Object.hasOwn(jurisdiction, "productionBucketId"))).toBe(true);
+    expect(result.every((jurisdiction: Record<string, unknown>) => !Object.hasOwn(jurisdiction, "productionBucketId"))).toBe(true);
   });
 
   it("returns only enabled, production-configured jurisdictions publicly", async () => {

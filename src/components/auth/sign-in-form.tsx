@@ -19,7 +19,9 @@ function SignInFormInner() {
   // mid-action (e.g. asked a question while signed out).
   const redirectTo = safeRedirectPath(searchParams.get("redirect"), "/new");
 
-  const [step, setStep] = useState<"signIn" | "signUp">("signIn");
+  const [step, setStep] = useState<"signIn" | "signUp" | "twoFactor">("signIn");
+  const [challengeMode, setChallengeMode] = useState<"totp" | "backup">("totp");
+  const [challengeCode, setChallengeCode] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -74,6 +76,19 @@ function SignInFormInner() {
         return;
       }
 
+      if (
+        step === "signIn" &&
+        result.data &&
+        "twoFactorRedirect" in result.data &&
+        result.data.twoFactorRedirect === true
+      ) {
+        setPassword("");
+        setChallengeCode("");
+        setChallengeMode("totp");
+        setStep("twoFactor");
+        return;
+      }
+
       if (step === "signUp") {
         // Accounts must verify their email before signing in.
         setStep("signIn");
@@ -87,6 +102,44 @@ function SignInFormInner() {
       router.replace(redirectTo);
     } catch {
       setError("We could not reach the sign-in service. Check your connection and try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleTwoFactorSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const normalizedCode = challengeCode.trim();
+      const result =
+        challengeMode === "totp"
+          ? await authClient.twoFactor.verifyTotp({
+              code: normalizedCode,
+              trustDevice: false,
+            })
+          : await authClient.twoFactor.verifyBackupCode({
+              code: normalizedCode,
+              trustDevice: false,
+            });
+
+      if (result.error || !result.data) {
+        setError(
+          challengeMode === "totp"
+            ? "That authenticator code was not accepted. Check the time on your device and try again."
+            : "That backup code was not accepted. Check the code and try another unused code.",
+        );
+        return;
+      }
+
+      setChallengeCode("");
+      setNotice("Signed in securely. Redirecting…");
+      router.replace(redirectTo);
+    } catch {
+      setError("We could not complete Two-Factor verification. Try again.");
     } finally {
       setSubmitting(false);
     }
@@ -127,13 +180,90 @@ function SignInFormInner() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-2 text-center">
           <CardTitle className="text-2xl">
-            {step === "signIn" ? "Sign in to your account" : "Create your account"}
+            {step === "twoFactor"
+              ? "Verify it’s you"
+              : step === "signIn"
+                ? "Sign in to your account"
+                : "Create your account"}
           </CardTitle>
           <CardDescription>
-            Save chat history securely and manage active sessions across devices.
+            {step === "twoFactor"
+              ? "Complete the security challenge for this account."
+              : "Save chat history securely and manage active sessions across devices."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {step === "twoFactor" ? (
+            <form className="space-y-4" onSubmit={handleTwoFactorSubmit}>
+              <div className="space-y-2">
+                <label htmlFor="two-factor-code" className="text-sm font-medium">
+                  {challengeMode === "totp" ? "Authenticator code" : "Backup code"}
+                </label>
+                <input
+                  id="two-factor-code"
+                  name="two-factor-code"
+                  type="text"
+                  inputMode={challengeMode === "totp" ? "numeric" : "text"}
+                  autoComplete="one-time-code"
+                  required
+                  minLength={challengeMode === "totp" ? 6 : 1}
+                  maxLength={challengeMode === "totp" ? 6 : 128}
+                  pattern={challengeMode === "totp" ? "[0-9]{6}" : undefined}
+                  value={challengeCode}
+                  onChange={(event) =>
+                    setChallengeCode(
+                      challengeMode === "totp"
+                        ? event.target.value.replace(/\D/g, "")
+                        : event.target.value,
+                    )
+                  }
+                  className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  placeholder={challengeMode === "totp" ? "123456" : "Enter one unused backup code"}
+                />
+              </div>
+
+              {notice && (
+                <p role="status" className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                  {notice}
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  {error}
+                </p>
+              )}
+
+              <Button type="submit" className="w-full" disabled={submitting}>
+                {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Verify and sign in
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full"
+                onClick={() => {
+                  setChallengeMode((current) => current === "totp" ? "backup" : "totp");
+                  setChallengeCode("");
+                  setError(null);
+                }}
+              >
+                {challengeMode === "totp" ? "Use a backup code" : "Use authenticator code"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full text-muted-foreground"
+                onClick={() => {
+                  setStep("signIn");
+                  setChallengeCode("");
+                  setError(null);
+                  setNotice(null);
+                }}
+              >
+                Back to sign in
+              </Button>
+            </form>
+          ) : (
           <form className="space-y-4" onSubmit={handlePasswordSubmit}>
             {step === "signUp" && (
               <div className="space-y-2">
@@ -230,7 +360,9 @@ function SignInFormInner() {
             </Button>
           </form>
 
-          <div className="space-y-3">
+          )}
+
+          {step !== "twoFactor" && <div className="space-y-3">
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <span className="w-full border-t" />
@@ -258,9 +390,9 @@ function SignInFormInner() {
                 Google
               </Button>
             </div>
-          </div>
+          </div>}
 
-          <div className="text-center text-sm text-muted-foreground">
+          {step !== "twoFactor" && <div className="text-center text-sm text-muted-foreground">
             {step === "signIn" ? (
               <>
                 New here?{" "}
@@ -292,7 +424,7 @@ function SignInFormInner() {
                 </button>
               </>
             )}
-          </div>
+          </div>}
 
           <p className="text-center text-xs text-muted-foreground">
             <Link href="/" className="underline-offset-4 hover:underline">

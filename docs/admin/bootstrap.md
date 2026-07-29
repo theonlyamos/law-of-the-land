@@ -42,6 +42,12 @@ Conversation exports use a hashed, one-time `exp_` reference. The browser posts 
 
 ## Isolated bootstrap procedure
 
+### Prepare the first administrator candidate
+
+The candidate must first create a credential account from `/signin`, open the email-verification link, sign in, and open `/settings/security`. They must confirm their current password, scan the locally rendered authenticator QR code (or enter the manual key), store the one-time backup codes offline, and verify a current six-digit code. The page then shows the candidate's Better Auth user ID. It deliberately does not show executable bootstrap commands: the release manager must use the deployment-bound sequence below. Do not accept an ID copied from an email address, URL, or application log.
+
+The release manager must verify on `/settings/security` that the candidate shows **Email verified** and **Two-Factor is active**. OAuth-only accounts are not eligible for administration because administrative sign-in requires credential-backed Two-Factor verification. The candidate must never give the release manager their password, authenticator secret, current code, or backup codes.
+
 The release manager must receive the exact isolated deployment identity from the approved change record as a release-shell input named `APPROVED_ISOLATED_CONVEX_DEPLOYMENT`. It is not application configuration or a secret, and its value must use the installed Convex CLI's `dev:<deployment-name>` format. Before starting, verify in the Convex dashboard that this identity is an isolated non-production deployment, `ADMIN_PANEL_ENABLED=false`, `ADMIN_ENVIRONMENT=preview`, and the temporary `INITIAL_SUPER_ADMIN_IDS` allowlist contains only the approved verified, 2FA-enrolled candidates.
 
 Run this required release sequence literally and in order. `bunx convex dev --once` pushes the checked-in functions to the bound target before either migration runs. All three Convex commands read this same process-level `CONVEX_DEPLOYMENT` binding; none may select a different target with a per-command flag.
@@ -81,6 +87,8 @@ Expected migration state: Ghana is enabled/default, `productionBucketId` is `118
 ```powershell
 bunx convex env remove INITIAL_SUPER_ADMIN_IDS
 ```
+
+The first administrative grant revokes the candidate's existing sessions. The candidate must return to `/signin`, enter the credential password, and complete the authenticator or one-time backup-code challenge. They can then open `/settings/security`, which shows the active Super Administrator handoff and links to `/admin-recovery`. Never attempt to bypass this forced reauthentication by editing session records.
 
 Record GroundX as **configured**, not healthy or smoke-passed, until an authorized remote-ingest callback actually completes. The external smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
 

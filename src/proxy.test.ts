@@ -3,6 +3,19 @@ import { describe, expect, it } from "vitest";
 import { proxy } from "./proxy";
 
 describe("admin route proxy experience gate", () => {
+  it("lets the sign-in page validate a stale session cookie server-side", async () => {
+    const response = await proxy(
+      new NextRequest("http://localhost/signin?redirect=%2Fadmin", {
+        headers: {
+          cookie: "better-auth.session_token=revoked-session",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
   it("sends an unauthenticated admin request to sign in with its safe return path", async () => {
     const response = await proxy(
       new NextRequest("http://localhost/admin?section=health"),

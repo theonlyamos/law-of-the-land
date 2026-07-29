@@ -276,7 +276,7 @@ export function Sidebar({
           className={`h-11 w-full justify-start gap-2 ${collapsibleRow}`}
           title={collapsed ? "Settings" : undefined}
         >
-          <Link href="/settings/sessions" aria-label="Manage sessions">
+          <Link href="/settings/security" aria-label="Account security">
             <Settings className="h-4 w-4 shrink-0" />
             <span className={collapsibleLabel}>Settings</span>
           </Link>

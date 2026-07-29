@@ -34,9 +34,9 @@ export function UserNav() {
         <span className="max-w-[160px] truncate">{displayName}</span>
       </div>
       <Button asChild size="sm" variant="ghost">
-        <Link href="/settings/sessions">
+        <Link href="/settings/security">
           <Settings className="h-4 w-4" />
-          <span className="sr-only">Manage sessions</span>
+          <span className="sr-only">Account security</span>
         </Link>
       </Button>
       <Button
