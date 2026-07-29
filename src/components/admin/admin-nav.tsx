@@ -2,7 +2,7 @@ import {
   hasRolePermission,
   type AdminRole,
 } from "../../../convex/lib/adminPermissions";
-import Link from "next/link";
+import { AdminNavClient, type AdminNavGroup } from "./admin-nav-client";
 
 type NavItem = {
   label: string;
@@ -75,43 +75,14 @@ export function AdminNav({
   roles: readonly AdminRole[];
   currentPath?: string;
 }) {
-  return (
-    <nav
-      aria-label="Administration"
-      className="flex gap-6 overflow-x-auto pb-2 [scrollbar-width:thin] lg:block lg:space-y-7 lg:overflow-visible lg:pb-0"
-    >
-      {NAV_GROUPS.map((group) => {
-        const items = group.items.filter((item) => canSeeItem(roles, item));
-        if (items.length === 0) return null;
+  const groups: AdminNavGroup[] = [];
 
-        return (
-          <section
-            key={group.label}
-            className="shrink-0 lg:shrink"
-            aria-labelledby={`admin-nav-${group.label.toLowerCase().replaceAll(" ", "-")}`}
-          >
-            <h2
-              id={`admin-nav-${group.label.toLowerCase().replaceAll(" ", "-")}`}
-              className="sr-only px-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 lg:not-sr-only"
-            >
-              {group.label}
-            </h2>
-            <ul className="flex gap-1 lg:mt-2 lg:block lg:space-y-1">
-              {items.map((item) => (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    aria-current={currentPath === item.href ? "page" : undefined}
-                    className="flex min-h-11 items-center whitespace-nowrap border-b-2 border-transparent px-3 text-sm font-medium text-slate-700 transition-colors duration-150 hover:bg-slate-200/60 hover:text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 aria-[current=page]:border-amber-700 aria-[current=page]:bg-white/70 aria-[current=page]:text-slate-950 lg:rounded-md lg:border-b-0 lg:border-l-2"
-                  >
-                    {item.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </section>
-        );
-      })}
-    </nav>
-  );
+  for (const group of NAV_GROUPS) {
+    const items = group.items
+      .filter((item) => canSeeItem(roles, item))
+      .map(({ label, href }) => ({ label, href }));
+    if (items.length > 0) groups.push({ label: group.label, items });
+  }
+
+  return <AdminNavClient groups={groups} currentPath={currentPath} />;
 }

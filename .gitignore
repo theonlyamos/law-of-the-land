@@ -44,6 +44,7 @@ node_modules
 # Local Superpowers design and planning artifacts
 .superpowers/
 docs/superpowers/
+docs/admin/2026-07-29-responsive-admin-plan.md
 
 # Generated performance-harness output
 artifacts/admin-performance.json

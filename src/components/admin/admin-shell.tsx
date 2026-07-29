@@ -3,10 +3,18 @@ import {
   hasRolePermission,
   type AdminRole,
 } from "../../../convex/lib/adminPermissions";
+import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import logo from "@/app/logo-transparent.png";
 import { AdminNav } from "./admin-nav";
+import {
+  AdminNavigationProvider,
+  AdminNavigationToggle,
+  MobileAdminNavigationToggle,
+} from "./admin-navigation-state";
 import { AdminPermissionProvider } from "./permission-boundary";
+import { AdminWorkspace } from "./admin-workspace";
 
 const ROLE_LABELS: Record<AdminRole, string> = {
   super_admin: "Super administrator",
@@ -48,38 +56,46 @@ export function AdminShell({
         Skip to administration content
       </a>
 
-      <div className="admin-control-plane min-h-screen bg-[oklch(94%_0.015_82)] text-[oklch(24%_0.035_252)]">
-        <header className="border-b border-[oklch(78%_0.025_78)] bg-[oklch(97%_0.012_82)] px-4 py-3 sm:px-6 lg:px-8">
-          <div className="mx-auto flex max-w-[100rem] items-center justify-between gap-4">
-            <Link
-              href="/admin"
-              className="group flex min-h-11 items-center gap-3 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700"
-            >
-              <span
-                aria-hidden
-                className="grid h-9 w-9 place-items-center border border-[oklch(43%_0.06_70)] bg-[oklch(89%_0.055_79)] font-serif text-lg font-semibold text-[oklch(31%_0.055_64)]"
+      <AdminNavigationProvider>
+        <div className="admin-control-plane min-h-screen bg-[oklch(94%_0.015_82)] text-[oklch(24%_0.035_252)]">
+        <header className="relative z-50 border-b border-[oklch(78%_0.025_78)] bg-[oklch(97%_0.012_82)] px-3 py-2.5 sm:px-6 sm:py-3 lg:px-8">
+          <div className="mx-auto grid max-w-[100rem] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:justify-between sm:gap-4">
+            <div className="flex min-w-0 items-center gap-2">
+              <Link
+                href="/admin"
+                className="group flex min-h-11 min-w-0 items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700 sm:gap-3"
               >
-                L
-              </span>
-              <span>
-                <span className="block text-[0.68rem] font-semibold uppercase tracking-[0.19em] text-[oklch(43%_0.055_252)]">
-                  Law of the Land
+                <Image
+                  src={logo}
+                  alt="Law of the Land"
+                  width={80}
+                  height={43}
+                  priority
+                  className="h-auto w-10 shrink-0 sm:w-12"
+                />
+                <span className="min-w-0">
+                  <span className="hidden text-[0.68rem] font-semibold uppercase tracking-[0.19em] text-[oklch(43%_0.055_252)] sm:block">
+                    Law of the Land
+                  </span>
+                  <span className="block text-sm font-semibold tracking-tight sm:text-sm">Administration</span>
                 </span>
-                <span className="block text-sm font-semibold tracking-tight">Administration</span>
-              </span>
-            </Link>
+              </Link>
+              <AdminNavigationToggle />
+            </div>
             <Link
               href="/new"
-              className="inline-flex min-h-11 items-center px-3 text-sm font-semibold text-[oklch(35%_0.065_252)] underline decoration-[oklch(60%_0.1_70)] decoration-2 underline-offset-4 hover:text-[oklch(24%_0.055_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+              className="hidden min-h-11 items-center whitespace-nowrap px-3 text-sm font-semibold text-[oklch(35%_0.065_252)] underline decoration-[oklch(60%_0.1_70)] decoration-2 underline-offset-4 hover:text-[oklch(24%_0.055_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 md:inline-flex"
             >
               Return to public site
             </Link>
+            <MobileAdminNavigationToggle />
           </div>
         </header>
 
-        <div className="mx-auto grid max-w-[100rem] lg:min-h-[calc(100vh-4.25rem)] lg:grid-cols-[18rem_minmax(0,1fr)]">
-          <aside className="border-b border-[oklch(78%_0.025_78)] bg-[oklch(91%_0.02_79)] px-4 py-4 sm:px-6 lg:border-b-0 lg:border-r lg:px-5 lg:py-8">
-            <div className="mb-4 hidden border-b border-[oklch(78%_0.025_78)] pb-6 lg:block">
+        <AdminWorkspace
+          sidebar={
+            <>
+            <div className="mb-4 hidden border-b border-[oklch(78%_0.025_78)] pb-6 xl:block">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(45%_0.04_252)]">
                 Signed-in authority
               </p>
@@ -89,17 +105,21 @@ export function AdminShell({
               </p>
             </div>
             <AdminNav roles={currentAdmin.roles} currentPath={currentPath} />
-          </aside>
-
-          <main
-            id="admin-main-content"
-            tabIndex={-1}
-            className="min-w-0 px-4 py-8 outline-none sm:px-6 sm:py-10 lg:px-[clamp(2rem,5vw,5rem)] lg:py-14"
-          >
-            {children}
-          </main>
+            </>
+          }
+          mobileMenuFooter={
+            <Link
+              href="/new"
+              className="flex min-h-11 items-center px-3 text-sm font-semibold text-[oklch(35%_0.065_252)] underline decoration-[oklch(60%_0.1_70)] decoration-2 underline-offset-4 hover:text-[oklch(24%_0.055_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+            >
+              Return to public site
+            </Link>
+          }
+        >
+          {children}
+        </AdminWorkspace>
         </div>
-      </div>
+      </AdminNavigationProvider>
     </AdminPermissionProvider>
   );
 }
