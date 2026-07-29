@@ -3,6 +3,7 @@
 import { LandingPage } from "@/components/landing-page";
 import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
+import { chooseJurisdictionCode } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, usePaginatedQuery, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
@@ -14,37 +15,22 @@ function LandingShell() {
   const [country, setCountry] = useState("");
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
-  const countries = publicJurisdictions ?? [];
-  const { results: sessionsData, status: sessionsStatus } = usePaginatedQuery(
+  const { results: sessionsData } = usePaginatedQuery(
     api.chats.list,
     isAuthenticated ? {} : "skip",
     { initialNumItems: 30 }
   );
 
-  // chats.list is sorted by most recent first. Signed-in users start a fresh
-  // conversation via /new, so the landing always forwards to the last chat.
-  const latestChatId = sessionsData[0]?.id ?? null;
-  const shouldRedirect = isAuthenticated && latestChatId !== null;
-
   useEffect(() => {
     if (publicJurisdictions === undefined) return;
-    setCountry((current) => {
-      if (publicJurisdictions.some((jurisdiction) => jurisdiction.code === current)) {
-        return current;
-      }
-      return (
-        publicJurisdictions.find((jurisdiction) => jurisdiction.isDefault)?.code ??
-        publicJurisdictions[0]?.code ??
-        ""
-      );
-    });
+    setCountry((current) => chooseJurisdictionCode(publicJurisdictions, current));
   }, [publicJurisdictions]);
 
-  useEffect(() => {
-    if (shouldRedirect) {
-      router.replace(`/${latestChatId}`);
-    }
-  }, [latestChatId, router, shouldRedirect]);
+  const researchUnavailable =
+    authLoading ||
+    publicJurisdictions === undefined ||
+    publicJurisdictions.length === 0 ||
+    !country;
 
   const savedChats = useMemo<ChatSession[]>(() => {
     return sessionsData.map((session) => ({
@@ -68,19 +54,13 @@ function LandingShell() {
   const goToChat = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !country) return;
+      if (!trimmed || researchUnavailable) return;
 
-      const id = crypto.randomUUID();
-      const chatUrl = `/${id}?q=${encodeURIComponent(trimmed)}&country=${country}`;
-
-      if (!isAuthenticated) {
-        router.push(`/signin?redirect=${encodeURIComponent(chatUrl)}`);
-        return;
-      }
-
-      router.push(chatUrl);
+      const normalizedCountry = country.trim().toUpperCase();
+      const chatUrl = `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&country=${encodeURIComponent(normalizedCountry)}`;
+      router.push(isAuthenticated ? chatUrl : `/signin?redirect=${encodeURIComponent(chatUrl)}`);
     },
-    [country, isAuthenticated, router]
+    [country, isAuthenticated, researchUnavailable, router]
   );
 
   const handleKeyDown = useCallback(
@@ -93,10 +73,6 @@ function LandingShell() {
     [query, goToChat]
   );
 
-  if (shouldRedirect || (isAuthenticated && sessionsStatus === "LoadingFirstPage")) {
-    return <PageLoader label="Opening your last chat…" />;
-  }
-
   return (
     <div className="container relative mx-auto flex min-h-0 flex-1 flex-col overflow-hidden">
       <LandingPage
@@ -105,14 +81,13 @@ function LandingShell() {
         onSearch={() => goToChat(query)}
         onPickSuggested={goToChat}
         onKeyDown={handleKeyDown}
-        isLoading={authLoading || publicJurisdictions === undefined || !country}
+        isLoading={researchUnavailable}
         savedChats={savedChats}
         onResumeChat={resumeChat}
         isAuthenticated={isAuthenticated}
         country={country}
         onCountryChange={setCountry}
-        countries={countries}
-        jurisdictionCatalogLoading={publicJurisdictions === undefined}
+        jurisdictions={publicJurisdictions}
       />
     </div>
   );

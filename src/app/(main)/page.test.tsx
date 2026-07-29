@@ -1,10 +1,19 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   replace: vi.fn(),
   push: vi.fn(),
   useQuery: vi.fn(),
+  auth: { isAuthenticated: false, isLoading: false },
+  sessions: [] as Array<{
+    id: string;
+    title: string;
+    lastMessage: string;
+    timestamp: number;
+    messageCount: number;
+  }>,
+  sessionsStatus: "Exhausted",
 }));
 
 vi.mock("next/navigation", () => ({
@@ -12,8 +21,8 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("convex/react", () => ({
-  useConvexAuth: () => ({ isAuthenticated: false, isLoading: false }),
-  usePaginatedQuery: () => ({ results: [], status: "Exhausted" }),
+  useConvexAuth: () => mocks.auth,
+  usePaginatedQuery: () => ({ results: mocks.sessions, status: mocks.sessionsStatus }),
   useQuery: mocks.useQuery,
 }));
 
@@ -23,6 +32,10 @@ beforeEach(() => {
   mocks.replace.mockReset();
   mocks.push.mockReset();
   mocks.useQuery.mockReset();
+  mocks.auth = { isAuthenticated: false, isLoading: false };
+  mocks.sessions = [];
+  mocks.sessionsStatus = "Exhausted";
+  vi.stubGlobal("crypto", { randomUUID: () => "new-chat" });
   mocks.useQuery.mockReturnValue([
     {
       code: "GH",
@@ -43,7 +56,10 @@ beforeEach(() => {
   ]);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("public home jurisdiction catalog", () => {
   it("loads the governed jurisdictions and selects their configured default", () => {
@@ -62,5 +78,93 @@ describe("public home jurisdiction catalog", () => {
       "No jurisdictions are currently available",
     );
     expect(screen.getByRole("textbox")).toBeDisabled();
+  });
+
+  it("keeps the full landing page visible for an authenticated user with history", () => {
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    mocks.sessions = [
+      { id: "existing-chat", title: "Tenancy", lastMessage: "", timestamp: 1, messageCount: 1 },
+    ];
+
+    render(<Home />);
+
+    expect(mocks.replace).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Ask a question" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Tenancy" })).toBeVisible();
+  });
+
+  it("disables research while authentication is loading", () => {
+    mocks.auth = { isAuthenticated: false, isLoading: true };
+
+    render(<Home />);
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+  });
+
+  it("disables research while the jurisdiction catalog is loading", () => {
+    mocks.useQuery.mockReturnValue(undefined);
+
+    render(<Home />);
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("returns a stale country selection to the configured default", () => {
+    const { rerender } = render(<Home />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Country" }), {
+      target: { value: "NG" },
+    });
+    expect(screen.getByRole("combobox", { name: "Country" })).toHaveValue("NG");
+
+    mocks.useQuery.mockReturnValue([
+      {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        isDefault: true,
+      },
+      {
+        code: "ZA",
+        name: "South Africa",
+        slug: "south-africa",
+        isDefault: false,
+      },
+    ]);
+    rerender(<Home />);
+
+    expect(screen.getByRole("combobox", { name: "Country" })).toHaveValue("GH");
+  });
+
+  it("preserves the guest question and country through sign-in", () => {
+    render(<Home />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26country%3DGH",
+    );
+  });
+
+  it("sends an authenticated question directly to a country-specific chat", () => {
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    render(<Home />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+
+    expect(mocks.push).toHaveBeenCalledWith("/new-chat?q=Tenant%20rights%3F&country=GH");
+  });
+
+  it("submits on Enter but not Shift+Enter", () => {
+    render(<Home />);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Tenant rights?" } });
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(mocks.push).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+    expect(mocks.push).toHaveBeenCalledOnce();
   });
 });

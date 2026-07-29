@@ -2,7 +2,7 @@
 
 import { ChatInput } from "@/components/ui/chat-input";
 import type { ChatSession } from "@/lib/chat-sessions";
-import type { Country } from "@/lib/countries";
+import type { PublicJurisdiction } from "@/lib/countries";
 import { ArrowUpRight, Check, MessageSquare } from "lucide-react";
 import Link from "next/link";
 
@@ -26,8 +26,7 @@ interface LandingPageProps {
   isAuthenticated: boolean;
   country: string;
   onCountryChange: (code: string) => void;
-  countries: readonly Country[];
-  jurisdictionCatalogLoading: boolean;
+  jurisdictions: readonly PublicJurisdiction[] | undefined;
 }
 
 export function LandingPage({
@@ -42,8 +41,7 @@ export function LandingPage({
   isAuthenticated,
   country,
   onCountryChange,
-  countries,
-  jurisdictionCatalogLoading,
+  jurisdictions,
 }: LandingPageProps) {
   const recentChats = savedChats.slice(0, 3);
 
@@ -93,12 +91,12 @@ export function LandingPage({
 
           <div className="rounded-xl border bg-card p-5 shadow-elegant-lg sm:p-6">
             <h2 className="text-sm font-medium">Ask a question</h2>
-            {!jurisdictionCatalogLoading && countries.length === 0 ? (
+            {jurisdictions !== undefined && jurisdictions.length === 0 ? (
               <p role="status" className="mt-3 text-sm text-muted-foreground">
                 No jurisdictions are currently available. Please try again later.
               </p>
             ) : null}
-            {countries.length > 1 && (
+            {jurisdictions !== undefined && jurisdictions.length > 1 && (
               <div className="mt-3">
                 <label htmlFor="landing-country" className="sr-only">
                   Country
@@ -109,7 +107,7 @@ export function LandingPage({
                   onChange={(event) => onCountryChange(event.target.value)}
                   className="h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  {countries.map((option) => (
+                  {jurisdictions.map((option) => (
                     <option key={option.code} value={option.code}>
                       {option.name}
                     </option>

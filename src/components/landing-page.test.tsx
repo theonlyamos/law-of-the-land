@@ -18,11 +18,10 @@ describe("public jurisdiction selector", () => {
       isAuthenticated: false,
       country: "GH",
       onCountryChange: vi.fn(),
-      countries: [
-        { code: "GH", name: "Ghana" },
-        { code: "NG", name: "Nigeria" },
+      jurisdictions: [
+        { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
+        { code: "NG", name: "Nigeria", slug: "nigeria", isDefault: false },
       ],
-      jurisdictionCatalogLoading: false,
     };
 
     render(<LandingPage {...props} />);
