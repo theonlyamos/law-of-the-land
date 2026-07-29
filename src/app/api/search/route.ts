@@ -44,28 +44,17 @@ export async function POST(request: Request) {
         const countryWasOmitted = body?.country === undefined || body?.country === null
         const suppliedCountryCode =
             typeof body?.country === "string" ? body.country.trim().toUpperCase() : ""
-        const defaultJurisdictions = countryWasOmitted
+        const publicJurisdictions = countryWasOmitted
             ? await fetchAuthQuery(api.jurisdictions.listPublicEnabled, {})
             : null
-        const defaultJurisdiction = defaultJurisdictions
-            ? defaultJurisdictions.find((candidate) => candidate.isDefault) ??
-              defaultJurisdictions[0] ??
-              null
-            : null
         const countryCode = countryWasOmitted
-            ? defaultJurisdiction?.code ?? ""
+            ? publicJurisdictions?.find((candidate) => candidate.isDefault)?.code ??
+              publicJurisdictions?.[0]?.code ??
+              ""
             : suppliedCountryCode
-        if (!/^[A-Z]{2}$/.test(countryCode)) {
-            return NextResponse.json(
-                { error: "That country is not supported yet." },
-                { status: 400 }
-            )
-        }
-
-        const jurisdiction = defaultJurisdiction ?? await fetchAuthQuery(
-            api.jurisdictions.getPublicByCode,
-            { code: countryCode }
-        )
+        const jurisdiction = /^[A-Z]{2}$/.test(countryCode)
+            ? await fetchAuthQuery(api.jurisdictions.getPublicByCode, { code: countryCode })
+            : null
         const productionBucketId = jurisdiction?.productionBucketId?.trim()
         const productionBucket =
             productionBucketId && /^\d+$/.test(productionBucketId)

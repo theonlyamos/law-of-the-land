@@ -31,12 +31,16 @@ function request(body: Record<string, unknown>) {
   });
 }
 
-const gh = {
+const publicGhana = {
   code: "GH",
   name: "Ghana",
   slug: "ghana",
-  enabled: true as const,
   isDefault: true,
+};
+
+const gh = {
+  ...publicGhana,
+  enabled: true as const,
   productionBucketId: "11833",
 };
 
@@ -92,17 +96,20 @@ describe("POST /api/search governed jurisdiction lookup", () => {
   });
 
   it("uses the governed default when a client omits the jurisdiction", async () => {
-    const nigeria = {
+    const publicNigeria = {
       code: "NG",
       name: "Nigeria",
       slug: "nigeria",
-      enabled: true as const,
       isDefault: true,
+    };
+    const nigeria = {
+      ...publicNigeria,
+      enabled: true as const,
       productionBucketId: "22001",
     };
     authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
       getFunctionName(reference) === "jurisdictions:listPublicEnabled"
-        ? [nigeria]
+        ? [publicNigeria]
         : nigeria,
     );
 
@@ -110,9 +117,13 @@ describe("POST /api/search governed jurisdiction lookup", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ jurisdictionCode: "NG" });
-    expect(getFunctionName(authMocks.fetchAuthQuery.mock.calls[0][0])).toBe(
+    expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) =>
+      getFunctionName(reference),
+    )).toEqual([
       "jurisdictions:listPublicEnabled",
-    );
+      "jurisdictions:getPublicByCode",
+    ]);
+    expect(authMocks.fetchAuthQuery.mock.calls[1][1]).toEqual({ code: "NG" });
     expect(groundxMocks.searchContent).toHaveBeenCalledWith({
       id: 22001,
       query: "What is the law?",

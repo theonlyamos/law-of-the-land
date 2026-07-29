@@ -13,13 +13,11 @@ const publicJurisdictionValidator = v.union(
   }),
 );
 
-const publicJurisdictionRowValidator = v.object({
+const publicJurisdictionListItemValidator = v.object({
   code: v.string(),
   name: v.string(),
   slug: v.string(),
-  enabled: v.literal(true),
   isDefault: v.boolean(),
-  productionBucketId: v.string(),
 });
 
 // Admin validation currently accepts any two-letter code (26 × 26).
@@ -67,23 +65,20 @@ export const getPublicByCode = query({
 /** Lists the complete enabled ISO catalog used by public jurisdiction selectors. */
 export const listPublicEnabled = query({
   args: {},
-  returns: v.array(publicJurisdictionRowValidator),
+  returns: v.array(publicJurisdictionListItemValidator),
   handler: async (ctx) => {
     const rows = await ctx.db
       .query("jurisdictions")
       .withIndex("by_status_and_name", (q) => q.eq("status", "enabled"))
       .take(MAX_PUBLIC_JURISDICTIONS);
 
-    return rows.flatMap((jurisdiction) => {
-      if (!jurisdiction.productionBucketId) return [];
-      return [{
-        code: jurisdiction.code,
-        name: jurisdiction.name,
-        slug: jurisdiction.slug,
-        enabled: true as const,
-        isDefault: jurisdiction.isDefault,
-        productionBucketId: jurisdiction.productionBucketId,
-      }];
-    });
+    return rows
+      .filter((row) => Boolean(row.productionBucketId?.trim()))
+      .map(({ code, name, slug, isDefault }) => ({ code, name, slug, isDefault }))
+      .sort((left, right) =>
+        Number(right.isDefault) - Number(left.isDefault) ||
+        left.name.localeCompare(right.name) ||
+        left.code.localeCompare(right.code),
+      );
   },
 });

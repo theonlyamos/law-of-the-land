@@ -135,28 +135,28 @@ afterEach(() => {
 const page = { paginationOpts: { numItems: 20, cursor: null } };
 
 describe("jurisdiction governance", () => {
-  it("lists every enabled production-configured jurisdiction for the public selector", async () => {
+  it("lists browser-safe enabled jurisdictions with the default first", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {
       const now = Date.now();
       for (const jurisdiction of [
         {
-          code: "GH",
-          name: "Ghana",
-          slug: "ghana",
-          status: "enabled" as const,
-          isDefault: true,
-          stagingBucketId: "staging-gh",
-          productionBucketId: "11833",
-        },
-        {
           code: "NG",
           name: "Nigeria",
           slug: "nigeria",
           status: "enabled" as const,
-          isDefault: false,
+          isDefault: true,
           stagingBucketId: "staging-ng",
           productionBucketId: "22001",
+        },
+        {
+          code: "GH",
+          name: "Ghana",
+          slug: "ghana",
+          status: "enabled" as const,
+          isDefault: false,
+          stagingBucketId: "staging-gh",
+          productionBucketId: "11833",
         },
         {
           code: "CI",
@@ -179,27 +179,27 @@ describe("jurisdiction governance", () => {
       }
     });
 
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        enabled: true,
-        isDefault: true,
-        productionBucketId: "11833",
-      },
+    const publicRows = await t.query(listPublicEnabled, {});
+
+    expect(publicRows).toEqual([
       {
         code: "NG",
         name: "Nigeria",
         slug: "nigeria",
-        enabled: true,
+        isDefault: true,
+      },
+      {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
         isDefault: false,
-        productionBucketId: "22001",
       },
     ]);
+    expect(publicRows.every((row) => !Object.hasOwn(row, "productionBucketId"))).toBe(true);
+    expect(publicRows.every((row) => !Object.hasOwn(row, "providerSyncState"))).toBe(true);
   });
 
-  it("does not truncate the governed catalog before its configured default", async () => {
+  it("keeps the bounded governed catalog while placing its default first", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {
       const now = Date.now();
@@ -224,10 +224,13 @@ describe("jurisdiction governance", () => {
 
     const result = await t.query(listPublicEnabled, {});
     expect(result).toHaveLength(250);
-    expect(result.find((jurisdiction: { code: string }) => jurisdiction.code === "JP")).toMatchObject({
+    expect(result[0]).toEqual({
+      code: "JP",
+      name: "Jurisdiction 249",
+      slug: "jurisdiction-249",
       isDefault: true,
-      productionBucketId: "30249",
     });
+    expect(result.every((jurisdiction) => !Object.hasOwn(jurisdiction, "productionBucketId"))).toBe(true);
   });
 
   it("returns only enabled, production-configured jurisdictions publicly", async () => {
