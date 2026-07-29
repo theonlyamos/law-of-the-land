@@ -5,6 +5,7 @@ import { mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { hasRolePermission } from "../lib/adminPermissions";
 import { adminAccessError } from "../lib/adminAccessErrors";
+import { normalizePositiveSafeIntegerBucketId } from "../lib/jurisdictionEligibility";
 import { requireCurrentAdmin } from "../lib/requireAdmin";
 import { validateAuditReason, writeAudit } from "./audit";
 import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags";
@@ -124,6 +125,13 @@ function normalizeSlug(value: string): string {
 function optionalBucket(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return requiredText(value, "BUCKET_ID");
+}
+
+function optionalProductionBucket(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = normalizePositiveSafeIntegerBucketId(value);
+  if (normalized === null) throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
+  return normalized;
 }
 
 function validateResourceType(value: string): ResourceType {
@@ -309,6 +317,8 @@ export const createJurisdiction = mutation({
     const slug = normalizeSlug(args.slug);
     await assertUniqueJurisdiction(ctx, { code, slug });
     if (args.isDefault) await assertDefaultAvailable(ctx);
+    const stagingBucketId = optionalBucket(args.stagingBucketId);
+    const productionBucketId = optionalProductionBucket(args.productionBucketId);
     const now = Date.now();
     const id = await ctx.db.insert("jurisdictions", {
       code,
@@ -316,8 +326,8 @@ export const createJurisdiction = mutation({
       slug,
       status: "draft",
       isDefault: args.isDefault,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId: optionalBucket(args.productionBucketId),
+      stagingBucketId,
+      productionBucketId,
       providerSyncState: "pending",
       createdBy: actor.userId,
       updatedBy: actor.userId,
@@ -332,8 +342,8 @@ export const createJurisdiction = mutation({
       before: JSON.stringify(null),
       after: JSON.stringify(jurisdictionSnapshot({
         code, name: requiredText(args.name, "JURISDICTION_NAME"), slug, status: "draft",
-        isDefault: args.isDefault, stagingBucketId: optionalBucket(args.stagingBucketId),
-        productionBucketId: optionalBucket(args.productionBucketId), providerSyncState: "pending",
+        isDefault: args.isDefault, stagingBucketId,
+        productionBucketId, providerSyncState: "pending",
       })),
     });
     return id;
@@ -360,11 +370,15 @@ export const updateJurisdiction = mutation({
     const slug = normalizeSlug(args.slug);
     await assertUniqueJurisdiction(ctx, { code: row.code, slug, exceptId: row._id });
     if (args.isDefault) await assertDefaultAvailable(ctx, row._id);
+    const productionBucketId = optionalProductionBucket(args.productionBucketId);
+    if (row.status === "enabled" && productionBucketId === undefined) {
+      throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
+    }
     const patch = {
       name: requiredText(args.name, "JURISDICTION_NAME"),
       slug,
       stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId: optionalBucket(args.productionBucketId),
+      productionBucketId,
       isDefault: args.isDefault,
       providerSyncState: "pending" as const,
       updatedBy: actor.userId,
@@ -393,6 +407,9 @@ export const enableJurisdiction = mutation({
     if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
     if (row.status !== "draft") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
     if (!row.productionBucketId) throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
+    if (normalizePositiveSafeIntegerBucketId(row.productionBucketId) === null) {
+      throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
+    }
     const patch = { status: "enabled" as const, updatedBy: actor.userId, updatedAt: Date.now() };
     await ctx.db.patch(row._id, patch);
     await auditChange(ctx, actor, {

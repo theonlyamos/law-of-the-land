@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalQuery, query } from "./_generated/server";
+import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
 
 const searchJurisdictionValidator = v.union(
   v.null(),
@@ -39,13 +40,11 @@ export const getPublicByCode = internalQuery({
     const code = normalizeCode(args.code);
     const rows = await ctx.db
       .query("jurisdictions")
-      .withIndex("by_code", (q) => q.eq("code", code))
+      .withIndex("by_code_and_status", (q) =>
+        q.eq("code", code).eq("status", "enabled"),
+      )
       .take(2);
-    if (
-      rows.length !== 1 ||
-      rows[0].status !== "enabled" ||
-      !rows[0].productionBucketId
-    ) {
+    if (rows.length !== 1 || !isPublicJurisdictionEligible(rows[0])) {
       return null;
     }
     const jurisdiction = rows[0];
@@ -70,10 +69,23 @@ export const listPublicEnabled = query({
     const rows = await ctx.db
       .query("jurisdictions")
       .withIndex("by_status_and_name", (q) => q.eq("status", "enabled"))
-      .take(MAX_PUBLIC_JURISDICTIONS);
+      .take(MAX_PUBLIC_JURISDICTIONS + 1);
+
+    // More enabled rows than possible two-letter codes proves corruption.
+    // Fail closed rather than risk exposing a duplicate beyond the bounded read.
+    if (rows.length > MAX_PUBLIC_JURISDICTIONS) return [];
+
+    const enabledRowsByCode = new Map<string, number>();
+    for (const row of rows) {
+      enabledRowsByCode.set(row.code, (enabledRowsByCode.get(row.code) ?? 0) + 1);
+    }
 
     return rows
-      .filter((row) => Boolean(row.productionBucketId?.trim()))
+      .filter(
+        (row) =>
+          enabledRowsByCode.get(row.code) === 1 &&
+          isPublicJurisdictionEligible(row),
+      )
       .map(({ code, name, slug, isDefault }) => ({ code, name, slug, isDefault }))
       .sort((left, right) =>
         Number(right.isDefault) - Number(left.isDefault) ||

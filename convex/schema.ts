@@ -26,6 +26,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_code", ["code"])
+    .index("by_code_and_status", ["code", "status"])
     .index("by_slug", ["slug"])
     .index("by_status_and_name", ["status", "name"])
     .index("by_isDefault", ["isDefault"])
