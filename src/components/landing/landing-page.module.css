@@ -925,15 +925,10 @@
   text-transform: uppercase;
 }
 
-.footerBrand > span {
-  display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
-  place-items: center;
-  border: 1px solid var(--brass);
-  border-radius: 50%;
-  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  font-size: 1rem;
+.footerLogo {
+  width: 3rem;
+  height: auto;
+  object-fit: contain;
 }
 
 .footer nav {

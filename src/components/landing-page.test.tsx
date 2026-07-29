@@ -7,7 +7,9 @@ vi.mock("@/components/auth/user-nav", () => ({
 }));
 
 vi.mock("next/image", () => ({
-  default: ({ alt }: { alt: string }) => <span aria-label={alt} />,
+  default: ({ alt, className }: { alt: string; className?: string }) => (
+    <img alt={alt} className={className} />
+  ),
 }));
 
 afterEach(cleanup);
@@ -196,6 +198,16 @@ describe("professional landing research shell", () => {
       "href",
       "#legal-information-notice",
     );
+  });
+
+  it("uses the brand logo in the footer home link", () => {
+    render(<LandingPage {...landingProps()} />);
+
+    const homeLinks = screen.getAllByRole("link", { name: "Law of the Land home" });
+    const footerHomeLink = homeLinks.at(-1);
+
+    expect(footerHomeLink).toBeDefined();
+    expect(within(footerHomeLink!).getByAltText("")).toBeVisible();
   });
 
   it("links authenticated plans and session controls to settings", () => {

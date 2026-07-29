@@ -1,6 +1,8 @@
+import logo from "@/app/logo-transparent.png";
 import type { ChatSession } from "@/lib/chat-sessions";
 import type { PublicJurisdiction } from "@/lib/countries";
 import { ArrowRight } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { LegalInformationNotice } from "./legal-information-notice";
 import styles from "./landing-page.module.css";
@@ -335,7 +337,7 @@ export function LandingSections({
 
       <footer className={styles.footer}>
         <Link href="/" className={styles.footerBrand} aria-label="Law of the Land home">
-          <span aria-hidden>L</span>
+          <Image src={logo} alt="" width={80} height={43} className={styles.footerLogo} />
           <strong>Law of the Land</strong>
         </Link>
         <nav aria-label="Footer navigation">
