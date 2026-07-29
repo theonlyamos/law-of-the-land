@@ -65,7 +65,7 @@ export function AdminShell({
             <div className="mb-5 border-b border-[oklch(78%_0.025_78)] pb-5">
               <Link
                 href="/admin"
-                className="group flex min-h-11 min-w-0 items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700 sm:gap-3"
+                className="admin-sidebar-brand group flex min-h-11 min-w-0 items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700 sm:gap-3"
               >
                 <Image
                   src={logo}
@@ -75,7 +75,7 @@ export function AdminShell({
                   priority
                   className="h-auto w-10 shrink-0 sm:w-12"
                 />
-                <span className="min-w-0">
+                <span className="admin-sidebar-expanded min-w-0">
                   <span className="hidden text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.055_252)] xl:block">
                     Law of the Land
                   </span>
@@ -83,10 +83,10 @@ export function AdminShell({
                 </span>
               </Link>
             </div>
-            <div className="mb-3 flex justify-end">
+            <div className="admin-sidebar-collapse-control mb-3 flex justify-end">
               <AdminNavigationToggle />
             </div>
-            <div className="mb-4 hidden border-b border-[oklch(78%_0.025_78)] pb-6 xl:block">
+            <div className="admin-sidebar-expanded mb-4 hidden border-b border-[oklch(78%_0.025_78)] pb-6 xl:block">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(45%_0.04_252)]">
                 Signed-in authority
               </p>

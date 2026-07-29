@@ -21,6 +21,10 @@ describe("administration shell permissions", () => {
 
     expect(screen.getByRole("link", { name: "Users" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Conversations" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Users" }).querySelector("svg")).not.toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Conversations" }).querySelector("svg"),
+    ).not.toBeNull();
     expect(screen.queryByRole("link", { name: "Documents" })).toBeNull();
   });
 
@@ -162,16 +166,28 @@ describe("administration shell permissions", () => {
     });
     expect(screen.getByRole("complementary")).toContainElement(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveClass(
+      "admin-nav-link",
+      "w-full",
+      "justify-start",
+      "px-3",
+      "md:rounded-md",
+      "md:border-l-2",
+    );
+    expect(toggle).not.toHaveClass("aria-[expanded=true]:bg-white/70");
 
     fireEvent.click(toggle);
 
     expect(
       screen.getByRole("button", { name: "Expand administration navigation" }),
     ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByRole("complementary")).toHaveClass(
-      "md:hidden",
+    expect(screen.getByRole("complementary")).not.toHaveClass("md:hidden");
+    expect(screen.getByRole("main").parentElement).toHaveClass(
+      "md:grid-cols-[4rem_minmax(0,1fr)]",
     );
-    expect(screen.getByRole("main").parentElement).toHaveClass("md:grid-cols-1");
+    expect(
+      screen.getByRole("button", { name: "Expand administration navigation" }),
+    ).toHaveTextContent("Expand sidebar");
 
     fireEvent.click(
       screen.getByRole("button", { name: "Expand administration navigation" }),
@@ -180,6 +196,6 @@ describe("administration shell permissions", () => {
     expect(screen.getByRole("complementary")).not.toHaveClass("md:hidden");
     expect(screen.getByRole("button", {
       name: "Collapse administration navigation",
-    })).toHaveAttribute("aria-expanded", "true");
+    })).toHaveTextContent("Collapse sidebar");
   });
 });
