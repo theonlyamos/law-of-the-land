@@ -5,6 +5,7 @@ import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it } from "vitest";
 import authSchema from "../betterAuth/schema";
 import { components } from "../_generated/api";
+import type { Id } from "../_generated/dataModel";
 import schema from "../schema";
 import { authorizeFixtureRequest } from "./e2eFixtures";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
@@ -337,8 +338,8 @@ describe("isolated admin E2E fixture control plane", () => {
     const notedIncident = await superAdmin.mutation(addIncidentNote, preparedNote.args);
 
     const records = await t.run(async (ctx) => {
-      const grantedOverride = await ctx.db.get(granted.overrideId);
-      const revokedOverride = await ctx.db.get(revoked.overrideId);
+      const grantedOverride = await ctx.db.get(granted.overrideId as Id<"quotaOverrides">);
+      const revokedOverride = await ctx.db.get(revoked.overrideId as Id<"quotaOverrides">);
       if (!grantedOverride || !revokedOverride || !revokedOverride.revokeOperationId) throw new Error("matrix quota records missing");
       const createdOperation = await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", fixture.sessions.super_admin.userId).eq("idempotencyKey", "cleanup_create_incident")).unique();
       const notedOperation = await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", fixture.sessions.super_admin.userId).eq("idempotencyKey", "cleanup_note_incident")).unique();

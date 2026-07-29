@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { GroundxAdapter, ProviderError } from "./groundx";
+import rawRemoteIngestAccepted from "./fixtures/remote-ingest-accepted.json";
+import processTraining from "./fixtures/process-training.json";
+import copyComplete from "./fixtures/copy-complete.json";
 
 const ingestResult = {
   data: { ingest: { processId: "process-1", status: "queued" } },
@@ -118,19 +121,23 @@ describe("GroundxAdapter SDK bindings", () => {
   it("uses the documented callback transport only when callback delivery is requested", async () => {
     const sdk = makeSdk();
     const fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(ingestResult), {
+      new Response(JSON.stringify(rawRemoteIngestAccepted), {
         status: 202,
         headers: { "Content-Type": "application/json" },
       }),
     );
     const adapter = makeAdapter({ sdk, fetch });
-    const callbackUrl = "https://law.example.convex.site/groundx/callback/gx_" + "a".repeat(64);
+    const callbackUrl = "https://law.example.convex.site/groundx/callback";
+    const callbackData = "gx_" + "a".repeat(64);
 
     await expect(adapter.ingestRemote({
       documents: [{ bucketId: 7, sourceUrl: "https://documents.example/constitution.pdf" }],
       callbackUrl,
-      callbackData: { targetType: "documentVersion", targetId: "version_01" },
-    })).resolves.toEqual({ processId: "process-1", status: "queued" });
+      callbackData,
+    })).resolves.toEqual({
+      processId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      status: "queued",
+    });
 
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(sdk.documents.ingestRemote).not.toHaveBeenCalled();
@@ -143,7 +150,19 @@ describe("GroundxAdapter SDK bindings", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       documents: [{ bucketId: 7, sourceUrl: "https://documents.example/constitution.pdf" }],
       callbackUrl,
-      callbackData: { targetType: "documentVersion", targetId: "version_01" },
+      callbackData,
+    });
+  });
+
+  it("accepts the documented training status as nonterminal", async () => {
+    const sdk = makeSdk();
+    sdk.documents.getProcessingStatusById.mockResolvedValue(processTraining);
+    const adapter = makeAdapter({ sdk });
+
+    await expect(adapter.getProcess({ processId: "3fa85f64-5717-4562-b3fc-2c963f66afa6" })).resolves.toMatchObject({
+      processId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      status: "training",
+      progress: { complete: 0, processing: 1, errors: 0, cancelled: 0 },
     });
   });
 
@@ -249,6 +268,21 @@ describe("GroundxAdapter copy binding", () => {
       documentIds: ["doc-1"],
     });
     expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("preserves the authoritative target document from a completed copy contract", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(copyComplete), { status: 200 }));
+    const adapter = makeAdapter({ fetch });
+
+    await expect(adapter.copyDocuments({
+      fromBucket: 11833,
+      toBucket: 11834,
+      documentIds: ["staging-document-17"],
+    })).resolves.toMatchObject({
+      processId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      status: "complete",
+      completedDocuments: [{ documentId: "production-document-42", bucketId: 11834 }],
+    });
   });
 });
 

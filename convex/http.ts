@@ -147,13 +147,9 @@ http.route({
 });
 
 http.route({
-  pathPrefix: "/groundx/callback/",
+  path: "/groundx/callback",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const token = new URL(request.url).pathname.slice("/groundx/callback/".length);
-    if (!/^gx_[a-f0-9]{64}$/.test(token)) {
-      return new Response(null, { status: 404 });
-    }
     const declaredSize = Number(request.headers.get("content-length") ?? "0");
     if (Number.isFinite(declaredSize) && declaredSize > MAX_GROUNDX_CALLBACK_BYTES) {
       return new Response(null, { status: 400 });
@@ -170,20 +166,30 @@ http.route({
     }
     if (
       typeof body !== "object" || body === null ||
-      typeof (body as Record<string, unknown>).processId !== "string" ||
-      typeof (body as Record<string, unknown>).targetType !== "string" ||
-      typeof (body as Record<string, unknown>).targetId !== "string" ||
-      !["complete", "error", "cancelled"].includes(String((body as Record<string, unknown>).status))
+      typeof (body as Record<string, unknown>).callbackData !== "string" ||
+      !/^gx_[a-f0-9]{64}$/.test(String((body as Record<string, unknown>).callbackData)) ||
+      typeof (body as Record<string, unknown>).ingest !== "object" ||
+      (body as Record<string, unknown>).ingest === null ||
+      typeof ((body as Record<string, unknown>).ingest as Record<string, unknown>).processId !== "string" ||
+      !["queued", "training", "processing", "complete", "error", "cancelled"].includes(String(((body as Record<string, unknown>).ingest as Record<string, unknown>).status))
     ) {
       return new Response(null, { status: 400 });
     }
     try {
+      const token = (body as { callbackData: string }).callbackData;
+      const ingest = (body as { ingest: { processId: string; status: "queued" | "training" | "processing" | "complete" | "error" | "cancelled" } }).ingest;
+      const completed = (body as { ingest?: { progress?: { complete?: { documents?: Array<Record<string, unknown>> } } } }).ingest?.progress?.complete?.documents?.[0];
       await ctx.runMutation(completeGroundxCallback, {
         tokenHash: await hashCallbackToken(token),
-        processId: (body as { processId: string }).processId,
-        targetType: (body as { targetType: string }).targetType,
-        targetId: (body as { targetId: string }).targetId,
-        status: (body as { status: "complete" | "error" | "cancelled" }).status,
+        processId: ingest.processId,
+        status: ingest.status,
+        ...(completed && typeof completed.documentId === "string"
+          ? { documentEvidence: {
+              documentId: completed.documentId,
+              status: ingest.status,
+              ...(typeof completed.bucketId === "number" ? { bucketId: completed.bucketId } : {}),
+            } }
+          : {}),
       });
       return new Response(null, { status: 202 });
     } catch {

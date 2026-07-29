@@ -24,6 +24,7 @@ import {
   parseAdminRoles,
 } from "./lib/adminPermissions";
 import { sendEmail } from "./lib/email";
+import { ADMIN_STEP_UP_KEY_PATTERN, isAdminStepUpAction } from "./lib/adminStepUp";
 
 const siteUrl = process.env.SITE_URL!;
 
@@ -46,14 +47,6 @@ const twoFactorVerificationRoutes = new Set([
   "/two-factor/verify-backup-code",
 ]);
 
-const stepUpActions = new Set([
-  "roles_assign",
-  "impersonation_start",
-  "user_deletion_queue",
-  "conversation_export",
-  "admin_panel_set",
-]);
-const stepUpKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const recordAdminStepUpProofReference =
   makeFunctionReference<"mutation">(
     "admin/users:recordAdminStepUpProof",
@@ -113,11 +106,11 @@ function readStepUpScope(hookCtx: {
   const idempotencyKey = requestHeader(hookCtx, "x-admin-step-up-key");
   if (
     !action ||
-    !stepUpActions.has(action) ||
+    !isAdminStepUpAction(action) ||
     !targetId ||
     targetId.length > 256 ||
     !idempotencyKey ||
-    !stepUpKeyPattern.test(idempotencyKey)
+    !ADMIN_STEP_UP_KEY_PATTERN.test(idempotencyKey)
   ) {
     return null;
   }
@@ -262,7 +255,7 @@ export const createAuthOptions = (
               session &&
               targetId &&
               idempotencyKey &&
-              stepUpKeyPattern.test(idempotencyKey)
+              ADMIN_STEP_UP_KEY_PATTERN.test(idempotencyKey)
             ) {
               const allowed = await runAuthMutation<boolean>(
                 ctx,

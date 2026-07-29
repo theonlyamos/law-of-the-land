@@ -39,6 +39,7 @@ export async function applyPublicationJobOutcome(
   job: Doc<"integrationJobs">,
   outcome: "succeeded" | "failed",
   processId?: string,
+  productionDocumentId?: string,
 ): Promise<void> {
   const payload = readPayload(job);
   if (!payload) return;
@@ -82,6 +83,7 @@ export async function applyPublicationJobOutcome(
     });
     await ctx.db.patch(resource._id, { activeVersionId: undefined, updatedBy: job.actorId, updatedAt: now });
   } else {
+    if (!productionDocumentId) throw new ConvexError("GROUNDX_PRODUCTION_EVIDENCE_REQUIRED");
     if (version.status !== "publishing" || resource.activeVersionId !== priorId) {
       throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
     }
@@ -94,7 +96,7 @@ export async function applyPublicationJobOutcome(
     }
     await ctx.db.patch(version._id, {
       status: "published",
-      groundxProductionDocumentId: version.groundxStagingDocumentId,
+      groundxProductionDocumentId: productionDocumentId,
       groundxProductionProcessId: processId,
       publishedAt: now,
       unpublishedAt: undefined,

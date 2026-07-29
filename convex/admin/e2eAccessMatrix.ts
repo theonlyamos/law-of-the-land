@@ -29,7 +29,6 @@ export const E2E_PROTECTED_ROUTES = [
 
 export const E2E_PRIVILEGED_FUNCTIONS = [
   { path: "admin/featureFlags:setAdminPanel", resource: "user", action: "set_role", allowed: ["super_admin"], success: "admin_panel_flag_set" },
-  { path: "admin/roles:setAdminRoles", resource: "user", action: "set_role", allowed: ["super_admin"], success: "roles_changed" },
   { path: "admin/users:assignRoles", resource: "user", action: "set_role", allowed: ["super_admin"], success: "roles_assign_succeeded" },
   { path: "admin/users:banUser", resource: "user", action: "ban", allowed: ["super_admin"], success: "user_ban_succeeded" },
   { path: "admin/users:unbanUser", resource: "user", action: "ban", allowed: ["super_admin"], success: "user_unban_succeeded" },
@@ -59,7 +58,6 @@ export const E2E_PRIVILEGED_FUNCTIONS = [
   { path: "admin/publication:rollbackVersion", resource: "document", action: "rollback", allowed: ["super_admin", "content_reviewer"], success: "rollback_succeeded" },
   { path: "admin/billing:grantQuotaOverride", resource: "quota", action: "write", allowed: ["super_admin", "billing_manager"], success: "quota_override_granted" },
   { path: "admin/billing:revokeQuotaOverride", resource: "quota", action: "write", allowed: ["super_admin", "billing_manager"], success: "quota_override_revoked" },
-  { path: "admin/jobs:enqueueJob", resource: "operations", action: "write", allowed: ["super_admin"], success: "job_succeeded" },
   { path: "admin/jobs:retryJob", resource: "operations", action: "retry", allowed: ["super_admin"], success: "job_retry_succeeded" },
   { path: "admin/jobs:cancelJob", resource: "operations", action: "write", allowed: ["super_admin"], success: "job_cancelled" },
   { path: "admin/operations:createIncident", resource: "operations", action: "write", allowed: ["super_admin"], success: "incident_created" },

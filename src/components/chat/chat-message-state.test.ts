@@ -14,6 +14,7 @@ import {
   shouldEnsureForNewSubmission,
   type LocalChatMessage,
   type PersistedChatMessage,
+  type RouteEnsureEntry,
 } from "./chat-message-state";
 
 const persisted = (overrides: Partial<PersistedChatMessage> = {}): PersistedChatMessage => ({
@@ -265,7 +266,7 @@ describe("route-scoped chat creation", () => {
     const first = deferred<void>();
     const second = deferred<void>();
     const ensure = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    let cached = startOrReuseRouteEnsure({
+    let cached: RouteEnsureEntry | null = startOrReuseRouteEnsure({
       current: null,
       routeGeneration: 7,
       externalId: "chat-7",

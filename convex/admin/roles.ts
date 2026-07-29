@@ -2,7 +2,7 @@ import type { FunctionReturnType } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { components } from "../_generated/api";
 import type { MutationCtx } from "../_generated/server";
-import { mutation } from "../_generated/server";
+import { internalMutation } from "../_generated/server";
 import { authComponent, createAuthOptions } from "../auth";
 import {
   parseAdminRoles,
@@ -141,6 +141,9 @@ export async function writeAdminRoles(
 
   const nextRoles = [...new Set(input.roles)];
   const currentRoles = parseAdminRoles(target.role);
+  if (nextRoles.length > 0 && target.emailVerified !== true) {
+    throw new ConvexError("Target administrator must verify their email");
+  }
   if (nextRoles.length > 0 && target.twoFactorEnabled !== true) {
     throw new ConvexError("Target administrator must enroll in Two Factor");
   }
@@ -196,7 +199,7 @@ export async function writeAdminRoles(
   return { changed: true, roles: nextRoles };
 }
 
-export const setAdminRoles = mutation({
+export const setAdminRoles = internalMutation({
   args: {
     targetUserId: v.string(),
     roles: v.array(adminRoleValidator),

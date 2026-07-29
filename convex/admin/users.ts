@@ -32,6 +32,7 @@ import {
 } from "./featureFlags";
 import { writeAdminRoles } from "./roles";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
+import { ADMIN_STEP_UP_MAX_AGE_MS, isAdminStepUpAction } from "../lib/adminStepUp";
 
 const MAX_PAGE_SIZE = 50;
 const MIN_IDEMPOTENCY_KEY_LENGTH = 8;
@@ -39,7 +40,7 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const VERIFICATION_RESEND_WINDOW_MS = 5 * 60 * 1_000;
 const VERIFICATION_DELIVERY_LEASE_MS = 5 * 60 * 1_000;
-const STEP_UP_MAX_AGE_MS = 5 * 60 * 1_000;
+const STEP_UP_MAX_AGE_MS = ADMIN_STEP_UP_MAX_AGE_MS;
 const USER_DELETION_DELAY_MS = 7 * 24 * 60 * 60 * 1_000;
 const USER_DELETION_BATCH_SIZE = 25;
 
@@ -83,16 +84,6 @@ type BegunOperation =
       action: string;
       targetId: string;
     };
-
-const STEP_UP_ACTIONS = new Set([
-  "roles_assign",
-  "impersonation_start",
-  "user_deletion_queue",
-  "conversation_export",
-  "document_publish",
-  "document_unpublish",
-  "document_rollback",
-]);
 
 function validateIdempotencyKey(value: string): string {
   if (
@@ -1109,7 +1100,7 @@ export const recordAdminStepUpProof = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     validateIdempotencyKey(args.idempotencyKey);
-    if (!STEP_UP_ACTIONS.has(args.action)) {
+    if (!isAdminStepUpAction(args.action)) {
       throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     }
     const [actor, session] = await Promise.all([

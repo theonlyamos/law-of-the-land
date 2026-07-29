@@ -230,7 +230,7 @@ const queueRowValidator = v.object({
     v.object({ status: v.literal("unavailable") }),
     v.object({
       status: v.union(
-        v.literal("queued"), v.literal("processing"), v.literal("complete"),
+        v.literal("queued"), v.literal("training"), v.literal("processing"), v.literal("complete"),
         v.literal("error"), v.literal("cancelled"),
       ),
       documentId: v.string(),

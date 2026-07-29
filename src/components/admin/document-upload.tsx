@@ -43,6 +43,7 @@ export function DocumentUpload({
   const createDocumentVersion = useMutation(
     api.admin.documents.createDocumentVersion,
   );
+  const stageDocumentVersion = useMutation(api.admin.documents.stageDocumentVersion);
   const [file, setFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState(defaultSourceUrl);
   const [effectiveAt, setEffectiveAt] = useState(defaultEffectiveAt);
@@ -95,7 +96,7 @@ export function DocumentUpload({
       }
 
       setState({ kind: "busy", message: "Recording governed draft metadata..." });
-      await createDocumentVersion({
+      const versionId = await createDocumentVersion({
         resourceId: resourceId as Id<"legalResources">,
         storageId: payload.storageId as Id<"_storage">,
         filename: file.name,
@@ -105,10 +106,15 @@ export function DocumentUpload({
         sourceUrl,
         effectiveAt,
       });
+      await stageDocumentVersion({
+        versionId,
+        reason: "Stage newly uploaded governed original",
+        idempotencyKey: `stage-${versionId}`,
+      });
       setFile(null);
       setState({
         kind: "success",
-        message: "Draft version recorded. It is ready for staging preparation.",
+        message: "Draft version recorded and queued for GroundX staging.",
       });
       router.refresh();
     } catch {

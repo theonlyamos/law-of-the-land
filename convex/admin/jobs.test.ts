@@ -7,6 +7,7 @@ import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
 import { executeClaimedGroundxJob, executeGroundxJob } from "./groundxActions";
+import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -135,6 +136,9 @@ async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
 }
 
 describe("durable GroundX jobs", () => {
+  it("does not expose the generic provider dispatcher as a privileged public function", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain("admin/jobs:enqueueJob");
+  });
   it("claims and terminalizes a stubbed E2E job without constructing a provider transport", async () => {
     const t = convexTest(schema, modules);
     Object.assign(process.env, {
@@ -229,19 +233,9 @@ describe("durable GroundX jobs", () => {
     expect(snapshot.audits[0].correlationId).toBe(snapshot.jobs[0].correlationId);
   });
 
-  it("enforces legal transitions and shares completion semantics", async () => {
+  it("allows a token-bound fast callback to bind the provider process once", async () => {
     const t = convexTest(schema, modules);
     const created = await t.mutation(enqueueJob, request());
-
-    await expect(
-      t.mutation(completeGroundxCallback, {
-        tokenHash: created.callbackTokenHash,
-        processId: "process-1",
-        targetType: "documentVersion",
-        targetId: "version_01",
-        status: "complete",
-      }),
-    ).rejects.toThrow("INTEGRATION_CALLBACK_NOT_READY");
 
     await expect(
       t.mutation(applyProviderResult, {
@@ -265,17 +259,9 @@ describe("durable GroundX jobs", () => {
       leaseToken,
       tokenHash: callbackTokenHash,
     });
-    await t.mutation(applyProviderResult, {
-      jobId: created.jobId,
-      leaseToken,
-      processId: "process-1",
-      status: "processing",
-    });
     const accepted = await t.mutation(completeGroundxCallback, {
       tokenHash: callbackTokenHash,
       processId: "process-1",
-      targetType: "documentVersion",
-      targetId: "version_01",
       status: "complete",
     });
     expect(accepted).toEqual({ accepted: true, duplicate: false });
@@ -283,8 +269,6 @@ describe("durable GroundX jobs", () => {
       t.mutation(completeGroundxCallback, {
         tokenHash: callbackTokenHash,
         processId: "process-1",
-        targetType: "documentVersion",
-        targetId: "version_01",
         status: "complete",
       }),
     ).resolves.toEqual({ accepted: true, duplicate: true });
@@ -296,6 +280,23 @@ describe("durable GroundX jobs", () => {
         status: "complete",
       }),
     ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
+  });
+
+  it("never automatically replays an ambiguous ingest transport failure", async () => {
+    const t = convexTest(schema, modules);
+    const created = await t.mutation(enqueueJob, request({ idempotencyKey: "uncertain-ingest-send" }));
+    const leaseToken = await claimLease(t, created.jobId);
+
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: created.jobId,
+      leaseToken,
+      kind: "network",
+    })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
+    await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({
+      status: "manual_review",
+      attemptCount: 1,
+      lastErrorKind: "network",
+    });
   });
 
   it("retries transport and rate-limit failures at 1, 5, and 20 minutes then requires review", async () => {
@@ -311,7 +312,7 @@ describe("durable GroundX jobs", () => {
         const result = await t.mutation(recordProviderFailure, {
           jobId: created.jobId,
           leaseToken,
-          kind: index === 1 ? "rate_limit" : "network",
+          kind: "rate_limit",
         });
         expect(result).toMatchObject({ status: "queued", nextAttemptAt: now + delays[index] });
         vi.setSystemTime(now + delays[index]);
@@ -321,7 +322,7 @@ describe("durable GroundX jobs", () => {
         t.mutation(recordProviderFailure, {
           jobId: created.jobId,
           leaseToken,
-          kind: "timeout",
+          kind: "rate_limit",
         }),
       ).resolves.toMatchObject({ status: "manual_review", nextAttemptAt: null });
     } finally {
@@ -426,50 +427,42 @@ describe("durable GroundX jobs", () => {
     });
 
     expect(
-      (await t.fetch("/groundx/callback/wrong-token", {
+      (await t.fetch("/groundx/callback", {
         method: "POST",
-        body: JSON.stringify({ processId: "process-7", targetType: "documentVersion", targetId: "version_01", status: "complete" }),
+        body: JSON.stringify({ callbackData: `gx_${"d".repeat(64)}`, ingest: { processId: "process-7", status: "complete" } }),
       })).status,
     ).toBe(404);
     expect(
-      (await t.fetch(`/groundx/callback/${callbackToken}`, {
+      (await t.fetch("/groundx/callback", {
         method: "POST",
-        body: JSON.stringify({ processId: "other", targetType: "documentVersion", targetId: "version_01", status: "complete" }),
+        body: JSON.stringify({ callbackData: callbackToken, ingest: { processId: "other", status: "complete" } }),
       })).status,
     ).toBe(404);
     expect(
-      (await t.fetch(`/groundx/callback/${callbackToken}`, {
-        method: "POST",
-        body: JSON.stringify({ processId: "process-7", targetType: "documentVersion", targetId: "wrong-target", status: "complete" }),
-      })).status,
-    ).toBe(404);
-    expect(
-      (await t.fetch(`/groundx/callback/${callbackToken}`, {
+      (await t.fetch("/groundx/callback", {
         method: "POST",
         body: "x".repeat(16_385),
       })).status,
     ).toBe(400);
     expect(
-      (await t.fetch(`/groundx/callback/${callbackToken}`, {
+      (await t.fetch("/groundx/callback", {
         method: "POST",
         body: "{",
       })).status,
     ).toBe(400);
     expect(
-      (await t.fetch(`/groundx/callback/${callbackToken}`, {
+      (await t.fetch("/groundx/callback", {
         method: "POST",
         body: JSON.stringify({}),
       })).status,
     ).toBe(400);
     const body = JSON.stringify({
-      processId: "process-7",
-      targetType: "documentVersion",
-      targetId: "version_01",
-      status: "complete",
+      callbackData: callbackToken,
+      ingest: { processId: "process-7", status: "complete" },
       rawBody: "provider-sensitive-body",
     });
-    expect((await t.fetch(`/groundx/callback/${callbackToken}`, { method: "POST", body })).status).toBe(202);
-    expect((await t.fetch(`/groundx/callback/${callbackToken}`, { method: "POST", body })).status).toBe(202);
+    expect((await t.fetch("/groundx/callback", { method: "POST", body })).status).toBe(202);
+    expect((await t.fetch("/groundx/callback", { method: "POST", body })).status).toBe(202);
     const persisted = JSON.stringify(await t.run(async (ctx) => ({
       jobs: await ctx.db.query("integrationJobs").take(2),
       audits: await ctx.db.query("auditEvents").take(10),
@@ -581,43 +574,16 @@ describe("durable GroundX jobs", () => {
     expect(order).toEqual(["arm", "adapter"]);
     expect(adapter.ingestRemote).toHaveBeenCalledWith({
       documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
-      callbackUrl: `https://law.example.convex.site/groundx/callback/gx_${"b".repeat(64)}`,
-      callbackData: { targetType: "documentVersion", targetId: "version_01" },
+      callbackUrl: "https://law.example.convex.site/groundx/callback",
+      callbackData: `gx_${"b".repeat(64)}`,
     });
     expect(JSON.stringify(arm.mock.calls)).not.toContain(`gx_${"b".repeat(64)}`);
   });
 
-  it("derives the actor from the assured admin session and rejects role spoofing", async () => {
-    const t = createBackend();
-    await enablePanel(t);
-    const manager = await asAdmin(t, "content_manager");
-    const auditor = await asAdmin(t, "auditor");
-    const { systemActor: _systemActor, ...authorizedRequest } = request({
-      idempotencyKey: "guarded-enqueue",
-    });
-    const created = await manager.client.mutation(
-      guardedEnqueueJob,
-      authorizedRequest,
+  it("does not expose the generic job dispatcher as a privileged public command", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain(
+      "admin/jobs:enqueueJob",
     );
-    await expect(
-      manager.client.mutation(guardedEnqueueJob, {
-        ...authorizedRequest,
-        idempotencyKey: "spoofed-enqueue",
-        actor: { id: manager.userId, roles: ["super_admin"] },
-      }),
-    ).rejects.toThrow();
-    await expect(
-      auditor.client.mutation(guardedEnqueueJob, {
-        ...authorizedRequest,
-        idempotencyKey: "auditor-enqueue",
-      }),
-    ).rejects.toThrow("Admin permission required");
-    await expect(
-      t.run(async (ctx) => ctx.db.get(created.jobId as Id<"integrationJobs">)),
-    ).resolves.toMatchObject({
-      actorId: manager.userId,
-      actorRoles: ["content_manager"],
-    });
   });
 
   it("rejects results from an expired lease after a newer worker reclaims the job", async () => {

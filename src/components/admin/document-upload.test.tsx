@@ -4,6 +4,7 @@ import { DocumentUpload } from "./document-upload";
 
 const generateUploadUrl = vi.fn();
 const createDocumentVersion = vi.fn();
+const stageDocumentVersion = vi.fn();
 
 vi.mock("../../../convex/_generated/api", () => ({
   api: {
@@ -11,15 +12,16 @@ vi.mock("../../../convex/_generated/api", () => ({
       documents: {
         generateUploadUrl: "generate-upload-url",
         createDocumentVersion: "create-document-version",
+        stageDocumentVersion: "stage-document-version",
       },
     },
   },
 }));
 vi.mock("convex/react", () => ({
   useMutation: (reference: string) =>
-    reference === "generate-upload-url"
-      ? generateUploadUrl
-      : createDocumentVersion,
+    reference === "generate-upload-url" ? generateUploadUrl
+      : reference === "create-document-version" ? createDocumentVersion
+      : stageDocumentVersion,
 }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
@@ -28,6 +30,8 @@ vi.mock("next/navigation", () => ({
 beforeEach(() => {
   generateUploadUrl.mockReset();
   createDocumentVersion.mockReset();
+  stageDocumentVersion.mockReset();
+  stageDocumentVersion.mockResolvedValue({ jobId: "job_1", duplicate: false });
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -126,6 +130,11 @@ describe("document original upload", () => {
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
       sourceUrl: "https://laws.example.gov/files/act.pdf",
       effectiveAt: "2012-10-16",
+    });
+    expect(stageDocumentVersion).toHaveBeenCalledWith({
+      versionId: "version_1",
+      reason: "Stage newly uploaded governed original",
+      idempotencyKey: "stage-version_1",
     });
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Draft version recorded",

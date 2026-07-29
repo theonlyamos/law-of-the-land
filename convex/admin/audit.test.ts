@@ -310,9 +310,14 @@ describe("audit writer", () => {
   });
 
   it("returns a bounded, masked list to an authorized auditor", async () => {
+    const previousEnabled = process.env.ADMIN_PANEL_ENABLED;
+    const previousEnvironment = process.env.ADMIN_ENVIRONMENT;
+    process.env.ADMIN_PANEL_ENABLED = "true";
+    process.env.ADMIN_ENVIRONMENT = "test";
     const t = createAdminBackend();
     const auditor = await createAuditor(t);
     await t.run(async (ctx) => {
+      await ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() });
       await writeAudit(ctx, {
         actorId: "user_sensitive_abcdef",
         actorRoles: ["support_agent"],
@@ -379,6 +384,10 @@ describe("audit writer", () => {
       action: "conversation.access_granted",
     });
     expect(events[0]).not.toHaveProperty("reason");
+    if (previousEnabled === undefined) delete process.env.ADMIN_PANEL_ENABLED;
+    else process.env.ADMIN_PANEL_ENABLED = previousEnabled;
+    if (previousEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
+    else process.env.ADMIN_ENVIRONMENT = previousEnvironment;
   });
 });
 

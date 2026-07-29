@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
 import { query, type MutationCtx } from "../_generated/server";
 import { isAdminRole } from "../lib/adminPermissions";
-import { requireAdminPermission } from "../lib/requireAdmin";
+import { requireEnabledAdminPermission } from "./featureFlags";
 
 const MAX_ACTOR_ROLES = 6;
 const MAX_AUDIT_REASON_LENGTH = 500;
@@ -346,7 +346,7 @@ export const listAudit = query({
   args: { limit: v.optional(v.number()) },
   returns: v.array(maskedAuditEventValidator),
   handler: async (ctx, args) => {
-    await requireAdminPermission(ctx, "audit", "read_masked");
+    await requireEnabledAdminPermission(ctx, "audit", "read_masked");
 
     const limit = args.limit ?? DEFAULT_AUDIT_LIST_LIMIT;
     if (
@@ -386,7 +386,7 @@ export const listAuditPage = query({
   },
   returns: v.object({ page: v.array(maskedAuditEventValidator), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
-    await requireAdminPermission(ctx, "audit", "read_masked");
+    await requireEnabledAdminPermission(ctx, "audit", "read_masked");
     if (!Number.isInteger(args.paginationOpts.numItems) || args.paginationOpts.numItems < 1) throw new ConvexError("INVALID_ADMIN_PAGINATION");
     const filterCount = Number(args.action !== undefined) + Number(args.outcome !== undefined) + Number(args.targetType !== undefined);
     if (filterCount > 1) throw new ConvexError("Select only one indexed audit filter");

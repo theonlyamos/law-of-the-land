@@ -374,6 +374,7 @@ describe("governed document publication", () => {
       leaseToken: claim.leaseToken,
       processId: "copy-process-2",
       status: "complete",
+      documentEvidence: { documentId: "production-copy-2", bucketId: 202, status: "complete" },
     });
     const after = await t.run(async (ctx) => ({
       resource: await ctx.db.get(resourceId),
@@ -386,9 +387,8 @@ describe("governed document publication", () => {
     await expect(t.mutation(completeGroundxCallback, {
       tokenHash: before.jobs[0].callbackTokenHash,
       processId: "copy-process-2",
-      targetType: "documentVersion",
-      targetId: candidateId,
       status: "complete",
+      documentEvidence: { documentId: "production-copy-2", bucketId: 202, status: "complete" },
     })).resolves.toEqual({ accepted: true, duplicate: true });
     expect(await t.run(async (ctx) => (await ctx.db.get(resourceId))?.activeVersionId)).toBe(candidateId);
     await expect(reviewer.client.mutation(publishVersion, publicationRequest)).resolves.toMatchObject({
@@ -432,6 +432,7 @@ describe("governed document publication", () => {
     await t.mutation(applyProviderResult, {
       jobId: rollback.jobId, leaseToken: rollbackClaim.leaseToken,
       processId: "rollback-process", status: "complete",
+      documentEvidence: { documentId: "production-rollback", bucketId: 202, status: "complete" },
     });
     expect(await t.run(async (ctx) => (await ctx.db.get(resourceId))?.activeVersionId)).toBe(ids[0]);
 
@@ -571,9 +572,8 @@ describe("governed document publication", () => {
     await t.mutation(completeGroundxCallback, {
       tokenHash: winnerJob.callbackTokenHash,
       processId: "resource-winner",
-      targetType: "documentVersion",
-      targetId: winnerJob.targetId,
       status: "complete",
+      documentEvidence: { documentId: "production-winner", bucketId: 202, status: "complete" },
     });
     const loserRetry = winnerIndex === 0
       ? await secondReviewer.client.mutation(rollbackVersion, rollbackRequest)
@@ -749,14 +749,13 @@ describe("governed document publication", () => {
           leaseToken: provider.leaseToken,
           processId: "provider-delayed-success",
           status: "complete",
+          documentEvidence: { documentId: "production-delayed", bucketId: 202, status: "complete" },
         });
         expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[2]);
       } else {
         await t.mutation(completeGroundxCallback, {
           tokenHash: provider.callbackTokenHash,
           processId: "provider-uncertain-process",
-          targetType: "documentVersion",
-          targetId: ids[2],
           status: "error",
         });
         const failed = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), candidate: await ctx.db.get(ids[2]) }));
@@ -832,24 +831,13 @@ describe("governed document publication", () => {
       await expect(t.mutation(completeGroundxCallback, {
         tokenHash: uncertain.job?.callbackTokenHash,
         processId: "wrong-process",
-        targetType: "documentVersion",
-        targetId: ids[2],
         status: terminalStatus,
       })).rejects.toThrow("INTEGRATION_CALLBACK_NOT_FOUND");
-      await expect(t.mutation(completeGroundxCallback, {
-        tokenHash: uncertain.job?.callbackTokenHash,
-        processId: `manual-review-${terminalStatus}-process`,
-        targetType: "documentVersion",
-        targetId: ids[1],
-        status: terminalStatus,
-      })).rejects.toThrow("INTEGRATION_CALLBACK_NOT_FOUND");
-
       const callback = {
         tokenHash: uncertain.job?.callbackTokenHash,
         processId: `manual-review-${terminalStatus}-process`,
-        targetType: "documentVersion",
-        targetId: ids[2],
         status: terminalStatus,
+        ...(terminalStatus === "complete" ? { documentEvidence: { documentId: "production-manual-review", bucketId: 202, status: "complete" as const } } : {}),
       };
       await expect(t.mutation(completeGroundxCallback, callback)).resolves.toEqual({ accepted: true, duplicate: false });
       await expect(t.mutation(completeGroundxCallback, callback)).resolves.toEqual({ accepted: true, duplicate: true });

@@ -428,7 +428,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: target.userId,
           roles: ["auditor"],
         }),
@@ -448,7 +448,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: target.userId,
           roles: ["content_manager"],
         }),
@@ -470,7 +470,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: actor.userId,
           roles: ["auditor"],
         }),
@@ -496,7 +496,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: actor.userId,
           roles: ["auditor"],
         }),
@@ -516,7 +516,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: actor.userId,
           roles: ["auditor"],
         }),
@@ -565,7 +565,7 @@ describe("admin permission registry", () => {
 
     await expect(
       t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-        .mutation(api.admin.roles.setAdminRoles, {
+        .mutation(internal.admin.roles.setAdminRoles, {
           targetUserId: actor.userId,
           roles: ["auditor"],
         }),
@@ -641,7 +641,7 @@ describe("admin permission registry", () => {
 
     await t
       .withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-      .mutation(api.admin.roles.setAdminRoles, {
+      .mutation(internal.admin.roles.setAdminRoles, {
         targetUserId: target.userId,
         roles: ["content_reviewer"],
       });
@@ -679,7 +679,7 @@ describe("admin permission registry", () => {
 
     await t
       .withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-      .mutation(api.admin.roles.setAdminRoles, {
+      .mutation(internal.admin.roles.setAdminRoles, {
         targetUserId: target.userId,
         roles: ["auditor", "content_reviewer"],
       });
@@ -702,7 +702,7 @@ describe("admin permission registry", () => {
 
     await t
       .withIdentity({ subject: actor.userId, sessionId: actor.sessionId })
-      .mutation(api.admin.roles.setAdminRoles, {
+      .mutation(internal.admin.roles.setAdminRoles, {
         targetUserId: target.userId,
         roles: ["super_admin"],
       });

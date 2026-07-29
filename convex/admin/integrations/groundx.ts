@@ -7,6 +7,7 @@ const REMOTE_INGEST_ENDPOINT = "https://api.groundx.ai/api/v1/ingest/documents/r
 
 const processingStatusSchema = z.enum([
   "queued",
+  "training",
   "processing",
   "error",
   "complete",
@@ -25,16 +26,18 @@ const documentTypeSchema = z.enum([
   "json",
 ]);
 
-const processEnvelopeSchema = z.object({
+const processSchema = z.object({
+  processId: z.string().min(1),
+  status: processingStatusSchema,
+});
+
+const sdkProcessEnvelopeSchema = z.object({
   data: z.object({
-    ingest: z.object({
-      processId: z.string().min(1),
-      status: processingStatusSchema,
-    }),
+    ingest: processSchema,
   }),
 });
 
-const copyProcessSchema = processEnvelopeSchema.shape.data;
+const rawProcessEnvelopeSchema = z.object({ ingest: processSchema });
 
 const bucketEnvelopeSchema = z.object({
   data: z.object({
@@ -45,24 +48,36 @@ const bucketEnvelopeSchema = z.object({
   }),
 });
 
-const progressPartSchema = z.object({ total: z.number().int().nonnegative().optional() });
+const progressDocumentSchema = z.object({
+  documentId: z.string().min(1),
+  bucketId: z.number().int().positive().optional(),
+  processId: z.string().min(1).optional(),
+  fileName: z.string().min(1).optional(),
+  fileType: documentTypeSchema.optional(),
+  fileSize: z.string().optional(),
+  sourceUrl: z.string().url().optional(),
+  status: processingStatusSchema.optional(),
+  statusMessage: z.string().optional(),
+});
+const progressPartSchema = z.object({
+  documents: z.array(progressDocumentSchema).optional(),
+  total: z.number().int().nonnegative().optional(),
+});
+const processStatusSchema = processSchema.extend({
+  statusMessage: z.string().optional(),
+  progress: z.object({
+    complete: progressPartSchema.optional(),
+    processing: progressPartSchema.optional(),
+    errors: progressPartSchema.optional(),
+    cancelled: progressPartSchema.optional(),
+  }).optional(),
+});
 const processStatusEnvelopeSchema = z.object({
   data: z.object({
-    ingest: z.object({
-      processId: z.string().min(1),
-      status: processingStatusSchema,
-      statusMessage: z.string().optional(),
-      progress: z
-        .object({
-          complete: progressPartSchema.optional(),
-          processing: progressPartSchema.optional(),
-          errors: progressPartSchema.optional(),
-          cancelled: progressPartSchema.optional(),
-        })
-        .optional(),
-    }),
+    ingest: processStatusSchema,
   }),
 });
+const rawProcessStatusEnvelopeSchema = z.object({ ingest: processStatusSchema });
 
 const searchDataSchema = z.record(z.string(), z.unknown());
 const documentEnvelopeSchema = z.object({
@@ -113,12 +128,7 @@ const remoteDocumentSchema = z.object({
 const ingestRemoteInputSchema = z.object({
   documents: z.array(remoteDocumentSchema).min(1).max(100),
   callbackUrl: z.string().url().optional(),
-  callbackData: z
-    .object({
-      targetType: z.string().min(1).max(64),
-      targetId: z.string().min(1).max(256),
-    })
-    .optional(),
+  callbackData: z.string().min(1).max(256).optional(),
 });
 const copyDocumentsInputSchema = documentIdsInputSchema.extend({
   fromBucket: z.number().int().positive(),
@@ -171,7 +181,13 @@ export interface GroundxSdk {
 }
 
 export type RemoteDocument = z.infer<typeof remoteDocumentSchema>;
-export type NormalizedProcess = z.infer<typeof processEnvelopeSchema>["data"]["ingest"];
+export type NormalizedProcess = {
+  processId: string;
+  status: z.infer<typeof processingStatusSchema>;
+  statusMessage?: string | null;
+  progress?: { complete: number; processing: number; errors: number; cancelled: number } | null;
+  completedDocuments?: Array<z.infer<typeof progressDocumentSchema>>;
+};
 export type NormalizedDocument = z.infer<typeof documentEnvelopeSchema>["data"]["document"];
 export type NormalizedHealth = z.infer<typeof healthEnvelopeSchema>["data"]["health"];
 
@@ -257,6 +273,24 @@ function parseResponse<T>(schema: z.ZodType<T>, input: unknown, status?: number)
   return parsed.data;
 }
 
+function normalizeProcess(input: z.infer<typeof processStatusSchema>): NormalizedProcess {
+  const progress = input.progress;
+  return {
+    processId: input.processId,
+    status: input.status,
+    ...(input.statusMessage !== undefined ? { statusMessage: input.statusMessage } : {}),
+    ...(progress ? { progress: {
+          complete: progress.complete?.total ?? 0,
+          processing: progress.processing?.total ?? 0,
+          errors: progress.errors?.total ?? 0,
+          cancelled: progress.cancelled?.total ?? 0,
+        } } : {}),
+    ...(progress?.complete?.documents?.length
+      ? { completedDocuments: progress.complete.documents }
+      : {}),
+  };
+}
+
 export class GroundxAdapter {
   private readonly apiKey: string;
   private readonly sdk: GroundxSdk;
@@ -295,7 +329,7 @@ export class GroundxAdapter {
   async ingestRemote(input: {
     documents: RemoteDocument[];
     callbackUrl?: string;
-    callbackData?: { targetType: string; targetId: string };
+    callbackData?: string;
   }): Promise<NormalizedProcess> {
     const request = parseInput(ingestRemoteInputSchema, input);
     if (request.callbackUrl !== undefined) {
@@ -304,7 +338,7 @@ export class GroundxAdapter {
     }
     try {
       const response = parseResponse(
-        processEnvelopeSchema,
+        sdkProcessEnvelopeSchema,
         await this.sdk.documents.ingestRemote(
           { documents: request.documents },
           { timeout: this.timeoutMs },
@@ -336,7 +370,7 @@ export class GroundxAdapter {
       } catch {
         throw invalidResponse(response.status);
       }
-      return parseResponse(processEnvelopeSchema, body, response.status).data.ingest;
+      return parseResponse(rawProcessEnvelopeSchema, body, response.status).ingest;
     } catch (error) {
       throw translateError(error);
     } finally {
@@ -371,7 +405,7 @@ export class GroundxAdapter {
       } catch {
         throw invalidResponse(response.status);
       }
-      return parseResponse(copyProcessSchema, body, response.status).ingest;
+      return normalizeProcess(parseResponse(rawProcessStatusEnvelopeSchema, body, response.status).ingest);
     } catch (error) {
       throw translateError(error);
     } finally {
@@ -379,32 +413,14 @@ export class GroundxAdapter {
     }
   }
 
-  async getProcess(input: { processId: string }): Promise<{
-    processId: string;
-    status: z.infer<typeof processingStatusSchema>;
-    statusMessage: string | null;
-    progress: { complete: number; processing: number; errors: number; cancelled: number } | null;
-  }> {
+  async getProcess(input: { processId: string }): Promise<NormalizedProcess> {
     const request = parseInput(processIdInputSchema, input);
     try {
       const response = parseResponse(
         processStatusEnvelopeSchema,
         await this.sdk.documents.getProcessingStatusById(request, { timeout: this.timeoutMs }),
       ).data.ingest;
-      const progress = response.progress;
-      return {
-        processId: response.processId,
-        status: response.status,
-        statusMessage: response.statusMessage ?? null,
-        progress: progress
-          ? {
-              complete: progress.complete?.total ?? 0,
-              processing: progress.processing?.total ?? 0,
-              errors: progress.errors?.total ?? 0,
-              cancelled: progress.cancelled?.total ?? 0,
-            }
-          : null,
-      };
+      return normalizeProcess(response);
     } catch (error) {
       throw translateError(error);
     }
@@ -414,7 +430,7 @@ export class GroundxAdapter {
     const request = parseInput(documentIdsInputSchema, input);
     try {
       const response = parseResponse(
-        processEnvelopeSchema,
+        sdkProcessEnvelopeSchema,
         await this.sdk.documents.delete(request, { timeout: this.timeoutMs }),
       );
       return response.data.ingest;

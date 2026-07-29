@@ -68,7 +68,7 @@ function normalizedFileSize(value: string | undefined): number | undefined {
 export async function executeGroundxJob(
   adapter: Adapter,
   job: Doc<"integrationJobs">,
-  callbackUrl?: string,
+  callbackUrl?: { url: string; token: string },
 ) {
   const raw: unknown = JSON.parse(job.payload);
   if (job.processId !== undefined || job.type === "poll_process") {
@@ -85,8 +85,8 @@ export async function executeGroundxJob(
         ...payloadSchemas.ingest_remote.parse(raw),
         ...(callbackUrl
           ? {
-              callbackUrl,
-              callbackData: { targetType: job.targetType, targetId: job.targetId },
+              callbackUrl: callbackUrl.url,
+              callbackData: callbackUrl.token,
             }
           : {}),
       });
@@ -111,7 +111,7 @@ export async function executeClaimedGroundxJob(input: {
   armCallback: ArmCallback;
   tokenFactory?: () => string;
 }) {
-  let callbackUrl: string | undefined;
+  let callback: { url: string; token: string } | undefined;
   if (input.job.type === "ingest_remote") {
     let origin: string;
     try {
@@ -135,9 +135,9 @@ export async function executeClaimedGroundxJob(input: {
       leaseToken: input.leaseToken,
       tokenHash: await callbackTokenHash(token),
     });
-    callbackUrl = `${origin}/groundx/callback/${token}`;
+    callback = { url: `${origin}/groundx/callback`, token };
   }
-  return await executeGroundxJob(input.adapter, input.job, callbackUrl);
+  return await executeGroundxJob(input.adapter, input.job, callback);
 }
 
 export const runGroundxJob = internalAction({
@@ -176,6 +176,11 @@ export const runGroundxJob = internalAction({
         leaseToken,
         processId: `e2e_stub_${job._id}`,
         status: "complete",
+        ...(job.type === "copy_documents" ? { documentEvidence: {
+          documentId: `e2e_production_${job._id}`,
+          bucketId: (JSON.parse(job.payload) as { toBucket: number }).toBucket,
+          status: "complete" as const,
+        } } : {}),
       });
       return null;
     }
@@ -210,11 +215,24 @@ export const runGroundxJob = internalAction({
     let documentEvidence:
       | {
           documentId: string;
-          status: "queued" | "processing" | "complete" | "error" | "cancelled";
+          bucketId?: number;
+          status: "queued" | "training" | "processing" | "complete" | "error" | "cancelled";
           fileType?: "txt" | "docx" | "pptx" | "xlsx" | "pdf" | "png" | "jpg" | "csv" | "tsv" | "json";
           fileSize?: number;
         }
       | undefined;
+    if (job.targetType === "documentVersion" && (job.type === "copy_documents" || (job.type === "ingest_remote" && JSON.parse(job.payload).operation === "stage"))) {
+      const completed = result.completedDocuments?.[0];
+      if (completed) {
+        documentEvidence = {
+          documentId: completed.documentId,
+          status: completed.status ?? result.status,
+          ...(completed.bucketId === undefined ? {} : { bucketId: completed.bucketId }),
+          ...(completed.fileType === undefined ? {} : { fileType: completed.fileType }),
+          ...(normalizedFileSize(completed.fileSize) === undefined ? {} : { fileSize: normalizedFileSize(completed.fileSize) }),
+        };
+      }
+    }
     if (job.targetType === "documentVersion" && ["ingest_remote", "poll_process"].includes(job.type)) {
       try {
         const target = (await ctx.runQuery(evidenceTargetRef, {

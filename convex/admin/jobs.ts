@@ -28,6 +28,7 @@ const jobTypeValidator = v.union(
 );
 const providerStatusValidator = v.union(
   v.literal("queued"),
+  v.literal("training"),
   v.literal("processing"),
   v.literal("complete"),
   v.literal("error"),
@@ -41,6 +42,7 @@ const documentTypeValidator = v.union(
 );
 const documentEvidenceValidator = v.object({
   documentId: v.string(),
+  bucketId: v.optional(v.number()),
   status: providerStatusValidator,
   fileType: v.optional(documentTypeValidator),
   fileSize: v.optional(v.number()),
@@ -118,7 +120,7 @@ const claimResultValidator = v.union(
 );
 
 type JobType = "create_bucket" | "ingest_remote" | "copy_documents" | "delete_documents" | "poll_process";
-type ProviderStatus = "queued" | "processing" | "complete" | "error" | "cancelled";
+type ProviderStatus = "queued" | "training" | "processing" | "complete" | "error" | "cancelled";
 type ProviderErrorKind = "invalid_request" | "validation" | "authentication" | "not_found" | "rate_limit" | "timeout" | "network" | "invalid_response" | "provider";
 type SafeJson = null | boolean | number | string | SafeJson[] | { [key: string]: SafeJson };
 
@@ -275,30 +277,11 @@ const enqueueArgs = {
   idempotencyKey: v.string(),
 };
 
-function permissionForJob(type: JobType): [string, string] {
-  switch (type) {
-    case "create_bucket":
-      return ["jurisdiction", "write"];
-    case "copy_documents":
-      return ["document", "publish"];
-    case "poll_process":
-      return ["operations", "write"];
-    case "ingest_remote":
-    case "delete_documents":
-      return ["document", "write"];
-  }
-}
-
-export const enqueueJob = mutation({
+export const enqueueJob = internalMutation({
   args: enqueueArgs,
   returns: enqueueResultValidator,
   handler: async (ctx, args) => {
-    const [resource, action] = permissionForJob(args.type as JobType);
-    const admin = await requireEnabledAdminPermission(ctx, resource, action);
-    return await persistJob(ctx, args as EnqueueInput, {
-      id: admin.userId,
-      roles: admin.roles,
-    });
+    return await persistJob(ctx, args as EnqueueInput, { id: "system", roles: [] });
   },
 });
 
@@ -455,7 +438,29 @@ function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string) {
   }
 }
 
-async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, processId: string, status: ProviderStatus) {
+type DocumentEvidence = { documentId: string; bucketId?: number; status: ProviderStatus; fileType?: "txt" | "docx" | "pptx" | "xlsx" | "pdf" | "png" | "jpg" | "csv" | "tsv" | "json"; fileSize?: number };
+
+function jobOperation(job: Doc<"integrationJobs">): string | undefined {
+  try { const value = JSON.parse(job.payload) as { operation?: unknown }; return typeof value.operation === "string" ? value.operation : undefined; }
+  catch { return undefined; }
+}
+
+async function applyStagingOutcome(ctx: MutationCtx, job: Doc<"integrationJobs">, outcome: "succeeded" | "failed", processId: string, evidence?: DocumentEvidence) {
+  if (job.type !== "ingest_remote" || jobOperation(job) !== "stage" || job.targetType !== "documentVersion") return;
+  const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
+  if (!version || version.status !== "staging_processing") throw new ConvexError("DOCUMENT_STAGING_STATE_INVALID");
+  if (outcome === "succeeded" && (!evidence || evidence.status !== "complete")) throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
+  await ctx.db.patch(version._id, outcome === "succeeded" ? {
+    status: "draft", groundxStagingDocumentId: evidence!.documentId, groundxStagingProcessId: processId,
+    xrayEvidence: { documentId: evidence!.documentId, processId, status: "complete", ...(evidence!.fileType ? { fileType: evidence!.fileType } : {}), ...(evidence!.fileSize === undefined ? {} : { fileSize: evidence!.fileSize }), observedAt: Date.now() },
+    failureSummary: undefined, updatedAt: Date.now(),
+  } : { status: "draft", failureSummary: "GroundX staging failed", updatedAt: Date.now() });
+  const locks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", version.resourceId)).take(2);
+  if (locks.length > 1) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
+  if (locks[0]?.jobId === job._id) await ctx.db.delete(locks[0]._id);
+}
+
+async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, processId: string, status: ProviderStatus, evidence?: DocumentEvidence) {
   if (job.processId !== undefined && job.processId !== processId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
   if (["succeeded", "failed", "cancelled"].includes(job.status)) {
     const expected = status === "complete" ? "succeeded" : status === "cancelled" ? "cancelled" : "failed";
@@ -474,7 +479,7 @@ async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, proces
   ) {
     throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
   }
-  if (status === "queued" || status === "processing") {
+  if (status === "queued" || status === "training" || status === "processing") {
     if (uncertainManualReview) throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
     await ctx.db.patch(job._id, {
       processId,
@@ -497,7 +502,8 @@ async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, proces
     retentionPending: true,
   });
   if (job.targetType === "documentVersion") {
-    await applyPublicationJobOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId);
+    await applyStagingOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, evidence);
+    await applyPublicationJobOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, job.type === "copy_documents" ? evidence?.documentId : undefined);
   }
   await auditJob(ctx, job, nextStatus === "succeeded" ? "success" : "failure", `integration.job_${nextStatus}`);
   return { accepted: true, duplicate: false };
@@ -517,44 +523,73 @@ export const applyProviderResult = internalMutation({
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     assertCurrentLease(job, args.leaseToken);
     const processId = assertIdentifier(args.processId, "INTEGRATION_PROCESS_INVALID");
+    if (args.status === "complete" && job.type === "copy_documents" && args.documentEvidence === undefined) {
+      throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
+    }
     if (args.documentEvidence !== undefined) {
-      if (job.targetType !== "documentVersion" || !["ingest_remote", "poll_process"].includes(job.type)) {
+      if (job.targetType !== "documentVersion" || !["ingest_remote", "poll_process", "copy_documents"].includes(job.type)) {
         throw new ConvexError("INTEGRATION_EVIDENCE_TARGET_INVALID");
       }
       const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
-      if (
-        !version ||
-        version.groundxStagingDocumentId !== args.documentEvidence.documentId ||
+      let expectedCopyBucket: number | undefined;
+      if (job.type === "copy_documents") {
+        try {
+          const payload = JSON.parse(job.payload) as { toBucket?: unknown };
+          expectedCopyBucket = typeof payload.toBucket === "number" ? payload.toBucket : undefined;
+        } catch {
+          throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
+        }
+      }
+      const stagingOperation = job.type === "ingest_remote" && jobOperation(job) === "stage";
+      let expectedStagingBucket: number | undefined;
+      if (stagingOperation) {
+        try { expectedStagingBucket = (JSON.parse(job.payload) as { documents?: Array<{ bucketId?: number }> }).documents?.[0]?.bucketId; }
+        catch { throw new ConvexError("INTEGRATION_EVIDENCE_INVALID"); }
+      }
+      if (!version ||
+        (!stagingOperation && job.type !== "copy_documents" && version.groundxStagingDocumentId !== args.documentEvidence.documentId) ||
+        (stagingOperation && (expectedStagingBucket === undefined || args.documentEvidence.bucketId !== expectedStagingBucket)) ||
+        (job.type === "copy_documents" && (expectedCopyBucket === undefined || args.documentEvidence.bucketId !== expectedCopyBucket)) ||
         args.documentEvidence.status !== args.status ||
         (args.documentEvidence.fileSize !== undefined &&
           (!Number.isSafeInteger(args.documentEvidence.fileSize) || args.documentEvidence.fileSize < 0))
       ) {
         throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
       }
-      await ctx.db.patch(version._id, {
+      if (job.type !== "copy_documents" && !stagingOperation) await ctx.db.patch(version._id, {
         xrayEvidence: {
-          ...args.documentEvidence,
+          documentId: args.documentEvidence.documentId,
+          status: args.documentEvidence.status,
+          ...(args.documentEvidence.fileType === undefined ? {} : { fileType: args.documentEvidence.fileType }),
+          ...(args.documentEvidence.fileSize === undefined ? {} : { fileSize: args.documentEvidence.fileSize }),
           processId,
           observedAt: Date.now(),
         },
         updatedAt: Date.now(),
       });
     }
-    return await completeJob(ctx, job, processId, args.status as ProviderStatus);
+    return await completeJob(ctx, job, processId, args.status as ProviderStatus, args.documentEvidence as DocumentEvidence | undefined);
   },
 });
 
 export const completeGroundxCallback = internalMutation({
-  args: { tokenHash: v.string(), processId: v.string(), targetType: v.string(), targetId: v.string(), status: providerStatusValidator },
+  args: { tokenHash: v.string(), processId: v.string(), status: providerStatusValidator, documentEvidence: v.optional(documentEvidenceValidator) },
   returns: completionResultValidator,
   handler: async (ctx, args) => {
     if (!/^[a-f0-9]{64}$/.test(args.tokenHash)) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
     const candidates = await ctx.db.query("integrationJobs").withIndex("by_callbackTokenHash", (q) => q.eq("callbackTokenHash", args.tokenHash)).take(2);
     if (candidates.length !== 1 || !safeEqual(candidates[0].callbackTokenHash, args.tokenHash)) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
     const job = candidates[0];
-    if (job.processId === undefined) throw new ConvexError("INTEGRATION_CALLBACK_NOT_READY");
-    if (job.processId !== args.processId || job.targetType !== args.targetType || job.targetId !== args.targetId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-    return await completeJob(ctx, job, args.processId, args.status as ProviderStatus);
+    if (job.processId !== undefined && job.processId !== args.processId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
+    if (job.type === "copy_documents" && args.status === "complete") {
+      if (!args.documentEvidence) throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
+      let toBucket: unknown;
+      try { toBucket = (JSON.parse(job.payload) as { toBucket?: unknown }).toBucket; } catch { /* fail below */ }
+      if (args.documentEvidence.status !== "complete" || args.documentEvidence.bucketId !== toBucket) {
+        throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
+      }
+    }
+    return await completeJob(ctx, job, args.processId, args.status as ProviderStatus, args.documentEvidence as DocumentEvidence | undefined);
   },
 });
 
@@ -570,8 +605,12 @@ export const recordProviderFailure = internalMutation({
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     assertCurrentLease(job, args.leaseToken);
     const retryable = ["rate_limit", "timeout", "network"].includes(args.kind);
+    const ambiguousSideEffect =
+      job.processId === undefined &&
+      ["ingest_remote", "copy_documents", "delete_documents"].includes(job.type) &&
+      ["timeout", "network"].includes(args.kind);
     const attemptCount = job.attemptCount + 1;
-    if (retryable && attemptCount <= RETRY_DELAYS_MS.length) {
+    if (!ambiguousSideEffect && retryable && attemptCount <= RETRY_DELAYS_MS.length) {
       const nextAttemptAt = Date.now() + RETRY_DELAYS_MS[attemptCount - 1];
       await ctx.db.patch(job._id, {
         status: "queued",
@@ -585,7 +624,7 @@ export const recordProviderFailure = internalMutation({
       await ctx.scheduler.runAfter(RETRY_DELAYS_MS[attemptCount - 1], runGroundxJobRef, { jobId: job._id });
       return { status: "queued" as const, nextAttemptAt };
     }
-    const status: "manual_review" | "failed" = retryable ? "manual_review" : "failed";
+    const status: "manual_review" | "failed" = (retryable || ambiguousSideEffect) ? "manual_review" : "failed";
     await ctx.db.patch(job._id, {
       status,
       attemptCount,
@@ -597,6 +636,7 @@ export const recordProviderFailure = internalMutation({
       retentionPending: status === "failed" ? true : undefined,
     });
     if (status === "failed" && job.targetType === "documentVersion") {
+      await applyStagingOutcome(ctx, job, "failed", job.processId ?? job.correlationId);
       await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
     }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");

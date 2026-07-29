@@ -102,6 +102,7 @@ export default defineSchema({
     xrayEvidence: v.optional(v.object({
       status: v.union(
         v.literal("queued"),
+        v.literal("training"),
         v.literal("processing"),
         v.literal("complete"),
         v.literal("error"),
@@ -158,6 +159,7 @@ export default defineSchema({
       v.literal("publish"),
       v.literal("unpublish"),
       v.literal("rollback"),
+      v.literal("stage"),
     ),
     actorId: v.string(),
     idempotencyKey: v.string(),

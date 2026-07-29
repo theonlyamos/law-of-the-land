@@ -5,7 +5,6 @@ import { E2E_PRIVILEGED_FUNCTIONS, E2E_PROTECTED_ROUTES } from "./e2eAccessMatri
 describe("admin E2E authorization matrix", () => {
   const publicPrivilegedPaths = [
     "admin/featureFlags:setAdminPanel",
-    "admin/roles:setAdminRoles",
     "admin/users:assignRoles",
     "admin/users:banUser",
     "admin/users:unbanUser",
@@ -35,7 +34,6 @@ describe("admin E2E authorization matrix", () => {
     "admin/publication:rollbackVersion",
     "admin/billing:grantQuotaOverride",
     "admin/billing:revokeQuotaOverride",
-    "admin/jobs:enqueueJob",
     "admin/jobs:retryJob",
     "admin/jobs:cancelJob",
     "admin/operations:createIncident",
@@ -63,15 +61,15 @@ describe("admin E2E authorization matrix", () => {
     }
   });
 
-  it("keeps the canonical privileged mutation surface at exactly 37 operations", () => {
-    expect(E2E_PRIVILEGED_FUNCTIONS).toHaveLength(37);
+  it("keeps the canonical privileged mutation surface at exactly 35 operations", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS).toHaveLength(35);
   });
 
   it("contains no duplicate route or function entries and includes every required domain", () => {
     expect(new Set(E2E_PROTECTED_ROUTES.map((entry) => entry.path)).size).toBe(E2E_PROTECTED_ROUTES.length);
     expect(new Set(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).size).toBe(E2E_PRIVILEGED_FUNCTIONS.length);
     expect(new Set(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path.split("/")[1].split(":")[0]))).toEqual(
-      new Set(["featureFlags", "roles", "users", "conversations", "exports", "documents", "resources", "reviews", "publication", "billing", "jobs", "operations"]),
+      new Set(["featureFlags", "users", "conversations", "exports", "documents", "resources", "reviews", "publication", "billing", "jobs", "operations"]),
     );
   });
 
