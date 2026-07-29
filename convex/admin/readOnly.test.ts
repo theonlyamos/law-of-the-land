@@ -152,6 +152,9 @@ describe("read-only admin authorization", () => {
     await expect(
       asBilling.query(api.admin.conversations.list, firstPage),
     ).rejects.toThrow("ADMIN_FORBIDDEN");
+    await expect(
+      asBilling.query(api.admin.users.listAllSessions, firstPage),
+    ).rejects.toThrow("ADMIN_FORBIDDEN");
   });
 
   it("allows support agents to list conversation metadata", async () => {
@@ -190,6 +193,9 @@ describe("read-only admin authorization", () => {
       }),
     ).rejects.toThrow("ADMIN_DISABLED");
     await expect(
+      asSuperAdmin.query(api.admin.users.listAllSessions, firstPage),
+    ).rejects.toThrow("ADMIN_DISABLED");
+    await expect(
       asSuperAdmin.query(api.admin.conversations.list, firstPage),
     ).rejects.toThrow("ADMIN_DISABLED");
     await expect(
@@ -202,6 +208,69 @@ describe("read-only admin authorization", () => {
 });
 
 describe("read-only admin query behavior", () => {
+  it("returns a site-wide session page with minimized user identity", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const asSupport = await createAdmin(t, "support_agent");
+    const firstUser = await createUser(t, {
+      name: "Ama Mensah",
+      email: "ama@example.com",
+    });
+    const secondUser = await createUser(t, {
+      name: "Kojo Owusu",
+      email: "kojo@example.com",
+    });
+    const now = Date.now();
+
+    await t.run(async (ctx) => {
+      for (const [index, user] of [firstUser, secondUser].entries()) {
+        await ctx.runMutation(components.betterAuth.adapter.create, {
+          input: {
+            model: "session",
+            data: {
+              token: `site-wide-secret-${index}`,
+              userId: user._id,
+              expiresAt: now + 60_000 + index,
+              createdAt: now + index,
+              updatedAt: now + index,
+              ipAddress: `198.51.100.${index + 10}`,
+              userAgent: `Private browser ${index}`,
+            },
+          },
+        });
+      }
+    });
+
+    const result = await asSupport.query(api.admin.users.listAllSessions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+
+    expect(result.page).toHaveLength(3);
+    expect(result.page.slice(0, 2).map((session) => session.userEmail)).toEqual([
+      "kojo@example.com",
+      "ama@example.com",
+    ]);
+    expect(result.page[0]).toMatchObject({
+      userId: secondUser._id,
+      userName: "Kojo Owusu",
+      userEmail: "kojo@example.com",
+      isImpersonated: false,
+    });
+    expect(Object.keys(result.page[0]).sort()).toEqual([
+      "createdAt",
+      "expiresAt",
+      "id",
+      "isImpersonated",
+      "updatedAt",
+      "userEmail",
+      "userId",
+      "userName",
+    ]);
+    expect(JSON.stringify(result)).not.toContain("site-wide-secret");
+    expect(JSON.stringify(result)).not.toContain("198.51.100");
+    expect(JSON.stringify(result)).not.toContain("Private browser");
+  });
+
   it("uses exact normalized email and user ID lookup without leaking auth data", async () => {
     const t = createBackend();
     await enablePanel(t);

@@ -11,7 +11,7 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { COUNTRIES, DEFAULT_COUNTRY, findCountry } from "@/lib/countries";
+import { findCountry } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import {
   beginComposerBottomScroll,
@@ -109,10 +109,10 @@ interface ChatWorkspaceProps {
 export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
+  const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
+  const countries = publicJurisdictions ?? [];
   const [query, setQuery] = useState("");
-  const [selectedCountry, setSelectedCountry] = useState(
-    findCountry(initialCountry)?.code ?? DEFAULT_COUNTRY.code
-  );
+  const [selectedCountry, setSelectedCountry] = useState("");
   const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -160,6 +160,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
   const removeSession = useMutation(api.chats.remove);
 
   const sessions = sessionsData.map(toSidebarSession);
+  useEffect(() => {
+    if (publicJurisdictions === undefined) return;
+    setSelectedCountry((current) =>
+      findCountry(publicJurisdictions, current)?.code ??
+      findCountry(publicJurisdictions, initialCountry)?.code ??
+      publicJurisdictions.find((jurisdiction) => jurisdiction.isDefault)?.code ??
+      publicJurisdictions[0]?.code ??
+      ""
+    );
+  }, [initialCountry, publicJurisdictions]);
   const persistedMessages = useMemo<PersistedChatMessage[]>(() => {
     const byStorageId = new Map<string, PersistedChatMessage>();
     for (const message of messageResults) {
@@ -188,7 +198,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage");
   // Existing chats answer from the jurisdiction they were started in.
   const chatCountry =
-    sessionData?.country ?? findCountry(initialCountry)?.code ?? selectedCountry;
+    sessionData?.country ??
+    findCountry(countries, initialCountry)?.code ??
+    selectedCountry;
 
   const invalidateChatRequests = useCallback(() => {
     requestGenerationRef.current += 1;
@@ -323,17 +335,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       externalId: chatId,
       start: () => ensureSession({
         externalId: chatId,
-        country: findCountry(initialCountry)?.code,
+        country: chatCountry || undefined,
       }),
     });
     routeEnsureRef.current = entry;
     return entry;
-  }, [chatId, ensureSession, initialCountry, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
+  }, [chatCountry, chatId, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       const trimmed = searchQuery.trim();
-      if (!trimmed || isLoading) return;
+      if (!trimmed || isLoading || !chatCountry) return;
 
       // New-chat mode: the chat page picks the question up from ?q= and runs it.
       if (!chatId) {
@@ -506,6 +518,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
 
   useEffect(() => {
     if (!initialQuery?.trim()) return;
+    if (!chatCountry) return;
     const q = initialQuery.trim();
     const key = `${chatId}|${q}`;
     if (processedBootstrap.current.has(key)) return;
@@ -517,7 +530,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     if (sessionData && persistedMessages.length > 0) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [chatId, handleSearch, initialQuery, persistedMessages.length, router, sessionData]);
+  }, [chatCountry, chatId, handleSearch, initialQuery, persistedMessages.length, router, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -646,7 +659,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 Ask about a law in plain language. Answers come from the legal document library and
                 cite the sections they are based on.
               </p>
-              {COUNTRIES.length > 1 && (
+              {publicJurisdictions !== undefined && countries.length === 0 ? (
+                <p role="status" className="mx-auto mt-5 max-w-md text-center text-sm text-muted-foreground">
+                  No jurisdictions are currently available. Please try again later.
+                </p>
+              ) : null}
+              {countries.length > 1 && (
                 <div className="mx-auto mt-6 max-w-xs">
                   <label
                     htmlFor="new-chat-country"
@@ -660,7 +678,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                     onChange={(event) => setSelectedCountry(event.target.value)}
                     className="h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
-                    {COUNTRIES.map((country) => (
+                    {countries.map((country) => (
                       <option key={country.code} value={country.code}>
                         {country.name}
                       </option>
@@ -674,7 +692,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                   onQueryChange={setQuery}
                   onSearch={() => void handleSearch(query)}
                   onKeyDown={handleKeyDown}
-                  isLoading={isLoading}
+                  isLoading={
+                    isLoading || publicJurisdictions === undefined || !selectedCountry
+                  }
                   rows={3}
                   placeholder="e.g. What are my rights as a tenant?"
                 />

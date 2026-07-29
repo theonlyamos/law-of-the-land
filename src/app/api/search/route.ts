@@ -4,7 +4,6 @@ import { makeFunctionReference } from "convex/server"
 import { NextResponse } from "next/server"
 import { api } from "../../../../convex/_generated/api"
 import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from "@/lib/auth-server"
-import { DEFAULT_COUNTRY } from "@/lib/countries"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
 import {
     createOpaqueTelemetryToken,
@@ -42,12 +41,20 @@ export async function POST(request: Request) {
             )
         }
 
-        const countryCode =
-            body?.country === undefined || body?.country === null
-                ? DEFAULT_COUNTRY.code
-                : typeof body.country === "string"
-                  ? body.country.trim().toUpperCase()
-                  : ""
+        const countryWasOmitted = body?.country === undefined || body?.country === null
+        const suppliedCountryCode =
+            typeof body?.country === "string" ? body.country.trim().toUpperCase() : ""
+        const defaultJurisdictions = countryWasOmitted
+            ? await fetchAuthQuery(api.jurisdictions.listPublicEnabled, {})
+            : null
+        const defaultJurisdiction = defaultJurisdictions
+            ? defaultJurisdictions.find((candidate) => candidate.isDefault) ??
+              defaultJurisdictions[0] ??
+              null
+            : null
+        const countryCode = countryWasOmitted
+            ? defaultJurisdiction?.code ?? ""
+            : suppliedCountryCode
         if (!/^[A-Z]{2}$/.test(countryCode)) {
             return NextResponse.json(
                 { error: "That country is not supported yet." },
@@ -55,7 +62,7 @@ export async function POST(request: Request) {
             )
         }
 
-        const jurisdiction = await fetchAuthQuery(
+        const jurisdiction = defaultJurisdiction ?? await fetchAuthQuery(
             api.jurisdictions.getPublicByCode,
             { code: countryCode }
         )

@@ -91,6 +91,34 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     });
   });
 
+  it("uses the governed default when a client omits the jurisdiction", async () => {
+    const nigeria = {
+      code: "NG",
+      name: "Nigeria",
+      slug: "nigeria",
+      enabled: true as const,
+      isDefault: true,
+      productionBucketId: "22001",
+    };
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+      getFunctionName(reference) === "jurisdictions:listPublicEnabled"
+        ? [nigeria]
+        : nigeria,
+    );
+
+    const response = await POST(request({ query: "What is the law?" }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ jurisdictionCode: "NG" });
+    expect(getFunctionName(authMocks.fetchAuthQuery.mock.calls[0][0])).toBe(
+      "jurisdictions:listPublicEnabled",
+    );
+    expect(groundxMocks.searchContent).toHaveBeenCalledWith({
+      id: 22001,
+      query: "What is the law?",
+    });
+  });
+
   it("records one sanitized terminal search failure without returning its correlation token", async () => {
     groundxMocks.searchContent.mockRejectedValue(new Error("provider token secret-provider-value"));
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);

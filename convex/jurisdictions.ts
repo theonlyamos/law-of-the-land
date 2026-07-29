@@ -13,6 +13,18 @@ const publicJurisdictionValidator = v.union(
   }),
 );
 
+const publicJurisdictionRowValidator = v.object({
+  code: v.string(),
+  name: v.string(),
+  slug: v.string(),
+  enabled: v.literal(true),
+  isDefault: v.boolean(),
+  productionBucketId: v.string(),
+});
+
+// Admin validation currently accepts any two-letter code (26 × 26).
+const MAX_PUBLIC_JURISDICTIONS = 26 * 26;
+
 function normalizeCode(code: string): string {
   const normalized = code.trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(normalized)) {
@@ -49,5 +61,29 @@ export const getPublicByCode = query({
       isDefault: jurisdiction.isDefault,
       productionBucketId,
     };
+  },
+});
+
+/** Lists the complete enabled ISO catalog used by public jurisdiction selectors. */
+export const listPublicEnabled = query({
+  args: {},
+  returns: v.array(publicJurisdictionRowValidator),
+  handler: async (ctx) => {
+    const rows = await ctx.db
+      .query("jurisdictions")
+      .withIndex("by_status_and_name", (q) => q.eq("status", "enabled"))
+      .take(MAX_PUBLIC_JURISDICTIONS);
+
+    return rows.flatMap((jurisdiction) => {
+      if (!jurisdiction.productionBucketId) return [];
+      return [{
+        code: jurisdiction.code,
+        name: jurisdiction.name,
+        slug: jurisdiction.slug,
+        enabled: true as const,
+        isDefault: jurisdiction.isDefault,
+        productionBucketId: jurisdiction.productionBucketId,
+      }];
+    });
   },
 });

@@ -3,17 +3,18 @@
 import { LandingPage } from "@/components/landing-page";
 import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
-import { useConvexAuth, usePaginatedQuery } from "convex/react";
+import { useConvexAuth, usePaginatedQuery, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 function LandingShell() {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [country, setCountry] = useState(DEFAULT_COUNTRY.code);
+  const [country, setCountry] = useState("");
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
+  const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
+  const countries = publicJurisdictions ?? [];
   const { results: sessionsData, status: sessionsStatus } = usePaginatedQuery(
     api.chats.list,
     isAuthenticated ? {} : "skip",
@@ -24,6 +25,20 @@ function LandingShell() {
   // conversation via /new, so the landing always forwards to the last chat.
   const latestChatId = sessionsData[0]?.id ?? null;
   const shouldRedirect = isAuthenticated && latestChatId !== null;
+
+  useEffect(() => {
+    if (publicJurisdictions === undefined) return;
+    setCountry((current) => {
+      if (publicJurisdictions.some((jurisdiction) => jurisdiction.code === current)) {
+        return current;
+      }
+      return (
+        publicJurisdictions.find((jurisdiction) => jurisdiction.isDefault)?.code ??
+        publicJurisdictions[0]?.code ??
+        ""
+      );
+    });
+  }, [publicJurisdictions]);
 
   useEffect(() => {
     if (shouldRedirect) {
@@ -53,7 +68,7 @@ function LandingShell() {
   const goToChat = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      if (!trimmed || !country) return;
 
       const id = crypto.randomUUID();
       const chatUrl = `/${id}?q=${encodeURIComponent(trimmed)}&country=${country}`;
@@ -90,12 +105,14 @@ function LandingShell() {
         onSearch={() => goToChat(query)}
         onPickSuggested={goToChat}
         onKeyDown={handleKeyDown}
-        isLoading={authLoading}
+        isLoading={authLoading || publicJurisdictions === undefined || !country}
         savedChats={savedChats}
         onResumeChat={resumeChat}
         isAuthenticated={isAuthenticated}
         country={country}
         onCountryChange={setCountry}
+        countries={countries}
+        jurisdictionCatalogLoading={publicJurisdictions === undefined}
       />
     </div>
   );

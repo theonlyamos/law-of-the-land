@@ -24,6 +24,9 @@ type Backend = TestConvex<typeof schema>;
 const getPublicByCode = makeFunctionReference<"query">(
   "jurisdictions:getPublicByCode",
 );
+const listPublicEnabled = makeFunctionReference<"query">(
+  "jurisdictions:listPublicEnabled",
+);
 const listJurisdictions = makeFunctionReference<"query">(
   "admin/resources:listJurisdictions",
 );
@@ -132,6 +135,101 @@ afterEach(() => {
 const page = { paginationOpts: { numItems: 20, cursor: null } };
 
 describe("jurisdiction governance", () => {
+  it("lists every enabled production-configured jurisdiction for the public selector", async () => {
+    const t = createBackend();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const jurisdiction of [
+        {
+          code: "GH",
+          name: "Ghana",
+          slug: "ghana",
+          status: "enabled" as const,
+          isDefault: true,
+          stagingBucketId: "staging-gh",
+          productionBucketId: "11833",
+        },
+        {
+          code: "NG",
+          name: "Nigeria",
+          slug: "nigeria",
+          status: "enabled" as const,
+          isDefault: false,
+          stagingBucketId: "staging-ng",
+          productionBucketId: "22001",
+        },
+        {
+          code: "CI",
+          name: "Cote d'Ivoire",
+          slug: "cote-divoire",
+          status: "draft" as const,
+          isDefault: false,
+          stagingBucketId: "staging-ci",
+          productionBucketId: "22002",
+        },
+      ]) {
+        await ctx.db.insert("jurisdictions", {
+          ...jurisdiction,
+          providerSyncState: "synced",
+          createdBy: "fixture",
+          updatedBy: "fixture",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
+      {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        enabled: true,
+        isDefault: true,
+        productionBucketId: "11833",
+      },
+      {
+        code: "NG",
+        name: "Nigeria",
+        slug: "nigeria",
+        enabled: true,
+        isDefault: false,
+        productionBucketId: "22001",
+      },
+    ]);
+  });
+
+  it("does not truncate the governed catalog before its configured default", async () => {
+    const t = createBackend();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 250; index += 1) {
+        const code = `${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + (index % 26))}`;
+        await ctx.db.insert("jurisdictions", {
+          code,
+          name: `Jurisdiction ${String(index).padStart(3, "0")}`,
+          slug: `jurisdiction-${index}`,
+          status: "enabled",
+          isDefault: index === 249,
+          stagingBucketId: `staging-${index}`,
+          productionBucketId: String(30_000 + index),
+          providerSyncState: "synced",
+          createdBy: "fixture",
+          updatedBy: "fixture",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const result = await t.query(listPublicEnabled, {});
+    expect(result).toHaveLength(250);
+    expect(result.find((jurisdiction: { code: string }) => jurisdiction.code === "JP")).toMatchObject({
+      isDefault: true,
+      productionBucketId: "30249",
+    });
+  });
+
   it("returns only enabled, production-configured jurisdictions publicly", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {

@@ -350,6 +350,21 @@ const sessionPageValidator = v.object({
   continueCursor: v.string(),
 });
 
+const siteWideSessionPageValidator = v.object({
+  page: v.array(v.object({
+    id: v.string(),
+    userId: v.string(),
+    userName: v.union(v.string(), v.null()),
+    userEmail: v.union(v.string(), v.null()),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    isImpersonated: v.boolean(),
+  })),
+  isDone: v.boolean(),
+  continueCursor: v.string(),
+});
+
 type AuthDocument = Record<string, unknown>;
 
 function normalizedPagination(paginationOpts: {
@@ -502,6 +517,72 @@ export const listSessions = query({
         updatedAt: requiredNumber(session, "updatedAt"),
         isImpersonated: typeof session.impersonatedBy === "string",
       })),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
+    };
+  },
+});
+
+export const listAllSessions = query({
+  args: { paginationOpts: paginationOptsValidator },
+  returns: siteWideSessionPageValidator,
+  handler: async (ctx, args) => {
+    await requireEnabledAdminPermission(ctx, "session", "revoke");
+
+    const result = (await ctx.runQuery(
+      components.betterAuth.adapter.findMany,
+      {
+        model: "session",
+        select: [
+          "id",
+          "userId",
+          "expiresAt",
+          "createdAt",
+          "updatedAt",
+          "impersonatedBy",
+        ],
+        sortBy: { field: "createdAt", direction: "desc" },
+        paginationOpts: normalizedPagination(args.paginationOpts),
+      },
+    )) as PaginationResult<AuthDocument>;
+
+    const userIds = [...new Set(result.page.map((session) =>
+      requiredString(session, "userId")
+    ))];
+    const users = userIds.length === 0
+      ? []
+      : ((await ctx.runQuery(
+          components.betterAuth.adapter.findMany,
+          {
+            model: "user",
+            where: [{ field: "_id", operator: "in", value: userIds }],
+            select: ["id", "name", "email"],
+            paginationOpts: {
+              numItems: userIds.length,
+              cursor: null,
+              maximumRowsRead: userIds.length + 1,
+            },
+          },
+        )) as PaginationResult<AuthDocument>).page;
+    const usersById = new Map(
+      users.map((user) => [requiredString(user, "_id"), user]),
+    );
+
+    return {
+      page: result.page.map((session) => {
+        const userId = requiredString(session, "userId");
+        const user = usersById.get(userId);
+        return {
+          id: requiredString(session, "_id"),
+          userId,
+          userName: user ? requiredString(user, "name") : null,
+          userEmail: user ? requiredString(user, "email") : null,
+          expiresAt: requiredNumber(session, "expiresAt"),
+          createdAt: requiredNumber(session, "createdAt"),
+          updatedAt: requiredNumber(session, "updatedAt"),
+          isImpersonated: typeof session.impersonatedBy === "string",
+        };
+      }),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };

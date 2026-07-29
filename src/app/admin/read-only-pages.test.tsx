@@ -25,6 +25,7 @@ vi.mock("@/components/admin/user-actions", () => ({
 
 import ConversationsPage from "./conversations/page";
 import OperationsPage from "./operations/page";
+import SessionsPage from "./sessions/page";
 import UserDetailPage from "./users/[userId]/page";
 import UsersPage from "./users/page";
 
@@ -56,6 +57,41 @@ beforeEach(() => {
 });
 
 describe("read-only admin pages", () => {
+  it("renders the site-wide session register with links to its user controls", async () => {
+    mocks.fetchAuthQuery.mockResolvedValue({
+      page: [
+        {
+          id: "session-1",
+          userId: "user-1",
+          userName: "Ama Mensah",
+          userEmail: "ama@example.com",
+          expiresAt: 1_900_000_060_000,
+          createdAt: 1_900_000_000_000,
+          updatedAt: 1_900_000_000_100,
+          isImpersonated: false,
+        },
+      ],
+      isDone: true,
+      continueCursor: "",
+    });
+
+    render(await SessionsPage({ searchParams: Promise.resolve({}) }));
+
+    expect(mocks.fetchAuthQuery).toHaveBeenCalledWith(
+      api.admin.users.listAllSessions,
+      { paginationOpts: { numItems: 30, cursor: null } },
+    );
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Ama Mensah" })).toHaveAttribute(
+      "href",
+      "/admin/users/user-1",
+    );
+    expect(screen.getByRole("link", { name: "Manage sessions" })).toHaveAttribute(
+      "href",
+      "/admin/users/user-1",
+    );
+  });
+
   it("drives exact user lookup and cursor state from the URL", async () => {
     mocks.fetchAuthQuery.mockResolvedValue({
       page: [
