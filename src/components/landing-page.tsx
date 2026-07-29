@@ -40,11 +40,14 @@ export function LandingPage({
   onSearch,
   onKeyDown,
   isLoading,
+  savedChats,
+  onResumeChat,
   isAuthenticated,
   country,
   onCountryChange,
   jurisdictions,
 }: LandingPageProps) {
+  const recentChats = savedChats.slice(0, 3);
   const catalogUnavailable = jurisdictions !== undefined && jurisdictions.length === 0;
   const researchDisabled =
     isLoading || jurisdictions === undefined || catalogUnavailable || !country || !query.trim();
@@ -186,6 +189,36 @@ export function LandingPage({
       </section>
 
       <LegalInformationNotice className="grid gap-4 border-y bg-primary px-4 py-6 text-primary-foreground sm:grid-cols-[auto_minmax(0,0.7fr)_minmax(0,1.3fr)] sm:px-6 lg:px-8" />
+
+      {isAuthenticated && recentChats.length > 0 ? (
+        <section
+          aria-labelledby="recent-research-title"
+          className="border-b px-4 py-6 sm:px-6 lg:px-8"
+        >
+          <div className="mx-auto w-full max-w-7xl">
+            <h2
+              id="recent-research-title"
+              className="text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground"
+            >
+              Recent research
+            </h2>
+            <ul className="mt-3 divide-y border-y">
+              {recentChats.map((session) => (
+                <li key={session.id}>
+                  <button
+                    type="button"
+                    onClick={() => onResumeChat(session.id)}
+                    className="flex min-h-11 w-full items-center justify-between gap-4 py-2 text-left text-sm font-medium transition-colors hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  >
+                    <span className="truncate">{session.title}</span>
+                    <ArrowRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

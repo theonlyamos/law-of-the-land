@@ -100,6 +100,57 @@ describe("professional landing research shell", () => {
     expect(props.onSearch).toHaveBeenCalledTimes(1);
   });
 
+  it("shows up to three authenticated recent sessions and resumes the selected session", () => {
+    const props = landingProps({
+      isAuthenticated: true,
+      savedChats: [
+        {
+          id: "chat-tenancy",
+          title: "Tenancy",
+          lastMessage: "Notice periods",
+          timestamp: new Date("2026-07-29T12:00:00Z"),
+          messageCount: 2,
+          messages: [],
+        },
+        {
+          id: "chat-consumer",
+          title: "Consumer rights",
+          lastMessage: "Refund rules",
+          timestamp: new Date("2026-07-28T12:00:00Z"),
+          messageCount: 2,
+          messages: [],
+        },
+        {
+          id: "chat-employment",
+          title: "Employment",
+          lastMessage: "Notice requirements",
+          timestamp: new Date("2026-07-27T12:00:00Z"),
+          messageCount: 2,
+          messages: [],
+        },
+        {
+          id: "chat-hidden",
+          title: "Fourth session",
+          lastMessage: "Should not render",
+          timestamp: new Date("2026-07-26T12:00:00Z"),
+          messageCount: 2,
+          messages: [],
+        },
+      ],
+    });
+
+    render(<LandingPage {...props} />);
+
+    const recentResearch = screen.getByRole("region", { name: "Recent research" });
+    expect(within(recentResearch).getByRole("button", { name: "Tenancy" })).toBeVisible();
+    expect(within(recentResearch).getByRole("button", { name: "Consumer rights" })).toBeVisible();
+    expect(within(recentResearch).getByRole("button", { name: "Employment" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Fourth session" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(recentResearch).getByRole("button", { name: "Consumer rights" }));
+    expect(props.onResumeChat).toHaveBeenCalledWith("chat-consumer");
+  });
+
   it("explains when no governed jurisdiction is available and blocks research", () => {
     render(<LandingPage {...landingProps({ country: "", jurisdictions: [] })} />);
 

@@ -93,6 +93,9 @@ describe("public home jurisdiction catalog", () => {
       screen.getByRole("heading", { name: "Understand the law where you are." }),
     ).toBeVisible();
     expect(screen.getByRole("form", { name: "Legal research" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Tenancy" }));
+    expect(mocks.push).toHaveBeenCalledWith("/existing-chat");
+    expect(mocks.replace).not.toHaveBeenCalled();
   });
 
   it("disables research while authentication is loading", () => {
