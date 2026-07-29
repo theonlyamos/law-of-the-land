@@ -369,7 +369,7 @@ export const rollupDailyMetrics = internalMutation({
     }
     for (const row of rows) await ctx.db.patch(row._id, { rollupStatus: "processed", rolledUpAt: now });
     const done = rows.length < ROLLUP_BATCH;
-    const cursor = rows.at(-1)?._id ?? null;
+    const cursor = rows[rows.length - 1]?._id ?? null;
     if (!done) await ctx.scheduler.runAfter(0, rollupDailyMetricsRef, { cursor });
     return { processed: rows.length, done, cursor };
   },
