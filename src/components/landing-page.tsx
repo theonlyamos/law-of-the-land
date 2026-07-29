@@ -1,18 +1,16 @@
 "use client";
 
-import { ChatInput } from "@/components/ui/chat-input";
+import logo from "@/app/logo-transparent.png";
+import { UserNav } from "@/components/auth/user-nav";
+import { LegalInformationNotice } from "@/components/landing/legal-information-notice";
+import { PublicJurisdictionSelector } from "@/components/landing/public-jurisdiction-selector";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import type { ChatSession } from "@/lib/chat-sessions";
 import type { PublicJurisdiction } from "@/lib/countries";
-import { ArrowUpRight, Check, MessageSquare } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
-
-const SUGGESTED_QUESTIONS = [
-  "What are my rights as a tenant?",
-  "Can I get a refund for a defective product?",
-  "What should I do if I get a speeding ticket?",
-  "What are the rules for returning items to stores?",
-  "What are my rights at work?",
-];
 
 interface LandingPageProps {
   query: string;
@@ -29,163 +27,165 @@ interface LandingPageProps {
   jurisdictions: readonly PublicJurisdiction[] | undefined;
 }
 
+const PRIMARY_LINKS = [
+  { href: "#jurisdictions", label: "Jurisdictions" },
+  { href: "#how-it-works", label: "How it works" },
+  { href: "#for-professionals", label: "For professionals" },
+  { href: "#plans", label: "Plans" },
+] as const;
+
 export function LandingPage({
   query,
   onQueryChange,
   onSearch,
-  onPickSuggested,
   onKeyDown,
   isLoading,
-  savedChats,
-  onResumeChat,
   isAuthenticated,
   country,
   onCountryChange,
   jurisdictions,
 }: LandingPageProps) {
-  const recentChats = savedChats.slice(0, 3);
+  const catalogUnavailable = jurisdictions !== undefined && jurisdictions.length === 0;
+  const researchDisabled =
+    isLoading || jurisdictions === undefined || catalogUnavailable || !country || !query.trim();
 
   return (
-    <div className="relative flex flex-1 flex-col overflow-hidden">
-      <div className="container relative mx-auto flex flex-1 items-center px-4 py-12 lg:py-16">
-        {/* Anchored to the content container, not the viewport, so it stays
-            aligned with the hero at any screen width. */}
-        <div aria-hidden className="pointer-events-none absolute inset-0">
-          <span className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/3 select-none text-[26rem] font-semibold leading-none text-foreground/[0.03] max-lg:hidden">
-            §
-          </span>
+    <main className="flex min-h-full w-full flex-1 flex-col bg-background text-foreground">
+      <header className="border-b bg-background">
+        <div className="mx-auto flex min-h-[72px] w-full max-w-7xl items-center justify-between gap-5 px-4 sm:px-6 lg:px-8">
+          <Link
+            href="/"
+            aria-label="Law of the Land home"
+            className="inline-flex min-h-11 shrink-0 items-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Image src={logo} alt="" width={80} height={43} priority />
+          </Link>
+          <nav aria-label="Primary navigation" className="hidden items-center gap-1 lg:flex">
+            {PRIMARY_LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="inline-flex min-h-11 items-center px-3 text-sm font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {link.label}
+              </Link>
+            ))}
+          </nav>
+          <div className="shrink-0 [&_a]:min-h-11 [&_button]:min-h-11">
+            <UserNav />
+          </div>
         </div>
-        <div className="grid w-full items-center gap-12 lg:grid-cols-[1.1fr_minmax(0,540px)] lg:gap-20">
-          <div>
-            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-brand">
-              <span aria-hidden className="text-base leading-none">§</span>
-              Grounded legal answers
-            </p>
-            <h1 className="mt-4 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-              Know what the law says — and where it says it.
-            </h1>
-            <p className="mt-5 max-w-xl text-lg leading-relaxed text-muted-foreground">
-              Ask about your rights in plain language. Answers are grounded in the legal document
-              library and cite the exact sections, so you can check every claim yourself.
-            </p>
+      </header>
 
-            <ul className="mt-8 space-y-3 text-sm">
-              <li className="flex items-start gap-3">
-                <Check aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
-                <span>Answers come from published legal text, not internet guesses</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <Check aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
-                <span>Citations point to the sections and articles that apply</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <Check aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
-                <span>
-                  {isAuthenticated
-                    ? "Your chat history syncs to your account"
-                    : "Free to try — sign in to keep your chat history"}
-                </span>
-              </li>
+      <section
+        className="relative overflow-hidden px-4 py-16 sm:px-6 sm:py-20 lg:px-8 lg:py-24"
+        aria-labelledby="landing-title"
+      >
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -right-16 -top-24 hidden select-none font-serif text-[24rem] leading-none text-foreground/[0.035] lg:block"
+        >
+          §
+        </span>
+        <div className="relative mx-auto grid w-full max-w-7xl items-center gap-12 lg:grid-cols-[minmax(0,0.9fr)_minmax(360px,0.7fr)] lg:gap-20">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand">
+              Jurisdiction-specific legal research
+            </p>
+            <h1
+              id="landing-title"
+              className="mt-4 max-w-[9ch] text-balance font-serif text-5xl font-medium leading-[0.96] tracking-[-0.045em] sm:text-6xl lg:text-7xl"
+            >
+              Understand the law where you are.
+            </h1>
+            <p className="mt-6 max-w-[56ch] text-base leading-relaxed text-muted-foreground sm:text-lg">
+              Ask a question in plain language. Receive a clear, jurisdiction-specific answer with
+              the legal sources and citations needed to verify it.
+            </p>
+            <ul
+              aria-label="Designed for"
+              className="mt-7 flex flex-wrap gap-x-6 gap-y-3 text-xs font-semibold uppercase tracking-[0.08em]"
+            >
+              <li className="border-b pb-2">Individuals</li>
+              <li className="border-b pb-2">Legal professionals</li>
+              <li className="border-b pb-2">Organisations</li>
             </ul>
           </div>
 
-          <div className="rounded-xl border bg-card p-5 shadow-elegant-lg sm:p-6">
-            <h2 className="text-sm font-medium">Ask a question</h2>
-            {jurisdictions !== undefined && jurisdictions.length === 0 ? (
-              <p role="status" className="mt-3 text-sm text-muted-foreground">
-                No jurisdictions are currently available. Please try again later.
-              </p>
-            ) : null}
-            {jurisdictions !== undefined && jurisdictions.length > 1 && (
-              <div className="mt-3">
-                <label htmlFor="landing-country" className="sr-only">
-                  Country
-                </label>
-                <select
-                  id="landing-country"
-                  value={country}
-                  onChange={(event) => onCountryChange(event.target.value)}
-                  className="h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  {jurisdictions.map((option) => (
-                    <option key={option.code} value={option.code}>
-                      {option.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            <div className="mt-3">
-              <ChatInput
-                query={query}
-                onQueryChange={onQueryChange}
-                onSearch={onSearch}
-                onKeyDown={onKeyDown}
-                isLoading={isLoading}
-                rows={3}
-                placeholder="e.g. What are my rights as a tenant?"
+          <form
+            id="research"
+            aria-label="Legal research"
+            className="border bg-card shadow-elegant-lg"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!researchDisabled) onSearch();
+            }}
+          >
+            <div className="border-b p-5 sm:p-6">
+              <PublicJurisdictionSelector
+                id="landing-jurisdiction"
+                label="Research jurisdiction"
+                jurisdictions={jurisdictions}
+                value={country}
+                onChange={onCountryChange}
               />
+              {catalogUnavailable ? (
+                <p role="status" className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                  Legal research is not available for a jurisdiction right now. Please check again
+                  later.
+                </p>
+              ) : null}
             </div>
-            {!isAuthenticated && (
-              <p className="mt-3 text-xs text-muted-foreground">
+
+            <div className="p-5 sm:p-6">
+              <label htmlFor="landing-question" className="block text-sm font-semibold">
+                Your legal question
+              </label>
+              <Textarea
+                id="landing-question"
+                value={query}
+                onChange={(event) => onQueryChange(event.target.value)}
+                onKeyDown={onKeyDown}
+                disabled={isLoading}
+                rows={4}
+                placeholder="For example: What notice must a landlord give before ending a tenancy?"
+                aria-describedby="landing-question-help"
+                className="mt-3 min-h-28 resize-none rounded-none"
+              />
+              <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <p
+                  id="landing-question-help"
+                  className="max-w-[30ch] text-xs leading-relaxed text-muted-foreground"
+                >
+                  Available jurisdictions use reviewed, published legal libraries.
+                </p>
+                <Button
+                  type="submit"
+                  disabled={researchDisabled}
+                  className="min-h-11 rounded-none px-5"
+                >
+                  Research this question
+                  <ArrowRight aria-hidden className="ml-2 size-4" />
+                </Button>
+              </div>
+            </div>
+
+            {!isAuthenticated ? (
+              <p className="border-t px-5 py-3 text-xs leading-relaxed text-muted-foreground sm:px-6">
                 <Link
                   href="/signin"
-                  className="font-medium text-foreground underline-offset-4 hover:underline"
+                  className="inline-flex min-h-11 items-center font-semibold text-foreground underline underline-offset-4"
                 >
                   Sign in
                 </Link>{" "}
-                to save chats and pick them up on any device.
+                to save this research thread and continue on another device.
               </p>
-            )}
-
-            <div className="mt-6">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Or start from an example
-              </p>
-              <div className="-mx-2 mt-2">
-                {SUGGESTED_QUESTIONS.map((question) => (
-                  <button
-                    key={question}
-                    type="button"
-                    onClick={() => onPickSuggested(question)}
-                    className="group flex w-full items-center justify-between gap-3 rounded-md px-2 py-2.5 text-left text-sm transition hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    <span>{question}</span>
-                    <ArrowUpRight
-                      aria-hidden
-                      className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100"
-                    />
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {isAuthenticated && recentChats.length > 0 && (
-              <div className="mt-6 border-t pt-4">
-                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Pick up where you left off
-                </p>
-                <div className="-mx-2 mt-2">
-                  {recentChats.map((session) => (
-                    <button
-                      key={session.id}
-                      type="button"
-                      onClick={() => onResumeChat(session.id)}
-                      className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <MessageSquare
-                        aria-hidden
-                        className="h-4 w-4 shrink-0 text-muted-foreground"
-                      />
-                      <span className="truncate">{session.title}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+            ) : null}
+          </form>
         </div>
-      </div>
-    </div>
+      </section>
+
+      <LegalInformationNotice className="grid gap-4 border-y bg-primary px-4 py-6 text-primary-foreground sm:grid-cols-[auto_minmax(0,0.7fr)_minmax(0,1.3fr)] sm:px-6 lg:px-8" />
+    </main>
   );
 }

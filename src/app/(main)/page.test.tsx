@@ -65,7 +65,7 @@ describe("public home jurisdiction catalog", () => {
   it("loads the governed jurisdictions and selects their configured default", () => {
     render(<Home />);
 
-    expect(screen.getByRole("combobox", { name: "Country" })).toHaveValue("GH");
+    expect(screen.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("GH");
     expect(screen.getByRole("option", { name: "Nigeria" })).toBeVisible();
   });
 
@@ -75,7 +75,7 @@ describe("public home jurisdiction catalog", () => {
     render(<Home />);
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "No jurisdictions are currently available",
+      "Legal research is not available for a jurisdiction right now. Please check again later.",
     );
     expect(screen.getByRole("textbox")).toBeDisabled();
   });
@@ -89,8 +89,10 @@ describe("public home jurisdiction catalog", () => {
     render(<Home />);
 
     expect(mocks.replace).not.toHaveBeenCalled();
-    expect(screen.getByRole("heading", { name: "Ask a question" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Tenancy" })).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Understand the law where you are." }),
+    ).toBeVisible();
+    expect(screen.getByRole("form", { name: "Legal research" })).toBeVisible();
   });
 
   it("disables research while authentication is loading", () => {
@@ -99,7 +101,7 @@ describe("public home jurisdiction catalog", () => {
     render(<Home />);
 
     expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
   });
 
   it("disables research while the jurisdiction catalog is loading", () => {
@@ -113,10 +115,10 @@ describe("public home jurisdiction catalog", () => {
 
   it("returns a stale country selection to the configured default", () => {
     const { rerender } = render(<Home />);
-    fireEvent.change(screen.getByRole("combobox", { name: "Country" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Research jurisdiction" }), {
       target: { value: "NG" },
     });
-    expect(screen.getByRole("combobox", { name: "Country" })).toHaveValue("NG");
+    expect(screen.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("NG");
 
     mocks.useQuery.mockReturnValue([
       {
@@ -134,13 +136,13 @@ describe("public home jurisdiction catalog", () => {
     ]);
     rerender(<Home />);
 
-    expect(screen.getByRole("combobox", { name: "Country" })).toHaveValue("GH");
+    expect(screen.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("GH");
   });
 
   it("preserves the guest question and country through sign-in", () => {
     render(<Home />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
       "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26country%3DGH",
@@ -151,7 +153,7 @@ describe("public home jurisdiction catalog", () => {
     mocks.auth = { isAuthenticated: true, isLoading: false };
     render(<Home />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
 
     expect(mocks.push).toHaveBeenCalledWith("/new-chat?q=Tenant%20rights%3F&country=GH");
   });
