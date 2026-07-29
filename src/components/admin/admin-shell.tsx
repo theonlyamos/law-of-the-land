@@ -57,10 +57,12 @@ export function AdminShell({
       </a>
 
       <AdminNavigationProvider>
-        <div className="admin-control-plane min-h-screen bg-[oklch(94%_0.015_82)] text-[oklch(24%_0.035_252)]">
-        <header className="relative z-50 border-b border-[oklch(78%_0.025_78)] bg-[oklch(97%_0.012_82)] px-3 py-2.5 sm:px-6 sm:py-3 lg:px-8">
-          <div className="mx-auto grid max-w-[100rem] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:justify-between sm:gap-4">
-            <div className="flex min-w-0 items-center gap-2">
+        <div className="admin-control-plane h-dvh overflow-hidden bg-[oklch(94%_0.015_82)] text-[oklch(24%_0.035_252)]">
+
+        <AdminWorkspace
+          sidebar={
+            <>
+            <div className="mb-5 border-b border-[oklch(78%_0.025_78)] pb-5">
               <Link
                 href="/admin"
                 className="group flex min-h-11 min-w-0 items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700 sm:gap-3"
@@ -74,27 +76,16 @@ export function AdminShell({
                   className="h-auto w-10 shrink-0 sm:w-12"
                 />
                 <span className="min-w-0">
-                  <span className="hidden text-[0.68rem] font-semibold uppercase tracking-[0.19em] text-[oklch(43%_0.055_252)] sm:block">
+                  <span className="hidden text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.055_252)] xl:block">
                     Law of the Land
                   </span>
-                  <span className="block text-sm font-semibold tracking-tight sm:text-sm">Administration</span>
+                  <span className="block whitespace-nowrap text-sm font-semibold tracking-tight">Administration</span>
                 </span>
               </Link>
+            </div>
+            <div className="mb-3 flex justify-end">
               <AdminNavigationToggle />
             </div>
-            <Link
-              href="/new"
-              className="hidden min-h-11 items-center whitespace-nowrap px-3 text-sm font-semibold text-[oklch(35%_0.065_252)] underline decoration-[oklch(60%_0.1_70)] decoration-2 underline-offset-4 hover:text-[oklch(24%_0.055_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 md:inline-flex"
-            >
-              Return to public site
-            </Link>
-            <MobileAdminNavigationToggle />
-          </div>
-        </header>
-
-        <AdminWorkspace
-          sidebar={
-            <>
             <div className="mb-4 hidden border-b border-[oklch(78%_0.025_78)] pb-6 xl:block">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(45%_0.04_252)]">
                 Signed-in authority
@@ -118,6 +109,7 @@ export function AdminShell({
         >
           {children}
         </AdminWorkspace>
+        <MobileAdminNavigationToggle />
         </div>
       </AdminNavigationProvider>
     </AdminPermissionProvider>
