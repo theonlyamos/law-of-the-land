@@ -256,7 +256,7 @@ export default defineSchema({
     expiresAt: v.number(),
     consumedAt: v.optional(v.number()),
   }).index(
-    "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+    "by_actorId_sessionId_action_targetId_idempotencyKey",
     ["actorId", "sessionId", "action", "targetId", "idempotencyKey"],
   ),
   userDeletionRequests: defineTable({

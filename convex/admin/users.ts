@@ -290,7 +290,7 @@ async function consumeStepUp(
   const proofs = await ctx.db
     .query("adminStepUpProofs")
     .withIndex(
-      "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+      "by_actorId_sessionId_action_targetId_idempotencyKey",
       (q) =>
         q
           .eq("actorId", actorId)
@@ -1258,7 +1258,7 @@ export const recordAdminStepUpProof = internalMutation({
     const existing = await ctx.db
       .query("adminStepUpProofs")
       .withIndex(
-        "by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey",
+        "by_actorId_sessionId_action_targetId_idempotencyKey",
         (q) =>
           q
             .eq("actorId", args.actorId)

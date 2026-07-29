@@ -74,7 +74,7 @@ async function consumeStepUp(
   idempotencyKey: string,
 ) {
   const proofs = await ctx.db.query("adminStepUpProofs")
-    .withIndex("by_actorId_and_sessionId_and_action_and_targetId_and_idempotencyKey", (q) => q
+    .withIndex("by_actorId_sessionId_action_targetId_idempotencyKey", (q) => q
       .eq("actorId", actorId).eq("sessionId", sessionId).eq("action", action)
       .eq("targetId", targetId).eq("idempotencyKey", idempotencyKey))
     .take(2);
