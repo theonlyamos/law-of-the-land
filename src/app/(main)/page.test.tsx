@@ -62,6 +62,14 @@ afterEach(() => {
 });
 
 describe("public home jurisdiction catalog", () => {
+  it("lets the landing composition span and scroll across the full page", () => {
+    render(<Home />);
+
+    const landing = screen.getByRole("main");
+    expect(landing.parentElement).not.toHaveClass("container");
+    expect(landing.parentElement).not.toHaveClass("overflow-hidden");
+  });
+
   it("loads the governed jurisdictions and selects their configured default", () => {
     render(<Home />);
 

@@ -17,11 +17,10 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Law of the Land",
-  description: "Ask questions in plain language and get answers grounded in a legal document library.",
-  icons: {
-    icon: "/favicon.ico",
-  },
+  title: "Law of the Land \u2014 Jurisdiction-specific legal information",
+  description:
+    "Ask legal questions in plain language and review jurisdiction-specific answers grounded in published legal sources and citations.",
+  icons: { icon: "/favicon.ico" },
 };
 
 export default function RootLayout({

@@ -74,22 +74,20 @@ function LandingShell() {
   );
 
   return (
-    <div className="container relative mx-auto flex min-h-0 flex-1 flex-col overflow-hidden">
-      <LandingPage
-        query={query}
-        onQueryChange={setQuery}
-        onSearch={() => goToChat(query)}
-        onPickSuggested={goToChat}
-        onKeyDown={handleKeyDown}
-        isLoading={researchUnavailable}
-        savedChats={savedChats}
-        onResumeChat={resumeChat}
-        isAuthenticated={isAuthenticated}
-        country={country}
-        onCountryChange={setCountry}
-        jurisdictions={publicJurisdictions}
-      />
-    </div>
+    <LandingPage
+      query={query}
+      onQueryChange={setQuery}
+      onSearch={() => goToChat(query)}
+      onPickSuggested={goToChat}
+      onKeyDown={handleKeyDown}
+      isLoading={researchUnavailable}
+      savedChats={savedChats}
+      onResumeChat={resumeChat}
+      isAuthenticated={isAuthenticated}
+      country={country}
+      onCountryChange={setCountry}
+      jurisdictions={publicJurisdictions}
+    />
   );
 }
 

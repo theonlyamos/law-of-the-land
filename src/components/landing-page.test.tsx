@@ -151,6 +151,66 @@ describe("professional landing research shell", () => {
     expect(props.onResumeChat).toHaveBeenCalledWith("chat-consumer");
   });
 
+  it("renders the approved editorial sections from the governed jurisdiction register", () => {
+    render(<LandingPage {...landingProps()} />);
+
+    for (const heading of [
+      "Clear explanations. Verifiable sources.",
+      "Built for everyday questions and professional research.",
+      "Coverage grows through governed publication.",
+      "Research that remains available when you return.",
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeVisible();
+    }
+
+    const coverage = screen.getByRole("region", { name: "Published jurisdiction coverage" });
+    expect(within(coverage).getByText("Ghana")).toBeVisible();
+    expect(within(coverage).getByText("Nigeria")).toBeVisible();
+    expect(screen.queryByText(/countries covered/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Illustrative source trail")).toHaveTextContent(
+      "Act or regulation \u00b7 Section or article",
+    );
+  });
+
+  it("uses only valid page destinations and explains continuity to guests", () => {
+    render(<LandingPage {...landingProps()} />);
+
+    expect(screen.getByRole("link", { name: "Review plans" })).toHaveAttribute(
+      "href",
+      "/signin?redirect=%2Fsettings%2Fbilling",
+    );
+    expect(screen.getByRole("link", { name: "Choose a jurisdiction" })).toHaveAttribute(
+      "href",
+      "#research",
+    );
+    expect(screen.getByRole("form", { name: "Legal research" })).toHaveAttribute(
+      "tabindex",
+      "-1",
+    );
+    expect(screen.getByText(/Sign in to save research threads/i)).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Session controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /privacy/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /terms/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /contact/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Legal notice" })).toHaveAttribute(
+      "href",
+      "#legal-information-notice",
+    );
+  });
+
+  it("links authenticated plans and session controls to settings", () => {
+    render(<LandingPage {...landingProps({ isAuthenticated: true })} />);
+
+    expect(screen.getByRole("link", { name: "Review plans" })).toHaveAttribute(
+      "href",
+      "/settings/billing",
+    );
+    expect(screen.getByRole("link", { name: "Session controls" })).toHaveAttribute(
+      "href",
+      "/settings/sessions",
+    );
+  });
+
   it("explains when no governed jurisdiction is available and blocks research", () => {
     render(<LandingPage {...landingProps({ country: "", jurisdictions: [] })} />);
 
@@ -158,5 +218,16 @@ describe("professional landing research shell", () => {
       "Legal research is not available for a jurisdiction right now. Please check again later.",
     );
     expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
+    expect(
+      screen.getAllByText(
+        "Legal research is not available for a jurisdiction right now. Please check again later.",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("labels the published register while jurisdiction data is loading", () => {
+    render(<LandingPage {...landingProps({ country: "", jurisdictions: undefined })} />);
+
+    expect(screen.getByText("Loading the published jurisdiction register\u2026")).toBeVisible();
   });
 });
