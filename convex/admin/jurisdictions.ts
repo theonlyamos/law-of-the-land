@@ -646,7 +646,7 @@ function invalidAdminJurisdictionProjection(): never {
 function assertTypedGeographicCommon(row: Doc<"jurisdictions">): void {
   if (
     row.kind !== "geographic" ||
-    row.visibility === undefined ||
+    row.visibility !== "public" ||
     row.organizationId !== undefined
   ) {
     invalidAdminJurisdictionProjection();
@@ -802,6 +802,9 @@ export const suggestGeographicParentsByAliases = query({
   returns: v.array(geographicOptionValidator),
   handler: async (ctx, args) => {
     await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
+    if (args.aliases.length > MAX_GEOGRAPHIC_ALIASES) {
+      throw new ConvexError("INVALID_GEOGRAPHIC_ALIASES");
+    }
     const normalizedAliases: string[] = [];
     const seenAliases = new Set<string>();
     for (const alias of args.aliases) {
@@ -816,9 +819,6 @@ export const suggestGeographicParentsByAliases = query({
       if (seenAliases.has(normalized)) continue;
       seenAliases.add(normalized);
       normalizedAliases.push(normalized);
-      if (normalizedAliases.length > MAX_GEOGRAPHIC_ALIASES) {
-        throw new ConvexError("INVALID_GEOGRAPHIC_ALIASES");
-      }
     }
     const aliasRows = await Promise.all(normalizedAliases.map((normalizedAlias) =>
       ctx.db
@@ -898,12 +898,15 @@ export const listAdminJurisdictions = query({
 
     const geographicRows = result.page.filter((row) => row.kind === "geographic");
     const organizationalRows = result.page.filter((row) => row.kind === "organizational");
-    for (const row of [...geographicRows, ...organizationalRows]) {
-      if (row.visibility === undefined) invalidAdminJurisdictionProjection();
-      if (
-        (row.kind === "geographic" && row.organizationId !== undefined) ||
-        (row.kind === "organizational" && row.organizationId === undefined)
-      ) {
+    const legacyRows = result.page.filter((row) => row.kind === undefined);
+    for (const row of legacyRows) {
+      if (row.visibility !== undefined || row.organizationId !== undefined) {
+        invalidAdminJurisdictionProjection();
+      }
+    }
+    for (const row of geographicRows) assertTypedGeographicCommon(row);
+    for (const row of organizationalRows) {
+      if (row.visibility === undefined || row.organizationId === undefined) {
         invalidAdminJurisdictionProjection();
       }
     }

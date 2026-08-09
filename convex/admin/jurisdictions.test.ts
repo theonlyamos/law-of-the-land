@@ -1129,6 +1129,10 @@ describe("administration catalog projections", () => {
       childLevel: "town",
       aliases: Array.from({ length: 21 }, (_, index) => `alias ${index}`),
     })).rejects.toThrow("INVALID_GEOGRAPHIC_ALIASES");
+    await expect(writer.client.query(suggestGeographicParentsByAliases, {
+      childLevel: "town",
+      aliases: Array.from({ length: 21 }, () => "ghana"),
+    })).rejects.toThrow("INVALID_GEOGRAPHIC_ALIASES");
 
     const claim = await issueVerifiedPlaceClaim(
       writer.userId,
@@ -1442,6 +1446,99 @@ describe("administration catalog projections", () => {
       await ctx.db.delete(missingOrganization);
     });
     await expect(reader2.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+  });
+
+  it("fails closed on non-public typed geography and hybrid legacy rows", async () => {
+    const typedBackend = createBackend();
+    await enablePanel(typedBackend);
+    const typedReader = await asAdmin(typedBackend, "auditor");
+    await typedBackend.run(async (ctx) => {
+      const now = Date.now();
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Members-only Geography",
+        slug: "members-only-geography",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "members",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId,
+        googlePlaceId: "members-only-geography",
+        level: "country",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: "Members-only Geography",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(typedReader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+    await expect(typedReader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+
+    const legacyBackend = createBackend();
+    await enablePanel(legacyBackend);
+    const legacyReader = await asAdmin(legacyBackend, "auditor");
+    const nonPublicLegacyId = await legacyBackend.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        code: "HY",
+        name: "Non-public Legacy",
+        slug: "non-public-legacy",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        visibility: "members",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(legacyReader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+
+    await legacyBackend.run(async (ctx) => {
+      await ctx.db.delete(nonPublicLegacyId);
+      const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Hybrid Legacy Organization",
+        slug: "hybrid-legacy-organization",
+        class: "company",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("jurisdictions", {
+        code: "HZ",
+        name: "Organization-linked Legacy",
+        slug: "organization-linked-legacy",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        organizationId,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(legacyReader.client.query(listAdminJurisdictions, {
       paginationOpts: { numItems: 20, cursor: null },
     })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
   });
