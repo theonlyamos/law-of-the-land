@@ -137,6 +137,27 @@ describe("Google Places server adapter", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("cancels a non-OK provider body and maps it without exposing the body", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("secret provider error body"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(stream, { status: 503 }));
+
+    const result = await autocompletePlaces("Acc", sessionToken).catch(
+      (error: unknown) => error,
+    );
+
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toBe("GOOGLE_PLACES_UNAVAILABLE");
+    expect(cancelled).toBe(true);
+  });
+
   it.each([
     ["absent", undefined],
     ["falsely small", "1"],

@@ -78,17 +78,21 @@ function validPlaceId(value: string): boolean {
   return value.length >= 1 && value.length <= 255 && value.trim() === value;
 }
 
+async function cancelProviderBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Rejection is already determined; cancellation is best-effort cleanup.
+  }
+}
+
 async function readProviderBody(response: Response): Promise<Uint8Array> {
   const contentLength = response.headers.get("content-length");
   if (
     contentLength !== null &&
     (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_PROVIDER_RESPONSE_BYTES)
   ) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // The response is rejected regardless; cancellation is best-effort cleanup.
-    }
+    await cancelProviderBody(response);
     placesError("GOOGLE_PLACES_UNAVAILABLE");
   }
   if (!response.body) placesError("GOOGLE_PLACES_INVALID_RESPONSE");
@@ -132,7 +136,10 @@ async function providerJson(url: string, init: RequestInit): Promise<unknown> {
     } catch {
       placesError("GOOGLE_PLACES_UNAVAILABLE");
     }
-    if (!response.ok) placesError("GOOGLE_PLACES_UNAVAILABLE");
+    if (!response.ok) {
+      await cancelProviderBody(response);
+      placesError("GOOGLE_PLACES_UNAVAILABLE");
+    }
     const bytes = await readProviderBody(response);
     try {
       return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
