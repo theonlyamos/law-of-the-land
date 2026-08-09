@@ -1,19 +1,20 @@
 # Admin bootstrap
 
-**Owner:** release manager, with a Super Admin candidate present. **Abort:** production target, missing isolated non-production target, migration conflict, missing verified email or 2FA, missing provider configuration, or a failed test/build. Keep `ADMIN_PANEL_ENABLED=false` until every gate passes.
+**Owner:** release manager, with a Super Admin candidate present. **Default:** use an isolated non-production target. A production bootstrap is permitted only through the separate promotion procedure below after the isolated release checklist is complete. **Abort:** unapproved or ambiguous target, migration conflict, missing verified email or 2FA, missing provider configuration, failed test/build, or unresolved incident. Keep `ADMIN_PANEL_ENABLED=false` until every gate passes.
 
 ## Configuration ownership matrix
 
-`Vercel` means project environment variables; `Convex` means the selected deployment environment. Secrets belong only to Convex. `Local`, `Preview`, and `Production` state whether the variable is required in that environment.
+`Vercel` means project environment variables; `Convex` means the selected deployment environment. A server-only secret can be required in both runtimes; it must have the same approved value where the two runtimes authenticate to each other. `Local`, `Preview`, and `Production` state whether the variable is required in that environment.
 
 | Variable | Owner | Local | Preview | Production |
 | --- | --- | --- | --- | --- |
-| `GROUNDX_API_KEY` | Convex | Required for provider work | Required | Required |
-| `GOOGLE_AI_API_KEY` | Convex | Required for generated answers | Required | Required |
+| `GROUNDX_API_KEY` | Vercel and Convex | Required for provider work | Required | Required |
+| `GOOGLE_AI_API_KEY` | Vercel and Convex | Required for generated answers | Required | Required |
 | `CONVEX_DEPLOYMENT` | local shell / Vercel build | Required | Required | Required |
 | `NEXT_PUBLIC_CONVEX_URL` | Vercel | Required | Required | Required |
 | `NEXT_PUBLIC_CONVEX_SITE_URL` | Vercel and Convex | Required | Required | Required |
 | `NEXT_PUBLIC_SITE_URL` | Vercel | Required | Required | Required |
+| `SEARCH_JURISDICTION_SECRET` | Vercel and Convex | Required | Required | Required |
 | `ADMIN_MAX_DOCUMENT_BYTES` | Convex | Required for admin upload | Required | Required |
 | `BETTER_AUTH_SECRET` | Convex | Required | Required | Required |
 | `SITE_URL` | Convex | Required | Required | Required |
@@ -92,6 +93,64 @@ The first administrative grant revokes the candidate's existing sessions. The ca
 
 Record GroundX as **configured**, not healthy or smoke-passed, until an authorized remote-ingest callback actually completes. The external smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
 
+## Production promotion and first Super Admin
+
+Do not reuse a preview user ID or run the isolated `convex dev` sequence against production. Better Auth users are deployment-specific. Promotion requires a completed and signed [isolated release checklist](release-checklist.md#isolated-release-gates), an approved change record, the exact production Convex deployment name copied from the Convex dashboard, and the Vercel production project identity. Record the identities, candidate, approver, planned window, and rollback owner without recording any secret values.
+
+### 1. Deploy disabled and prepare the production account
+
+1. In the Convex production deployment, set `ADMIN_ENVIRONMENT=production` and `ADMIN_PANEL_ENABLED=false`. Confirm `INITIAL_SUPER_ADMIN_IDS` is absent. Configure the Convex-owned variables in the matrix.
+2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GROUNDX_API_KEY`, `GOOGLE_AI_API_KEY`, and `SEARCH_JURISDICTION_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. The shared search secret must match Convex exactly.
+3. Promote the already-reviewed commit through the normal `main` deployment pipeline. Do not run an ad hoc `convex deploy` from the release shell: that command defaults to the project's production deployment and does not accept the exact-name selector used below.
+4. Verify the production site loads while ordinary `/admin` access remains disabled. The candidate must create a new production credential account, verify its email, enroll in 2FA at `/settings/security`, and copy the production Better Auth user ID. Verify the production ID, email-verification state, and 2FA state in that same environment.
+
+### 2. Bind every bootstrap command to the exact production name
+
+Set `APPROVED_PRODUCTION_CONVEX_DEPLOYMENT` from the approved change record to the immutable deployment name shown by the Convex dashboard, such as `joyful-capybara-123`. Do not use the aliases `prod`, `production`, `staging`, `dev`, or `local`. The release manager must independently confirm in the dashboard that the name is the production deployment for this project and that the deployed commit matches the approved release.
+
+Run the following from a clean checkout of that approved commit. The `INITIAL_SUPER_ADMIN_IDS` value is entered interactively, so it does not enter shell history. `Invoke-CheckedConvex` stops the sequence on any non-zero CLI result, and the `finally` block attempts to remove the allowlist even when a migration fails. The release remains failed until the dashboard independently confirms that the allowlist is absent.
+
+```powershell
+bun install --frozen-lockfile
+bun run test
+bun run build
+bun run lint
+
+$ApprovedProductionDeployment = $env:APPROVED_PRODUCTION_CONVEX_DEPLOYMENT
+if (
+  [string]::IsNullOrWhiteSpace($ApprovedProductionDeployment) -or
+  $ApprovedProductionDeployment -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)+$' -or
+  $ApprovedProductionDeployment -in @('prod', 'production', 'staging', 'dev', 'local')
+) {
+  throw 'Abort: APPROVED_PRODUCTION_CONVEX_DEPLOYMENT must be the exact dashboard deployment name, not an environment alias.'
+}
+
+$ConfirmedProductionDeployment = Read-Host "Type the exact approved production Convex deployment ($ApprovedProductionDeployment)"
+if ($ConfirmedProductionDeployment -cne $ApprovedProductionDeployment) {
+  throw 'Abort: the confirmed production target does not match the approved target.'
+}
+
+function Invoke-CheckedConvex {
+  param([Parameter(Mandatory)][string[]]$CommandArgs)
+  & bunx convex @CommandArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Abort: a Convex command failed. Keep both admin controls disabled and preserve its output.'
+  }
+}
+
+Invoke-CheckedConvex @('env', 'set', 'INITIAL_SUPER_ADMIN_IDS', '--deployment', $ApprovedProductionDeployment)
+try {
+  Invoke-CheckedConvex @('run', 'admin/migrations:seedGhanaJurisdiction', '--deployment', $ApprovedProductionDeployment)
+  Invoke-CheckedConvex @('run', 'admin/migrations:bootstrapSuperAdmins', '--deployment', $ApprovedProductionDeployment)
+} finally {
+  Invoke-CheckedConvex @('env', 'remove', 'INITIAL_SUPER_ADMIN_IDS', '--deployment', $ApprovedProductionDeployment)
+}
+```
+
+The interactive allowlist must contain only the approved production user ID or comma-separated approved production user IDs. Expected state matches the isolated run: Ghana retains production bucket `11833`, the seed is idempotent, and only existing verified, 2FA-enrolled users receive `super_admin`. Capture redacted command results and the evidence that the allowlist was removed. Never retry with a different target after a partial failure; keep both controls disabled and open an incident.
+
+The role grant revokes the candidate's existing sessions. The candidate must sign in again with credentials and complete the 2FA challenge. On `/settings/security`, verify the production Super Administrator handoff and then use the production enablement procedure below. At least one different assured Super Admin is required for routine recovery after the initial handoff; add that administrator through the audited admin UI before treating production setup as complete.
+
 ### Supplemental Windows troubleshooting
 
 The Bun sequence above is the release procedure. The commands below only diagnose a local Windows launcher problem; they do not satisfy or replace any release step. After fixing Bun, restart the required sequence from `bun install --frozen-lockfile`.
@@ -104,9 +163,9 @@ npm run build
 
 ## Persisted flag enable, disable, and recovery
 
-Auth-gated public mutations are not an unauthenticated CLI recovery mechanism. A different assured, non-impersonated Super Admin must sign in and open `/admin-recovery`.
+Auth-gated public mutations are not an unauthenticated CLI recovery mechanism. For the first enablement, the newly bootstrapped Super Admin must complete the forced sign-in and 2FA challenge before opening `/admin-recovery`. After a second Super Admin exists, routine recovery must be performed by a different assured, non-impersonated Super Admin, never by the account whose access or activity is under investigation.
 
-To enable the persisted row, select **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the current password, and submit **Verify and enable**. Expected state is `Enabled` plus a correlation ID and one `admin.panel_flag_set` audit event. Then enable the deployment gate:
+For preview, use environment `preview` and the isolated binding from the procedure above. To enable the persisted row, select **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the current password, and submit **Verify and enable**. Expected state is `Enabled` plus a correlation ID and one `admin.panel_flag_set` audit event. Then enable the deployment gate:
 
 ```powershell
 bunx convex env set ADMIN_PANEL_ENABLED true
@@ -118,4 +177,18 @@ To disable safely, keep the deployment gate on long enough to open `/admin-recov
 bunx convex env set ADMIN_PANEL_ENABLED false
 ```
 
-Run those environment commands only in the same shell after confirming `$env:CONVEX_DEPLOYMENT -ceq $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT`; otherwise abort and re-establish the approved binding. Every attempt uses a newly generated idempotency key. Abort if the page reports the wrong environment, the session is impersonated/unassured, the exact confirmation differs, or no correlation ID is returned. Recovery after an aborted attempt is to leave the deployment gate false, sign in as another assured Super Admin, and retry from `/admin-recovery` with a new key.
+Run those preview environment commands only in the same shell after confirming `$env:CONVEX_DEPLOYMENT -ceq $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT`; otherwise abort and re-establish the approved binding. Every attempt uses a newly generated idempotency key. Abort if the page reports the wrong environment, the session is impersonated/unassured, the exact confirmation differs, or no correlation ID is returned. Recovery after an aborted attempt is to leave the deployment gate false, sign in as another assured Super Admin, and retry from `/admin-recovery` with a new key.
+
+For production, first verify `/admin-recovery` displays environment `production`. Select **Enable persisted flag**, enter the approved reason, type `ADMIN_PANEL production ENABLE`, confirm the current password, and require the correlation ID and `admin.panel_flag_set` audit event. Only then, in the same release shell that retains the typed-confirmed exact deployment name, run:
+
+```powershell
+Invoke-CheckedConvex @('env', 'set', 'ADMIN_PANEL_ENABLED', 'true', '--deployment', $ApprovedProductionDeployment)
+```
+
+Smoke the fixed roles and monitor audit, job, incident, auth, and provider health. To roll back, disable the persisted flag first with `ADMIN_PANEL production DISABLE` and a fresh idempotency key, then set the deployment gate false on the exact target:
+
+```powershell
+Invoke-CheckedConvex @('env', 'set', 'ADMIN_PANEL_ENABLED', 'false', '--deployment', $ApprovedProductionDeployment)
+```
+
+If the persisted row cannot be disabled, set the deployment gate false immediately on the exact approved production name, preserve evidence, and open an incident. Never use an alias or a candidate's session to recover itself.

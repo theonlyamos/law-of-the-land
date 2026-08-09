@@ -54,7 +54,9 @@ The administrative surface is deliberately disabled by default. Its deployment
 gate must be exactly `ADMIN_PANEL_ENABLED=true`, `ADMIN_ENVIRONMENT` must name
 the deployment environment, and that environment must have one enabled
 `featureFlags` row with key `admin_panel`. See the checked-in runbooks before
-enabling it: [bootstrap](docs/admin/bootstrap.md), [document publishing](docs/admin/document-publishing.md), [provider outage](docs/admin/provider-outage.md), [rollback](docs/admin/rollback.md), [retention](docs/admin/retention.md), and the [release checklist](docs/admin/release-checklist.md).
+enabling it. Production setup is a promotion from a completed isolated release,
+not the isolated bootstrap commands run against production. See
+[bootstrap](docs/admin/bootstrap.md), [document publishing](docs/admin/document-publishing.md), [provider outage](docs/admin/provider-outage.md), [rollback](docs/admin/rollback.md), [retention](docs/admin/retention.md), and the [release checklist](docs/admin/release-checklist.md).
 
 ## Contributing
 
