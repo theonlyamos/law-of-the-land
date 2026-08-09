@@ -385,6 +385,44 @@ describe("jurisdiction governance", () => {
 });
 
 describe("legal resource governance", () => {
+  it("accepts typed jurisdiction IDs without requiring a legacy country code", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("jurisdictions", {
+        name: "Accra",
+        slug: "accra",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const resourceId = await manager.client.mutation(createResource, {
+      jurisdictionId,
+      type: "ordinance",
+      title: "Accra local instrument",
+      issuer: "Accra authority",
+      officialCitation: "LI 1",
+      sourceUrl: "https://example.gov.gh/li-1",
+      topics: ["local government"],
+      effectiveDate: "2026-01-01",
+      reason: "Add typed jurisdiction resource",
+    });
+
+    await expect(manager.client.query(getResource, { id: resourceId })).resolves.toMatchObject({
+      jurisdiction: { name: "Accra", status: "draft" },
+    });
+  });
+
   it("rejects invalid metadata and duplicate official citations", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -591,7 +629,7 @@ describe("legal resource governance", () => {
         id: jurisdictionId,
         reason: "Retire catalog",
       }),
-    ).rejects.toThrow("active resources");
+    ).rejects.toThrow("JURISDICTION_HAS_ACTIVE_RESOURCES");
     await expect(
       manager.client.mutation(archiveResource, {
         id: resourceId,

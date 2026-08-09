@@ -5,11 +5,16 @@ import { mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { hasRolePermission } from "../lib/adminPermissions";
 import { adminAccessError } from "../lib/adminAccessErrors";
-import { normalizePositiveSafeIntegerBucketId } from "../lib/jurisdictionEligibility";
 import { isLegacyCountryCode } from "../lib/jurisdictionDomain";
 import { requireCurrentAdmin } from "../lib/requireAdmin";
 import { validateAuditReason, writeAudit } from "./audit";
 import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags";
+import {
+  archiveJurisdictionForActor,
+  createLegacyJurisdictionForActor,
+  enableJurisdictionForActor,
+  updateLegacyJurisdictionForActor,
+} from "./jurisdictions";
 
 const MAX_PAGE_SIZE = 100;
 const MAX_TEXT_LENGTH = 300;
@@ -89,7 +94,11 @@ const resourceDetailValidator = v.object({
   effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
-  jurisdiction: v.object({ code: v.string(), name: v.string(), status: jurisdictionStatusValidator }),
+  jurisdiction: v.object({
+    code: v.optional(v.string()),
+    name: v.string(),
+    status: jurisdictionStatusValidator,
+  }),
 });
 
 type Actor = { userId: string; roles: AdminRole[] };
@@ -115,14 +124,6 @@ function normalizeCode(value: string): string {
     throw new ConvexError("INVALID_JURISDICTION_CODE");
   }
   return code;
-}
-
-function normalizeSlug(value: string): string {
-  const slug = value.trim().toLowerCase();
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80) {
-    throw new ConvexError("INVALID_JURISDICTION_SLUG");
-  }
-  return slug;
 }
 
 function hasLegacyJurisdictionCode<T extends { code?: string }>(
@@ -172,18 +173,6 @@ function legacyJurisdictionProjection(
     projection.push({ ...row, code: requireLegacyJurisdictionCode(row) });
   }
   return projection;
-}
-
-function optionalBucket(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredText(value, "BUCKET_ID");
-}
-
-function optionalProductionBucket(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const normalized = normalizePositiveSafeIntegerBucketId(value);
-  if (normalized === null) throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
-  return normalized;
 }
 
 function validateResourceType(value: string): ResourceType {
@@ -244,14 +233,6 @@ function canonicalCitation(value: string): string {
   return value.normalize("NFKC").toLowerCase();
 }
 
-function jurisdictionSnapshot(row: Pick<Doc<"jurisdictions">, "code" | "name" | "slug" | "status" | "isDefault" | "stagingBucketId" | "productionBucketId" | "providerSyncState">) {
-  return {
-    code: row.code, name: row.name, slug: row.slug, status: row.status, isDefault: row.isDefault,
-    stagingBucketId: row.stagingBucketId ?? null, productionBucketId: row.productionBucketId ?? null,
-    providerSyncState: row.providerSyncState,
-  };
-}
-
 function resourceSnapshot(row: Pick<Doc<"legalResources">, "jurisdictionId" | "type" | "title" | "issuer" | "officialCitation" | "sourceUrl" | "topics" | "effectiveDate" | "repealDate" | "status" | "activeVersionId">) {
   const source = new URL(row.sourceUrl);
   return {
@@ -262,38 +243,12 @@ function resourceSnapshot(row: Pick<Doc<"legalResources">, "jurisdictionId" | "t
   };
 }
 
-async function assertUniqueJurisdiction(
-  ctx: MutationCtx,
-  input: { code: string; slug: string; exceptId?: Id<"jurisdictions"> },
-) {
-  const [codes, slugs] = await Promise.all([
-    ctx.db.query("jurisdictions").withIndex("by_code", (q) => q.eq("code", input.code)).take(2),
-    ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", input.slug)).take(2),
-  ]);
-  if (codes.some((row) => row._id !== input.exceptId)) {
-    throw new ConvexError("JURISDICTION_CODE_EXISTS");
-  }
-  if (slugs.some((row) => row._id !== input.exceptId)) {
-    throw new ConvexError("JURISDICTION_SLUG_EXISTS");
-  }
-}
-
-async function assertDefaultAvailable(ctx: MutationCtx, exceptId?: Id<"jurisdictions">) {
-  const defaults = await ctx.db
-    .query("jurisdictions")
-    .withIndex("by_isDefault", (q) => q.eq("isDefault", true))
-    .take(2);
-  if (defaults.some((row) => row._id !== exceptId && row.status !== "archived")) {
-    throw new ConvexError("DEFAULT_JURISDICTION_EXISTS");
-  }
-}
-
 async function auditChange(
   ctx: MutationCtx,
   actor: Actor,
   input: {
     action: string;
-    targetType: "jurisdiction" | "legalResource";
+    targetType: "legalResource";
     targetId: string;
     reason: string;
     before?: string;
@@ -380,40 +335,7 @@ export const createJurisdiction = mutation({
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
-    const code = normalizeCode(args.code);
-    const slug = normalizeSlug(args.slug);
-    await assertUniqueJurisdiction(ctx, { code, slug });
-    if (args.isDefault) await assertDefaultAvailable(ctx);
-    const stagingBucketId = optionalBucket(args.stagingBucketId);
-    const productionBucketId = optionalProductionBucket(args.productionBucketId);
-    const now = Date.now();
-    const id = await ctx.db.insert("jurisdictions", {
-      code,
-      name: requiredText(args.name, "JURISDICTION_NAME"),
-      slug,
-      status: "draft",
-      isDefault: args.isDefault,
-      stagingBucketId,
-      productionBucketId,
-      providerSyncState: "pending",
-      createdBy: actor.userId,
-      updatedBy: actor.userId,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await auditChange(ctx, actor, {
-      action: "jurisdiction.created",
-      targetType: "jurisdiction",
-      targetId: id,
-      reason,
-      before: JSON.stringify(null),
-      after: JSON.stringify(jurisdictionSnapshot({
-        code, name: requiredText(args.name, "JURISDICTION_NAME"), slug, status: "draft",
-        isDefault: args.isDefault, stagingBucketId,
-        productionBucketId, providerSyncState: "pending",
-      })),
-    });
-    return id;
+    return await createLegacyJurisdictionForActor(ctx, actor, args, reason);
   },
 });
 
@@ -431,37 +353,8 @@ export const updateJurisdiction = mutation({
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
-    const row = await ctx.db.get("jurisdictions", args.id);
-    if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    const code = requireLegacyJurisdictionCode(row);
-    if (row.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
-    const slug = normalizeSlug(args.slug);
-    await assertUniqueJurisdiction(ctx, { code, slug, exceptId: row._id });
-    if (args.isDefault) await assertDefaultAvailable(ctx, row._id);
-    const productionBucketId = optionalProductionBucket(args.productionBucketId);
-    if (row.status === "enabled" && productionBucketId === undefined) {
-      throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-    }
-    const patch = {
-      name: requiredText(args.name, "JURISDICTION_NAME"),
-      slug,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId,
-      isDefault: args.isDefault,
-      providerSyncState: "pending" as const,
-      updatedBy: actor.userId,
-      updatedAt: Date.now(),
-    };
-    await ctx.db.patch(row._id, patch);
-    await auditChange(ctx, actor, {
-      action: "jurisdiction.updated",
-      targetType: "jurisdiction",
-      targetId: row._id,
-      reason,
-      before: JSON.stringify(jurisdictionSnapshot(row)),
-      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
-    });
-    return { ...row, ...patch, code };
+    const row = await updateLegacyJurisdictionForActor(ctx, actor, args, reason);
+    return { ...row, code: requireLegacyJurisdictionCode(row) };
   },
 });
 
@@ -471,25 +364,8 @@ export const enableJurisdiction = mutation({
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
-    const row = await ctx.db.get("jurisdictions", args.id);
-    if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    const code = requireLegacyJurisdictionCode(row);
-    if (row.status !== "draft") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
-    if (!row.productionBucketId) throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-    if (normalizePositiveSafeIntegerBucketId(row.productionBucketId) === null) {
-      throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
-    }
-    const patch = { status: "enabled" as const, updatedBy: actor.userId, updatedAt: Date.now() };
-    await ctx.db.patch(row._id, patch);
-    await auditChange(ctx, actor, {
-      action: "jurisdiction.enabled",
-      targetType: "jurisdiction",
-      targetId: row._id,
-      reason,
-      before: JSON.stringify(jurisdictionSnapshot(row)),
-      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
-    });
-    return { ...row, ...patch, code };
+    const row = await enableJurisdictionForActor(ctx, actor, args.id, reason);
+    return { ...row, code: requireLegacyJurisdictionCode(row) };
   },
 });
 
@@ -499,33 +375,8 @@ export const archiveJurisdiction = mutation({
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
-    const row = await ctx.db.get("jurisdictions", args.id);
-    if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    const code = requireLegacyJurisdictionCode(row);
-    if (row.status === "archived") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
-    const active = await ctx.db
-      .query("legalResources")
-      .withIndex("by_jurisdictionId_and_status", (q) =>
-        q.eq("jurisdictionId", row._id).eq("status", "active"),
-      )
-      .take(1);
-    if (active.length > 0) throw new ConvexError("Jurisdiction has active resources");
-    const patch = {
-      status: "archived" as const,
-      isDefault: false,
-      updatedBy: actor.userId,
-      updatedAt: Date.now(),
-    };
-    await ctx.db.patch(row._id, patch);
-    await auditChange(ctx, actor, {
-      action: "jurisdiction.archived",
-      targetType: "jurisdiction",
-      targetId: row._id,
-      reason,
-      before: JSON.stringify(jurisdictionSnapshot(row)),
-      after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
-    });
-    return { ...row, ...patch, code };
+    const row = await archiveJurisdictionForActor(ctx, actor, args.id, reason);
+    return { ...row, code: requireLegacyJurisdictionCode(row) };
   },
 });
 
@@ -563,11 +414,10 @@ export const getResource = query({
     if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
     const jurisdiction = await ctx.db.get("jurisdictions", resource.jurisdictionId);
     if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    const code = requireLegacyJurisdictionCode(jurisdiction);
     return {
       ...resource,
       jurisdiction: {
-        code,
+        ...(jurisdiction.code === undefined ? {} : { code: jurisdiction.code }),
         name: jurisdiction.name,
         status: jurisdiction.status,
       },
@@ -602,7 +452,6 @@ async function resourceInput(
   if (!jurisdiction || jurisdiction.status === "archived") {
     throw new ConvexError("JURISDICTION_NOT_AVAILABLE");
   }
-  requireLegacyJurisdictionCode(jurisdiction);
   const officialCitation = requiredText(input.officialCitation, "OFFICIAL_CITATION");
   const officialCitationKey = canonicalCitation(officialCitation);
   const citations = await ctx.db
