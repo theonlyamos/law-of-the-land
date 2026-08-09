@@ -14,6 +14,8 @@ import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags"
 const MAX_PAGE_SIZE = 100;
 const MAX_TEXT_LENGTH = 300;
 const MAX_TOPICS = 25;
+const MAX_LEGACY_JURISDICTIONS = 26 * 26;
+const LEGACY_PAGE_CURSOR_PREFIX = "legacy-country-code:";
 
 const jurisdictionStatusValidator = v.union(
   v.literal("draft"),
@@ -134,6 +136,42 @@ function requireLegacyJurisdictionCode<T extends { code?: string }>(row: T): str
     throw new ConvexError("JURISDICTION_NOT_FOUND");
   }
   return row.code;
+}
+
+function legacyPageCursor(cursor: string | null): string | null {
+  if (cursor === null || cursor === "") return null;
+  if (!cursor.startsWith(LEGACY_PAGE_CURSOR_PREFIX)) {
+    throw new ConvexError("INVALID_ADMIN_PAGINATION");
+  }
+  const code = cursor.slice(LEGACY_PAGE_CURSOR_PREFIX.length);
+  if (!isLegacyCountryCode(code)) {
+    throw new ConvexError("INVALID_ADMIN_PAGINATION");
+  }
+  return code;
+}
+
+function legacyJurisdictionProjection(
+  rows: Doc<"jurisdictions">[],
+  status: Doc<"jurisdictions">["status"] | undefined,
+) {
+  if (rows.length > MAX_LEGACY_JURISDICTIONS) return [];
+
+  const rowsByCode = new Map<string, Doc<"jurisdictions">[]>();
+  for (const row of rows) {
+    if (!hasLegacyJurisdictionCode(row)) continue;
+    const rowsForCode = rowsByCode.get(row.code);
+    if (rowsForCode) rowsForCode.push(row);
+    else rowsByCode.set(row.code, [row]);
+  }
+
+  const projection: Array<Doc<"jurisdictions"> & { code: string }> = [];
+  for (const rowsForCode of rowsByCode.values()) {
+    if (rowsForCode.length !== 1) continue;
+    const row = rowsForCode[0];
+    if (status !== undefined && row.status !== status) continue;
+    projection.push({ ...row, code: requireLegacyJurisdictionCode(row) });
+  }
+  return projection;
 }
 
 function optionalBucket(value: string | undefined): string | undefined {
@@ -304,18 +342,25 @@ export const listJurisdictions = query({
     await requireEnabledCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
     const code = args.code === undefined ? undefined : normalizeCode(args.code);
-    const source = code
-      ? ctx.db.query("jurisdictions").withIndex("by_code", (q) => q.eq("code", code))
-      : args.status
-      ? ctx.db.query("jurisdictions").withIndex("by_status_and_name", (q) => q.eq("status", args.status!))
-      : ctx.db.query("jurisdictions");
-    const result = await source.paginate(args.paginationOpts);
-    const page = result.page.flatMap((row) => {
-      if (!hasLegacyJurisdictionCode(row)) return [];
-      return [{ ...row, code: row.code }];
-    });
+    const rows = code
+      ? await ctx.db.query("jurisdictions").withIndex("by_code", (q) => q.eq("code", code)).take(2)
+      : await ctx.db
+        .query("jurisdictions")
+        .withIndex("by_code", (q) => q.gte("code", "AA").lte("code", "ZZ"))
+        .take(MAX_LEGACY_JURISDICTIONS + 1);
+    const projection = legacyJurisdictionProjection(rows, args.status);
+    const cursorCode = legacyPageCursor(args.paginationOpts.cursor);
+    const start = cursorCode === null
+      ? 0
+      : projection.findIndex((row) => row.code > cursorCode);
+    const pageStart = start < 0 ? projection.length : start;
+    const page = projection.slice(pageStart, pageStart + args.paginationOpts.numItems);
+    const isDone = pageStart + page.length >= projection.length;
     return {
-      ...result,
+      isDone,
+      continueCursor: isDone || page.length === 0
+        ? ""
+        : `${LEGACY_PAGE_CURSOR_PREFIX}${page[page.length - 1].code}`,
       page,
     };
   },

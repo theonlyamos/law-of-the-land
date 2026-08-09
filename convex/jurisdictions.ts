@@ -74,7 +74,9 @@ export const listPublicEnabled = query({
   handler: async (ctx) => {
     const rows = await ctx.db
       .query("jurisdictions")
-      .withIndex("by_status_and_name", (q) => q.eq("status", "enabled"))
+      .withIndex("by_status_and_code", (q) =>
+        q.eq("status", "enabled").gte("code", "AA").lte("code", "ZZ"),
+      )
       .take(MAX_PUBLIC_JURISDICTIONS + 1);
 
     const legacyRows = rows.filter(

@@ -671,4 +671,45 @@ describe("legal resource governance", () => {
       }),
     ).resolves.toMatchObject({ page: [] });
   });
+
+  it("paginates only unique legacy codes despite code-less and duplicate rows", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const auditor = await asAdmin(t, "auditor");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const [code, name] of [
+        [undefined, "A Organization"],
+        ["GH", "Ghana"],
+        ["GH", "Duplicate Ghana"],
+        ["KE", "Kenya"],
+        ["NG", "Nigeria"],
+      ] as const) {
+        await ctx.db.insert("jurisdictions", {
+          code,
+          name,
+          slug: `${name.toLowerCase().replaceAll(" ", "-")}-${crypto.randomUUID()}`,
+          status: "enabled",
+          isDefault: false,
+          providerSyncState: "synced",
+          createdBy: "system",
+          updatedBy: "system",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const first = await auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: null },
+    });
+    expect(first.page).toMatchObject([{ code: "KE" }]);
+    expect(first.isDone).toBe(false);
+
+    const second = await auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: first.continueCursor },
+    });
+    expect(second.page).toMatchObject([{ code: "NG" }]);
+    expect(second.isDone).toBe(true);
+  });
 });
