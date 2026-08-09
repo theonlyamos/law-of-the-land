@@ -51,6 +51,9 @@ const suggestGeographicParentsByAliases = makeFunctionReference<"query">(
 const listAdminJurisdictions = makeFunctionReference<"query">(
   "admin/jurisdictions:listAdminJurisdictions",
 );
+const assertCanManageJurisdictions = makeFunctionReference<"query">(
+  "admin/jurisdictions:assertCanManageJurisdictions",
+);
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -155,6 +158,26 @@ describe("typed jurisdiction administration", () => {
     delete process.env.PLACE_CLAIM_SECRET;
     delete process.env.ADMIN_PANEL_ENABLED;
     delete process.env.ADMIN_ENVIRONMENT;
+  });
+
+  it("returns only the enabled jurisdiction writer's server-derived actor ID", async () => {
+    const t = createBackend();
+    const writer = await asAdmin(t, "content_manager");
+    const forbidden = await asAdmin(t, "content_reviewer");
+
+    await expect(t.query(assertCanManageJurisdictions, {})).rejects.toThrow(
+      "ADMIN_AUTH_REQUIRED",
+    );
+    await expect(writer.client.query(assertCanManageJurisdictions, {})).rejects.toThrow(
+      "ADMIN_DISABLED",
+    );
+    await enablePanel(t);
+    await expect(forbidden.client.query(assertCanManageJurisdictions, {})).rejects.toThrow(
+      "ADMIN_FORBIDDEN",
+    );
+    await expect(writer.client.query(assertCanManageJurisdictions, {})).resolves.toBe(
+      writer.userId,
+    );
   });
 
   it("requires an enabled broader geographic parent and rejects cycles", async () => {

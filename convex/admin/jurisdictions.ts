@@ -93,6 +93,15 @@ const adminJurisdictionValidator = v.object({
 
 type Actor = { userId: string; roles: AdminRole[] };
 
+export const assertCanManageJurisdictions = query({
+  args: {},
+  returns: v.string(),
+  handler: async (ctx) => {
+    const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
+    return actor.userId;
+  },
+});
+
 function requiredText(value: string, code: string): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > MAX_TEXT_LENGTH) throw new ConvexError(code);

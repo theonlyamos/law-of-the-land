@@ -1,7 +1,7 @@
 import { normalizeGeographicAlias } from "./jurisdictionDomain";
 
 const CLAIM_VERSION = 1;
-const CLAIM_TTL_MS = 10 * 60 * 1_000;
+export const VERIFIED_PLACE_CLAIM_TTL_MS = 10 * 60 * 1_000;
 const MAX_PAYLOAD_BYTES = 8_192;
 const MAX_TOKEN_LENGTH = 12_000;
 const MAX_ACTOR_ID_LENGTH = 500;
@@ -167,7 +167,7 @@ function parsedPayload(value: string): PlaceClaimPayload {
     !Number.isSafeInteger(input.issuedAt) ||
     typeof input.expiresAt !== "number" ||
     !Number.isSafeInteger(input.expiresAt) ||
-    input.expiresAt - input.issuedAt !== CLAIM_TTL_MS
+    input.expiresAt - input.issuedAt !== VERIFIED_PLACE_CLAIM_TTL_MS
   ) {
     invalid();
   }
@@ -194,7 +194,7 @@ export async function issueVerifiedPlaceClaim(
     version: CLAIM_VERSION,
     actorId: normalizedActorId,
     issuedAt,
-    expiresAt: issuedAt + CLAIM_TTL_MS,
+    expiresAt: issuedAt + VERIFIED_PLACE_CLAIM_TTL_MS,
     place: canonicalPlace(place),
   };
   if (!Number.isSafeInteger(payload.expiresAt)) invalid();
@@ -236,7 +236,7 @@ export async function verifyVerifiedPlaceClaim(
     invalid();
   }
   const payload = parsedPayload(decodedPayload);
-  if (payload.actorId !== opaqueActorId(actorId)) invalid("PLACE_CLAIM_ACTOR_MISMATCH");
+  if (payload.actorId !== opaqueActorId(actorId)) invalid("PLACE_CLAIM_FORBIDDEN");
   if (!Number.isSafeInteger(now) || now < payload.issuedAt - 60_000) invalid();
   if (now >= payload.expiresAt) invalid("PLACE_CLAIM_EXPIRED");
   return payload.place;

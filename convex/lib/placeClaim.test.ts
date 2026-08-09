@@ -47,7 +47,7 @@ describe("verified place claims", () => {
 
     await expect(
       verifyVerifiedPlaceClaim(claim, "admin-2", issuedAt + 1),
-    ).rejects.toThrow("PLACE_CLAIM_ACTOR_MISMATCH");
+    ).rejects.toThrow("PLACE_CLAIM_FORBIDDEN");
     await expect(
       verifyVerifiedPlaceClaim(claim, "admin-1", issuedAt + 600_001),
     ).rejects.toThrow("PLACE_CLAIM_EXPIRED");
