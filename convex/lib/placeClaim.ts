@@ -236,6 +236,6 @@ export async function verifyVerifiedPlaceClaim(
   const payload = parsedPayload(decodedPayload);
   if (payload.actorId !== opaqueActorId(actorId)) invalid("PLACE_CLAIM_ACTOR_MISMATCH");
   if (!Number.isSafeInteger(now) || now < payload.issuedAt - 60_000) invalid();
-  if (now > payload.expiresAt) invalid("PLACE_CLAIM_EXPIRED");
+  if (now >= payload.expiresAt) invalid("PLACE_CLAIM_EXPIRED");
   return payload.place;
 }

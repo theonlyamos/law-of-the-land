@@ -23,6 +23,7 @@ const MAX_TEXT_LENGTH = 300;
 const MAX_SCOPE_LINKS = 8;
 const MAX_PROFILE_ROWS = 2;
 const MAX_ARCHIVAL_CHILD_SCAN = 100;
+const MAX_GEOGRAPHIC_ALIASES = 20;
 
 type Actor = { userId: string; roles: AdminRole[] };
 
@@ -116,6 +117,10 @@ export async function assertGeographicParentChain(
 ): Promise<void> {
   const visited = new Set<Id<"jurisdictions">>([childId]);
   let currentId: Id<"jurisdictions"> | undefined = parentId;
+  let narrowerLevel: GeographicLevel | undefined;
+  let immediateStateInvalid = false;
+  let ancestorStateInvalid = false;
+  let levelInvalid = false;
   let depth = 1;
   while (currentId !== undefined) {
     if (visited.has(currentId)) throw new ConvexError("GEOGRAPHIC_PARENT_CYCLE");
@@ -124,10 +129,44 @@ export async function assertGeographicParentChain(
     if (depth > MAX_GEOGRAPHIC_DEPTH) {
       throw new ConvexError("GEOGRAPHIC_DEPTH_EXCEEDED");
     }
-    const profile = await geographicProfile(ctx, currentId);
-    if (!profile) throw new ConvexError("GEOGRAPHIC_PARENT_REQUIRED");
+    const [common, profile]: [
+      Doc<"jurisdictions"> | null,
+      Doc<"geographicJurisdictions"> | null,
+    ] = await Promise.all([
+      ctx.db.get("jurisdictions", currentId),
+      geographicProfile(ctx, currentId),
+    ]);
+    const stateInvalid =
+      !common ||
+      common.status !== "enabled" ||
+      projectJurisdictionKind(common) !== "geographic" ||
+      !profile;
+    if (stateInvalid) {
+      if (currentId === parentId) immediateStateInvalid = true;
+      else ancestorStateInvalid = true;
+    }
+    if (!profile) {
+      throw new ConvexError(
+        currentId === parentId
+          ? "GEOGRAPHIC_PARENT_REQUIRED"
+          : "GEOGRAPHIC_PARENT_CHAIN_INVALID",
+      );
+    }
+    if (
+      narrowerLevel !== undefined &&
+      !allowedParentLevelsByLevel[narrowerLevel].includes(profile.level)
+    ) {
+      levelInvalid = true;
+    }
+    if (profile.parentJurisdictionId === undefined && profile.level !== "country") {
+      ancestorStateInvalid = true;
+    }
+    narrowerLevel = profile.level;
     currentId = profile.parentJurisdictionId;
   }
+  if (ancestorStateInvalid) throw new ConvexError("GEOGRAPHIC_PARENT_CHAIN_INVALID");
+  if (immediateStateInvalid) throw new ConvexError("GEOGRAPHIC_PARENT_REQUIRED");
+  if (levelInvalid) throw new ConvexError("GEOGRAPHIC_PARENT_LEVEL_INVALID");
 }
 
 async function assertGeographicParent(
@@ -235,7 +274,12 @@ async function resolveScopeProfiles(
       ctx.db.get("jurisdictions", jurisdictionId),
       geographicProfile(ctx, jurisdictionId),
     ]);
-    if (!common || common.status !== "enabled" || !profile) {
+    if (
+      !common ||
+      common.status !== "enabled" ||
+      projectJurisdictionKind(common) !== "geographic" ||
+      !profile
+    ) {
       throw new ConvexError("GEOGRAPHIC_SCOPE_INVALID");
     }
     return profile;
@@ -282,6 +326,111 @@ function jurisdictionSnapshot(row: Doc<"jurisdictions"> | Omit<Doc<"jurisdiction
     organizationId: row.organizationId ?? null,
     legacyCountryCode: row.legacyCountryCode ?? null,
   };
+}
+
+function geographicJurisdictionSnapshot(
+  common: Doc<"jurisdictions"> | Omit<Doc<"jurisdictions">, "_id" | "_creationTime">,
+  profile: Pick<
+    Doc<"geographicJurisdictions">,
+    "googlePlaceId" | "level" | "countryCode" | "parentJurisdictionId"
+  >,
+  aliases: readonly string[],
+) {
+  return {
+    common: jurisdictionSnapshot(common),
+    geographic: {
+      googlePlaceId: profile.googlePlaceId,
+      level: profile.level,
+      countryCode: profile.countryCode ?? null,
+      parentJurisdictionId: profile.parentJurisdictionId ?? null,
+      aliases: [...aliases].sort(),
+    },
+  };
+}
+
+function organizationalJurisdictionSnapshot(
+  common: Doc<"jurisdictions"> | Omit<Doc<"jurisdictions">, "_id" | "_creationTime">,
+  profile: Pick<Doc<"organizationalJurisdictions">, "scopeMode">,
+  linkedProfiles: readonly Pick<Doc<"geographicJurisdictions">, "jurisdictionId">[],
+) {
+  return {
+    common: jurisdictionSnapshot(common),
+    organizational: {
+      scopeMode: profile.scopeMode,
+      geographicJurisdictionIds: linkedProfiles
+        .map((linked) => linked.jurisdictionId)
+        .sort(),
+    },
+  };
+}
+
+async function geographicAliasesForAudit(
+  ctx: MutationCtx,
+  jurisdictionId: Id<"jurisdictions">,
+): Promise<Doc<"geographicJurisdictionAliases">[]> {
+  const aliases = await ctx.db
+    .query("geographicJurisdictionAliases")
+    .withIndex("by_jurisdictionId_and_normalizedAlias", (q) =>
+      q.eq("jurisdictionId", jurisdictionId),
+    )
+    .take(MAX_GEOGRAPHIC_ALIASES + 1);
+  if (aliases.length > MAX_GEOGRAPHIC_ALIASES) {
+    throw new ConvexError("GEOGRAPHIC_ALIAS_STATE_INVALID");
+  }
+  return aliases;
+}
+
+async function linkedProfilesForAudit(
+  ctx: MutationCtx,
+  links: readonly Doc<"organizationGeographicScopes">[],
+): Promise<Doc<"geographicJurisdictions">[]> {
+  return await Promise.all(links.map(async (link) => {
+    const profile = await ctx.db.get(
+      "geographicJurisdictions",
+      link.geographicJurisdictionId,
+    );
+    if (!profile) throw new ConvexError("ORGANIZATIONAL_SCOPE_STATE_INVALID");
+    return profile;
+  }));
+}
+
+async function completeJurisdictionSnapshot(
+  ctx: MutationCtx,
+  common: Doc<"jurisdictions">,
+) {
+  if (projectJurisdictionKind(common) === "organizational") {
+    const profile = await organizationalProfile(ctx, common._id);
+    if (!profile) return { common: jurisdictionSnapshot(common) };
+    const links = await scopeLinks(ctx, profile._id);
+    return organizationalJurisdictionSnapshot(
+      common,
+      profile,
+      await linkedProfilesForAudit(ctx, links),
+    );
+  }
+  const profile = await geographicProfile(ctx, common._id);
+  if (!profile) {
+    return common.kind === undefined
+      ? jurisdictionSnapshot(common)
+      : { common: jurisdictionSnapshot(common) };
+  }
+  const aliases = await geographicAliasesForAudit(ctx, common._id);
+  return geographicJurisdictionSnapshot(
+    common,
+    profile,
+    aliases.map((alias) => alias.normalizedAlias),
+  );
+}
+
+function withUpdatedCommonSnapshot(
+  snapshot: unknown,
+  common: Doc<"jurisdictions">,
+) {
+  const updatedCommon = jurisdictionSnapshot(common);
+  if (snapshot !== null && typeof snapshot === "object" && "common" in snapshot) {
+    return { ...snapshot, common: updatedCommon };
+  }
+  return updatedCommon;
 }
 
 function normalizeLegacyCode(value: string): string {
@@ -459,11 +608,22 @@ export const createGeographicJurisdiction = mutation({
         createdAt: now,
       });
     }
+    const created = await ctx.db.get("jurisdictions", id);
+    if (!created) throw new ConvexError("JURISDICTION_NOT_FOUND");
     await auditJurisdiction(ctx, actor, {
       action: "jurisdiction.geographic_created",
       targetId: id,
       reason,
-      after: { kind: "geographic", name: place.name, level: args.level },
+      after: geographicJurisdictionSnapshot(
+        created,
+        {
+          googlePlaceId: placeId,
+          level: args.level,
+          countryCode: place.countryCode,
+          parentJurisdictionId: args.parentJurisdictionId,
+        },
+        place.aliases,
+      ),
     });
     return id;
   },
@@ -504,11 +664,12 @@ export const updateGeographicJurisdiction = mutation({
         .take(1);
       if (children.length > 0) throw new ConvexError("GEOGRAPHIC_CHILDREN_EXIST");
     }
-    const aliases = await ctx.db
-      .query("geographicJurisdictionAliases")
-      .withIndex("by_jurisdictionId_and_normalizedAlias", (q) => q.eq("jurisdictionId", row._id))
-      .take(21);
-    if (aliases.length > 20) throw new ConvexError("GEOGRAPHIC_ALIAS_STATE_INVALID");
+    const aliases = await geographicAliasesForAudit(ctx, row._id);
+    const beforeSnapshot = geographicJurisdictionSnapshot(
+      row,
+      profile,
+      aliases.map((alias) => alias.normalizedAlias),
+    );
     const now = Date.now();
     const patch = {
       name: place.name,
@@ -547,8 +708,17 @@ export const updateGeographicJurisdiction = mutation({
       action: "jurisdiction.geographic_updated",
       targetId: row._id,
       reason,
-      before: { name: row.name, level: profile.level },
-      after: { name: place.name, level: args.level },
+      before: beforeSnapshot,
+      after: geographicJurisdictionSnapshot(
+        { ...row, ...patch },
+        {
+          googlePlaceId: placeId,
+          level: args.level,
+          countryCode: place.countryCode,
+          parentJurisdictionId: args.parentJurisdictionId,
+        },
+        place.aliases,
+      ),
     });
     return { ...row, ...patch };
   },
@@ -613,11 +783,17 @@ export const createOrganizationalJurisdiction = mutation({
         createdAt: now,
       });
     }
+    const created = await ctx.db.get("jurisdictions", id);
+    if (!created) throw new ConvexError("JURISDICTION_NOT_FOUND");
     await auditJurisdiction(ctx, actor, {
       action: "jurisdiction.organizational_created",
       targetId: id,
       reason,
-      after: { kind: "organizational", organizationId: organization._id },
+      after: organizationalJurisdictionSnapshot(
+        created,
+        { scopeMode: args.scopeMode },
+        profiles,
+      ),
     });
     return id;
   },
@@ -648,6 +824,12 @@ export const updateOrganizationalJurisdiction = mutation({
       args.geographicJurisdictionIds,
     );
     const links = await scopeLinks(ctx, profile._id);
+    const previousProfiles = await linkedProfilesForAudit(ctx, links);
+    const beforeSnapshot = organizationalJurisdictionSnapshot(
+      row,
+      profile,
+      previousProfiles,
+    );
     const productionBucketId = optionalProductionBucket(args.productionBucketId);
     if (row.status === "enabled" && !productionBucketId) {
       throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
@@ -675,8 +857,12 @@ export const updateOrganizationalJurisdiction = mutation({
       action: "jurisdiction.organizational_updated",
       targetId: row._id,
       reason,
-      before: { visibility: row.visibility, scopeMode: profile.scopeMode },
-      after: { visibility: args.visibility, scopeMode: args.scopeMode },
+      before: beforeSnapshot,
+      after: organizationalJurisdictionSnapshot(
+        { ...row, ...patch },
+        { scopeMode: args.scopeMode },
+        profiles,
+      ),
     });
     return { ...row, ...patch };
   },
@@ -695,23 +881,29 @@ export async function enableJurisdictionForActor(
   if (normalizePositiveSafeIntegerBucketId(row.productionBucketId) === null) {
     throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
   }
-  if (row.kind === "geographic") {
+  if (projectJurisdictionKind(row) === "geographic") {
     const profile = await geographicProfile(ctx, row._id);
-    if (!profile) throw new ConvexError("GEOGRAPHIC_PROFILE_REQUIRED");
-    await assertGeographicParent(ctx, row._id, profile.level, profile.parentJurisdictionId);
-  } else if (row.kind === "organizational") {
+    if (row.kind === "geographic" && !profile) {
+      throw new ConvexError("GEOGRAPHIC_PROFILE_REQUIRED");
+    }
+    if (profile) {
+      await assertGeographicParent(ctx, row._id, profile.level, profile.parentJurisdictionId);
+    }
+  } else {
     await assertOrganizationalScope(ctx, row);
   }
+  const beforeSnapshot = await completeJurisdictionSnapshot(ctx, row);
   const patch = { status: "enabled" as const, updatedBy: actor.userId, updatedAt: Date.now() };
   await ctx.db.patch(row._id, patch);
+  const updated = { ...row, ...patch };
   await auditJurisdiction(ctx, actor, {
     action: "jurisdiction.enabled",
     targetId: row._id,
     reason,
-    before: jurisdictionSnapshot(row),
-    after: jurisdictionSnapshot({ ...row, ...patch }),
+    before: beforeSnapshot,
+    after: withUpdatedCommonSnapshot(beforeSnapshot, updated),
   });
-  return { ...row, ...patch };
+  return updated;
 }
 
 export const enableJurisdiction = mutation({
@@ -726,21 +918,21 @@ export const enableJurisdiction = mutation({
 async function assertNoScopeLinks(
   ctx: MutationCtx,
   row: Doc<"jurisdictions">,
+  geographic: Doc<"geographicJurisdictions"> | null,
 ): Promise<void> {
-  if (row.kind === "organizational") {
+  if (projectJurisdictionKind(row) === "organizational") {
     const profile = await organizationalProfile(ctx, row._id);
-    if (profile && (await scopeLinks(ctx, profile._id)).length > 0) {
+    if (!profile) throw new ConvexError("ORGANIZATIONAL_PROFILE_REQUIRED");
+    if ((await scopeLinks(ctx, profile._id)).length > 0) {
       throw new ConvexError("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
     }
     return;
   }
-  if (row.kind === "geographic") {
-    const profile = await geographicProfile(ctx, row._id);
-    if (!profile) return;
+  if (geographic) {
     const incoming = await ctx.db
       .query("organizationGeographicScopes")
       .withIndex("by_geographicJurisdictionId_and_organizationalJurisdictionId", (q) =>
-        q.eq("geographicJurisdictionId", profile._id),
+        q.eq("geographicJurisdictionId", geographic._id),
       )
       .take(1);
     if (incoming.length > 0) throw new ConvexError("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
@@ -763,7 +955,14 @@ export async function archiveJurisdictionForActor(
     )
     .take(1);
   if (activeResources.length > 0) throw new ConvexError("JURISDICTION_HAS_ACTIVE_RESOURCES");
-  if (row.kind === "geographic") {
+  let geographic: Doc<"geographicJurisdictions"> | null = null;
+  if (projectJurisdictionKind(row) === "geographic") {
+    geographic = await geographicProfile(ctx, row._id);
+    if (row.kind === "geographic" && !geographic) {
+      throw new ConvexError("GEOGRAPHIC_PROFILE_REQUIRED");
+    }
+  }
+  if (geographic) {
     const children = await ctx.db
       .query("geographicJurisdictions")
       .withIndex("by_parentJurisdictionId", (q) => q.eq("parentJurisdictionId", row._id))
@@ -775,12 +974,16 @@ export async function archiveJurisdictionForActor(
       children.map((child) => ctx.db.get("jurisdictions", child.jurisdictionId)),
     );
     for (const common of commonChildren) {
-      if (common?.status === "enabled") {
+      if (!common || projectJurisdictionKind(common) !== "geographic") {
+        throw new ConvexError("GEOGRAPHIC_CHILD_STATE_INVALID");
+      }
+      if (common.status === "enabled") {
         throw new ConvexError("JURISDICTION_HAS_ENABLED_CHILDREN");
       }
     }
   }
-  await assertNoScopeLinks(ctx, row);
+  await assertNoScopeLinks(ctx, row, geographic);
+  const beforeSnapshot = await completeJurisdictionSnapshot(ctx, row);
   const patch = {
     status: "archived" as const,
     isDefault: false,
@@ -788,14 +991,15 @@ export async function archiveJurisdictionForActor(
     updatedAt: Date.now(),
   };
   await ctx.db.patch(row._id, patch);
+  const archived = { ...row, ...patch };
   await auditJurisdiction(ctx, actor, {
     action: "jurisdiction.archived",
     targetId: row._id,
     reason,
-    before: jurisdictionSnapshot(row),
-    after: jurisdictionSnapshot({ ...row, ...patch }),
+    before: beforeSnapshot,
+    after: withUpdatedCommonSnapshot(beforeSnapshot, archived),
   });
-  return { ...row, ...patch };
+  return archived;
 }
 
 export const archiveJurisdiction = mutation({

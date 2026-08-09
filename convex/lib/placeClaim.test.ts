@@ -58,6 +58,15 @@ describe("verified place claims", () => {
     ).rejects.toThrow("PLACE_CLAIM_INVALID");
   });
 
+  it("expires exactly ten minutes after issuance", async () => {
+    const issuedAt = 1_800_000_000_000;
+    const claim = await issueVerifiedPlaceClaim("admin-1", place, issuedAt);
+
+    await expect(
+      verifyVerifiedPlaceClaim(claim, "admin-1", issuedAt + 600_000),
+    ).rejects.toThrow("PLACE_CLAIM_EXPIRED");
+  });
+
   it("rejects oversized decoded payloads before parsing", async () => {
     const oversized = `${"a".repeat(12_000)}.invalid`;
     await expect(
