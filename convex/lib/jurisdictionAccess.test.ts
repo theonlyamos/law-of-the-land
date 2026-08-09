@@ -5,6 +5,7 @@ import { makeFunctionReference } from "convex/server";
 import { describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
 import authSchema from "../betterAuth/schema";
+import { MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS } from "./jurisdictionDomain";
 import { activeOrganizationIdsForUser } from "./jurisdictionAccess";
 import schema from "../schema";
 
@@ -86,6 +87,54 @@ async function asUser(t: Backend, role: "content_manager" | "user") {
 }
 
 describe("jurisdiction membership access", () => {
+  it("fails closed for a member-only read when persisted active memberships exceed the limit", async () => {
+    const t = createBackend();
+    const member = await asUser(t, "user");
+    const membersJurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      let jurisdictionId;
+      for (let index = 0; index <= MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS; index += 1) {
+        const organizationId = await ctx.db.insert("organizations", {
+          name: `Organization ${index}`,
+          slug: `organization-${index}`,
+          class: "university",
+          status: "active",
+          createdBy: "fixture",
+          updatedBy: "fixture",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("organizationMemberships", {
+          organizationId,
+          userId: member.userId,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+        if (index === 0) {
+          jurisdictionId = await ctx.db.insert("jurisdictions", {
+            name: "Organization Rules",
+            slug: "organization-rules",
+            status: "enabled",
+            isDefault: false,
+            providerSyncState: "synced",
+            kind: "organizational",
+            visibility: "members",
+            organizationId,
+            createdBy: "fixture",
+            updatedBy: "fixture",
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+      return jurisdictionId!;
+    });
+
+    await expect(member.client.query(getAccessibleById, { id: membersJurisdictionId }))
+      .rejects.toThrow("ORGANIZATION_MEMBERSHIP_LIMIT");
+  });
+
   it("fails closed when duplicate persisted memberships make the active set ambiguous", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {

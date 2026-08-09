@@ -58,13 +58,8 @@ export async function assertJurisdictionAccess(
   const userId = await optionalUserId(ctx);
   if (!organizationId || !userId) denied();
 
-  const memberships = await ctx.db
-    .query("organizationMemberships")
-    .withIndex("by_organizationId_and_userId", (q) =>
-      q.eq("organizationId", organizationId).eq("userId", userId),
-    )
-    .take(2);
-  if (memberships.length !== 1 || memberships[0].status !== "active") denied();
+  const activeOrganizationIds = await activeOrganizationIdsForUser(ctx, userId);
+  if (!activeOrganizationIds.has(organizationId)) denied();
 }
 
 export function projectAccessibleJurisdiction(
