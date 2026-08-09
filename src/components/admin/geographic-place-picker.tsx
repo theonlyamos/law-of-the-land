@@ -45,6 +45,7 @@ export function GeographicPlacePicker({ value, onChange, disabled = false }: Geo
   const generation = useRef(0);
   const onChangeRef = useRef(onChange);
   const detailsInFlight = useRef(false);
+  const suppressAutocomplete = useRef(false);
 
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
 
@@ -78,6 +79,11 @@ export function GeographicPlacePicker({ value, onChange, disabled = false }: Geo
     generation.current += 1;
     const requestGeneration = generation.current;
     controller.current?.abort();
+    if (suppressAutocomplete.current) {
+      suppressAutocomplete.current = false;
+      setLoading(false);
+      return;
+    }
     if (normalized.length < MIN_QUERY_LENGTH || normalized.length > MAX_QUERY_LENGTH) {
       setSuggestions([]);
       setActiveIndex(-1);
@@ -150,7 +156,10 @@ export function GeographicPlacePicker({ value, onChange, disabled = false }: Geo
       const selection = await response.json() as GeographicPlaceSelection;
       if (requestGeneration !== generation.current || nextController.signal.aborted) return;
       onChangeRef.current(selection);
-      setQuery(selection.place.displayName);
+      if (selection.place.displayName !== query) {
+        suppressAutocomplete.current = true;
+        setQuery(selection.place.displayName);
+      }
       setSuggestions([]);
       setActiveIndex(-1);
       setStatus(`${selection.place.formattedAddress} selected and verified.`);

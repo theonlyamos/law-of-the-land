@@ -2,7 +2,7 @@
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery_experimental as useQueryState } from "convex/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { lazy, Suspense, type FormEvent, useEffect, useState } from "react";
@@ -57,15 +57,22 @@ function mergeById<T extends { id: string }>(current: readonly T[], next: readon
   return [...new Map([...current, ...next].map((option) => [option.id, option])).values()];
 }
 
-function OrganizationSelect({ initial, page }: { initial: readonly OrganizationOption[]; page?: OptionPage }) {
+function retryQuery<T>(request: T, setRequest: (value: T | null) => void) {
+  setRequest(null);
+  window.setTimeout(() => setRequest(request), 0);
+}
+
+function OrganizationSelect({ initial, page, preferredId = "" }: { initial: readonly OrganizationOption[]; page?: OptionPage; preferredId?: string }) {
   const [options, setOptions] = useState(() => [...initial]);
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(preferredId);
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [cursor, setCursor] = useState(page?.nextCursor ?? "");
   const [done, setDone] = useState(page?.isDone ?? true);
   const [request, setRequest] = useState<null | { query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
-  const result = useQuery(api.admin.organizations.listActiveOrganizationOptions, request ?? "skip");
+  const queryState = useQueryState({ query: api.admin.organizations.listActiveOrganizationOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
+  useEffect(() => { if (preferredId) setSelected(preferredId); }, [preferredId]);
   useEffect(() => {
     if (!result || !request) return;
     setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => option.id === selected), result.page));
@@ -79,32 +86,39 @@ function OrganizationSelect({ initial, page }: { initial: readonly OrganizationO
   return <div className="grid min-w-0 gap-2 sm:col-span-2">
     <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find organization<input aria-label="Find organization" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search organizations</button></div>
     <label className={labelClass}>Organization<select aria-label="Organization" name="organizationId" value={selected} onChange={(event) => setSelected(event.target.value)} required className={fieldClass}><option value="">Select an active organization</option>{options.map((organization) => <option key={organization.id} value={organization.id}>{organization.name} ({organization.class.replaceAll("_", " ")})</option>)}</select></label>
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Organizations could not be loaded. Your current selection is preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry organizations</button></div> : null}
     {!done ? <button type="button" onClick={() => setRequest({ ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor } })} className={secondaryButtonClass}>Load more organizations</button> : null}
   </div>;
 }
 
 function GeographicParentField({ level, selection, value, onChange, initial }: { level: GeographicLevel; selection: GeographicPlaceSelection | null; value: string; onChange(value: string): void; initial: readonly GeographicOption[] }) {
   const aliases = selection ? [...new Set(selection.place.addressComponents.flatMap((component) => [component.longText.trim(), component.shortText.trim()]).filter(Boolean))].slice(0, 20) : [];
-  const suggested = useQuery(api.admin.jurisdictions.suggestGeographicParentsByAliases, selection && aliases.length > 0 ? { childLevel: level, aliases } : "skip");
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(true);
+  const suggestionState = useQueryState({ query: api.admin.jurisdictions.suggestGeographicParentsByAliases, args: suggestionsEnabled && selection && aliases.length > 0 ? { childLevel: level, aliases } : "skip" });
+  const suggested = suggestionState.status === "success" ? suggestionState.data : undefined;
   const [options, setOptions] = useState(() => initial.filter((option) => PARENTS[level].includes(option.level)));
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [cursor, setCursor] = useState("");
   const [done, setDone] = useState(false);
+  const [lookupStarted, setLookupStarted] = useState(false);
   const [request, setRequest] = useState<null | { purpose: "parent"; childLevel: GeographicLevel; query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
-  const result = useQuery(api.admin.jurisdictions.listGeographicJurisdictionOptions, request ?? "skip");
+  const queryState = useQueryState({ query: api.admin.jurisdictions.listGeographicJurisdictionOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
   useEffect(() => { if (suggested) setOptions((current) => mergeById(current, suggested)); }, [suggested]);
   useEffect(() => {
     if (!result || !request) return;
     setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => option.id === value), mergeById(suggested ?? [], result.page)));
     setCursor(result.continueCursor); setDone(result.isDone); setRequest(null);
   }, [request, result, suggested]);
-  function search() { const normalized = query.trim(); if (normalized && normalized.length < 2) return; setActiveQuery(normalized); setRequest({ purpose: "parent", childLevel: level, ...(normalized ? { query: normalized } : {}), paginationOpts: { numItems: 20, cursor: null } }); }
+  function search() { const normalized = query.trim(); if (normalized && normalized.length < 2) return; setLookupStarted(true); setActiveQuery(normalized); setRequest({ purpose: "parent", childLevel: level, ...(normalized ? { query: normalized } : {}), paginationOpts: { numItems: 20, cursor: null } }); }
   return <div className="grid min-w-0 gap-2 sm:col-span-2">
     <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find governed parent<input aria-label="Find governed parent" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search parents</button></div>
     <label className={labelClass}>Governed parent<select aria-label="Governed parent" value={value} onChange={(event) => onChange(event.target.value)} disabled={options.length === 0} className={fieldClass}><option value="">Select an eligible parent</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name} ({option.level})</option>)}</select></label>
-    {!done ? <button type="button" onClick={() => setRequest({ purpose: "parent", childLevel: level, ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor: cursor || null } })} className={secondaryButtonClass}>Load more parents</button> : null}
-    {options.length === 0 ? <p className="break-words text-sm">No governed parent is available. <Link href="/admin/jurisdictions?create=parent" className="font-semibold underline underline-offset-4">Create the parent jurisdiction first</Link>.</p> : <p role="status" aria-live="polite" className="text-sm">Choose a parent explicitly; address matches are suggestions only.</p>}
+    {suggestionState.status === "error" ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Parent suggestions could not be loaded. Choose from the preserved governed options or retry.</p><button type="button" onClick={() => { setSuggestionsEnabled(false); window.setTimeout(() => setSuggestionsEnabled(true), 0); }} className={secondaryButtonClass}>Retry parent suggestions</button></div> : null}
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Governed parents could not be loaded. Your current selection is preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry parents</button></div> : null}
+    {!done ? <button type="button" onClick={() => { setLookupStarted(true); setRequest({ purpose: "parent", childLevel: level, ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor: cursor || null } }); }} className={secondaryButtonClass}>Load more parents</button> : null}
+    {options.length === 0 && done && lookupStarted ? <p className="break-words text-sm">No governed parent matched the completed lookup. <Link href="/admin/jurisdictions?create=parent" className="font-semibold underline underline-offset-4">Create the parent jurisdiction first</Link>.</p> : <p role="status" aria-live="polite" className="text-sm">{options.length === 0 ? "Search or load more before concluding that no governed parent exists." : "Choose a parent explicitly; address matches are suggestions only."}</p>}
   </div>;
 }
 
@@ -115,7 +129,8 @@ function LinkedGeographyField({ initial, page, selected, onChange }: { initial: 
   const [cursor, setCursor] = useState(page?.nextCursor ?? "");
   const [done, setDone] = useState(page?.isDone ?? true);
   const [request, setRequest] = useState<null | { purpose: "linked_scope"; query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
-  const result = useQuery(api.admin.jurisdictions.listGeographicJurisdictionOptions, request ?? "skip");
+  const queryState = useQueryState({ query: api.admin.jurisdictions.listGeographicJurisdictionOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
   useEffect(() => {
     if (!result || !request) return;
     setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => selected.includes(option.id)), result.page));
@@ -125,6 +140,7 @@ function LinkedGeographyField({ initial, page, selected, onChange }: { initial: 
   return <fieldset className="grid min-w-0 gap-2 sm:col-span-2 lg:col-span-4"><legend className="text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]">Linked geographies (choose 1-8)</legend>
     <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find linked geography<input aria-label="Find linked geography" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search geographies</button></div>
     <div className="flex flex-wrap gap-x-5 gap-y-2">{options.map((option) => <label key={option.id} className="flex min-h-11 items-center gap-2 break-words"><input type="checkbox" aria-label={option.name} checked={selected.includes(option.id)} disabled={!selected.includes(option.id) && selected.length >= 8} onChange={(event) => onChange(event.target.checked ? [...new Set([...selected, option.id])] : selected.filter((id) => id !== option.id))} />{option.name}</label>)}</div>
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Linked geographies could not be loaded. Current selections are preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry geographies</button></div> : null}
     {!done ? <button type="button" onClick={() => setRequest({ purpose: "linked_scope", ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor } })} className={secondaryButtonClass}>Load more geographies</button> : null}
   </fieldset>;
 }
@@ -144,9 +160,13 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [inlineOrganization, setInlineOrganization] = useState<OrganizationOption | null>(null);
+  const [retryOrganizationId, setRetryOrganizationId] = useState("");
 
   function switchKind(next: "geographic" | "organizational") {
-    setKind(next); setSelection(null); setParentId(""); setLinkedIds([]); setError(""); setSuccess("");
+    setKind(next); setSelection(null); setLevel("country"); setParentId("");
+    setOrganizationMode("choose"); setScopeMode("global"); setLinkedIds([]);
+    setRetryOrganizationId(""); setError(""); setSuccess("");
   }
 
   function placeChanged(next: GeographicPlaceSelection | null) {
@@ -194,6 +214,10 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
             name, slug, class: text(data, "organizationClass") as OrganizationClass,
             ...(website ? { website } : {}), reason,
           });
+          const created = { id: organizationId, name, slug, class: text(data, "organizationClass") as OrganizationClass };
+          setInlineOrganization(created);
+          setRetryOrganizationId(organizationId);
+          setOrganizationMode("choose");
         }
         if (!organizationId) throw new Error("ORGANIZATION_REQUIRED");
         const distinctIds = [...new Set(linkedIds)];
@@ -208,7 +232,7 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
           reason,
         });
       }
-      form.reset(); switchKind(kind); setKind(null); setSuccess("Draft jurisdiction created. Provider synchronization is pending."); router.refresh();
+      form.reset(); switchKind(kind); setInlineOrganization(null); setRetryOrganizationId(""); setKind(null); setSuccess("Draft jurisdiction created. Provider synchronization is pending."); router.refresh();
     } catch (cause) {
       const code = cause instanceof Error ? cause.message : "";
       setError(code === "PARENT_REQUIRED" ? "Select an eligible governed parent before creating this locality."
@@ -233,7 +257,7 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
       </> : null}
       {kind === "organizational" ? <>
         <fieldset className="grid gap-2 sm:col-span-2"><legend className="text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]">Organization source</legend><div className="flex flex-wrap gap-4">{(["choose", "create"] as const).map((mode) => <label key={mode} className="flex min-h-11 items-center gap-2 font-semibold"><input type="radio" name="organizationMode" checked={organizationMode === mode} onChange={() => setOrganizationMode(mode)} />{mode === "choose" ? "Choose organization" : "Create organization"}</label>)}</div></fieldset>
-        {organizationMode === "choose" ? <OrganizationSelect initial={organizations} page={organizationPage} /> : <>
+        {organizationMode === "choose" ? <OrganizationSelect initial={inlineOrganization ? mergeById(organizations, [inlineOrganization]) : organizations} page={organizationPage} preferredId={retryOrganizationId} /> : <>
           <label className={labelClass}>Organization name<input aria-label="Organization name" name="organizationName" minLength={1} maxLength={300} required className={fieldClass} /></label>
           <label className={labelClass}>Organization slug<input aria-label="Organization slug" name="organizationSlug" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} required className={fieldClass} /></label>
           <label className={labelClass}>Organization class<select name="organizationClass" className={fieldClass}>{ORGANIZATION_CLASSES.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>

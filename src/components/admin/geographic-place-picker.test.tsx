@@ -100,6 +100,40 @@ describe("GeographicPlacePicker", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body)).sessionToken).toBe(TOKENS[1]);
   });
 
+  it("does not autocomplete the programmatic selected display name", async () => {
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => response({ suggestions: [{ placeId: "accra", primaryText: "Acc", secondaryText: "Ghana", types: [] }] }))
+      .mockImplementationOnce(() => response({
+        place: { placeId: "accra", displayName: "Accra", formattedAddress: "Accra, Ghana", latitude: 5.6, longitude: -0.2, types: [], addressComponents: [] },
+        verifiedPlaceClaim: "signed",
+        expiresAt: Date.now() + 60_000,
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<GeographicPlacePicker value={null} onChange={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "Find place" });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "Acc" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("option", { name: /Acc/ }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a verified selection when its claim expires", async () => {
+    const onChange = vi.fn();
+    vi.stubGlobal("fetch", vi.fn());
+    render(<GeographicPlacePicker value={{
+      place: { placeId: "accra", displayName: "Accra", formattedAddress: "Accra, Ghana", latitude: 5.6, longitude: -0.2, types: [], addressComponents: [] },
+      verifiedPlaceClaim: "signed",
+      expiresAt: Date.now() + 1_000,
+    }} onChange={onChange} />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(onChange).toHaveBeenCalledWith(null);
+    expect(screen.getByText(/selection expired/i)).toBeVisible();
+  });
+
   it("clears protected state on an authorization failure", async () => {
     const onChange = vi.fn();
     vi.stubGlobal("fetch", vi.fn(() => response({ error: "Forbidden" }, 403)));
