@@ -26,6 +26,7 @@ describe("Google Places server adapter", () => {
 
   afterEach(() => {
     delete process.env.PLACES_API_KEY;
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -57,6 +58,7 @@ describe("Google Places server adapter", () => {
           includeQueryPredictions: false,
         }),
         cache: "no-store",
+        signal: expect.any(AbortSignal),
       },
     );
   });
@@ -97,6 +99,7 @@ describe("Google Places server adapter", () => {
           "X-Goog-FieldMask": "id,displayName,formattedAddress,location,addressComponents,types",
         },
         cache: "no-store",
+        signal: expect.any(AbortSignal),
       },
     );
   });
@@ -112,5 +115,81 @@ describe("Google Places server adapter", () => {
 
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({ id: "place-without-required-fields" }));
     await expect(getVerifiedPlace("place-without-required-fields", sessionToken)).rejects.toThrow("GOOGLE_PLACES_INVALID_RESPONSE");
+  });
+
+  it("rejects a declared oversized provider response before parsing it", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("not-json"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(stream, {
+      headers: { "content-length": "65537" },
+    }));
+
+    await expect(autocompletePlaces("Acc", sessionToken)).rejects.toThrow(
+      "GOOGLE_PLACES_UNAVAILABLE",
+    );
+    expect(cancelled).toBe(true);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["falsely small", "1"],
+  ])("stream-bounds and cancels a provider response when Content-Length is %s", async (_name, contentLength) => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          `${JSON.stringify({ suggestions: [] })}${" ".repeat(65_537)}`,
+        ));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const headers = contentLength === undefined ? undefined : { "content-length": contentLength };
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(stream, { headers }));
+
+    await expect(autocompletePlaces("Acc", sessionToken)).rejects.toThrow(
+      "GOOGLE_PLACES_UNAVAILABLE",
+    );
+    expect(cancelled).toBe(true);
+  });
+
+  it("aborts a provider request within ten seconds and maps it safely", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    vi.mocked(fetch).mockImplementationOnce((_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("provider timeout detail", "AbortError"));
+      }, { once: true });
+    }));
+    const outcome = autocompletePlaces("Acc", sessionToken).then(
+      () => "resolved",
+      (error: unknown) => error instanceof Error ? error.message : "unknown",
+    );
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(Promise.race([outcome, Promise.resolve("pending")])).resolves.toBe(
+      "GOOGLE_PLACES_UNAVAILABLE",
+    );
+    expect(aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the provider deadline after an early response", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ suggestions: [] }));
+
+    await expect(autocompletePlaces("Acc", sessionToken)).resolves.toEqual([]);
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

@@ -50,15 +50,18 @@ describe("POST /api/admin/geographic-places/autocomplete", () => {
     expect(placesMocks.autocompletePlaces).not.toHaveBeenCalled();
   });
 
-  it("fails closed when authorization returns a malformed actor ID", async () => {
-    authMocks.fetchAuthQuery.mockResolvedValueOnce("");
+  it.each(["   ", "admin\nother", "admin\u0085other"])(
+    "fails closed when authorization returns malformed actor ID %j",
+    async (actorId) => {
+      authMocks.fetchAuthQuery.mockResolvedValueOnce(actorId);
 
-    const response = await POST(request({ input: "Acc", sessionToken }));
+      const response = await POST(request({ input: "Acc", sessionToken }));
 
-    expect(response.status).toBe(503);
-    expect(rateLimitMocks.rateLimit).not.toHaveBeenCalled();
-    expect(placesMocks.autocompletePlaces).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(503);
+      expect(rateLimitMocks.rateLimit).not.toHaveBeenCalled();
+      expect(placesMocks.autocompletePlaces).not.toHaveBeenCalled();
+    },
+  );
 
   it("stream-bounds the body even when Content-Length is absent or falsely small", async () => {
     const valid = JSON.stringify({ input: "Acc", sessionToken });

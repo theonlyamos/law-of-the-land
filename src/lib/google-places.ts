@@ -5,6 +5,8 @@ const MAX_AUTOCOMPLETE_RESULTS = 5;
 const MAX_TYPES = 20;
 const MAX_ADDRESS_COMPONENTS = 32;
 const MIN_API_KEY_LENGTH = 20;
+const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1_024;
+const PROVIDER_TIMEOUT_MS = 8_000;
 
 export type PlaceSuggestion = {
   placeId: string;
@@ -76,18 +78,69 @@ function validPlaceId(value: string): boolean {
   return value.length >= 1 && value.length <= 255 && value.trim() === value;
 }
 
-async function providerJson(url: string, init: RequestInit): Promise<unknown> {
-  let response: Response;
-  try {
-    response = await fetch(url, init);
-  } catch {
+async function readProviderBody(response: Response): Promise<Uint8Array> {
+  const contentLength = response.headers.get("content-length");
+  if (
+    contentLength !== null &&
+    (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_PROVIDER_RESPONSE_BYTES)
+  ) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The response is rejected regardless; cancellation is best-effort cleanup.
+    }
     placesError("GOOGLE_PLACES_UNAVAILABLE");
   }
-  if (!response.ok) placesError("GOOGLE_PLACES_UNAVAILABLE");
+  if (!response.body) placesError("GOOGLE_PLACES_INVALID_RESPONSE");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
   try {
-    return await response.json();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_PROVIDER_RESPONSE_BYTES) {
+        await reader.cancel();
+        placesError("GOOGLE_PLACES_UNAVAILABLE");
+      }
+      chunks.push(value);
+    }
   } catch {
-    placesError("GOOGLE_PLACES_INVALID_RESPONSE");
+    placesError("GOOGLE_PLACES_UNAVAILABLE");
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function providerJson(url: string, init: RequestInit): Promise<unknown> {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+  try {
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, signal: controller.signal });
+    } catch {
+      placesError("GOOGLE_PLACES_UNAVAILABLE");
+    }
+    if (!response.ok) placesError("GOOGLE_PLACES_UNAVAILABLE");
+    const bytes = await readProviderBody(response);
+    try {
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      placesError("GOOGLE_PLACES_INVALID_RESPONSE");
+    }
+  } finally {
+    clearTimeout(deadline);
   }
 }
 

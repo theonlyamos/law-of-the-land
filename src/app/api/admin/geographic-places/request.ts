@@ -6,6 +6,7 @@ import { rateLimit } from "@/lib/rate-limit";
 const MAX_BODY_BYTES = 1_024;
 const PLACES_REQUESTS_PER_MINUTE = 60;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const NO_STORE_HEADERS = { "cache-control": "no-store" };
 
 export function json(body: unknown, status: number, headers?: HeadersInit): Response {
@@ -88,7 +89,12 @@ export async function authorizePlacesRequest(): Promise<
       response: json({ error: "Authorization is temporarily unavailable." }, 503),
     };
   }
-  if (typeof actorId !== "string" || !actorId || actorId.length > 500) {
+  if (
+    typeof actorId !== "string" ||
+    !actorId.trim() ||
+    actorId.length > 500 ||
+    CONTROL_CHARACTER_PATTERN.test(actorId)
+  ) {
     return {
       response: json({ error: "Authorization is temporarily unavailable." }, 503),
     };
