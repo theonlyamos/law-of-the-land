@@ -1,3 +1,5 @@
+import { normalizeGeographicAlias } from "./jurisdictionDomain";
+
 const CLAIM_VERSION = 1;
 const CLAIM_TTL_MS = 10 * 60 * 1_000;
 const MAX_PAYLOAD_BYTES = 8_192;
@@ -84,7 +86,7 @@ function opaqueActorId(value: unknown): string {
 }
 
 function canonicalAlias(value: unknown): string {
-  return boundedText(value, MAX_ALIAS_LENGTH).toLocaleLowerCase("en");
+  return normalizeGeographicAlias(boundedText(value, MAX_ALIAS_LENGTH));
 }
 
 function canonicalPlace(value: unknown): VerifiedPlace {

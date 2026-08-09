@@ -1,6 +1,12 @@
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
-import { mutation, type MutationCtx } from "../_generated/server";
+import {
+  mutation,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { normalizePositiveSafeIntegerBucketId } from "../lib/jurisdictionEligibility";
 import {
@@ -8,22 +14,82 @@ import {
   allowedParentLevelsByLevel,
   geographicLevelValidator,
   jurisdictionDocumentValidator,
+  jurisdictionKindValidator,
   jurisdictionVisibilityValidator,
+  normalizeGeographicAlias,
   normalizeJurisdictionSlug,
   normalizePlaceId,
+  organizationClassValidator,
   organizationScopeModeValidator,
+  organizationStatusValidator,
   projectJurisdictionKind,
+  projectJurisdictionVisibility,
   type GeographicLevel,
 } from "../lib/jurisdictionDomain";
 import { verifyVerifiedPlaceClaim } from "../lib/placeClaim";
 import { validateAuditReason, writeAudit } from "./audit";
-import { requireEnabledAdminPermission } from "./featureFlags";
+import {
+  requireEnabledAdminCatalogRead,
+  requireEnabledAdminPermission,
+} from "./featureFlags";
 
 const MAX_TEXT_LENGTH = 300;
 const MAX_SCOPE_LINKS = 8;
 const MAX_PROFILE_ROWS = 2;
 const MAX_ARCHIVAL_CHILD_SCAN = 100;
 const MAX_GEOGRAPHIC_ALIASES = 20;
+const MAX_CATALOG_PAGE_SIZE = 20;
+const MAX_CATALOG_SEARCH_LENGTH = 100;
+const MAX_CATALOG_ALIAS_LENGTH = 300;
+
+const jurisdictionStatusValidator = v.union(
+  v.literal("draft"),
+  v.literal("enabled"),
+  v.literal("archived"),
+);
+const providerSyncStateValidator = v.union(
+  v.literal("pending"),
+  v.literal("synced"),
+  v.literal("drifted"),
+  v.literal("failed"),
+);
+const safeParentValidator = v.object({
+  id: v.id("jurisdictions"),
+  name: v.string(),
+  level: geographicLevelValidator,
+});
+const geographicOptionValidator = v.object({
+  id: v.id("jurisdictions"),
+  name: v.string(),
+  level: geographicLevelValidator,
+  parent: v.union(v.null(), safeParentValidator),
+});
+const adminJurisdictionValidator = v.object({
+  id: v.id("jurisdictions"),
+  name: v.string(),
+  slug: v.string(),
+  status: jurisdictionStatusValidator,
+  kind: jurisdictionKindValidator,
+  visibility: jurisdictionVisibilityValidator,
+  provider: v.object({
+    syncState: providerSyncStateValidator,
+    stagingConfigured: v.boolean(),
+    productionConfigured: v.boolean(),
+  }),
+  migrationState: v.union(v.literal("typed"), v.literal("legacy")),
+  geographic: v.union(v.null(), v.object({
+    level: geographicLevelValidator,
+    parent: v.union(v.null(), safeParentValidator),
+  })),
+  organization: v.union(v.null(), v.object({
+    id: v.id("organizations"),
+    name: v.string(),
+    slug: v.string(),
+    class: organizationClassValidator,
+    status: organizationStatusValidator,
+  })),
+  scopeMode: v.union(v.null(), organizationScopeModeValidator),
+});
 
 type Actor = { userId: string; roles: AdminRole[] };
 
@@ -556,6 +622,367 @@ const geographicMutationArgs = {
   ...bucketArgs,
   reason: v.string(),
 } as const;
+
+function validateCatalogPageSize(value: number): void {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CATALOG_PAGE_SIZE) {
+    throw new ConvexError("INVALID_ADMIN_PAGINATION");
+  }
+}
+
+function normalizeCatalogSearch(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.normalize("NFKC").trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  if (normalized.length < 2 || normalized.length > MAX_CATALOG_SEARCH_LENGTH) {
+    throw new ConvexError("INVALID_ADMIN_SEARCH_QUERY");
+  }
+  return normalized;
+}
+
+function invalidAdminJurisdictionProjection(): never {
+  throw new ConvexError("ADMIN_JURISDICTION_PROJECTION_INVALID");
+}
+
+function assertTypedGeographicCommon(row: Doc<"jurisdictions">): void {
+  if (
+    row.kind !== "geographic" ||
+    row.visibility === undefined ||
+    row.organizationId !== undefined
+  ) {
+    invalidAdminJurisdictionProjection();
+  }
+}
+
+async function loadRequiredGeographicProfiles(
+  ctx: QueryCtx,
+  rows: readonly Doc<"jurisdictions">[],
+): Promise<Map<Id<"jurisdictions">, Doc<"geographicJurisdictions">>> {
+  const entries = await Promise.all(rows.map(async (row) => {
+    const profiles = await ctx.db
+      .query("geographicJurisdictions")
+      .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
+      .take(2);
+    if (profiles.length !== 1) invalidAdminJurisdictionProjection();
+    return [row._id, profiles[0]] as const;
+  }));
+  return new Map(entries);
+}
+
+async function loadRequiredOrganizationalProfiles(
+  ctx: QueryCtx,
+  rows: readonly Doc<"jurisdictions">[],
+): Promise<Map<Id<"jurisdictions">, Doc<"organizationalJurisdictions">>> {
+  const entries = await Promise.all(rows.map(async (row) => {
+    const profiles = await ctx.db
+      .query("organizationalJurisdictions")
+      .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
+      .take(2);
+    if (profiles.length !== 1) invalidAdminJurisdictionProjection();
+    return [row._id, profiles[0]] as const;
+  }));
+  return new Map(entries);
+}
+
+type SafeParent = {
+  id: Id<"jurisdictions">;
+  name: string;
+  level: GeographicLevel;
+};
+
+async function resolveSafeGeographicParents(
+  ctx: QueryCtx,
+  profiles: ReadonlyMap<Id<"jurisdictions">, Doc<"geographicJurisdictions">>,
+): Promise<Map<Id<"jurisdictions">, SafeParent>> {
+  const parentIds = [...new Set(
+    [...profiles.values()].flatMap((profile) =>
+      profile.parentJurisdictionId === undefined ? [] : [profile.parentJurisdictionId],
+    ),
+  )];
+  const parentRows = await Promise.all(parentIds.map(async (parentId) => {
+    const [common, parentProfiles] = await Promise.all([
+      ctx.db.get("jurisdictions", parentId),
+      ctx.db
+        .query("geographicJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", parentId))
+        .take(2),
+    ]);
+    if (
+      !common ||
+      common.status !== "enabled" ||
+      parentProfiles.length !== 1
+    ) {
+      invalidAdminJurisdictionProjection();
+    }
+    assertTypedGeographicCommon(common);
+    return [parentId, { id: parentId, name: common.name, level: parentProfiles[0].level }] as const;
+  }));
+  const parents = new Map(parentRows);
+  for (const profile of profiles.values()) {
+    if (profile.level === "country") {
+      if (profile.parentJurisdictionId !== undefined) invalidAdminJurisdictionProjection();
+      continue;
+    }
+    if (profile.parentJurisdictionId === undefined) invalidAdminJurisdictionProjection();
+    const parent = parents.get(profile.parentJurisdictionId);
+    if (!parent || !allowedParentLevelsByLevel[profile.level].includes(parent.level)) {
+      invalidAdminJurisdictionProjection();
+    }
+  }
+  return parents;
+}
+
+function geographicOption(
+  row: Doc<"jurisdictions">,
+  profile: Doc<"geographicJurisdictions">,
+  parents: ReadonlyMap<Id<"jurisdictions">, SafeParent>,
+) {
+  return {
+    id: row._id,
+    name: row.name,
+    level: profile.level,
+    parent: profile.parentJurisdictionId === undefined
+      ? null
+      : (parents.get(profile.parentJurisdictionId) ?? invalidAdminJurisdictionProjection()),
+  };
+}
+
+export const listGeographicJurisdictionOptions = query({
+  args: {
+    purpose: v.union(v.literal("parent"), v.literal("linked_scope")),
+    childLevel: v.optional(geographicLevelValidator),
+    query: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: paginationResultValidator(geographicOptionValidator),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
+    validateCatalogPageSize(args.paginationOpts.numItems);
+    if (
+      (args.purpose === "parent" && args.childLevel === undefined) ||
+      (args.purpose === "linked_scope" && args.childLevel !== undefined)
+    ) {
+      throw new ConvexError("INVALID_GEOGRAPHIC_OPTION_REQUEST");
+    }
+    const search = normalizeCatalogSearch(args.query);
+    const result = search === undefined
+      ? await ctx.db
+          .query("jurisdictions")
+          .withIndex("by_kind_and_status_and_name", (q) =>
+            q.eq("kind", "geographic").eq("status", "enabled"),
+          )
+          .paginate(args.paginationOpts)
+      : await ctx.db
+          .query("jurisdictions")
+          .withSearchIndex("search_name", (q) =>
+            q.search("name", search).eq("kind", "geographic").eq("status", "enabled"),
+          )
+          .paginate(args.paginationOpts);
+    for (const row of result.page) assertTypedGeographicCommon(row);
+    const profiles = await loadRequiredGeographicProfiles(ctx, result.page);
+    const parents = await resolveSafeGeographicParents(ctx, profiles);
+    const eligibleRows = args.purpose === "linked_scope"
+      ? result.page
+      : result.page.filter((row) =>
+          allowedParentLevelsByLevel[args.childLevel!].includes(profiles.get(row._id)!.level),
+        );
+    return {
+      ...result,
+      page: eligibleRows.map((row) =>
+        geographicOption(row, profiles.get(row._id)!, parents),
+      ),
+    };
+  },
+});
+
+export const suggestGeographicParentsByAliases = query({
+  args: {
+    childLevel: geographicLevelValidator,
+    aliases: v.array(v.string()),
+  },
+  returns: v.array(geographicOptionValidator),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
+    const normalizedAliases: string[] = [];
+    const seenAliases = new Set<string>();
+    for (const alias of args.aliases) {
+      const normalized = normalizeGeographicAlias(alias);
+      if (
+        alias.length > MAX_CATALOG_ALIAS_LENGTH ||
+        !normalized ||
+        normalized.length > MAX_CATALOG_ALIAS_LENGTH
+      ) {
+        throw new ConvexError("INVALID_GEOGRAPHIC_ALIASES");
+      }
+      if (seenAliases.has(normalized)) continue;
+      seenAliases.add(normalized);
+      normalizedAliases.push(normalized);
+      if (normalizedAliases.length > MAX_GEOGRAPHIC_ALIASES) {
+        throw new ConvexError("INVALID_GEOGRAPHIC_ALIASES");
+      }
+    }
+    const aliasRows = await Promise.all(normalizedAliases.map((normalizedAlias) =>
+      ctx.db
+        .query("geographicJurisdictionAliases")
+        .withIndex("by_normalizedAlias", (q) => q.eq("normalizedAlias", normalizedAlias))
+        .take(2),
+    ));
+    const candidateIds = [...new Set(
+      aliasRows.flat().map((row) => row.jurisdictionId),
+    )];
+    const candidates = (await Promise.all(
+      candidateIds.map((id) => ctx.db.get("jurisdictions", id)),
+    )).filter((row): row is Doc<"jurisdictions"> =>
+      row !== null && row.kind === "geographic" && row.status === "enabled",
+    );
+    for (const row of candidates) assertTypedGeographicCommon(row);
+    const profiles = await loadRequiredGeographicProfiles(ctx, candidates);
+    const eligible = candidates.filter((row) =>
+      allowedParentLevelsByLevel[args.childLevel].includes(profiles.get(row._id)!.level),
+    ).slice(0, MAX_GEOGRAPHIC_ALIASES);
+    const eligibleProfiles = new Map(
+      eligible.map((row) => [row._id, profiles.get(row._id)!] as const),
+    );
+    const parents = await resolveSafeGeographicParents(ctx, eligibleProfiles);
+    return eligible.map((row) =>
+      geographicOption(row, eligibleProfiles.get(row._id)!, parents),
+    );
+  },
+});
+
+export const listAdminJurisdictions = query({
+  args: {
+    status: v.optional(jurisdictionStatusValidator),
+    kind: v.optional(jurisdictionKindValidator),
+    query: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: paginationResultValidator(adminJurisdictionValidator),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
+    validateCatalogPageSize(args.paginationOpts.numItems);
+    const search = normalizeCatalogSearch(args.query);
+    const result = search !== undefined
+      ? args.kind !== undefined && args.status !== undefined
+        ? await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) =>
+            q.search("name", search).eq("kind", args.kind!).eq("status", args.status!),
+          ).paginate(args.paginationOpts)
+        : args.kind !== undefined
+          ? await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) =>
+              q.search("name", search).eq("kind", args.kind!),
+            ).paginate(args.paginationOpts)
+          : args.status !== undefined
+            ? await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) =>
+                q.search("name", search).eq("status", args.status!),
+              ).paginate(args.paginationOpts)
+            : await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) =>
+                q.search("name", search),
+              ).paginate(args.paginationOpts)
+      : args.kind !== undefined && args.status !== undefined
+        ? await ctx.db.query("jurisdictions").withIndex(
+            "by_kind_and_status_and_name",
+            (q) => q.eq("kind", args.kind!).eq("status", args.status!),
+          ).paginate(args.paginationOpts)
+        : args.kind !== undefined
+          ? await ctx.db.query("jurisdictions").withIndex(
+              "by_kind_and_name",
+              (q) => q.eq("kind", args.kind!),
+            ).paginate(args.paginationOpts)
+          : args.status !== undefined
+            ? await ctx.db.query("jurisdictions").withIndex(
+                "by_status_and_name",
+                (q) => q.eq("status", args.status!),
+              ).paginate(args.paginationOpts)
+            : await ctx.db.query("jurisdictions").withIndex("by_name").paginate(
+                args.paginationOpts,
+              );
+
+    const geographicRows = result.page.filter((row) => row.kind === "geographic");
+    const organizationalRows = result.page.filter((row) => row.kind === "organizational");
+    for (const row of [...geographicRows, ...organizationalRows]) {
+      if (row.visibility === undefined) invalidAdminJurisdictionProjection();
+      if (
+        (row.kind === "geographic" && row.organizationId !== undefined) ||
+        (row.kind === "organizational" && row.organizationId === undefined)
+      ) {
+        invalidAdminJurisdictionProjection();
+      }
+    }
+    const [geographicProfiles, organizationalProfiles] = await Promise.all([
+      loadRequiredGeographicProfiles(ctx, geographicRows),
+      loadRequiredOrganizationalProfiles(ctx, organizationalRows),
+    ]);
+    const parents = await resolveSafeGeographicParents(ctx, geographicProfiles);
+    const organizationIds = [...new Set(
+      organizationalRows.map((row) => row.organizationId!),
+    )];
+    const organizations = new Map(await Promise.all(organizationIds.map(async (id) => {
+      const organization = await ctx.db.get("organizations", id);
+      if (!organization) invalidAdminJurisdictionProjection();
+      return [id, organization] as const;
+    })));
+
+    return {
+      ...result,
+      page: result.page.map((row) => {
+        const base = {
+          id: row._id,
+          name: row.name,
+          slug: row.slug,
+          status: row.status,
+          kind: projectJurisdictionKind(row),
+          visibility: projectJurisdictionVisibility(row),
+          provider: {
+            syncState: row.providerSyncState,
+            stagingConfigured: Boolean(row.stagingBucketId),
+            productionConfigured: Boolean(row.productionBucketId),
+          },
+        };
+        if (row.kind === undefined) {
+          return {
+            ...base,
+            migrationState: "legacy" as const,
+            geographic: null,
+            organization: null,
+            scopeMode: null,
+          };
+        }
+        if (row.kind === "geographic") {
+          const profile = geographicProfiles.get(row._id) ?? invalidAdminJurisdictionProjection();
+          return {
+            ...base,
+            migrationState: "typed" as const,
+            geographic: {
+              level: profile.level,
+              parent: profile.parentJurisdictionId === undefined
+                ? null
+                : (parents.get(profile.parentJurisdictionId) ??
+                  invalidAdminJurisdictionProjection()),
+            },
+            organization: null,
+            scopeMode: null,
+          };
+        }
+        const profile = organizationalProfiles.get(row._id) ??
+          invalidAdminJurisdictionProjection();
+        const organization = organizations.get(row.organizationId!) ??
+          invalidAdminJurisdictionProjection();
+        return {
+          ...base,
+          migrationState: "typed" as const,
+          geographic: null,
+          organization: {
+            id: organization._id,
+            name: organization.name,
+            slug: organization.slug,
+            class: organization.class,
+            status: organization.status,
+          },
+          scopeMode: profile.scopeMode,
+        };
+      }),
+    };
+  },
+});
 
 export const createGeographicJurisdiction = mutation({
   args: geographicMutationArgs,

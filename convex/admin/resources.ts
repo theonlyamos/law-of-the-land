@@ -3,12 +3,12 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import { mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
-import { hasRolePermission } from "../lib/adminPermissions";
-import { adminAccessError } from "../lib/adminAccessErrors";
 import { isLegacyCountryCode } from "../lib/jurisdictionDomain";
-import { requireCurrentAdmin } from "../lib/requireAdmin";
 import { validateAuditReason, writeAudit } from "./audit";
-import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags";
+import {
+  requireEnabledAdminCatalogRead,
+  requireEnabledAdminPermission,
+} from "./featureFlags";
 import {
   archiveJurisdictionForActor,
   createLegacyJurisdictionForActor,
@@ -269,23 +269,6 @@ async function auditChange(
   });
 }
 
-async function requireEnabledCatalogRead(
-  ctx: Parameters<typeof requireCurrentAdmin>[0],
-  resource: "jurisdiction" | "resource",
-) {
-  const actor = await requireCurrentAdmin(ctx);
-  if (!(await readAdminEnabled(ctx))) {
-    throw adminAccessError("ADMIN_DISABLED", "Administration is not enabled");
-  }
-  if (
-    !hasRolePermission(actor.roles, resource, "read") &&
-    !hasRolePermission(actor.roles, resource, "write")
-  ) {
-    throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
-  }
-  return actor;
-}
-
 export const listJurisdictions = query({
   args: {
     status: v.optional(jurisdictionStatusValidator),
@@ -294,7 +277,7 @@ export const listJurisdictions = query({
   },
   returns: paginationResultValidator(jurisdictionDocValidator),
   handler: async (ctx, args) => {
-    await requireEnabledCatalogRead(ctx, "jurisdiction");
+    await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
     const code = args.code === undefined ? undefined : normalizeCode(args.code);
     const rows = code
@@ -388,7 +371,7 @@ export const listResources = query({
   },
   returns: paginationResultValidator(resourceDocValidator),
   handler: async (ctx, args) => {
-    await requireEnabledCatalogRead(ctx, "resource");
+    await requireEnabledAdminCatalogRead(ctx, "resource");
     validatePageSize(args.paginationOpts.numItems);
     const source = args.jurisdictionId && args.status
       ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status", (q) =>
@@ -409,7 +392,7 @@ export const getResource = query({
   args: { id: v.id("legalResources") },
   returns: resourceDetailValidator,
   handler: async (ctx, args) => {
-    await requireEnabledCatalogRead(ctx, "resource");
+    await requireEnabledAdminCatalogRead(ctx, "resource");
     const resource = await ctx.db.get("legalResources", args.id);
     if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
     const jurisdiction = await ctx.db.get("jurisdictions", resource.jurisdictionId);

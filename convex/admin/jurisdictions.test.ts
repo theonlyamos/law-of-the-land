@@ -4,6 +4,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
+import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import { issueVerifiedPlaceClaim, type VerifiedPlace } from "../lib/placeClaim";
 import schema from "../schema";
@@ -41,6 +42,15 @@ const enableJurisdiction = makeFunctionReference<"mutation">(
 const archiveJurisdiction = makeFunctionReference<"mutation">(
   "admin/jurisdictions:archiveJurisdiction",
 );
+const listGeographicJurisdictionOptions = makeFunctionReference<"query">(
+  "admin/jurisdictions:listGeographicJurisdictionOptions",
+);
+const suggestGeographicParentsByAliases = makeFunctionReference<"query">(
+  "admin/jurisdictions:suggestGeographicParentsByAliases",
+);
+const listAdminJurisdictions = makeFunctionReference<"query">(
+  "admin/jurisdictions:listAdminJurisdictions",
+);
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -59,19 +69,22 @@ async function enablePanel(t: Backend) {
   }));
 }
 
-async function asAdmin(t: Backend) {
+async function asAdmin(
+  t: Backend,
+  role: "auditor" | "content_manager" | "content_reviewer" = "content_manager",
+) {
   const identity = await t.run(async (ctx) => {
     const now = Date.now();
     const user = await ctx.runMutation(components.betterAuth.adapter.create, {
       input: {
         model: "user",
         data: {
-          name: "Admin fixture",
-          email: `admin-${crypto.randomUUID()}@example.com`,
+          name: `${role} fixture`,
+          email: `${role}-${crypto.randomUUID()}@example.com`,
           emailVerified: true,
           createdAt: now,
           updatedAt: now,
-          role: "content_manager",
+          role,
           banned: false,
           twoFactorEnabled: true,
         },
@@ -808,5 +821,628 @@ describe("typed jurisdiction administration", () => {
       id: ancestorId,
       reason: "Reject legacy active scope link",
     })).rejects.toThrow("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
+  });
+});
+
+describe("administration catalog projections", () => {
+  beforeEach(() => {
+    process.env.PLACE_CLAIM_SECRET = "test-place-claim-secret-that-is-at-least-32-bytes";
+  });
+
+  afterEach(() => {
+    delete process.env.PLACE_CLAIM_SECRET;
+    delete process.env.ADMIN_PANEL_ENABLED;
+    delete process.env.ADMIN_ENVIRONMENT;
+  });
+
+  it("requires enabled jurisdiction read-or-write authority before catalog enumeration", async () => {
+    const t = createBackend();
+    const writer = await asAdmin(t, "content_manager");
+    const reader = await asAdmin(t, "auditor");
+    const forbidden = await asAdmin(t, "content_reviewer");
+    const geographicArgs = {
+      purpose: "linked_scope",
+      paginationOpts: { numItems: 20, cursor: null },
+    };
+    const tableArgs = { paginationOpts: { numItems: 20, cursor: null } };
+    const aliasArgs = { childLevel: "town", aliases: ["ghana"] };
+
+    await expect(t.query(listAdminJurisdictions, tableArgs)).rejects.toThrow(
+      "ADMIN_AUTH_REQUIRED",
+    );
+    await expect(writer.client.query(listGeographicJurisdictionOptions, geographicArgs))
+      .rejects.toThrow("ADMIN_DISABLED");
+    await enablePanel(t);
+    await expect(forbidden.client.query(listAdminJurisdictions, tableArgs)).rejects.toThrow(
+      "ADMIN_FORBIDDEN",
+    );
+    await expect(forbidden.client.query(suggestGeographicParentsByAliases, aliasArgs))
+      .rejects.toThrow("ADMIN_FORBIDDEN");
+    await expect(writer.client.query(listAdminJurisdictions, tableArgs)).resolves.toMatchObject({
+      page: [],
+    });
+    await expect(reader.client.query(listGeographicJurisdictionOptions, geographicArgs))
+      .resolves.toMatchObject({ page: [] });
+    await expect(reader.client.query(suggestGeographicParentsByAliases, aliasArgs))
+      .resolves.toEqual([]);
+  });
+
+  it("returns only eligible governed geographic options with safe bounded pagination", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reader = await asAdmin(t, "auditor");
+    const { countryId, regionId, townId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const insertGeographic = async (
+        name: string,
+        slug: string,
+        level: "country" | "region" | "town",
+        status: "draft" | "enabled" | "archived",
+        parentJurisdictionId?: Id<"jurisdictions">,
+      ) => {
+        const jurisdictionId = await ctx.db.insert("jurisdictions", {
+          name,
+          slug,
+          status,
+          isDefault: false,
+          providerSyncState: "synced",
+          kind: "geographic",
+          visibility: "public",
+          createdBy: "fixture",
+          updatedBy: "fixture",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictions", {
+          jurisdictionId,
+          googlePlaceId: `secret-place-${slug}`,
+          level,
+          latitude: 5,
+          longitude: 0,
+          formattedAddress: `Secret ${name} address`,
+          parentJurisdictionId,
+          createdAt: now,
+          updatedAt: now,
+        });
+        return jurisdictionId;
+      };
+      const countryId = await insertGeographic("Ghana", "ghana", "country", "enabled");
+      const regionId = await insertGeographic(
+        "Greater Accra Region",
+        "greater-accra-region",
+        "region",
+        "enabled",
+        countryId,
+      );
+      const townId = await insertGeographic("Accra", "accra", "town", "enabled", regionId);
+      await insertGeographic("Draft Region", "draft-region", "region", "draft", countryId);
+      await insertGeographic("Archived Region", "archived-region", "region", "archived", countryId);
+      await ctx.db.insert("jurisdictions", {
+        code: "ZZ",
+        name: "Legacyland",
+        slug: "legacyland",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("jurisdictions", {
+        name: "Organization Rules",
+        slug: "organization-rules",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "organizational",
+        visibility: "members",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { countryId, regionId, townId };
+    });
+
+    await expect(reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "parent",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("INVALID_GEOGRAPHIC_OPTION_REQUEST");
+    await expect(reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      childLevel: "town",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("INVALID_GEOGRAPHIC_OPTION_REQUEST");
+    await expect(reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      paginationOpts: { numItems: 21, cursor: null },
+    })).rejects.toThrow("INVALID_ADMIN_PAGINATION");
+
+    const parentPage = await reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "parent",
+      childLevel: "town",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(parentPage.page.map((row: { id: string }) => row.id)).toEqual([
+      countryId,
+      regionId,
+    ]);
+    expect(parentPage.page[1]).toEqual({
+      id: regionId,
+      name: "Greater Accra Region",
+      level: "region",
+      parent: { id: countryId, name: "Ghana", level: "country" },
+    });
+    expect(JSON.stringify(parentPage.page)).not.toContain("secret-place-");
+    expect(JSON.stringify(parentPage.page)).not.toContain("Secret Ghana address");
+
+    const linkedPage = await reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      query: "  Accra  ",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(linkedPage.page.map((row: { id: string }) => row.id).sort()).toEqual(
+      [regionId, townId].sort(),
+    );
+  });
+
+  it("suggests exact normalized aliases without authorizing an invalid parent", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const writer = await asAdmin(t, "content_manager");
+    const { countryId, draftCountryId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const countryId = await ctx.db.insert("jurisdictions", {
+        name: "Ghana",
+        slug: "ghana-alias",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: countryId,
+        googlePlaceId: "secret-google-ghana",
+        level: "country",
+        latitude: 5,
+        longitude: 0,
+        formattedAddress: "Secret Ghana address",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictionAliases", {
+        jurisdictionId: countryId,
+        normalizedAlias: "ghana",
+        source: "secret-provider-source",
+        createdAt: now,
+      });
+      const broaderNameOnlyId = await ctx.db.insert("jurisdictions", {
+        name: "Greater Ghana",
+        slug: "greater-ghana-alias",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: broaderNameOnlyId,
+        googlePlaceId: "secret-google-greater-ghana",
+        level: "country",
+        latitude: 5,
+        longitude: 0,
+        formattedAddress: "Secret Greater Ghana address",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictionAliases", {
+        jurisdictionId: broaderNameOnlyId,
+        normalizedAlias: "greater ghana",
+        source: "secret-provider-source",
+        createdAt: now,
+      });
+      for (let index = 0; index < 21; index += 1) {
+        const aliasCandidateId = await ctx.db.insert("jurisdictions", {
+          name: `Alias Candidate ${index}`,
+          slug: `alias-candidate-${index}`,
+          status: "enabled",
+          isDefault: false,
+          providerSyncState: "pending",
+          kind: "geographic",
+          visibility: "public",
+          createdBy: "fixture",
+          updatedBy: "fixture",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictions", {
+          jurisdictionId: aliasCandidateId,
+          googlePlaceId: `alias-candidate-place-${index}`,
+          level: "country",
+          latitude: 0,
+          longitude: 0,
+          formattedAddress: `Alias Candidate ${index}`,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictionAliases", {
+          jurisdictionId: aliasCandidateId,
+          normalizedAlias: `alias ${Math.min(index, 19)}`,
+          source: "fixture",
+          createdAt: now,
+        });
+      }
+      const draftCountryId = await ctx.db.insert("jurisdictions", {
+        name: "Draft Country",
+        slug: "draft-country-alias",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: draftCountryId,
+        googlePlaceId: "secret-google-draft",
+        level: "country",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: "Secret draft address",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { countryId, draftCountryId };
+    });
+
+    const suggestions = await writer.client.query(suggestGeographicParentsByAliases, {
+      childLevel: "town",
+      aliases: ["  GHANA  ", "ghana"],
+    });
+    expect(suggestions).toEqual([
+      { id: countryId, name: "Ghana", level: "country", parent: null },
+    ]);
+    expect(JSON.stringify(suggestions)).not.toContain("greater ghana");
+    expect(suggestions.map((row: { name: string }) => row.name)).not.toContain(
+      "Greater Ghana",
+    );
+    expect(JSON.stringify(suggestions)).not.toContain("secret-");
+    const capped = await writer.client.query(suggestGeographicParentsByAliases, {
+      childLevel: "town",
+      aliases: Array.from({ length: 20 }, (_, index) => `alias ${index}`),
+    });
+    expect(capped).toHaveLength(20);
+    await expect(writer.client.query(suggestGeographicParentsByAliases, {
+      childLevel: "town",
+      aliases: Array.from({ length: 21 }, (_, index) => `alias ${index}`),
+    })).rejects.toThrow("INVALID_GEOGRAPHIC_ALIASES");
+
+    const claim = await issueVerifiedPlaceClaim(
+      writer.userId,
+      place("Alias Suggested Town", "alias-suggested-town"),
+    );
+    await expect(writer.client.mutation(createGeographicJurisdiction, {
+      verifiedPlaceClaim: claim,
+      level: "town",
+      parentJurisdictionId: draftCountryId,
+      reason: "Browser alias must not authorize a draft parent",
+    })).rejects.toThrow("GEOGRAPHIC_PARENT_REQUIRED");
+  });
+
+  it("projects typed and legacy table rows through every bounded index branch", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reader = await asAdmin(t, "auditor");
+    const { countryId, organizationId, organizationalJurisdictionId } = await t.run(
+      async (ctx) => {
+        const now = Date.now();
+        const countryId = await ctx.db.insert("jurisdictions", {
+          name: "Ghana Catalog",
+          slug: "ghana-catalog",
+          status: "enabled",
+          isDefault: false,
+          stagingBucketId: "secret-staging-bucket",
+          productionBucketId: "secret-production-bucket",
+          providerSyncState: "synced",
+          kind: "geographic",
+          visibility: "public",
+          createdBy: "secret-creator",
+          updatedBy: "secret-updater",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictions", {
+          jurisdictionId: countryId,
+          googlePlaceId: "secret-google-place",
+          level: "country",
+          latitude: 5,
+          longitude: 0,
+          formattedAddress: "Secret formatted address",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictionAliases", {
+          jurisdictionId: countryId,
+          normalizedAlias: "secret-alias",
+          source: "secret-provider-source",
+          createdAt: now,
+        });
+        const organizationId = await ctx.db.insert("organizations", {
+          name: "Example University",
+          slug: "example-university-catalog",
+          class: "university",
+          website: "https://secret-organization.example.com/",
+          status: "active",
+          createdBy: "secret-organization-creator",
+          updatedBy: "secret-organization-updater",
+          createdAt: now,
+          updatedAt: now,
+        });
+        const organizationalJurisdictionId = await ctx.db.insert("jurisdictions", {
+          name: "Example University Rules",
+          slug: "example-university-rules-catalog",
+          status: "draft",
+          isDefault: false,
+          providerSyncState: "drifted",
+          kind: "organizational",
+          visibility: "members",
+          organizationId,
+          createdBy: "secret-creator",
+          updatedBy: "secret-updater",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("organizationalJurisdictions", {
+          jurisdictionId: organizationalJurisdictionId,
+          scopeMode: "linked_geographies",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("jurisdictions", {
+          code: "LG",
+          name: "Legacy Catalog",
+          slug: "legacy-catalog",
+          status: "archived",
+          isDefault: false,
+          providerSyncState: "failed",
+          createdBy: "secret-creator",
+          updatedBy: "secret-updater",
+          createdAt: now,
+          updatedAt: now,
+        });
+        for (let index = 0; index < 20; index += 1) {
+          await ctx.db.insert("jurisdictions", {
+            name: `Paged Legacy ${String(index).padStart(2, "0")}`,
+            slug: `paged-legacy-${index}`,
+            status: "enabled",
+            isDefault: false,
+            providerSyncState: "pending",
+            createdBy: "fixture",
+            updatedBy: "fixture",
+            createdAt: now + index,
+            updatedAt: now + index,
+          });
+        }
+        return { countryId, organizationId, organizationalJurisdictionId };
+      },
+    );
+
+    await expect(reader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 21, cursor: null },
+    })).rejects.toThrow("INVALID_ADMIN_PAGINATION");
+    const first = await reader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(first.page).toHaveLength(20);
+    expect(first.isDone).toBe(false);
+    const second = await reader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: first.continueCursor },
+    });
+    expect(second.page.length).toBeGreaterThan(0);
+
+    const byKind = await reader.client.query(listAdminJurisdictions, {
+      kind: "geographic",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(byKind.page.map((row: { id: string }) => row.id)).toContain(countryId);
+    const byStatus = await reader.client.query(listAdminJurisdictions, {
+      status: "draft",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(byStatus.page).toHaveLength(1);
+    const byKindAndStatus = await reader.client.query(listAdminJurisdictions, {
+      kind: "organizational",
+      status: "draft",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(byKindAndStatus.page).toHaveLength(1);
+
+    for (const filters of [
+      {},
+      { kind: "organizational" },
+      { status: "draft" },
+      { kind: "organizational", status: "draft" },
+    ]) {
+      const searched = await reader.client.query(listAdminJurisdictions, {
+        ...filters,
+        query: "  University Rules  ",
+        paginationOpts: { numItems: 20, cursor: null },
+      });
+      expect(searched.page.map((row: { id: string }) => row.id)).toEqual([
+        organizationalJurisdictionId,
+      ]);
+    }
+
+    const typedOrganization = byKindAndStatus.page[0];
+    expect(typedOrganization).toMatchObject({
+      id: organizationalJurisdictionId,
+      migrationState: "typed",
+      geographic: null,
+      organization: {
+        id: organizationId,
+        name: "Example University",
+        slug: "example-university-catalog",
+        class: "university",
+        status: "active",
+      },
+      provider: {
+        syncState: "drifted",
+        stagingConfigured: false,
+        productionConfigured: false,
+      },
+      scopeMode: "linked_geographies",
+    });
+    const safePayload = JSON.stringify([...first.page, ...second.page]);
+    for (const secret of [
+      "secret-staging-bucket",
+      "secret-production-bucket",
+      "secret-google-place",
+      "Secret formatted address",
+      "secret-alias",
+      "secret-provider-source",
+      "secret-creator",
+      "secret-updater",
+      "secret-organization.example.com",
+    ]) {
+      expect(safePayload).not.toContain(secret);
+    }
+    const legacy = [...first.page, ...second.page].find(
+      (row: { name: string }) => row.name === "Legacy Catalog",
+    );
+    expect(legacy).toMatchObject({
+      kind: "geographic",
+      visibility: "public",
+      migrationState: "legacy",
+      geographic: null,
+      organization: null,
+      scopeMode: null,
+    });
+  });
+
+  it("fails closed when typed profile, parent, or organization relationships are malformed", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reader = await asAdmin(t, "auditor");
+    const missingProfileId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        name: "Missing Geographic Profile",
+        slug: "missing-geographic-profile",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    await expect(reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+    await expect(reader.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+
+    await t.run(async (ctx) => {
+      await ctx.db.delete(missingProfileId);
+      const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Cross-kind Organization",
+        slug: "cross-kind-organization",
+        class: "company",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Cross-kind Geography",
+        slug: "cross-kind-geography",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "public",
+        organizationId,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId,
+        googlePlaceId: "cross-kind-place",
+        level: "country",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: "Cross-kind Geography",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(reader.client.query(listGeographicJurisdictionOptions, {
+      purpose: "linked_scope",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
+
+    const t2 = createBackend();
+    await enablePanel(t2);
+    const reader2 = await asAdmin(t2, "auditor");
+    await t2.run(async (ctx) => {
+      const now = Date.now();
+      const missingOrganization = await ctx.db.insert("organizations", {
+        name: "Deleted Organization",
+        slug: "deleted-organization",
+        class: "company",
+        status: "archived",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Broken Organization Rules",
+        slug: "broken-organization-rules",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "organizational",
+        visibility: "members",
+        organizationId: missingOrganization,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId,
+        scopeMode: "global",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.delete(missingOrganization);
+    });
+    await expect(reader2.client.query(listAdminJurisdictions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("ADMIN_JURISDICTION_PROJECTION_INVALID");
   });
 });

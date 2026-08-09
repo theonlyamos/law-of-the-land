@@ -1,6 +1,7 @@
+import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
-import { mutation, type MutationCtx } from "../_generated/server";
+import { mutation, query, type MutationCtx } from "../_generated/server";
 import {
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
   organizationClassValidator,
@@ -8,12 +9,17 @@ import {
 } from "../lib/jurisdictionDomain";
 import { activeOrganizationIdsForUser } from "../lib/jurisdictionAccess";
 import { authComponent } from "../auth";
-import { requireEnabledAdminPermission } from "./featureFlags";
+import {
+  requireEnabledAdminCatalogRead,
+  requireEnabledAdminPermission,
+} from "./featureFlags";
 import { validateAuditReason, writeAudit } from "./audit";
 
 const MAX_ORGANIZATION_NAME_LENGTH = 300;
 const MAX_ORGANIZATION_WEBSITE_LENGTH = 500;
 const ORGANIZATION_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_CATALOG_PAGE_SIZE = 20;
+const MAX_CATALOG_SEARCH_LENGTH = 100;
 
 const organizationStatusValidator = v.union(
   v.literal("active"),
@@ -41,6 +47,28 @@ const membershipDocValidator = v.object({
   createdAt: v.number(),
   updatedAt: v.number(),
 });
+const organizationOptionValidator = v.object({
+  id: v.id("organizations"),
+  name: v.string(),
+  slug: v.string(),
+  class: organizationClassValidator,
+});
+
+function validateCatalogPageSize(value: number): void {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CATALOG_PAGE_SIZE) {
+    throw new ConvexError("INVALID_ADMIN_PAGINATION");
+  }
+}
+
+function normalizeCatalogSearch(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.normalize("NFKC").trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  if (normalized.length < 2 || normalized.length > MAX_CATALOG_SEARCH_LENGTH) {
+    throw new ConvexError("INVALID_ADMIN_SEARCH_QUERY");
+  }
+  return normalized;
+}
 
 function normalizeName(value: string): string {
   const normalized = value.trim();
@@ -126,6 +154,39 @@ async function auditOrganizationChange(
     outcome: "success",
   });
 }
+
+export const listActiveOrganizationOptions = query({
+  args: {
+    query: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: paginationResultValidator(organizationOptionValidator),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminCatalogRead(ctx, "organization");
+    validateCatalogPageSize(args.paginationOpts.numItems);
+    const search = normalizeCatalogSearch(args.query);
+    const result = search === undefined
+      ? await ctx.db
+          .query("organizations")
+          .withIndex("by_status_and_name", (q) => q.eq("status", "active"))
+          .paginate(args.paginationOpts)
+      : await ctx.db
+          .query("organizations")
+          .withSearchIndex("search_name", (q) =>
+            q.search("name", search).eq("status", "active"),
+          )
+          .paginate(args.paginationOpts);
+    return {
+      ...result,
+      page: result.page.map((row) => ({
+        id: row._id,
+        name: row.name,
+        slug: row.slug,
+        class: row.class,
+      })),
+    };
+  },
+});
 
 export const createOrganization = mutation({
   args: {

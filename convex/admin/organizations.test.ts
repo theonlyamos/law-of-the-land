@@ -2,7 +2,7 @@
 
 import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
 import authSchema from "../betterAuth/schema";
 import { MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS } from "../lib/jurisdictionDomain";
@@ -35,6 +35,9 @@ const updateOrganization = makeFunctionReference<"mutation">(
 const archiveOrganization = makeFunctionReference<"mutation">(
   "admin/organizations:archiveOrganization",
 );
+const listActiveOrganizationOptions = makeFunctionReference<"query">(
+  "admin/organizations:listActiveOrganizationOptions",
+);
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -55,7 +58,10 @@ async function enablePanel(t: Backend) {
   });
 }
 
-async function asUser(t: Backend, role: "content_manager" | "content_reviewer" | "user") {
+async function asUser(
+  t: Backend,
+  role: "auditor" | "content_manager" | "content_reviewer" | "user",
+) {
   const identity = await t.run(async (ctx) => {
     const now = Date.now();
     const user = await ctx.runMutation(components.betterAuth.adapter.create, {
@@ -92,6 +98,113 @@ async function asUser(t: Backend, role: "content_manager" | "content_reviewer" |
 }
 
 describe("organization administration", () => {
+  afterEach(() => {
+    delete process.env.ADMIN_PANEL_ENABLED;
+    delete process.env.ADMIN_ENVIRONMENT;
+  });
+
+  it("permission-gates active organization option pages for read-or-write admins", async () => {
+    const t = createBackend();
+    const writer = await asUser(t, "content_manager");
+    const reader = await asUser(t, "auditor");
+    const forbidden = await asUser(t, "content_reviewer");
+    const args = { paginationOpts: { numItems: 20, cursor: null } };
+
+    await expect(t.query(listActiveOrganizationOptions, args)).rejects.toThrow(
+      "ADMIN_AUTH_REQUIRED",
+    );
+    await expect(writer.client.query(listActiveOrganizationOptions, args)).rejects.toThrow(
+      "ADMIN_DISABLED",
+    );
+
+    await enablePanel(t);
+    await expect(forbidden.client.query(listActiveOrganizationOptions, args)).rejects.toThrow(
+      "ADMIN_FORBIDDEN",
+    );
+    await expect(writer.client.query(listActiveOrganizationOptions, args)).resolves.toMatchObject({
+      page: [],
+    });
+    await expect(reader.client.query(listActiveOrganizationOptions, args)).resolves.toMatchObject({
+      page: [],
+    });
+  });
+
+  it("returns bounded active organization projections for ordered and search pages", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reader = await asUser(t, "auditor");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 22; index += 1) {
+        await ctx.db.insert("organizations", {
+          name: `Active Organization ${String(index).padStart(2, "0")}`,
+          slug: `active-organization-${index}`,
+          class: index % 2 === 0 ? "university" : "nonprofit",
+          website: `https://private-${index}.example.com/`,
+          status: "active",
+          createdBy: `creator-${index}`,
+          updatedBy: `updater-${index}`,
+          createdAt: now + index,
+          updatedAt: now + index,
+        });
+      }
+      await ctx.db.insert("organizations", {
+        name: "Archived Organization",
+        slug: "archived-organization",
+        class: "company",
+        status: "archived",
+        createdBy: "creator-archived",
+        updatedBy: "updater-archived",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    await expect(reader.client.query(listActiveOrganizationOptions, {
+      paginationOpts: { numItems: 21, cursor: null },
+    })).rejects.toThrow("INVALID_ADMIN_PAGINATION");
+
+    const first = await reader.client.query(listActiveOrganizationOptions, {
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(first.page).toHaveLength(20);
+    expect(first.isDone).toBe(false);
+    expect(first.continueCursor).not.toBe("");
+    expect(Object.keys(first.page[0]).sort()).toEqual(["class", "id", "name", "slug"]);
+    expect(JSON.stringify(first.page)).not.toContain("private-");
+    expect(JSON.stringify(first.page)).not.toContain("creator-");
+
+    const second = await reader.client.query(listActiveOrganizationOptions, {
+      paginationOpts: { numItems: 20, cursor: first.continueCursor },
+    });
+    expect(second.page).toHaveLength(2);
+    expect(second.isDone).toBe(true);
+
+    const search = await reader.client.query(listActiveOrganizationOptions, {
+      query: "  07  ",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(search.page).toEqual([
+      expect.objectContaining({ name: "Active Organization 07" }),
+    ]);
+    const firstSearchPage = await reader.client.query(listActiveOrganizationOptions, {
+      query: "Active",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(firstSearchPage.page).toHaveLength(20);
+    expect(firstSearchPage.isDone).toBe(false);
+    const secondSearchPage = await reader.client.query(listActiveOrganizationOptions, {
+      query: "Active",
+      paginationOpts: { numItems: 20, cursor: firstSearchPage.continueCursor },
+    });
+    expect(secondSearchPage.page).toHaveLength(2);
+    expect(secondSearchPage.isDone).toBe(true);
+    await expect(reader.client.query(listActiveOrganizationOptions, {
+      query: "a",
+      paginationOpts: { numItems: 20, cursor: null },
+    })).rejects.toThrow("INVALID_ADMIN_SEARCH_QUERY");
+  });
+
   it("requires organization authority, keeps slugs unique, and audits membership changes", async () => {
     const t = createBackend();
     await enablePanel(t);

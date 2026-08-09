@@ -44,6 +44,9 @@ export default defineSchema({
     .index("by_status_and_code", ["status", "code"])
     .index("by_slug", ["slug"])
     .index("by_status_and_name", ["status", "name"])
+    .index("by_kind_and_status_and_name", ["kind", "status", "name"])
+    .index("by_kind_and_name", ["kind", "name"])
+    .index("by_name", ["name"])
     .index("by_isDefault", ["isDefault"])
     .index("by_isDefault_and_status", ["isDefault", "status"])
     .index("by_organizationId", ["organizationId"])
@@ -87,7 +90,13 @@ export default defineSchema({
     updatedBy: v.string(),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_slug", ["slug"]),
+  })
+    .index("by_slug", ["slug"])
+    .index("by_status_and_name", ["status", "name"])
+    .searchIndex("search_name", {
+      searchField: "name",
+      filterFields: ["status"],
+    }),
   organizationMemberships: defineTable({
     organizationId: v.id("organizations"),
     userId: v.string(),

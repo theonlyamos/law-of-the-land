@@ -1,6 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "../_generated/server";
 import { adminAccessError } from "../lib/adminAccessErrors";
+import { hasRolePermission } from "../lib/adminPermissions";
 import {
   requireAdminPermission,
   requireCurrentAdmin,
@@ -72,6 +73,23 @@ export async function requireEnabledAdminPermission(
       "ADMIN_DISABLED",
       "Administration is not enabled",
     );
+  }
+  return admin;
+}
+
+export async function requireEnabledAdminCatalogRead(
+  ctx: QueryCtx,
+  resource: string,
+) {
+  const admin = await requireCurrentAdmin(ctx);
+  if (!(await readAdminEnabled(ctx))) {
+    throw adminAccessError("ADMIN_DISABLED", "Administration is not enabled");
+  }
+  if (
+    !hasRolePermission(admin.roles, resource, "read") &&
+    !hasRolePermission(admin.roles, resource, "write")
+  ) {
+    throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
   }
   return admin;
 }

@@ -185,6 +185,10 @@ export function normalizePlaceId(value: string): string {
   return normalized;
 }
 
+export function normalizeGeographicAlias(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en");
+}
+
 export function normalizeJurisdictionSlug(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) || normalized.length > 80) {
