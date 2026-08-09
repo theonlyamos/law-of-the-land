@@ -6,6 +6,7 @@ import type { AdminRole } from "../lib/adminPermissions";
 import { hasRolePermission } from "../lib/adminPermissions";
 import { adminAccessError } from "../lib/adminAccessErrors";
 import { normalizePositiveSafeIntegerBucketId } from "../lib/jurisdictionEligibility";
+import { isLegacyCountryCode } from "../lib/jurisdictionDomain";
 import { requireCurrentAdmin } from "../lib/requireAdmin";
 import { validateAuditReason, writeAudit } from "./audit";
 import { readAdminEnabled, requireEnabledAdminPermission } from "./featureFlags";
@@ -120,6 +121,19 @@ function normalizeSlug(value: string): string {
     throw new ConvexError("INVALID_JURISDICTION_SLUG");
   }
   return slug;
+}
+
+function hasLegacyJurisdictionCode<T extends { code?: string }>(
+  row: T,
+): row is T & { code: string } {
+  return isLegacyCountryCode(row.code);
+}
+
+function requireLegacyJurisdictionCode<T extends { code?: string }>(row: T): string {
+  if (!hasLegacyJurisdictionCode(row)) {
+    throw new ConvexError("JURISDICTION_NOT_FOUND");
+  }
+  return row.code;
 }
 
 function optionalBucket(value: string | undefined): string | undefined {
@@ -295,7 +309,15 @@ export const listJurisdictions = query({
       : args.status
       ? ctx.db.query("jurisdictions").withIndex("by_status_and_name", (q) => q.eq("status", args.status!))
       : ctx.db.query("jurisdictions");
-    return await source.paginate(args.paginationOpts);
+    const result = await source.paginate(args.paginationOpts);
+    const page = result.page.flatMap((row) => {
+      if (!hasLegacyJurisdictionCode(row)) return [];
+      return [{ ...row, code: row.code }];
+    });
+    return {
+      ...result,
+      page,
+    };
   },
 });
 
@@ -366,9 +388,10 @@ export const updateJurisdiction = mutation({
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("jurisdictions", args.id);
     if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    const code = requireLegacyJurisdictionCode(row);
     if (row.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
     const slug = normalizeSlug(args.slug);
-    await assertUniqueJurisdiction(ctx, { code: row.code, slug, exceptId: row._id });
+    await assertUniqueJurisdiction(ctx, { code, slug, exceptId: row._id });
     if (args.isDefault) await assertDefaultAvailable(ctx, row._id);
     const productionBucketId = optionalProductionBucket(args.productionBucketId);
     if (row.status === "enabled" && productionBucketId === undefined) {
@@ -393,7 +416,7 @@ export const updateJurisdiction = mutation({
       before: JSON.stringify(jurisdictionSnapshot(row)),
       after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
-    return { ...row, ...patch };
+    return { ...row, ...patch, code };
   },
 });
 
@@ -405,6 +428,7 @@ export const enableJurisdiction = mutation({
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("jurisdictions", args.id);
     if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    const code = requireLegacyJurisdictionCode(row);
     if (row.status !== "draft") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
     if (!row.productionBucketId) throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
     if (normalizePositiveSafeIntegerBucketId(row.productionBucketId) === null) {
@@ -420,7 +444,7 @@ export const enableJurisdiction = mutation({
       before: JSON.stringify(jurisdictionSnapshot(row)),
       after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
-    return { ...row, ...patch };
+    return { ...row, ...patch, code };
   },
 });
 
@@ -432,6 +456,7 @@ export const archiveJurisdiction = mutation({
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("jurisdictions", args.id);
     if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    const code = requireLegacyJurisdictionCode(row);
     if (row.status === "archived") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
     const active = await ctx.db
       .query("legalResources")
@@ -455,7 +480,7 @@ export const archiveJurisdiction = mutation({
       before: JSON.stringify(jurisdictionSnapshot(row)),
       after: JSON.stringify(jurisdictionSnapshot({ ...row, ...patch })),
     });
-    return { ...row, ...patch };
+    return { ...row, ...patch, code };
   },
 });
 
@@ -493,10 +518,11 @@ export const getResource = query({
     if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
     const jurisdiction = await ctx.db.get("jurisdictions", resource.jurisdictionId);
     if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    const code = requireLegacyJurisdictionCode(jurisdiction);
     return {
       ...resource,
       jurisdiction: {
-        code: jurisdiction.code,
+        code,
         name: jurisdiction.name,
         status: jurisdiction.status,
       },
@@ -531,6 +557,7 @@ async function resourceInput(
   if (!jurisdiction || jurisdiction.status === "archived") {
     throw new ConvexError("JURISDICTION_NOT_AVAILABLE");
   }
+  requireLegacyJurisdictionCode(jurisdiction);
   const officialCitation = requiredText(input.officialCitation, "OFFICIAL_CITATION");
   const officialCitationKey = canonicalCitation(officialCitation);
   const citations = await ctx.db

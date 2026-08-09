@@ -4,13 +4,23 @@ import type { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { optionalUserId, requireUserId } from "./lib/requireUser";
+import { chatCitationValidator } from "./lib/jurisdictionDomain";
 
-const messageValidator = v.object({
-  role: v.union(v.literal("user"), v.literal("assistant")),
-  content: v.string(),
-  clientId: v.optional(v.string()),
-  createdAt: v.optional(v.number()),
-});
+const messageValidator = v.union(
+  v.object({
+    role: v.literal("user"),
+    content: v.string(),
+    clientId: v.optional(v.string()),
+    createdAt: v.optional(v.number()),
+  }),
+  v.object({
+    role: v.literal("assistant"),
+    content: v.string(),
+    clientId: v.optional(v.string()),
+    createdAt: v.optional(v.number()),
+    citations: v.optional(v.array(chatCitationValidator)),
+  }),
+);
 
 const MAX_SESSION_PAGE_SIZE = 30;
 const MAX_MESSAGE_PAGE_SIZE = 50;
@@ -45,6 +55,7 @@ const chatMessageValidator = v.object({
   content: v.string(),
   createdAt: v.number(),
   creationTime: v.number(),
+  citations: v.optional(v.array(chatCitationValidator)),
 });
 
 export const list = query({
@@ -151,6 +162,7 @@ export const listMessages = query({
         content: message.content,
         createdAt: message.createdAt,
         creationTime: message._creationTime,
+        citations: message.citations,
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
@@ -229,6 +241,7 @@ export const appendMessages = mutation({
         role: message.role,
         content: message.content,
         clientId: message.clientId,
+        citations: message.role === "assistant" ? message.citations : undefined,
         createdAt: message.createdAt ?? Date.now(),
       });
       inserted += 1;
@@ -333,6 +346,7 @@ export const migrateFromLocal = mutation({
           role: message.role,
           content: message.content,
           clientId: message.clientId,
+          citations: message.role === "assistant" ? message.citations : undefined,
           createdAt: message.createdAt ?? localSession.updatedAt,
         });
       }

@@ -1,9 +1,19 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import {
+  chatCitationValidator,
+  geographicLevelValidator,
+  jurisdictionKindValidator,
+  jurisdictionVisibilityValidator,
+  organizationClassValidator,
+  organizationMembershipStatusValidator,
+  organizationScopeModeValidator,
+  organizationStatusValidator,
+} from "./lib/jurisdictionDomain";
 
 export default defineSchema({
   jurisdictions: defineTable({
-    code: v.string(),
+    code: v.optional(v.string()),
     name: v.string(),
     slug: v.string(),
     status: v.union(
@@ -20,6 +30,10 @@ export default defineSchema({
       v.literal("drifted"),
       v.literal("failed"),
     ),
+    kind: v.optional(jurisdictionKindValidator),
+    visibility: v.optional(jurisdictionVisibilityValidator),
+    organizationId: v.optional(v.id("organizations")),
+    legacyCountryCode: v.optional(v.string()),
     createdBy: v.string(),
     updatedBy: v.string(),
     createdAt: v.number(),
@@ -30,7 +44,77 @@ export default defineSchema({
     .index("by_slug", ["slug"])
     .index("by_status_and_name", ["status", "name"])
     .index("by_isDefault", ["isDefault"])
-    .index("by_isDefault_and_status", ["isDefault", "status"]),
+    .index("by_isDefault_and_status", ["isDefault", "status"])
+    .index("by_organizationId", ["organizationId"])
+    .searchIndex("search_name", {
+      searchField: "name",
+      filterFields: ["kind", "status", "visibility"],
+    }),
+  geographicJurisdictions: defineTable({
+    jurisdictionId: v.id("jurisdictions"),
+    googlePlaceId: v.string(),
+    level: geographicLevelValidator,
+    countryCode: v.optional(v.string()),
+    latitude: v.number(),
+    longitude: v.number(),
+    formattedAddress: v.string(),
+    parentJurisdictionId: v.optional(v.id("jurisdictions")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_jurisdictionId", ["jurisdictionId"])
+    .index("by_googlePlaceId", ["googlePlaceId"])
+    .index("by_parentJurisdictionId", ["parentJurisdictionId"]),
+  geographicJurisdictionAliases: defineTable({
+    jurisdictionId: v.id("jurisdictions"),
+    normalizedAlias: v.string(),
+    source: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_normalizedAlias", ["normalizedAlias"])
+    .index("by_jurisdictionId_and_normalizedAlias", [
+      "jurisdictionId",
+      "normalizedAlias",
+    ]),
+  organizations: defineTable({
+    name: v.string(),
+    slug: v.string(),
+    class: organizationClassValidator,
+    website: v.optional(v.string()),
+    status: organizationStatusValidator,
+    createdBy: v.string(),
+    updatedBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_slug", ["slug"]),
+  organizationMemberships: defineTable({
+    organizationId: v.id("organizations"),
+    userId: v.string(),
+    status: organizationMembershipStatusValidator,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_userId_and_status", ["userId", "status"])
+    .index("by_organizationId_and_userId", ["organizationId", "userId"]),
+  organizationalJurisdictions: defineTable({
+    jurisdictionId: v.id("jurisdictions"),
+    scopeMode: organizationScopeModeValidator,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_jurisdictionId", ["jurisdictionId"]),
+  organizationGeographicScopes: defineTable({
+    organizationalJurisdictionId: v.id("organizationalJurisdictions"),
+    geographicJurisdictionId: v.id("geographicJurisdictions"),
+    createdAt: v.number(),
+  })
+    .index("by_organizationalJurisdictionId_and_geographicJurisdictionId", [
+      "organizationalJurisdictionId",
+      "geographicJurisdictionId",
+    ])
+    .index("by_geographicJurisdictionId_and_organizationalJurisdictionId", [
+      "geographicJurisdictionId",
+      "organizationalJurisdictionId",
+    ]),
   legalResources: defineTable({
     jurisdictionId: v.id("jurisdictions"),
     type: v.union(
@@ -479,7 +563,7 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_operationId", ["operationId"]),
   featureFlags: defineTable({
-    key: v.literal("admin_panel"),
+    key: v.union(v.literal("admin_panel"), v.literal("unified_jurisdictions")),
     environment: v.string(),
     enabled: v.boolean(),
     updatedAt: v.number(),
@@ -495,11 +579,15 @@ export default defineSchema({
     // ISO 3166-1 alpha-2 jurisdiction code; absent on rows created before
     // multi-country support (treated as the default country).
     country: v.optional(v.string()),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    jurisdictionName: v.optional(v.string()),
+    jurisdictionKind: v.optional(jurisdictionKindValidator),
   })
     .index("by_user", ["userId"])
     .index("by_updatedAt", ["updatedAt"])
     .index("by_userId_and_updatedAt", ["userId", "updatedAt"])
-    .index("by_user_externalId", ["userId", "externalId"]),
+    .index("by_user_externalId", ["userId", "externalId"])
+    .index("by_jurisdictionId", ["jurisdictionId"]),
   dailyUsage: defineTable({
     userId: v.string(),
     // UTC day key, e.g. "2026-06-11".
@@ -536,6 +624,9 @@ export default defineSchema({
     ownerBinding: v.string(),
     sessionBinding: v.string(),
     jurisdictionCode: v.string(),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    jurisdictionName: v.optional(v.string()),
+    jurisdictionKind: v.optional(jurisdictionKindValidator),
     status: v.union(
       v.literal("issued"),
       v.literal("search_complete"),
@@ -550,13 +641,24 @@ export default defineSchema({
     searchLatencyMs: v.optional(v.number()),
     resultCount: v.optional(v.number()),
     claimNonceHash: v.optional(v.string()),
+    scopeSize: v.optional(v.number()),
+    retrievalPlanSize: v.optional(v.number()),
+    providerCallCount: v.optional(v.number()),
+    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
+    plannerLatencyMs: v.optional(v.number()),
+    contextDigest: v.optional(v.string()),
+    partialCoverage: v.optional(v.boolean()),
   })
     .index("by_tokenHash", ["tokenHash"])
-    .index("by_status_and_expiresAt", ["status", "expiresAt"]),
+    .index("by_status_and_expiresAt", ["status", "expiresAt"])
+    .index("by_jurisdictionId", ["jurisdictionId"]),
   queryRuns: defineTable({
     correlationId: v.string(),
     day: v.string(),
     jurisdictionCode: v.string(),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    jurisdictionName: v.optional(v.string()),
+    jurisdictionKind: v.optional(jurisdictionKindValidator),
     outcome: v.union(
       v.literal("success"),
       v.literal("failure"),
@@ -580,13 +682,24 @@ export default defineSchema({
     completedAt: v.number(),
     rollupStatus: v.union(v.literal("pending"), v.literal("processed")),
     rolledUpAt: v.optional(v.number()),
+    scopeSize: v.optional(v.number()),
+    retrievalPlanSize: v.optional(v.number()),
+    providerCallCount: v.optional(v.number()),
+    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
+    plannerLatencyMs: v.optional(v.number()),
+    contextDigest: v.optional(v.string()),
+    partialCoverage: v.optional(v.boolean()),
   })
     .index("by_correlationId", ["correlationId"])
     .index("by_rollupStatus_and_completedAt", ["rollupStatus", "completedAt"])
-    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"]),
+    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
+    .index("by_jurisdictionId", ["jurisdictionId"]),
   dailyMetrics: defineTable({
     day: v.string(),
     jurisdictionCode: v.string(),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    jurisdictionName: v.optional(v.string()),
+    jurisdictionKind: v.optional(jurisdictionKindValidator),
     totalQuestions: v.number(),
     successCount: v.number(),
     failureCount: v.number(),
@@ -603,15 +716,24 @@ export default defineSchema({
     p50UpperBoundMs: v.number(),
     p95UpperBoundMs: v.number(),
     updatedAt: v.number(),
+    scopeSize: v.optional(v.number()),
+    retrievalPlanSize: v.optional(v.number()),
+    providerCallCount: v.optional(v.number()),
+    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
+    plannerLatencyMs: v.optional(v.number()),
+    contextDigest: v.optional(v.string()),
+    partialCoverage: v.optional(v.boolean()),
   })
     .index("by_day", ["day"])
     .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
-    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"]),
+    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
+    .index("by_jurisdictionId", ["jurisdictionId"]),
   messages: defineTable({
     sessionId: v.id("chatSessions"),
     role: v.union(v.literal("user"), v.literal("assistant")),
     content: v.string(),
     clientId: v.optional(v.string()),
+    citations: v.optional(v.array(chatCitationValidator)),
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])

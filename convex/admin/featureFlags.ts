@@ -16,6 +16,27 @@ function readAdminEnvironment(): string | null {
 }
 
 /**
+ * The unified-jurisdictions rollout uses the same explicit environment
+ * selection as the administrative surface and fails closed on any ambiguous
+ * feature-flag state.
+ */
+export async function readUnifiedJurisdictionsEnabled(
+  ctx: QueryCtx,
+): Promise<boolean> {
+  const environment = readAdminEnvironment();
+  if (!environment) return false;
+
+  const flags = await ctx.db
+    .query("featureFlags")
+    .withIndex("by_key_and_environment", (q) =>
+      q.eq("key", "unified_jurisdictions").eq("environment", environment),
+    )
+    .take(2);
+
+  return flags.length === 1 && flags[0].enabled === true;
+}
+
+/**
  * The administrative surface is enabled only when its deployment gate and
  * its explicitly selected environment row are both enabled. An absent or
  * blank selector deliberately cannot fall back to another environment.

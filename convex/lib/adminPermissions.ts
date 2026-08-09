@@ -22,6 +22,8 @@ export type AdminRole = (typeof ADMIN_ROLES)[number];
 export const APPLICATION_PERMISSION_METADATA = {
   "jurisdiction:read": { access: "read" },
   "jurisdiction:write": { access: "write" },
+  "organization:read": { access: "read" },
+  "organization:write": { access: "write" },
   "resource:read": { access: "read" },
   "resource:write": { access: "write" },
   "document:read": { access: "read" },
@@ -55,6 +57,7 @@ export const ADMIN_PERMISSIONS = {
   super_admin: ["*:*"] as const,
   content_manager: [
     "jurisdiction:write",
+    "organization:write",
     "resource:write",
     "document:write",
     "document:submit",
@@ -82,6 +85,7 @@ export const ADMIN_PERMISSIONS = {
   ] as const,
   auditor: [
     "jurisdiction:read",
+    "organization:read",
     "resource:read",
     "document:read",
     "user:read",

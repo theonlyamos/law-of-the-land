@@ -14,6 +14,7 @@ import {
   isOpaqueTelemetryToken,
   verifyTelemetryServiceProof,
 } from "./lib/telemetryProof";
+import { isLegacyCountryCode } from "./lib/jurisdictionDomain";
 
 const CORRELATION_TTL_MS = 5 * 60_000;
 const CHAT_LEASE_MS = 2 * 60_000;
@@ -164,7 +165,12 @@ export const issueCorrelation = mutation({
       .query("jurisdictions")
       .withIndex("by_code", (q) => q.eq("code", jurisdictionCode))
       .take(2);
-    if (jurisdictions.length !== 1 || jurisdictions[0].status !== "enabled") {
+    if (
+      jurisdictions.length !== 1 ||
+      !isLegacyCountryCode(jurisdictions[0].code) ||
+      jurisdictions[0].code !== jurisdictionCode ||
+      jurisdictions[0].status !== "enabled"
+    ) {
       throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
     }
     const tokenHash = await hashOpaqueTelemetryValue(args.token);

@@ -41,6 +41,7 @@ import type * as lib_adminPermissions from "../lib/adminPermissions.js";
 import type * as lib_adminStepUp from "../lib/adminStepUp.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_email from "../lib/email.js";
+import type * as lib_jurisdictionDomain from "../lib/jurisdictionDomain.js";
 import type * as lib_jurisdictionEligibility from "../lib/jurisdictionEligibility.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
@@ -90,6 +91,7 @@ declare const fullApi: ApiFromModules<{
   "lib/adminStepUp": typeof lib_adminStepUp;
   "lib/audit": typeof lib_audit;
   "lib/email": typeof lib_email;
+  "lib/jurisdictionDomain": typeof lib_jurisdictionDomain;
   "lib/jurisdictionEligibility": typeof lib_jurisdictionEligibility;
   "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;

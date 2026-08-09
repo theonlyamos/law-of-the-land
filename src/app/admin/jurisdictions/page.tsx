@@ -21,6 +21,12 @@ function single(value: string | string[] | undefined) {
   return typeof value === "string" ? value : "";
 }
 
+function isLegacyJurisdiction(
+  row: Doc<"jurisdictions">,
+): row is Doc<"jurisdictions"> & { code: string } {
+  return typeof row.code === "string" && /^[A-Z]{2}$/.test(row.code);
+}
+
 export default async function JurisdictionsPage({ searchParams }: { searchParams: Promise<AdminTableSearchParams> }) {
   const parameters = await searchParams;
   const navigation = readAdminTableNavigation(parameters);
@@ -46,7 +52,10 @@ export default async function JurisdictionsPage({ searchParams }: { searchParams
       failed = true;
     }
   }
-  const rows = (result && "page" in result ? result.page : []) as Doc<"jurisdictions">[];
+  const rawRows = (result && "page" in result ? result.page : []) as Doc<"jurisdictions">[];
+  // Defense in depth for the server-side legacy projection until the ID-first
+  // administration surface replaces this country-code editor.
+  const rows = rawRows.filter(isLegacyJurisdiction);
 
   return (
     <div className="mx-auto max-w-[88rem]">

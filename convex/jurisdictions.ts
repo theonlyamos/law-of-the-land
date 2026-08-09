@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { internalQuery, query } from "./_generated/server";
+import { isLegacyCountryCode } from "./lib/jurisdictionDomain";
 import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
 
 const searchJurisdictionValidator = v.union(
@@ -44,14 +45,19 @@ export const getPublicByCode = internalQuery({
         q.eq("code", code).eq("status", "enabled"),
       )
       .take(2);
-    if (rows.length !== 1 || !isPublicJurisdictionEligible(rows[0])) {
+    if (
+      rows.length !== 1 ||
+      !isLegacyCountryCode(rows[0].code) ||
+      rows[0].code !== code ||
+      !isPublicJurisdictionEligible(rows[0])
+    ) {
       return null;
     }
     const jurisdiction = rows[0];
     const productionBucketId = jurisdiction.productionBucketId;
     if (!productionBucketId) return null;
     return {
-      code: jurisdiction.code,
+      code,
       name: jurisdiction.name,
       slug: jurisdiction.slug,
       enabled: true as const,
@@ -71,16 +77,18 @@ export const listPublicEnabled = query({
       .withIndex("by_status_and_name", (q) => q.eq("status", "enabled"))
       .take(MAX_PUBLIC_JURISDICTIONS + 1);
 
-    // More enabled rows than possible two-letter codes proves corruption.
-    // Fail closed rather than risk exposing a duplicate beyond the bounded read.
-    if (rows.length > MAX_PUBLIC_JURISDICTIONS) return [];
-
+    const legacyRows = rows.filter(
+      (row): row is typeof row & { code: string } => isLegacyCountryCode(row.code),
+    );
+    // More legacy rows than possible two-letter codes proves corruption.
+    // Code-less unified rows are intentionally invisible to this flag-off path.
+    if (legacyRows.length > MAX_PUBLIC_JURISDICTIONS) return [];
     const enabledRowsByCode = new Map<string, number>();
-    for (const row of rows) {
+    for (const row of legacyRows) {
       enabledRowsByCode.set(row.code, (enabledRowsByCode.get(row.code) ?? 0) + 1);
     }
 
-    return rows
+    return legacyRows
       .filter(
         (row) =>
           enabledRowsByCode.get(row.code) === 1 &&
