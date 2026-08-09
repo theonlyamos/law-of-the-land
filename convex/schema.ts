@@ -96,6 +96,7 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_userId_and_status", ["userId", "status"])
+    .index("by_organizationId_and_status", ["organizationId", "status"])
     .index("by_organizationId_and_userId", ["organizationId", "userId"]),
   organizationalJurisdictions: defineTable({
     jurisdictionId: v.id("jurisdictions"),

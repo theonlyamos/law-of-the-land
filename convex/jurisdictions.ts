@@ -2,6 +2,16 @@ import { ConvexError, v } from "convex/values";
 import { internalQuery, query } from "./_generated/server";
 import { isLegacyCountryCode } from "./lib/jurisdictionDomain";
 import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
+import { getAccessibleJurisdictionById } from "./lib/jurisdictionAccess";
+
+const accessibleJurisdictionValidator = v.object({
+  _id: v.id("jurisdictions"),
+  name: v.string(),
+  slug: v.string(),
+  status: v.literal("enabled"),
+  kind: v.union(v.literal("geographic"), v.literal("organizational")),
+  visibility: v.union(v.literal("public"), v.literal("members")),
+});
 
 const searchJurisdictionValidator = v.union(
   v.null(),
@@ -103,4 +113,11 @@ export const listPublicEnabled = query({
         left.code.localeCompare(right.code),
       );
   },
+});
+
+/** Returns the safe jurisdiction projection when the caller has server-derived access. */
+export const getAccessibleById = query({
+  args: { id: v.id("jurisdictions") },
+  returns: v.union(accessibleJurisdictionValidator, v.null()),
+  handler: async (ctx, args) => await getAccessibleJurisdictionById(ctx, args.id),
 });
