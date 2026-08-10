@@ -6,6 +6,7 @@ vi.mock("server-only", () => ({}));
 
 import {
   buildGovernedContext,
+  digestExactContext,
   parseGovernedContext,
   runBoundedRetrieval,
 } from "./research-limits";
@@ -112,6 +113,17 @@ describe("governed research limits", () => {
     expect(parsed.sources[1].content).toBe("Ancestor only.");
     expect(context.serialized.length).toBeLessThanOrEqual(120_000);
     expect(context.digest).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("hashes JS UTF-16 code units injectively for replacement characters and lone surrogates", async () => {
+    const replacement = "\uFFFD";
+    const loneSurrogate = "\uD800";
+
+    expect(await digestExactContext(replacement)).not.toBe(await digestExactContext(loneSurrogate));
+    const context = await buildGovernedContext([{ ...selected, content: `${replacement}\n\n${loneSurrogate}` }]);
+    expect(parseGovernedContext(context.serialized).sources[0].content).toBe(
+      `${replacement}\n\n${loneSurrogate}`,
+    );
   });
 
   it("reserves selected content, accounts for JSON escaping, and never splits a surrogate pair", async () => {

@@ -291,10 +291,20 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
     plan.filter((_item, index) => index > 0 && availability[index].status === "unconfigured")
       .map((item) => item.jurisdictionId),
   );
-  const providerFailures = new Set(
-    settlements.filter((item) => item.job.relation !== "selected" && item.status !== "fulfilled")
+  const rejectedProviderFailures = new Set(
+    settlements.filter((item) => item.job.relation !== "selected" && item.status === "rejected")
       .map((item) => item.job.jurisdictionId),
   );
+  const deadlineCoverageUnavailable = new Set(
+    selectedResult?.status === "fulfilled"
+      ? settlements.filter((item) => item.job.relation !== "selected" && item.status === "not_started")
+        .map((item) => item.job.jurisdictionId)
+      : [],
+  );
+  const providerFailures = new Set([
+    ...rejectedProviderFailures,
+    ...deadlineCoverageUnavailable,
+  ]);
   if (!selectedResult || selectedResult.status !== "fulfilled") {
     const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
     const data = {

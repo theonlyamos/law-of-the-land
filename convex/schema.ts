@@ -42,6 +42,7 @@ export default defineSchema({
     .index("by_code", ["code"])
     .index("by_code_and_status", ["code", "status"])
     .index("by_status_and_code", ["status", "code"])
+    .index("by_legacyCountryCode_and_status", ["legacyCountryCode", "status"])
     .index("by_slug", ["slug"])
     .index("by_status_and_name", ["status", "name"])
     .index("by_kind_and_status_and_name", ["kind", "status", "name"])

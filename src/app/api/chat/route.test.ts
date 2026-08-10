@@ -20,6 +20,7 @@ vi.mock("@google/genai", () => ({
 }));
 
 import { POST } from "./route";
+import { digestExactContext } from "@/lib/research-limits";
 
 const token = "a".repeat(43);
 const claimNonce = "b".repeat(43);
@@ -209,6 +210,26 @@ describe("POST /api/chat governed citations", () => {
     const response = await POST(request({ context: "x".repeat(120_001), jurisdictionId }));
     expect(response.status).toBe(400);
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a lone-surrogate context digest that differs from replacement-character context before Gemini", async () => {
+    const replacementContext = context.replace("Section 1 says the rule applies.", "\uFFFD");
+    const loneSurrogateContext = context.replace("Section 1 says the rule applies.", "\uD800");
+    const replacementDigest = await digestExactContext(replacementContext);
+    const loneSurrogateDigest = await digestExactContext(loneSurrogateContext);
+    expect(loneSurrogateDigest).not.toBe(replacementDigest);
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "telemetry:claimChatPhase") {
+        expect(args.contextDigest).toBe(loneSurrogateDigest);
+        throw new Error("TELEMETRY_CONTEXT_MISMATCH");
+      }
+      return { status: "finalized", correlationId: "safe-hash" };
+    });
+
+    const response = await POST(request({ context: loneSurrogateContext, jurisdictionId }));
+
+    expect(response.status).toBe(400);
     expect(aiMocks.sendMessage).not.toHaveBeenCalled();
   });
 

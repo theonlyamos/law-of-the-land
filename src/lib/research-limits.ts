@@ -110,9 +110,22 @@ function normalizeParagraphs(value: string): string[] {
     .filter(Boolean);
 }
 
-async function sha256(value: string): Promise<string> {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+async function sha256Utf16CodeUnits(domain: "context-v1" | "paragraph-v1", value: string): Promise<string> {
+  const framed = new ArrayBuffer(12 + (domain.length + value.length) * 2);
+  const view = new DataView(framed);
+  view.setUint32(0, 0x4c4f544c, false); // "LOTL", big-endian.
+  view.setUint16(4, 1, false);
+  view.setUint16(6, domain.length, false);
+  view.setUint32(8, value.length, false);
+  let offset = 12;
+  for (const input of [domain, value]) {
+    for (let index = 0; index < input.length; index += 1) {
+      view.setUint16(offset, input.charCodeAt(index), false);
+      offset += 2;
+    }
+  }
+  const digest = await crypto.subtle.digest("SHA-256", framed);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function serialize(sources: GovernedSource[]): string {
@@ -121,7 +134,12 @@ function serialize(sources: GovernedSource[]): string {
 
 function safePrefix(value: string, length: number): string {
   let end = Math.max(0, Math.min(value.length, length));
-  if (end > 0 && /[\uD800-\uDBFF]/u.test(value[end - 1])) end -= 1;
+  const lastIncluded = end > 0 ? value.charCodeAt(end - 1) : 0;
+  const firstOmitted = end < value.length ? value.charCodeAt(end) : 0;
+  if (
+    lastIncluded >= 0xd800 && lastIncluded <= 0xdbff
+    && firstOmitted >= 0xdc00 && firstOmitted <= 0xdfff
+  ) end -= 1;
   return value.slice(0, end);
 }
 
@@ -172,7 +190,7 @@ export async function buildGovernedContext(
   for (const input of inputs) {
     const retained: string[] = [];
     for (const paragraph of normalizeParagraphs(safePrefix(input.content, MAX_RAW_PROVIDER_CONTENT_LENGTH))) {
-      const digest = await sha256(paragraph);
+      const digest = await sha256Utf16CodeUnits("paragraph-v1", paragraph);
       if (seen.has(digest)) continue;
       seen.add(digest);
       retained.push(paragraph);
@@ -219,7 +237,7 @@ export async function buildGovernedContext(
   if (serialized.length > MAX_GOVERNED_CONTEXT_LENGTH) {
     throw new Error("GOVERNED_CONTEXT_LIMIT_EXCEEDED");
   }
-  return { serialized, digest: await sha256(serialized), sources };
+  return { serialized, digest: await sha256Utf16CodeUnits("context-v1", serialized), sources };
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]) {
@@ -262,5 +280,5 @@ export function parseGovernedContext(value: string): GovernedContextEnvelope {
 }
 
 export async function digestExactContext(value: string): Promise<string> {
-  return await sha256(value);
+  return await sha256Utf16CodeUnits("context-v1", value);
 }

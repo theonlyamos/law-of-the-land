@@ -448,8 +448,8 @@ export const resolveResearchSelection = query({
       const codeRows = country
         ? await ctx.db
             .query("jurisdictions")
-            .withIndex("by_code_and_status", (q) =>
-              q.eq("code", country).eq("status", "enabled"),
+            .withIndex("by_legacyCountryCode_and_status", (q) =>
+              q.eq("legacyCountryCode", country).eq("status", "enabled"),
             )
             .take(2)
         : [];

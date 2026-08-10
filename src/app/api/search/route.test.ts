@@ -409,6 +409,56 @@ describe("POST /api/search unified jurisdictions", () => {
     expect(response.status).toBe(500);
     expect(JSON.stringify(await response.json())).not.toContain("selected provider detail");
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain("selected provider detail");
+    const phase = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase",
+    )?.[1];
+    expect(phase).toMatchObject({
+      providerStatus: "failure",
+      providerCallCount: groundxMocks.searchContent.mock.calls.length,
+      supplementaryProviderFailureCount: 0,
+    });
     errorLog.mockRestore();
+  });
+
+  it("reports ordered partial coverage when a successful selected retrieval exhausts the total deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      enableUnified();
+      let startedCount = 0;
+      let resolveStarted!: () => void;
+      const allWorkersStarted = new Promise<void>((resolve) => { resolveStarted = resolve; });
+      groundxMocks.searchContent.mockImplementation(async ({ id }: { id: number }) => {
+        startedCount += 1;
+        if (startedCount === 3) resolveStarted();
+        await new Promise((resolve) => setTimeout(resolve, 25_000));
+        return { data: { search: { text: `Law from ${id}.` } } };
+      });
+
+      const pending = POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+      await allWorkersStarted;
+      await vi.advanceTimersByTimeAsync(25_000);
+      const response = await pending;
+      const payload = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(groundxMocks.searchContent).toHaveBeenCalledTimes(3);
+      expect(payload.partialCoverage).toEqual([{
+        jurisdictionId: "west-africa-id",
+        name: "West Africa",
+        kind: "geographic",
+        relation: "geographic_ancestor",
+      }]);
+      const phase = authMocks.fetchAuthMutation.mock.calls.find(
+        ([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase",
+      )?.[1];
+      expect(phase).toMatchObject({
+        providerStatus: "success",
+        providerCallCount: 3,
+        partialCoverage: true,
+        supplementaryProviderFailureCount: 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

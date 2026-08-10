@@ -294,7 +294,9 @@ describe("privacy-bounded query telemetry", () => {
     const otherId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
     const owner = await user(t, "unified-owner");
     const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
-    const digest = "d".repeat(64);
+    const replacementCharacterDigest = "d".repeat(64);
+    const loneSurrogateDigest = "e".repeat(64);
+    expect(replacementCharacterDigest).not.toBe(loneSurrogateDigest);
 
     await owner.client.mutation(issue, {
       token,
@@ -311,7 +313,7 @@ describe("privacy-bounded query telemetry", () => {
       providerCallCount: 2,
       plannerStatus: "planned" as const,
       plannerLatencyMs: 25,
-      contextDigest: digest,
+      contextDigest: replacementCharacterDigest,
       partialCoverage: true,
       configurationUnavailableCount: 1,
       supplementaryProviderFailureCount: 0,
@@ -320,26 +322,26 @@ describe("privacy-bounded query telemetry", () => {
       ...searchArgs,
       serviceProof: await proof([
         "search-jurisdiction-v1", token, "success", 125, 2, 4, 3, 2,
-        "planned", 25, digest, 1, 1, 0,
+        "planned", 25, replacementCharacterDigest, 1, 1, 0,
       ]),
     });
     await expect(owner.client.mutation(claim, {
       token,
       jurisdictionId: otherId,
-      contextDigest: digest,
-      serviceProof: await proof(["claim-jurisdiction-v1", token, otherId, "", digest]),
+      contextDigest: replacementCharacterDigest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, otherId, "", replacementCharacterDigest]),
     })).rejects.toThrow("TELEMETRY_JURISDICTION_MISMATCH");
     await expect(owner.client.mutation(claim, {
       token,
       jurisdictionId,
-      contextDigest: "e".repeat(64),
-      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", "e".repeat(64)]),
+      contextDigest: loneSurrogateDigest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", loneSurrogateDigest]),
     })).rejects.toThrow("TELEMETRY_CONTEXT_MISMATCH");
     const claimed = await owner.client.mutation(claim, {
       token,
       jurisdictionId,
-      contextDigest: digest,
-      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", digest]),
+      contextDigest: replacementCharacterDigest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", replacementCharacterDigest]),
     });
     await owner.client.mutation(finalize, {
       token,
@@ -354,7 +356,7 @@ describe("privacy-bounded query telemetry", () => {
       jurisdictionId,
       jurisdictionName: "World Health Organization",
       jurisdictionKind: "organizational",
-      contextDigest: digest,
+      contextDigest: replacementCharacterDigest,
       configurationUnavailableCount: 1,
       supplementaryProviderFailureCount: 0,
     });

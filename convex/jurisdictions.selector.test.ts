@@ -79,12 +79,12 @@ async function asUser(t: Backend, label: string) {
 
 async function insertGeographic(
   t: Backend,
-  input: { name: string; code?: string; status?: "draft" | "enabled"; visibility?: "public" | "members" },
+  input: { name: string; code?: string; legacyOnly?: boolean; status?: "draft" | "enabled"; visibility?: "public" | "members" },
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
-      ...(input.code ? { code: input.code } : {}),
+      ...(input.code && !input.legacyOnly ? { code: input.code } : {}),
       ...(input.code ? { legacyCountryCode: input.code } : {}),
       name: input.name,
       slug: input.name.toLowerCase().replaceAll(" ", "-"),
@@ -117,7 +117,7 @@ async function insertGeographic(
 describe("server-authorized research selection", () => {
   it("resolves an ID, a unique legacy code, and a matching pair to the same safe projection", async () => {
     const t = createBackend();
-    const id = await insertGeographic(t, { name: "Ghana", code: "GH" });
+    const id = await insertGeographic(t, { name: "Ghana", code: "GH", legacyOnly: true });
 
     const byId = await t.query(resolveResearchSelection, { jurisdictionId: id, country: undefined });
     const byCode = await t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "gh" });
@@ -134,6 +134,17 @@ describe("server-authorized research selection", () => {
       legacyCountryCode: "GH",
     });
     expect(JSON.stringify(byId)).not.toMatch(/productionBucket|SECRET_|visibility|organizationId/);
+  });
+
+  it("fails closed when a legacy snapshot identifies multiple enabled typed rows", async () => {
+    const t = createBackend();
+    const first = await insertGeographic(t, { name: "Ghana One", code: "GH", legacyOnly: true });
+    await insertGeographic(t, { name: "Ghana Two", code: "GH", legacyOnly: true });
+
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "GH" }))
+      .resolves.toBeNull();
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: first, country: "GH" }))
+      .resolves.toBeNull();
   });
 
   it("returns one unavailable result for mismatches, disabled rows, and inaccessible member rows", async () => {
