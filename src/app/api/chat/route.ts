@@ -254,7 +254,7 @@ export async function POST(request: Request) {
           assistantContent: result.result,
           citations: result.citations,
           ...bindings,
-          serviceProof: await createTelemetryServiceProof(citationClaimIssueProofParts({
+          serviceProof: await createTelemetryServiceProof(await citationClaimIssueProofParts({
             externalId: parsed.externalId!,
             jurisdictionId: parsed.jurisdictionId!,
             ...bindings,

@@ -7,6 +7,8 @@ import { api, components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { normalizePageSize } from "./chats";
 import authSchema from "./betterAuth/schema";
+import { citationClaimIssueProofParts, createCitationClaimBindings } from "./lib/chatCitationClaim";
+import { createTelemetryServiceProof } from "./lib/telemetryProof";
 import schema from "./schema";
 
 const modules = Object.fromEntries(
@@ -38,68 +40,23 @@ type Citation = {
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
 };
 
-function base64url(bytes: ArrayBuffer) {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
-}
-
-async function testHmac(parts: readonly (string | number)[]) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(CLAIM_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return base64url(await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(parts.map((part) => `${String(part).length}:${part}`).join("|")),
-  ));
-}
-
-async function citationBindings(clientId: string, content: string, citations: Citation[]) {
-  const clientIdBinding = await testHmac(["chat-citation-client-id-v1", clientId]);
-  const contentBinding = await testHmac(["chat-citation-content-v1", content]);
-  const citationParts: (string | number)[] = ["chat-citation-dto-v1", citations.length];
-  for (const citation of citations) citationParts.push(
-    citation.label,
-    citation.jurisdictionId,
-    citation.jurisdictionName,
-    citation.jurisdictionKind,
-    citation.relation,
-  );
-  return {
-    clientIdBinding,
-    contentBinding,
-    orderedCitationBinding: await testHmac(citationParts),
-  };
-}
-
 async function issueClaim(
   client: ReturnType<TestConvex<typeof schema>["withIdentity"]>,
   input: { externalId: string; jurisdictionId: Id<"jurisdictions">; clientId: string; content: string; citations: Citation[] },
 ) {
-  const bindings = await citationBindings(input.clientId, input.content, input.citations);
-  const serviceProof = await testHmac([
-    "issue-chat-citation-claim-v1",
-    input.externalId,
-    input.jurisdictionId,
-    bindings.clientIdBinding,
-    bindings.contentBinding,
-    bindings.orderedCitationBinding,
-  ]);
+  const bindings = await createCitationClaimBindings(input.clientId, input.content, input.citations);
+  const serviceProof = await createTelemetryServiceProof(await citationClaimIssueProofParts({
+    externalId: input.externalId,
+    jurisdictionId: input.jurisdictionId,
+    ...bindings,
+  }));
   return await client.mutation(issueCitationClaim, {
     externalId: input.externalId,
     jurisdictionId: input.jurisdictionId,
     assistantClientId: input.clientId,
     assistantContent: input.content,
     citations: input.citations,
-    assistantClientIdBinding: bindings.clientIdBinding,
-    assistantContentBinding: bindings.contentBinding,
-    orderedCitationBinding: bindings.orderedCitationBinding,
+    ...bindings,
     serviceProof,
   });
 }
@@ -338,6 +295,77 @@ describe("chat pagination", () => {
     expect(messages.page.map((message) => message.content)).toEqual(["Bound answer"]);
   });
 
+  it.each(["assistant content", "citation label"] as const)(
+    "distinguishes a lone surrogate from its replacement character in %s bindings",
+    async (field) => {
+      const t = createTestBackend();
+      process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+      await enableUnifiedJurisdictions(t);
+      const owner = await createUser(t, `claim-unicode-${crypto.randomUUID()}@example.com`);
+      const jurisdictionId = await createGeographicJurisdiction(t);
+      const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+      await client.mutation(api.chats.ensure, { externalId: "unicode-chat", jurisdictionId });
+      const originalContent = field === "assistant content" ? "\uD800" : "Bound answer";
+      const forgedContent = field === "assistant content" ? "\uFFFD" : originalContent;
+      const originalCitations: Citation[] = [{
+        label: field === "citation label" ? "\uD800" : "Selected",
+        jurisdictionId,
+        jurisdictionName: "Ghana",
+        jurisdictionKind: "geographic",
+        relation: "selected",
+      }];
+      const forgedCitations = field === "citation label"
+        ? [{ ...originalCitations[0], label: "\uFFFD" }]
+        : originalCitations;
+      const claim = await issueClaim(client, {
+        externalId: "unicode-chat",
+        jurisdictionId,
+        clientId: "unicode-assistant",
+        content: originalContent,
+        citations: originalCitations,
+      });
+
+      await expect(client.mutation(api.chats.appendMessages, {
+        externalId: "unicode-chat",
+        jurisdictionId,
+        lastMessage: "Rejected collision",
+        messages: [{
+          role: "assistant",
+          content: forgedContent,
+          clientId: "unicode-assistant",
+          citations: forgedCitations,
+          citationClaim: claim.citationClaim,
+        }],
+      })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+      expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
+      const claims = await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2));
+      expect(claims).toHaveLength(1);
+      expect(Object.keys(claims[0]).sort()).toEqual([
+        "_creationTime",
+        "_id",
+        "assistantClientIdBinding",
+        "assistantContentBinding",
+        "chatSessionId",
+        "expiresAt",
+        "jurisdictionId",
+        "orderedCitationBinding",
+        "ownerBinding",
+        "sessionBinding",
+        "tokenHash",
+      ]);
+    },
+  );
+
+  it("rejects a non-ASCII claim binding before constructing HMAC proof parts", async () => {
+    await expect(citationClaimIssueProofParts({
+      externalId: "claim-chat",
+      jurisdictionId: "jurisdiction-id",
+      assistantClientIdBinding: `\uD800${"a".repeat(42)}`,
+      assistantContentBinding: "b".repeat(43),
+      orderedCitationBinding: "c".repeat(43),
+    })).rejects.toThrow("INVALID_CHAT_CITATION_BINDING");
+  });
+
   it.each<[string, { content?: string; clientId?: string; citations?: "label" | "order" }]>([
     ["content", { content: "Forged answer" }],
     ["client id", { clientId: "forged-client" }],
@@ -558,6 +586,160 @@ describe("chat pagination", () => {
       .rejects.toThrow("That jurisdiction is not available");
   });
 
+  it("rejects citation claim issuance for an accessible stored-ID chat while rollout is off", async () => {
+    const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `rollback-claim-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "rollback-claim", jurisdictionId });
+    await t.run(async (ctx) => {
+      const flag = await ctx.db.query("featureFlags")
+        .withIndex("by_key_and_environment", (q) =>
+          q.eq("key", "unified_jurisdictions").eq("environment", "test"))
+        .unique();
+      await ctx.db.patch(flag!._id, { enabled: false, updatedAt: Date.now() });
+    });
+    const citations: Citation[] = [{
+      label: "Selected",
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      relation: "selected",
+    }];
+
+    await expect(issueClaim(client, {
+      externalId: "rollback-claim",
+      jurisdictionId,
+      clientId: "blocked-claim",
+      content: "Blocked",
+      citations,
+    })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    expect(await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2))).toEqual([]);
+  });
+
+  it.each(["user", "assistant"] as const)(
+    "rejects an unsaved %s message for an accessible stored-ID chat while rollout is off",
+    async (role) => {
+      const t = createTestBackend();
+      process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+      await enableUnifiedJurisdictions(t);
+      const owner = await createUser(t, `rollback-${role}-${crypto.randomUUID()}@example.com`);
+      const jurisdictionId = await createGeographicJurisdiction(t);
+      const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+      await client.mutation(api.chats.ensure, { externalId: `rollback-${role}`, jurisdictionId });
+      await client.mutation(api.chats.appendMessages, {
+        externalId: `rollback-${role}`,
+        jurisdictionId,
+        lastMessage: "Baseline",
+        messages: [{ role: "user", content: "Baseline", clientId: "baseline", createdAt: 10 }],
+      });
+      const citations: Citation[] = [{
+        label: "Selected",
+        jurisdictionId,
+        jurisdictionName: "Ghana",
+        jurisdictionKind: "geographic",
+        relation: "selected",
+      }];
+      const pendingClaim = role === "assistant"
+        ? await issueClaim(client, {
+            externalId: `rollback-${role}`,
+            jurisdictionId,
+            clientId: "unsaved",
+            content: "Unsaved",
+            citations,
+          })
+        : null;
+      await t.run(async (ctx) => {
+        const flag = await ctx.db.query("featureFlags")
+          .withIndex("by_key_and_environment", (q) =>
+            q.eq("key", "unified_jurisdictions").eq("environment", "test"))
+          .unique();
+        await ctx.db.patch(flag!._id, { enabled: false, updatedAt: Date.now() });
+      });
+      const message = role === "assistant"
+        ? {
+            role,
+            content: "Unsaved",
+            clientId: "unsaved",
+            citations,
+            citationClaim: pendingClaim!.citationClaim,
+          }
+        : { role, content: "Unsaved", clientId: "unsaved" };
+
+      await expect(client.mutation(api.chats.appendMessages, {
+        externalId: `rollback-${role}`,
+        jurisdictionId,
+        title: "Must not patch",
+        lastMessage: "Must not patch",
+        messages: [message],
+      })).rejects.toThrow("That jurisdiction is not available");
+      const stored = await client.query(api.chats.listMessages, {
+        externalId: `rollback-${role}`,
+        paginationOpts: { numItems: 20, cursor: null },
+      });
+      expect(stored.page.map((row) => row.content)).toEqual(["Baseline"]);
+      await expect(client.query(api.chats.getByExternalId, { externalId: `rollback-${role}` }))
+        .resolves.toMatchObject({ title: "New chat", lastMessage: "Baseline", messageCount: 1 });
+      expect(await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2)))
+        .toHaveLength(role === "assistant" ? 1 : 0);
+    },
+  );
+
+  it("allows exact zero-write retries for a stored-ID chat while rollout is off", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `rollback-retry-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "rollback-retry", jurisdictionId });
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "rollback-retry",
+      jurisdictionId,
+      lastMessage: "Saved",
+      messages: [{ role: "user", content: "Saved", clientId: "saved", createdAt: 100 }],
+    });
+    await t.run(async (ctx) => {
+      const flag = await ctx.db.query("featureFlags")
+        .withIndex("by_key_and_environment", (q) =>
+          q.eq("key", "unified_jurisdictions").eq("environment", "test"))
+        .unique();
+      await ctx.db.patch(flag!._id, { enabled: false, updatedAt: Date.now() });
+    });
+    const sessionBeforeRetry = await t.run((ctx) => ctx.db.query("chatSessions")
+      .withIndex("by_user_externalId", (q) =>
+        q.eq("userId", owner.userId).eq("externalId", "rollback-retry"))
+      .unique());
+
+    for (const createdAt of [undefined, 100]) {
+      await expect(client.mutation(api.chats.appendMessages, {
+        externalId: "rollback-retry",
+        jurisdictionId,
+        title: "Must not patch",
+        lastMessage: "Must not patch",
+        messages: [{
+          role: "user",
+          content: "Saved",
+          clientId: "saved",
+          ...(createdAt === undefined ? {} : { createdAt }),
+        }],
+      })).resolves.toEqual({ id: "rollback-retry" });
+    }
+    const messages = await client.query(api.chats.listMessages, {
+      externalId: "rollback-retry",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(messages.page).toHaveLength(1);
+    const sessionAfterRetry = await t.run((ctx) => ctx.db.query("chatSessions")
+      .withIndex("by_user_externalId", (q) =>
+        q.eq("userId", owner.userId).eq("externalId", "rollback-retry"))
+      .unique());
+    expect(sessionAfterRetry).toEqual(sessionBeforeRetry);
+    await expect(client.query(api.chats.getByExternalId, { externalId: "rollback-retry" }))
+      .resolves.toMatchObject({ title: "New chat", lastMessage: "Saved", messageCount: 1 });
+  });
+
   it("removes every member-only chat boundary immediately when membership becomes inactive", async () => {
     const t = createTestBackend();
     await enableUnifiedJurisdictions(t);
@@ -611,6 +793,47 @@ describe("chat pagination", () => {
     });
     expect(stored.map((message) => message.content)).toEqual(["Saved"]);
   });
+
+  it.each(["citations", "citationClaim"] as const)(
+    "rejects legacy local migration messages containing %s with zero writes",
+    async (field) => {
+      const t = createTestBackend();
+      const owner = await createUser(t, `migration-${crypto.randomUUID()}@example.com`);
+      const jurisdictionId = await createGeographicJurisdiction(t);
+      const message = field === "citations"
+        ? {
+            role: "assistant" as const,
+            content: "Untrusted local citation",
+            citations: [{
+              label: "Forged",
+              jurisdictionId,
+              jurisdictionName: "Ghana",
+              jurisdictionKind: "geographic" as const,
+              relation: "selected" as const,
+            }],
+          }
+        : {
+            role: "assistant" as const,
+            content: "Untrusted local claim",
+            citationClaim: "untrusted-local-claim",
+          };
+
+      await expect(t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId })
+        .mutation(api.chats.migrateFromLocal, {
+          sessions: [{
+            externalId: `migration-${field}`,
+            title: "Local migration",
+            lastMessage: message.content,
+            messageCount: 1,
+            updatedAt: 1,
+            messages: [message],
+          }],
+        } as never)).rejects.toThrow();
+      expect(await t.run((ctx) => ctx.db.query("chatSessions").take(2))).toEqual([]);
+      expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
+    },
+  );
+
   it("normalizes every caller page size to a finite positive integer within the cap", () => {
     expect(normalizePageSize(Number.NaN, 30)).toBe(1);
     expect(normalizePageSize(Number.POSITIVE_INFINITY, 30)).toBe(1);
@@ -762,6 +985,82 @@ describe("chat pagination", () => {
       [...page.page.map((message) => message.creationTime)].sort((a, b) => a - b),
     );
   });
+
+  it("requires a supplied retry timestamp to exactly match the stored client-ID row", async () => {
+    const t = createTestBackend();
+    const owner = await createUser(t, `created-at-retry-${crypto.randomUUID()}@example.com`);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "created-at-retry", country: "GH" });
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "created-at-retry",
+      country: "GH",
+      lastMessage: "Original",
+      messages: [{ role: "user", content: "Original", clientId: "same-client", createdAt: 100 }],
+    });
+
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "created-at-retry",
+      country: "GH",
+      title: "Must not patch",
+      lastMessage: "Must not patch",
+      messages: [{ role: "user", content: "Original", clientId: "same-client", createdAt: 101 }],
+    })).rejects.toThrow("CHAT_CLIENT_ID_CONFLICT");
+    for (const createdAt of [undefined, 100]) {
+      await expect(client.mutation(api.chats.appendMessages, {
+        externalId: "created-at-retry",
+        country: "GH",
+        title: "Must not patch",
+        lastMessage: "Must not patch",
+        messages: [{
+          role: "user",
+          content: "Original",
+          clientId: "same-client",
+          ...(createdAt === undefined ? {} : { createdAt }),
+        }],
+      })).resolves.toEqual({ id: "created-at-retry" });
+    }
+    const messages = await client.query(api.chats.listMessages, {
+      externalId: "created-at-retry",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(messages.page).toHaveLength(1);
+    expect(messages.page[0].createdAt).toBe(100);
+    await expect(client.query(api.chats.getByExternalId, { externalId: "created-at-retry" }))
+      .resolves.toMatchObject({ title: "New chat", lastMessage: "Original", messageCount: 1 });
+  });
+
+  it.each(["identical", "conflicting"] as const)(
+    "%s new client IDs in one append batch preserve the idempotency invariant",
+    async (variant) => {
+      const t = createTestBackend();
+      const owner = await createUser(t, `same-batch-${variant}-${crypto.randomUUID()}@example.com`);
+      const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+      await client.mutation(api.chats.ensure, { externalId: `same-batch-${variant}`, country: "GH" });
+      const first = { role: "user" as const, content: "First", clientId: "same-client", createdAt: 100 };
+      const second = variant === "identical" ? { ...first } : { ...first, content: "Conflicting" };
+      const append = client.mutation(api.chats.appendMessages, {
+        externalId: `same-batch-${variant}`,
+        country: "GH",
+        lastMessage: second.content,
+        messages: [first, second],
+      });
+
+      if (variant === "conflicting") await expect(append).rejects.toThrow("CHAT_CLIENT_ID_CONFLICT");
+      else await expect(append).resolves.toEqual({ id: "same-batch-identical" });
+      const messages = await client.query(api.chats.listMessages, {
+        externalId: `same-batch-${variant}`,
+        paginationOpts: { numItems: 20, cursor: null },
+      });
+      expect(messages.page.map((row) => row.content)).toEqual(
+        variant === "identical" ? ["First"] : [],
+      );
+      await expect(client.query(api.chats.getByExternalId, { externalId: `same-batch-${variant}` }))
+        .resolves.toMatchObject({
+          messageCount: variant === "identical" ? 1 : 0,
+          lastMessage: variant === "identical" ? "First" : "",
+        });
+    },
+  );
 
   it("deletes messages through a bounded internal continuation after hiding the owned session", async () => {
     vi.useFakeTimers();

@@ -20,6 +20,7 @@ import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
 import {
   citationClaimIssueProofParts,
   createCitationClaimBindings,
+  isCitationClaimBinding,
   type ClaimCitation,
 } from "./lib/chatCitationClaim";
 import {
@@ -44,6 +45,21 @@ const messageValidator = v.union(
     createdAt: v.optional(v.number()),
     citations: v.optional(v.array(chatCitationValidator)),
     citationClaim: v.optional(v.string()),
+  }),
+);
+
+const legacyLocalMessageValidator = v.union(
+  v.object({
+    role: v.literal("user"),
+    content: v.string(),
+    clientId: v.optional(v.string()),
+    createdAt: v.optional(v.number()),
+  }),
+  v.object({
+    role: v.literal("assistant"),
+    content: v.string(),
+    clientId: v.optional(v.string()),
+    createdAt: v.optional(v.number()),
   }),
 );
 
@@ -364,6 +380,31 @@ function sameCitationSnapshots(
   });
 }
 
+function samePendingMessage(
+  left: {
+    role: "user" | "assistant";
+    content: string;
+    createdAt?: number;
+    citations?: Doc<"messages">["citations"];
+  },
+  right: {
+    role: "user" | "assistant";
+    content: string;
+    createdAt?: number;
+    citations?: Doc<"messages">["citations"];
+  },
+): boolean {
+  return left.role === right.role &&
+    left.content === right.content &&
+    (left.createdAt === undefined
+      ? right.createdAt === undefined
+      : right.createdAt !== undefined && Object.is(left.createdAt, right.createdAt)) &&
+    sameCitationSnapshots(
+      left.role === "assistant" ? left.citations : undefined,
+      right.role === "assistant" ? right.citations : undefined,
+    );
+}
+
 export function normalizePageSize(numItems: number, maxPageSize: number): number {
   if (!Number.isFinite(numItems) || numItems <= 0) return 1;
   return Math.min(maxPageSize, Math.max(1, Math.floor(numItems)));
@@ -424,9 +465,14 @@ export const issueCitationClaim = mutation({
       assistantContentBinding: args.assistantContentBinding,
       orderedCitationBinding: args.orderedCitationBinding,
     };
+    if (!isCitationClaimBinding(suppliedBindings.assistantClientIdBinding) ||
+      !isCitationClaimBinding(suppliedBindings.assistantContentBinding) ||
+      !isCitationClaimBinding(suppliedBindings.orderedCitationBinding)) {
+      invalidCitationClaim();
+    }
     if (!(await verifyTelemetryServiceProof(
       args.serviceProof,
-      citationClaimIssueProofParts({ externalId: args.externalId, jurisdictionId: args.jurisdictionId, ...suppliedBindings }),
+      await citationClaimIssueProofParts({ externalId: args.externalId, jurisdictionId, ...suppliedBindings }),
     ))) invalidCitationClaim();
     const expectedBindings = await createCitationClaimBindings(
       args.assistantClientId,
@@ -446,6 +492,7 @@ export const issueCitationClaim = mutation({
     if (!session || session.jurisdictionId !== jurisdictionId || !(await canAccessSession(ctx, session))) {
       invalidCitationClaim();
     }
+    if (!(await readUnifiedJurisdictionsEnabled(ctx))) invalidCitationClaim();
     await validateCitations(ctx, session, [{ role: "assistant", citations: args.citations }]);
     const principal = await citationClaimPrincipal(ctx);
     const citationClaim = createOpaqueTelemetryToken();
@@ -740,10 +787,18 @@ export const appendMessages = mutation({
       if (!(await canAccessSession(ctx, session))) unavailable();
       assertSelectionMatches(session, selectionArgs);
     }
-    // Skip messages that were already saved (retries, double-submits).
-    let inserted = 0;
+    // Resolve every retry before any write or one-use claim consumption.
+    const unsavedMessages: typeof args.messages = [];
+    const pendingByClientId = new Map<string, (typeof args.messages)[number]>();
     for (const message of args.messages) {
       if (message.clientId) {
+        const pending = pendingByClientId.get(message.clientId);
+        if (pending) {
+          if (!samePendingMessage(pending, message)) {
+            throw new ConvexError("CHAT_CLIENT_ID_CONFLICT");
+          }
+          continue;
+        }
         const existing = await ctx.db
           .query("messages")
           .withIndex("by_session_clientId", (q) =>
@@ -752,13 +807,21 @@ export const appendMessages = mutation({
           .unique();
         if (existing) {
           if (existing.role !== message.role || existing.content !== message.content ||
+            (message.createdAt !== undefined && !Object.is(existing.createdAt, message.createdAt)) ||
             !sameCitationSnapshots(existing.citations, message.role === "assistant" ? message.citations : undefined)) {
             throw new ConvexError("CHAT_CLIENT_ID_CONFLICT");
           }
           continue;
         }
+        pendingByClientId.set(message.clientId, message);
       }
+      unsavedMessages.push(message);
+    }
 
+    if (unsavedMessages.length === 0) return { id: session.externalId };
+    if (session.jurisdictionId !== undefined && !unified) unavailable();
+
+    for (const message of unsavedMessages) {
       await validateCitations(ctx, session, [message]);
       if (message.role === "assistant" && message.citations !== undefined) {
         await consumeCitationClaim(ctx, session, {
@@ -779,15 +842,12 @@ export const appendMessages = mutation({
         citations: message.role === "assistant" ? message.citations : undefined,
         createdAt: message.createdAt ?? Date.now(),
       });
-      inserted += 1;
     }
-
-    if (inserted === 0) return { id: session.externalId };
 
     await ctx.db.patch(session._id, {
       title: args.title ?? session.title,
       lastMessage: args.lastMessage,
-      messageCount: session.messageCount + inserted,
+      messageCount: session.messageCount + unsavedMessages.length,
       updatedAt: Date.now(),
     });
 
@@ -854,7 +914,7 @@ export const migrateFromLocal = mutation({
         lastMessage: v.string(),
         messageCount: v.number(),
         updatedAt: v.number(),
-        messages: v.array(messageValidator),
+        messages: v.array(legacyLocalMessageValidator),
       })
     ),
   },
@@ -888,7 +948,6 @@ export const migrateFromLocal = mutation({
           role: message.role,
           content: message.content,
           clientId: message.clientId,
-          citations: message.role === "assistant" ? message.citations : undefined,
           createdAt: message.createdAt ?? localSession.updatedAt,
         });
       }
