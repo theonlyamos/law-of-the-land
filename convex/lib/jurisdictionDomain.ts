@@ -269,3 +269,18 @@ export function projectJurisdictionVisibility(
 export function isLegacyCountryCode(value: string | undefined): value is string {
   return value !== undefined && /^[A-Z]{2}$/.test(value);
 }
+
+export function normalizeUniqueJurisdictionIds(
+  values: readonly string[],
+  normalize: (value: string) => Id<"jurisdictions"> | null,
+): Id<"jurisdictions">[] {
+  const normalized = values.map(normalize);
+  if (normalized.some((id) => id === null)) {
+    throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
+  }
+  const ids = normalized as Id<"jurisdictions">[];
+  if (new Set(ids).size !== ids.length) {
+    throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
+  }
+  return ids;
+}

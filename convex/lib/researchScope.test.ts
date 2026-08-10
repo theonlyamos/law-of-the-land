@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
+import { MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS } from "./jurisdictionDomain";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -343,5 +344,314 @@ describe("authorized research scope", () => {
         geographicHints: ["a", "b", "c", "d"],
       }),
     ).rejects.toThrow("INVALID_GEOGRAPHIC_HINTS");
+  });
+
+  it("makes missing and existing member-only rows indistinguishable during membership overflow", async () => {
+    const t = createBackend();
+    const member = await asUser(t, "overflow-member");
+    const existing = await insertOrganization(t, {
+      visibility: "members",
+      scopeMode: "global",
+    });
+    const missingId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await ctx.db.insert("jurisdictions", {
+        name: "Deleted",
+        slug: `deleted-${crypto.randomUUID()}`,
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "organizational",
+        visibility: "members",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.delete(id);
+      return id;
+    });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index <= MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS; index += 1) {
+        const organizationId = index === 0
+          ? existing.organizationId
+          : await ctx.db.insert("organizations", {
+              name: `Overflow ${index}`,
+              slug: `overflow-${index}-${crypto.randomUUID()}`,
+              class: "other",
+              status: "active",
+              createdBy: "fixture",
+              updatedBy: "fixture",
+              createdAt: now,
+              updatedAt: now,
+            });
+        await ctx.db.insert("organizationMemberships", {
+          organizationId,
+          userId: member.userId,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    for (const jurisdictionId of [missingId, existing.jurisdictionId]) {
+      await expect(member.client.query(resolveResearchScope, {
+        jurisdictionId,
+        geographicHints: [],
+      })).rejects.toThrow("JURISDICTION_ACCESS_DENIED");
+    }
+  });
+
+  it("maps duplicate membership corruption to the same public access denial", async () => {
+    const t = createBackend();
+    const member = await asUser(t, "duplicate-member");
+    const existing = await insertOrganization(t, {
+      visibility: "members",
+      scopeMode: "global",
+    });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 2; index += 1) {
+        await ctx.db.insert("organizationMemberships", {
+          organizationId: existing.organizationId,
+          userId: member.userId,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    await expect(member.client.query(resolveResearchScope, {
+      jurisdictionId: existing.jurisdictionId,
+      geographicHints: [],
+    })).rejects.toThrow("JURISDICTION_ACCESS_DENIED");
+  });
+
+  it.each([
+    "missing",
+    "disabled",
+    "wrong-kind",
+    "duplicate-profile",
+    "invalid-level",
+  ])("stops before a %s ancestor without skipping across it", async (corruption) => {
+    const t = createBackend();
+    const country = await insertGeographic(t, { name: "Country", level: "country" });
+    const town = await insertGeographic(t, {
+      name: "Town",
+      level: "town",
+      parentJurisdictionId: country.jurisdictionId,
+    });
+    await t.run(async (ctx) => {
+      if (corruption === "missing") await ctx.db.delete(country.jurisdictionId);
+      if (corruption === "disabled") await ctx.db.patch(country.jurisdictionId, { status: "archived" });
+      if (corruption === "wrong-kind") await ctx.db.patch(country.jurisdictionId, { kind: "organizational" });
+      if (corruption === "invalid-level") await ctx.db.patch(country.profileId, { level: "town" });
+      if (corruption === "duplicate-profile") {
+        const now = Date.now();
+        await ctx.db.insert("geographicJurisdictions", {
+          jurisdictionId: country.jurisdictionId,
+          googlePlaceId: `duplicate-${crypto.randomUUID()}`,
+          level: "country",
+          latitude: 0,
+          longitude: 0,
+          formattedAddress: "Duplicate Country",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    const scope = await t.query(resolveResearchScope, {
+      jurisdictionId: town.jurisdictionId,
+      geographicHints: [],
+    });
+    expect(scope.items.map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual([town.jurisdictionId]);
+  });
+
+  it("terminates an actual stored parent cycle without duplicating an item", async () => {
+    const t = createBackend();
+    const region = await insertGeographic(t, { name: "Region", level: "region" });
+    const town = await insertGeographic(t, {
+      name: "Town",
+      level: "town",
+      parentJurisdictionId: region.jurisdictionId,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(region.profileId, {
+        parentJurisdictionId: town.jurisdictionId,
+      });
+    });
+    const scope = await t.query(resolveResearchScope, {
+      jurisdictionId: town.jurisdictionId,
+      geographicHints: [],
+    });
+    expect(scope.items.map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual([town.jurisdictionId, region.jurisdictionId]);
+  });
+
+  it.each(["inactive", "global-linked", "linked-empty", "duplicate-links"])(
+    "fails closed for %s organizational scope state",
+    async (corruption) => {
+      const t = createBackend();
+      const geography = await insertGeographic(t, { name: "Ghana", level: "country" });
+      const organization = await insertOrganization(t, {
+        visibility: "public",
+        scopeMode: corruption === "linked-empty" || corruption === "duplicate-links"
+          ? "linked_geographies"
+          : "global",
+      });
+      await t.run(async (ctx) => {
+        if (corruption === "inactive") {
+          await ctx.db.patch(organization.organizationId, { status: "archived" });
+        }
+        if (corruption === "global-linked") {
+          await ctx.db.insert("organizationGeographicScopes", {
+            organizationalJurisdictionId: organization.profileId,
+            geographicJurisdictionId: geography.profileId,
+            createdAt: Date.now(),
+          });
+        }
+        if (corruption === "duplicate-links") {
+          for (let index = 0; index < 2; index += 1) {
+            await ctx.db.insert("organizationGeographicScopes", {
+              organizationalJurisdictionId: organization.profileId,
+              geographicJurisdictionId: geography.profileId,
+              createdAt: Date.now(),
+            });
+          }
+        }
+      });
+      await expect(t.query(resolveResearchScope, {
+        jurisdictionId: organization.jurisdictionId,
+        geographicHints: [],
+      })).rejects.toThrow("JURISDICTION_SCOPE_STATE_INVALID");
+    },
+  );
+
+  it("rejects an eleven-row alias overflow and a stale alias target", async () => {
+    const overflowBackend = createBackend();
+    const place = await insertGeographic(overflowBackend, { name: "Accra", level: "country" });
+    const organization = await insertOrganization(overflowBackend, {
+      visibility: "public",
+      scopeMode: "global",
+    });
+    for (let index = 0; index < 11; index += 1) {
+      await addAlias(overflowBackend, place.jurisdictionId, "accra");
+    }
+    const overflow = await overflowBackend.query(resolveResearchScope, {
+      jurisdictionId: organization.jurisdictionId,
+      geographicHints: ["Accra"],
+    });
+    expect(overflow.items).toHaveLength(1);
+
+    const staleBackend = createBackend();
+    const stalePlace = await insertGeographic(staleBackend, { name: "Stale", level: "country" });
+    await addAlias(staleBackend, stalePlace.jurisdictionId, "stale");
+    const staleOrganization = await insertOrganization(staleBackend, {
+      visibility: "public",
+      scopeMode: "global",
+    });
+    await staleBackend.run(async (ctx) => await ctx.db.delete(stalePlace.jurisdictionId));
+    const stale = await staleBackend.query(resolveResearchScope, {
+      jurisdictionId: staleOrganization.jurisdictionId,
+      geographicHints: ["Stale"],
+    });
+    expect(stale.items).toHaveLength(1);
+  });
+
+  it("ignores malformed and overlong hints while canonical duplicates expand only once", async () => {
+    const t = createBackend();
+    const accra = await insertGeographic(t, { name: "Accra", level: "country" });
+    await addAlias(t, accra.jurisdictionId, "accra");
+    const organization = await insertOrganization(t, {
+      visibility: "public",
+      scopeMode: "global",
+    });
+    const ignored = await t.query(resolveResearchScope, {
+      jurisdictionId: organization.jurisdictionId,
+      geographicHints: ["   ", "x".repeat(201)],
+    });
+    expect(ignored.items).toHaveLength(1);
+    const deduplicated = await t.query(resolveResearchScope, {
+      jurisdictionId: organization.jurisdictionId,
+      geographicHints: ["Accra", "  ACCRA  "],
+    });
+    expect(deduplicated.items.map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual([organization.jurisdictionId, accra.jurisdictionId]);
+  });
+
+  it("preserves three-hint order, deduplicates shared ancestors, and hides provider state", async () => {
+    const t = createBackend();
+    const country = await insertGeographic(t, { name: "Ghana", level: "country" });
+    const places = [];
+    for (const name of ["Accra", "Tema", "Ada"]) {
+      const place = await insertGeographic(t, {
+        name,
+        level: "town",
+        parentJurisdictionId: country.jurisdictionId,
+        productionBucketId: `SECRET_BUCKET_${name}`,
+      });
+      await addAlias(t, place.jurisdictionId, name.toLowerCase());
+      places.push(place);
+    }
+    const organization = await insertOrganization(t, {
+      visibility: "public",
+      scopeMode: "global",
+    });
+    const scope = await t.query(resolveResearchScope, {
+      jurisdictionId: organization.jurisdictionId,
+      geographicHints: ["Tema", "Accra", "Ada"],
+    });
+    expect(scope.items.map((item: { jurisdictionId: string }) => item.jurisdictionId)).toEqual([
+      organization.jurisdictionId,
+      places[1].jurisdictionId,
+      country.jurisdictionId,
+      places[0].jurisdictionId,
+      places[2].jurisdictionId,
+    ]);
+    expect(JSON.stringify(scope)).not.toMatch(/SECRET_BUCKET|production|staging|provider|visibility/i);
+  });
+
+  it("caps three independent hint hierarchies at eight geographic nodes", async () => {
+    const t = createBackend();
+    const organization = await insertOrganization(t, {
+      visibility: "public",
+      scopeMode: "global",
+    });
+    const hints: string[] = [];
+    const allIds: string[] = [];
+    for (let branch = 0; branch < 3; branch += 1) {
+      const country = await insertGeographic(t, { name: `Country ${branch}`, level: "country" });
+      const region = await insertGeographic(t, {
+        name: `Region ${branch}`,
+        level: "region",
+        parentJurisdictionId: country.jurisdictionId,
+      });
+      const district = await insertGeographic(t, {
+        name: `District ${branch}`,
+        level: "district",
+        parentJurisdictionId: region.jurisdictionId,
+      });
+      const town = await insertGeographic(t, {
+        name: `Town ${branch}`,
+        level: "town",
+        parentJurisdictionId: district.jurisdictionId,
+      });
+      const hint = `town ${branch}`;
+      await addAlias(t, town.jurisdictionId, hint);
+      hints.push(hint);
+      allIds.push(town.jurisdictionId, district.jurisdictionId, region.jurisdictionId, country.jurisdictionId);
+    }
+    const scope = await t.query(resolveResearchScope, {
+      jurisdictionId: organization.jurisdictionId,
+      geographicHints: hints,
+    });
+    expect(scope.items).toHaveLength(9);
+    expect(scope.items.slice(1).map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual(allIds.slice(0, 8));
+    expect(scope.items.some((item: { jurisdictionId: string }) => item.jurisdictionId === allIds[8]))
+      .toBe(false);
   });
 });

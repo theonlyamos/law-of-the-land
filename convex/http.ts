@@ -1,4 +1,5 @@
 import { httpRouter, makeFunctionReference } from "convex/server";
+import { ConvexError } from "convex/values";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { authComponent, createAuth } from "./auth";
@@ -123,6 +124,37 @@ async function readProductionLibraryRequest(request: Request) {
   };
 }
 
+type ProductionLibraryRequest = {
+  selectedJurisdictionId: string;
+  supplementaryJurisdictionIds: string[];
+};
+
+export async function productionLibraryResolutionResponse(
+  runQuery: (input: ProductionLibraryRequest) => Promise<unknown>,
+  input: ProductionLibraryRequest,
+): Promise<Response> {
+  try {
+    const resolution = await runQuery(input);
+    return Response.json(resolution, {
+      headers: {
+        "cache-control": "no-store, private",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  } catch (error) {
+    const code = error instanceof ConvexError ? error.message : null;
+    const status = code === "PRODUCTION_LIBRARY_REQUEST_INVALID"
+      ? 400
+      : code === "PRODUCTION_LIBRARY_NOT_FOUND"
+        ? 404
+        : 500;
+    return new Response(null, {
+      status,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+}
+
 http.route({
   path: "/internal/search-jurisdictions",
   method: "POST",
@@ -140,21 +172,11 @@ http.route({
         headers: { "cache-control": "no-store" },
       });
     }
-    try {
-      const resolution = await ctx.runQuery(getProductionLibraryAvailability, input);
-      return Response.json(resolution, {
-        headers: {
-          "cache-control": "no-store, private",
-          "x-content-type-options": "nosniff",
-        },
-      });
-    } catch (error) {
-      const invalidRequest = String(error).includes("PRODUCTION_LIBRARY_REQUEST_INVALID");
-      return new Response(null, {
-        status: invalidRequest ? 400 : 404,
-        headers: { "cache-control": "no-store" },
-      });
-    }
+    return await productionLibraryResolutionResponse(
+      async (queryInput) =>
+        await ctx.runQuery(getProductionLibraryAvailability, queryInput),
+      input,
+    );
   }),
 });
 

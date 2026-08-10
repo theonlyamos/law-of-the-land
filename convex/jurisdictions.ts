@@ -9,6 +9,7 @@ import {
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
   MAX_RETRIEVAL_LIBRARIES,
   MAX_SELECTOR_PAGE_SIZE,
+  normalizeUniqueJurisdictionIds,
   productionLibraryRequestValidator,
   productionLibraryResolutionValidator,
   researchScopeValidator,
@@ -530,16 +531,10 @@ export const getProductionLibraryAvailability = internalQuery({
     ) {
       throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
     }
-    const normalizedIds = rawIds.map((value) =>
-      ctx.db.normalizeId("jurisdictions", value),
+    const ids = normalizeUniqueJurisdictionIds(
+      rawIds,
+      (value) => ctx.db.normalizeId("jurisdictions", value),
     );
-    if (normalizedIds.some((id) => id === null)) {
-      throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
-    }
-    const ids = normalizedIds as Id<"jurisdictions">[];
-    if (new Set(ids).size !== ids.length) {
-      throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
-    }
     const rows = await Promise.all(ids.map((id) => ctx.db.get("jurisdictions", id)));
     if (rows.some((row) => !row || row.status !== "enabled")) {
       throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");

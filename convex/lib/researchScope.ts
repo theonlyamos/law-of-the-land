@@ -229,7 +229,18 @@ export async function resolveResearchScopeForJurisdiction(
 ): Promise<ResearchScope> {
   const selected = await ctx.db.get("jurisdictions", jurisdictionId);
   if (!selected) accessDenied();
-  await assertJurisdictionAccess(ctx, selected);
+  try {
+    await assertJurisdictionAccess(ctx, selected);
+  } catch (error) {
+    if (
+      error instanceof ConvexError &&
+      (error.message === "ORGANIZATION_MEMBERSHIP_LIMIT" ||
+        error.message === "ORGANIZATION_MEMBERSHIP_STATE_INVALID")
+    ) {
+      accessDenied();
+    }
+    throw error;
+  }
   if (geographicHints.length > MAX_GEOGRAPHIC_HINTS) {
     throw new ConvexError("INVALID_GEOGRAPHIC_HINTS");
   }

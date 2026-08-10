@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { components } from "./_generated/api";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
+import { productionLibraryResolutionResponse } from "./http";
+import { normalizeUniqueJurisdictionIds } from "./lib/jurisdictionDomain";
 
 const modules = import.meta.glob("./**/*.ts");
 const authModules = Object.fromEntries(
@@ -558,6 +560,34 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     });
   });
 
+  it("accepts the maximum one selected plus three supplementary IDs", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const ids = [];
+    for (const [code, name, bucket] of [
+      ["GH", "Ghana", "1"],
+      ["NG", "Nigeria", "2"],
+      ["KE", "Kenya", "3"],
+      ["ZA", "South Africa", "4"],
+    ] as const) {
+      ids.push(await insertJurisdiction(t, {
+        code,
+        name,
+        slug: name.toLowerCase().replaceAll(" ", "-"),
+        status: "enabled",
+        productionBucketId: bucket,
+      }));
+    }
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: ids[0],
+      supplementaryJurisdictionIds: ids.slice(1),
+    }));
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.supplementary.map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual(ids.slice(1));
+  });
+
   it.each([
     ["empty body", ""],
     ["malformed JSON", "{"],
@@ -644,5 +674,79 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     expect(incorrect.status).toBe(404);
     expect(await absent.text()).toBe("");
     expect(await incorrect.text()).toBe("");
+  });
+
+  it("maps an unexpected internal query failure to a sanitized bodyless 500", async () => {
+    const response = await productionLibraryResolutionResponse(
+      async () => {
+        throw new Error("database transport secret detail");
+      },
+      { selectedJurisdictionId: "opaque", supplementaryJurisdictionIds: [] },
+    );
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+  });
+
+  it("rejects raw-distinct IDs that normalize to the same jurisdiction", () => {
+    expect(() => normalizeUniqueJurisdictionIds(
+      ["canonical", "alternate-encoding"],
+      () => "canonical" as never,
+    )).toThrow("PRODUCTION_LIBRARY_REQUEST_INVALID");
+  });
+
+  it("uniformly rejects missing selected or supplementary rows and a disabled selected row", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+
+    const missingSelectedBackend = createBackend();
+    const missingSelected = await insertJurisdiction(missingSelectedBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    await missingSelectedBackend.run(async (ctx) => await ctx.db.delete(missingSelected));
+    const missingSelectedResponse = await post(missingSelectedBackend, JSON.stringify({
+      selectedJurisdictionId: missingSelected,
+      supplementaryJurisdictionIds: [],
+    }));
+    expect(missingSelectedResponse.status).toBe(404);
+    expect(await missingSelectedResponse.text()).toBe("");
+
+    const missingSupplementaryBackend = createBackend();
+    const selected = await insertJurisdiction(missingSupplementaryBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const missingSupplementary = await insertJurisdiction(missingSupplementaryBackend, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", productionBucketId: "2",
+    });
+    await missingSupplementaryBackend.run(async (ctx) => await ctx.db.delete(missingSupplementary));
+    const missingSupplementaryResponse = await post(missingSupplementaryBackend, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [missingSupplementary],
+    }));
+    expect(missingSupplementaryResponse.status).toBe(404);
+    expect(await missingSupplementaryResponse.text()).toBe("");
+
+    const disabledBackend = createBackend();
+    const disabled = await insertJurisdiction(disabledBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "draft", productionBucketId: "1",
+    });
+    const disabledResponse = await post(disabledBackend, JSON.stringify({
+      selectedJurisdictionId: disabled,
+      supplementaryJurisdictionIds: [],
+    }));
+    expect(disabledResponse.status).toBe(404);
+    expect(await disabledResponse.text()).toBe("");
+  });
+
+  it("stream-counts a valid body when content-length is the literal false value", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    }), secret, { "content-length": "false" });
+    expect(response.status).toBe(200);
   });
 });

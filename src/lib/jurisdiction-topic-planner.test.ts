@@ -69,8 +69,12 @@ describe("jurisdiction topic planner", () => {
     ["empty", ""],
     ["malformed", "{"],
     ["array", "[]"],
+    ["primitive", "1"],
+    ["null", "null"],
     ["extra key", '{"geographicHints":[],"ancestorDepth":0,"extra":true}'],
     ["missing key", '{"geographicHints":[]}'],
+    ["non-array hints", '{"geographicHints":"Accra","ancestorDepth":1}'],
+    ["non-string hint", '{"geographicHints":[1],"ancestorDepth":1}'],
     ["too many hints", '{"geographicHints":["a","b","c","d"],"ancestorDepth":1}'],
     ["duplicate hints", '{"geographicHints":["Accra"," accra "],"ancestorDepth":1}'],
     ["empty hint", '{"geographicHints":["   "],"ancestorDepth":1}'],
@@ -100,6 +104,55 @@ describe("jurisdiction topic planner", () => {
     );
     expect(result).toMatchObject({ geographicHints: [], ancestorDepth: 0, status: "fallback" });
     expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
+  it("falls back without constructing a provider when API configuration is missing", async () => {
+    const previous = process.env.GOOGLE_AI_API_KEY;
+    delete process.env.GOOGLE_AI_API_KEY;
+    try {
+      await expect(planTopicScope("question")).resolves.toMatchObject({
+        geographicHints: [],
+        ancestorDepth: 0,
+        status: "fallback",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.GOOGLE_AI_API_KEY;
+      else process.env.GOOGLE_AI_API_KEY = previous;
+    }
+  });
+
+  it("falls back when the injected provider construction seam throws synchronously", async () => {
+    await expect(planTopicScope("question", () => {
+      throw new Error("provider construction secret detail");
+    })).resolves.toMatchObject({
+      geographicHints: [],
+      ancestorDepth: 0,
+      status: "fallback",
+    });
+  });
+
+  it("aborts a pending generator on timeout and clears its timer", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const result = await planTopicScope(
+        "question",
+        async (request) => {
+          capturedSignal = request.config?.abortSignal;
+          return await new Promise((_resolve, reject) => {
+            capturedSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+              once: true,
+            });
+          });
+        },
+        { timeoutMs: 5 },
+      );
+      expect(result).toMatchObject({ geographicHints: [], ancestorDepth: 0, status: "fallback" });
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
   });
 });
 
