@@ -283,7 +283,7 @@ describe("professional landing research shell", () => {
     expect(screen.getByText(/Search by place or organization/i)).toBeVisible();
   });
 
-  it("explains why a selected code-less organization cannot enter the legacy chat yet", () => {
+  it("allows a selected code-less organization to start ID-based research", () => {
     render(
       <LandingPage
         {...landingProps({
@@ -301,9 +301,7 @@ describe("professional landing research shell", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "This jurisdiction will be available for research after the ID-based chat rollout.",
-    );
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
+    expect(screen.queryByText(/ID-based chat rollout/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Research this question" })).toBeEnabled();
   });
 });

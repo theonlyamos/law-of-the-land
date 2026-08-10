@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { ChatSession } from "@/lib/chat-sessions";
 import {
-  legacyCountryCodeForSelection,
   type PublicJurisdiction,
   type ResearchJurisdiction,
 } from "@/lib/countries";
@@ -64,10 +63,9 @@ export function LandingPage({
     unifiedJurisdictionsEnabled === false &&
     jurisdictions !== undefined &&
     jurisdictions.length === 0;
-  const unifiedCompatibilityCode = legacyCountryCodeForSelection(researchJurisdiction);
   const selectorReady =
     unifiedJurisdictionsEnabled === true
-      ? unifiedCompatibilityCode !== null
+      ? Boolean(researchJurisdiction?.id)
       : unifiedJurisdictionsEnabled === false &&
         jurisdictions !== undefined &&
         !catalogUnavailable &&
@@ -155,13 +153,6 @@ export function LandingPage({
                 <p role="status" className={styles.unavailableMessage}>
                   Legal research is not available for a jurisdiction right now. Please check again
                   later.
-                </p>
-              ) : null}
-              {unifiedJurisdictionsEnabled === true &&
-              researchJurisdiction &&
-              !unifiedCompatibilityCode ? (
-                <p role="status" className={styles.unavailableMessage}>
-                  This jurisdiction will be available for research after the ID-based chat rollout.
                 </p>
               ) : null}
             </div>

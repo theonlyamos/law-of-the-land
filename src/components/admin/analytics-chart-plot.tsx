@@ -1,8 +1,11 @@
 "use client";
 
 export type AnalyticsMetric = {
+  id: string;
   day: string;
-  jurisdictionCode: string;
+  jurisdictionCode?: string;
+  jurisdictionId?: string;
+  jurisdictionName?: string;
   totalQuestions: number;
   failureCount: number;
   providerFailureCount: number;
@@ -50,7 +53,7 @@ export default function AnalyticsChartPlot({ metrics }: { metrics: readonly Anal
       </div>
       <ol className="divide-y divide-slate-300 border-y-2 border-slate-700 text-sm">
         {chronological.map((row) => (
-          <li key={`${row.day}-${row.jurisdictionCode}`} className="grid grid-cols-[6rem_1fr] gap-4 py-3">
+          <li key={row.id} className="grid grid-cols-[6rem_1fr] gap-4 py-3">
             <time dateTime={row.day} className="font-semibold">{dayLabel(row.day)}</time>
             <span>{`${row.totalQuestions.toLocaleString("en-US")} questions, ${row.providerFailureCount.toLocaleString("en-US")} provider ${row.providerFailureCount === 1 ? "failure" : "failures"}, ${row.noResultCount.toLocaleString("en-US")} empty results, p95 ≤ ${row.p95UpperBoundMs.toLocaleString("en-US")} ms`}</span>
           </li>

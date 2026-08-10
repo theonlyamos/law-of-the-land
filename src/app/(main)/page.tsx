@@ -5,7 +5,6 @@ import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import {
   chooseJurisdictionCode,
-  legacyCountryCodeForSelection,
   type ResearchJurisdiction,
 } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
@@ -38,17 +37,16 @@ function LandingShell() {
     setCountry((current) => chooseJurisdictionCode(publicJurisdictions, current));
   }, [publicJurisdictions, unifiedJurisdictionsEnabled]);
 
-  const compatibilityCode =
-    unifiedJurisdictionsEnabled === true
-      ? legacyCountryCodeForSelection(researchJurisdiction)
-      : country || null;
+  const compatibilityCode = unifiedJurisdictionsEnabled === true
+    ? researchJurisdiction?.legacyCountryCode ?? null
+    : country || null;
 
   const researchUnavailable =
     authLoading ||
     unifiedJurisdictionsEnabled === undefined ||
     (unifiedJurisdictionsEnabled === false &&
       (publicJurisdictions === undefined || publicJurisdictions.length === 0)) ||
-    !compatibilityCode;
+    (unifiedJurisdictionsEnabled === true ? !researchJurisdiction?.id : !compatibilityCode);
 
   const savedChats = useMemo<ChatSession[]>(() => {
     return sessionsData.map((session) => ({
@@ -74,12 +72,14 @@ function LandingShell() {
       const trimmed = text.trim();
       if (!trimmed || researchUnavailable) return;
 
-      const normalizedCountry = compatibilityCode?.trim().toUpperCase();
-      if (!normalizedCountry) return;
-      const chatUrl = `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&country=${encodeURIComponent(normalizedCountry)}`;
+      const normalizedCountry = compatibilityCode?.trim().toUpperCase() || null;
+      const selection = unifiedJurisdictionsEnabled === true
+        ? `&jurisdiction=${encodeURIComponent(researchJurisdiction!.id)}${normalizedCountry ? `&country=${encodeURIComponent(normalizedCountry)}` : ""}`
+        : `&country=${encodeURIComponent(normalizedCountry!)}`;
+      const chatUrl = `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}${selection}`;
       router.push(isAuthenticated ? chatUrl : `/signin?redirect=${encodeURIComponent(chatUrl)}`);
     },
-    [compatibilityCode, isAuthenticated, researchUnavailable, router]
+    [compatibilityCode, isAuthenticated, researchJurisdiction, researchUnavailable, router, unifiedJurisdictionsEnabled]
   );
 
   const handleKeyDown = useCallback(

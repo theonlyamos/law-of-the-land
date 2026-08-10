@@ -25,6 +25,21 @@ export interface ResearchJurisdiction {
   legacyCountryCode?: string;
 }
 
+export interface ChatCitation {
+  label: string;
+  jurisdictionId: string;
+  jurisdictionName: string;
+  jurisdictionKind: ResearchJurisdictionKind;
+  relation: "selected" | "geographic_ancestor" | "organizational_geography";
+}
+
+export interface PartialCoverage {
+  jurisdictionId: string;
+  name: string;
+  kind: ResearchJurisdictionKind;
+  relation: "geographic_ancestor" | "organizational_geography";
+}
+
 /** Temporary compatibility handoff; IDs become authoritative in Task 9. */
 export function legacyCountryCodeForSelection(
   selection: ResearchJurisdiction | null,

@@ -8,17 +8,17 @@ import type { AnalyticsMetric } from "./analytics-chart-plot";
 const AnalyticsChartPlot = lazy(() => import("./analytics-chart-plot"));
 const listDailyMetrics = makeFunctionReference<
   "query",
-  { paginationOpts: { numItems: number; cursor: string | null }; jurisdictionCode: string | null; fromDay: string; toDay: string },
+  { paginationOpts: { numItems: number; cursor: string | null }; jurisdictionId: string | null; jurisdictionCode: string | null; fromDay: string; toDay: string },
   { page: AnalyticsMetric[]; isDone: boolean; continueCursor: string }
 >("admin/analytics:listDailyMetrics");
 
-export function AnalyticsCharts({ jurisdictionCode, fromDay, toDay }: { jurisdictionCode: string | null; fromDay: string; toDay: string }) {
+export function AnalyticsCharts({ jurisdictionId, jurisdictionCode, fromDay, toDay }: { jurisdictionId: string | null; jurisdictionCode: string | null; fromDay: string; toDay: string }) {
   const section = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
   const result = useQuery(
     listDailyMetrics,
     visible
-      ? { paginationOpts: { numItems: 50, cursor: null }, jurisdictionCode, fromDay, toDay }
+      ? { paginationOpts: { numItems: 50, cursor: null }, jurisdictionId, jurisdictionCode, fromDay, toDay }
       : "skip",
   );
 

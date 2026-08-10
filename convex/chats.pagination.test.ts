@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest, type TestConvex } from "convex-test";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, components, internal } from "./_generated/api";
 import { normalizePageSize } from "./chats";
 import authSchema from "./betterAuth/schema";
@@ -20,6 +20,55 @@ function createTestBackend() {
   const t = convexTest(schema, modules);
   t.registerComponent("betterAuth", authSchema, authModules);
   return t;
+}
+
+const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
+
+afterEach(() => {
+  if (previousAdminEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
+  else process.env.ADMIN_ENVIRONMENT = previousAdminEnvironment;
+});
+
+async function enableUnifiedJurisdictions(t: TestConvex<typeof schema>) {
+  process.env.ADMIN_ENVIRONMENT = "test";
+  await t.run((ctx) => ctx.db.insert("featureFlags", {
+    key: "unified_jurisdictions",
+    environment: "test",
+    enabled: true,
+    updatedAt: Date.now(),
+  }));
+}
+
+async function createGeographicJurisdiction(t: TestConvex<typeof schema>) {
+  return await t.run(async (ctx) => {
+    const now = Date.now();
+    const id = await ctx.db.insert("jurisdictions", {
+      name: "Ghana",
+      slug: "ghana",
+      status: "enabled",
+      isDefault: true,
+      providerSyncState: "synced",
+      kind: "geographic",
+      visibility: "public",
+      legacyCountryCode: "GH",
+      createdBy: "fixture",
+      updatedBy: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("geographicJurisdictions", {
+      jurisdictionId: id,
+      googlePlaceId: "place-ghana",
+      level: "country",
+      countryCode: "GH",
+      latitude: 7.9465,
+      longitude: -1.0232,
+      formattedAddress: "Ghana",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return id;
+  });
 }
 
 async function createUser(t: TestConvex<typeof schema>, email: string) {
@@ -57,6 +106,146 @@ async function createUser(t: TestConvex<typeof schema>, email: string) {
 }
 
 describe("chat pagination", () => {
+  it("stores an authorized stable jurisdiction snapshot and keeps it immutable after rename", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `chat-owner-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await client.mutation(api.chats.ensure, {
+      externalId: "stable-jurisdiction",
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      country: "GH",
+    });
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, { name: "Republic of Ghana" }));
+
+    await expect(client.query(api.chats.getByExternalId, {
+      externalId: "stable-jurisdiction",
+    })).resolves.toMatchObject({
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      country: "GH",
+    });
+  });
+
+  it("rejects a malformed stable jurisdiction with the uniform unavailable error before insert", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `chat-owner-${crypto.randomUUID()}@example.com`);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await expect(client.mutation(api.chats.ensure, {
+      externalId: "malformed-jurisdiction",
+      jurisdictionId: "not-a-convex-id",
+    })).rejects.toThrow("That jurisdiction is not available for research");
+    const rows = await t.run((ctx) => ctx.db.query("chatSessions")
+      .withIndex("by_user_externalId", (q) => q.eq("userId", owner.userId).eq("externalId", "malformed-jurisdiction"))
+      .take(1));
+    expect(rows).toEqual([]);
+  });
+
+  it("round-trips only assistant citation snapshots in their original order", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `chat-owner-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "cited", jurisdictionId });
+    const citations = [{
+      label: "Constitution, article 1",
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic" as const,
+      relation: "selected" as const,
+    }];
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "cited",
+      lastMessage: "Answer",
+      jurisdictionId,
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations }],
+    });
+    const page = await client.query(api.chats.listMessages, {
+      externalId: "cited",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(page.page[0].citations).toEqual(citations);
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, { name: "Republic of Ghana" }));
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "cited",
+      lastMessage: "Answer",
+      jurisdictionId,
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations }],
+    })).resolves.toEqual({ id: "cited" });
+
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "cited",
+      lastMessage: "Invalid",
+      jurisdictionId,
+      messages: [{ role: "user", content: "Question", citations }],
+    } as never)).rejects.toThrow();
+    const unchanged = await client.query(api.chats.listMessages, {
+      externalId: "cited",
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(unchanged.page.map((message) => message.content)).toEqual(["Answer"]);
+  });
+
+  it("removes every member-only chat boundary immediately when membership becomes inactive", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `chat-member-${crypto.randomUUID()}@example.com`);
+    const { jurisdictionId, membershipId } = await t.run(async (ctx) => {
+      const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Private University", slug: "private-university", class: "university", status: "active",
+        createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      const membershipId = await ctx.db.insert("organizationMemberships", {
+        organizationId, userId: owner.userId, status: "active", createdAt: now, updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Private University Rules", slug: "private-university-rules", status: "enabled",
+        isDefault: false, providerSyncState: "synced", kind: "organizational", visibility: "members",
+        organizationId, createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId, scopeMode: "global", createdAt: now, updatedAt: now,
+      });
+      return { jurisdictionId, membershipId };
+    });
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "private-chat", jurisdictionId });
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "private-chat", jurisdictionId, lastMessage: "Saved",
+      messages: [{ role: "assistant", content: "Saved" }],
+    });
+    await t.run((ctx) => ctx.db.patch(membershipId, { status: "inactive", updatedAt: Date.now() }));
+
+    await expect(client.query(api.chats.list, { paginationOpts: { numItems: 20, cursor: null } }))
+      .resolves.toMatchObject({ page: [] });
+    await expect(client.query(api.chats.getByExternalId, { externalId: "private-chat" })).resolves.toBeNull();
+    await expect(client.query(api.chats.listMessages, {
+      externalId: "private-chat", paginationOpts: { numItems: 20, cursor: null },
+    })).resolves.toMatchObject({ page: [] });
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "private-chat", jurisdictionId, lastMessage: "Denied",
+      messages: [{ role: "assistant", content: "Denied" }],
+    })).rejects.toThrow("That jurisdiction is not available");
+    await expect(client.mutation(api.chats.remove, { externalId: "private-chat" }))
+      .rejects.toThrow("That jurisdiction is not available");
+    const stored = await t.run(async (ctx) => {
+      const session = await ctx.db.query("chatSessions")
+        .withIndex("by_user_externalId", (q) => q.eq("userId", owner.userId).eq("externalId", "private-chat"))
+        .unique();
+      return session
+        ? await ctx.db.query("messages").withIndex("by_session", (q) => q.eq("sessionId", session._id)).take(3)
+        : [];
+    });
+    expect(stored.map((message) => message.content)).toEqual(["Saved"]);
+  });
   it("normalizes every caller page size to a finite positive integer within the cap", () => {
     expect(normalizePageSize(Number.NaN, 30)).toBe(1);
     expect(normalizePageSize(Number.POSITIVE_INFINITY, 30)).toBe(1);

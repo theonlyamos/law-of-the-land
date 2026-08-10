@@ -47,21 +47,14 @@ vi.mock("convex/react", () => ({
 
 vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
   ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
-    <button
-      type="button"
-      onClick={() =>
-        onChange({
-          id: "ghana-id",
-          name: "Ghana",
-          slug: "ghana",
-          kind: "geographic",
-          isDefault: true,
-          legacyCountryCode: "GH",
-        })
-      }
-    >
-      Choose Ghana unified
-    </button>
+    <>
+      <button type="button" onClick={() => onChange({ id: "ghana-id", name: "Ghana", slug: "ghana", kind: "geographic", isDefault: true, legacyCountryCode: "GH" })}>
+        Choose Ghana unified
+      </button>
+      <button type="button" onClick={() => onChange({ id: "university-id", name: "Private University", slug: "private-university", kind: "organizational", isDefault: false })}>
+        Choose organization unified
+      </button>
+    </>
   ),
 }));
 
@@ -220,7 +213,7 @@ describe("public home jurisdiction catalog", () => {
     expect(mocks.push).toHaveBeenCalledOnce();
   });
 
-  it("skips the legacy full catalog and preserves Ghana compatibility when unified selection is on", () => {
+  it("skips the legacy full catalog and emits a canonical stable-ID link when unified selection is on", () => {
     mocks.unifiedEnabled = true;
     render(<Home />);
 
@@ -230,7 +223,7 @@ describe("public home jurisdiction catalog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
-      "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26country%3DGH",
+      "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26jurisdiction%3Dghana-id%26country%3DGH",
     );
     expect(
       mocks.useQuery.mock.calls.some(
@@ -239,5 +232,17 @@ describe("public home jurisdiction catalog", () => {
             "jurisdictions:listPublicEnabled" && args === "skip",
       ),
     ).toBe(true);
+  });
+
+  it("starts a code-less organization chat with only its canonical stable ID", () => {
+    mocks.unifiedEnabled = true;
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose organization unified" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Employment policy?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/new-chat?q=Employment%20policy%3F&jurisdiction=university-id",
+    );
   });
 });
