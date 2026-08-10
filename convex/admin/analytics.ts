@@ -10,7 +10,7 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const metricProjection = v.object({
   id: v.id("dailyMetrics"),
   day: v.string(),
-  jurisdictionCode: v.string(),
+  jurisdictionCode: v.optional(v.string()),
   totalQuestions: v.number(),
   successCount: v.number(),
   failureCount: v.number(),
@@ -40,7 +40,7 @@ function project(row: Doc<"dailyMetrics">) {
   return {
     id: row._id,
     day: row.day,
-    jurisdictionCode: row.jurisdictionCode,
+    ...(row.jurisdictionCode ? { jurisdictionCode: row.jurisdictionCode } : {}),
     totalQuestions: row.totalQuestions,
     successCount: row.successCount,
     failureCount: row.failureCount,

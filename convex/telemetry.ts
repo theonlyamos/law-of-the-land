@@ -15,11 +15,14 @@ import {
   verifyTelemetryServiceProof,
 } from "./lib/telemetryProof";
 import { isLegacyCountryCode } from "./lib/jurisdictionDomain";
+import { assertJurisdictionAccess } from "./lib/jurisdictionAccess";
 
 const CORRELATION_TTL_MS = 5 * 60_000;
 const CHAT_LEASE_MS = 2 * 60_000;
 const MAX_PROVIDER_LATENCY_MS = 10 * 60_000;
 const MAX_RESULT_COUNT = 10_000;
+const MAX_SCOPE_SIZE = 9;
+const MAX_PLAN_SIZE = 4;
 const ROLLUP_BATCH = 500;
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const LATENCY_THRESHOLDS = [
@@ -58,6 +61,26 @@ function normalizeJurisdiction(value: string): string {
     throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
   }
   return normalized;
+}
+
+function normalizeLegacySnapshot(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return normalizeJurisdiction(value);
+}
+
+function validateDigest(value: string | undefined, required: boolean): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new ConvexError("TELEMETRY_CONTEXT_INVALID");
+  }
+  return value;
+}
+
+function boundedCount(value: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new ConvexError("TELEMETRY_COUNT_INVALID");
+  }
+  return value;
 }
 
 async function requireServiceProof(
@@ -133,7 +156,10 @@ async function recordTerminal(
   const id = await ctx.db.insert("queryRuns", {
     correlationId: row.tokenHash,
     day: new Date(completedAt).toISOString().slice(0, 10),
-    jurisdictionCode: row.jurisdictionCode,
+    ...(row.jurisdictionCode ? { jurisdictionCode: row.jurisdictionCode } : {}),
+    ...(row.jurisdictionId ? { jurisdictionId: row.jurisdictionId } : {}),
+    ...(row.jurisdictionName ? { jurisdictionName: row.jurisdictionName } : {}),
+    ...(row.jurisdictionKind ? { jurisdictionKind: row.jurisdictionKind } : {}),
     outcome: input.outcome,
     searchProviderStatus,
     generationProviderStatus: input.generationProviderStatus,
@@ -144,6 +170,19 @@ async function recordTerminal(
       searchLatencyMs + input.generationLatencyMs,
     ),
     resultCount,
+    ...(row.scopeSize !== undefined ? { scopeSize: row.scopeSize } : {}),
+    ...(row.retrievalPlanSize !== undefined ? { retrievalPlanSize: row.retrievalPlanSize } : {}),
+    ...(row.providerCallCount !== undefined ? { providerCallCount: row.providerCallCount } : {}),
+    ...(row.plannerStatus ? { plannerStatus: row.plannerStatus } : {}),
+    ...(row.plannerLatencyMs !== undefined ? { plannerLatencyMs: row.plannerLatencyMs } : {}),
+    ...(row.contextDigest ? { contextDigest: row.contextDigest } : {}),
+    ...(row.partialCoverage !== undefined ? { partialCoverage: row.partialCoverage } : {}),
+    ...(row.configurationUnavailableCount !== undefined
+      ? { configurationUnavailableCount: row.configurationUnavailableCount }
+      : {}),
+    ...(row.supplementaryProviderFailureCount !== undefined
+      ? { supplementaryProviderFailureCount: row.supplementaryProviderFailureCount }
+      : {}),
     completedAt,
     rollupStatus: "pending",
   });
@@ -152,26 +191,68 @@ async function recordTerminal(
 }
 
 export const issueCorrelation = mutation({
-  args: { token: v.string(), jurisdictionCode: v.string(), serviceProof: v.string() },
+  args: {
+    token: v.string(),
+    jurisdictionCode: v.optional(v.string()),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    legacyCountryCode: v.optional(v.string()),
+    serviceProof: v.string(),
+  },
   returns: v.object({ status: v.literal("issued"), correlationId: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
     if (!isOpaqueTelemetryToken(args.token)) {
       throw new ConvexError("TELEMETRY_CORRELATION_INVALID");
     }
-    const jurisdictionCode = normalizeJurisdiction(args.jurisdictionCode);
-    await requireServiceProof(args.serviceProof, ["issue", args.token, jurisdictionCode]);
-    const owner = await requireOwner(ctx);
-    const jurisdictions = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_code", (q) => q.eq("code", jurisdictionCode))
-      .take(2);
-    if (
-      jurisdictions.length !== 1 ||
-      !isLegacyCountryCode(jurisdictions[0].code) ||
-      jurisdictions[0].code !== jurisdictionCode ||
-      jurisdictions[0].status !== "enabled"
-    ) {
+    const unified = args.jurisdictionId !== undefined;
+    if (unified === (args.jurisdictionCode !== undefined)) {
       throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+    }
+    const legacyCountryCode = normalizeLegacySnapshot(args.legacyCountryCode);
+    const jurisdictionCode = args.jurisdictionCode === undefined
+      ? undefined
+      : normalizeJurisdiction(args.jurisdictionCode);
+    await requireServiceProof(
+      args.serviceProof,
+      unified
+        ? ["issue-jurisdiction-v1", args.token, args.jurisdictionId!, legacyCountryCode ?? ""]
+        : ["issue", args.token, jurisdictionCode!],
+    );
+    const owner = await requireOwner(ctx);
+    let jurisdictionId = args.jurisdictionId;
+    let jurisdictionName: string | undefined;
+    let jurisdictionKind: "geographic" | "organizational" | undefined;
+    if (unified) {
+      const selected = await ctx.db.get("jurisdictions", args.jurisdictionId!);
+      if (!selected || selected.status !== "enabled" ||
+        (selected.kind !== "geographic" && selected.kind !== "organizational")) {
+        throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      }
+      try {
+        await assertJurisdictionAccess(ctx, selected);
+      } catch {
+        throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      }
+      const storedLegacy = isLegacyCountryCode(selected.legacyCountryCode)
+        ? selected.legacyCountryCode
+        : undefined;
+      if (legacyCountryCode !== storedLegacy) {
+        throw new ConvexError("TELEMETRY_JURISDICTION_MISMATCH");
+      }
+      jurisdictionName = selected.name;
+      jurisdictionKind = selected.kind;
+    } else {
+      if (legacyCountryCode !== undefined) throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      const jurisdictions = await ctx.db
+        .query("jurisdictions")
+        .withIndex("by_code", (q) => q.eq("code", jurisdictionCode))
+        .take(2);
+      if (
+        jurisdictions.length !== 1 ||
+        !isLegacyCountryCode(jurisdictions[0].code) ||
+        jurisdictions[0].code !== jurisdictionCode ||
+        jurisdictions[0].status !== "enabled"
+      ) throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      jurisdictionId = undefined;
     }
     const tokenHash = await hashOpaqueTelemetryValue(args.token);
     const prior = await ctx.db
@@ -184,7 +265,12 @@ export const issueCorrelation = mutation({
     await ctx.db.insert("telemetryCorrelations", {
       tokenHash,
       ...owner,
-      jurisdictionCode,
+      ...(jurisdictionCode ?? legacyCountryCode
+        ? { jurisdictionCode: jurisdictionCode ?? legacyCountryCode }
+        : {}),
+      ...(jurisdictionId ? { jurisdictionId } : {}),
+      ...(jurisdictionName ? { jurisdictionName } : {}),
+      ...(jurisdictionKind ? { jurisdictionKind } : {}),
       status: "issued",
       issuedAt,
       expiresAt,
@@ -195,15 +281,48 @@ export const issueCorrelation = mutation({
 });
 
 export const recordSearchPhase = mutation({
-  args: { token: v.string(), providerStatus, latencyMs: v.number(), resultCount: v.number(), serviceProof: v.string() },
+  args: {
+    token: v.string(), providerStatus, latencyMs: v.number(), resultCount: v.number(),
+    scopeSize: v.optional(v.number()), retrievalPlanSize: v.optional(v.number()),
+    providerCallCount: v.optional(v.number()),
+    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
+    plannerLatencyMs: v.optional(v.number()), contextDigest: v.optional(v.string()),
+    partialCoverage: v.optional(v.boolean()),
+    configurationUnavailableCount: v.optional(v.number()),
+    supplementaryProviderFailureCount: v.optional(v.number()),
+    serviceProof: v.string(),
+  },
   returns: phaseReturn,
   handler: async (ctx, args) => {
     const latencyMs = validateLatency(args.latencyMs);
     const resultCount = validateResultCount(args.resultCount);
-    await requireServiceProof(args.serviceProof, ["search", args.token, args.providerStatus, latencyMs, resultCount]);
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
+    const unified = row.jurisdictionId !== undefined;
+    const scopeSize = unified ? boundedCount(args.scopeSize!, MAX_SCOPE_SIZE) : undefined;
+    const retrievalPlanSize = unified ? boundedCount(args.retrievalPlanSize!, MAX_PLAN_SIZE) : undefined;
+    const providerCallCount = unified ? boundedCount(args.providerCallCount!, MAX_PLAN_SIZE) : undefined;
+    const plannerLatencyMs = unified ? validateLatency(args.plannerLatencyMs!) : undefined;
+    const contextDigest = validateDigest(args.contextDigest, unified && args.providerStatus !== "failure");
+    const configurationUnavailableCount = unified
+      ? boundedCount(args.configurationUnavailableCount!, MAX_PLAN_SIZE - 1)
+      : undefined;
+    const supplementaryProviderFailureCount = unified
+      ? boundedCount(args.supplementaryProviderFailureCount!, MAX_PLAN_SIZE - 1)
+      : undefined;
+    if (unified && (!args.plannerStatus || args.partialCoverage === undefined)) {
+      throw new ConvexError("TELEMETRY_COUNT_INVALID");
+    }
+    await requireServiceProof(
+      args.serviceProof,
+      unified
+        ? ["search-jurisdiction-v1", args.token, args.providerStatus, latencyMs, resultCount,
+            scopeSize!, retrievalPlanSize!, providerCallCount!, args.plannerStatus!, plannerLatencyMs!,
+            contextDigest ?? "", args.partialCoverage ? 1 : 0,
+            configurationUnavailableCount!, supplementaryProviderFailureCount!]
+        : ["search", args.token, args.providerStatus, latencyMs, resultCount],
+    );
     if (row.status !== "issued") throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
     if (Date.now() >= row.expiresAt) throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
     await ctx.db.patch(row._id, {
@@ -211,6 +330,17 @@ export const recordSearchPhase = mutation({
       searchProviderStatus: args.providerStatus,
       searchLatencyMs: latencyMs,
       resultCount,
+      ...(unified ? {
+        scopeSize,
+        retrievalPlanSize,
+        providerCallCount,
+        plannerStatus: args.plannerStatus,
+        plannerLatencyMs,
+        ...(contextDigest ? { contextDigest } : {}),
+        partialCoverage: args.partialCoverage,
+        configurationUnavailableCount,
+        supplementaryProviderFailureCount,
+      } : {}),
     });
     const updated = (await ctx.db.get(row._id))!;
     if (args.providerStatus === "failure") {
@@ -222,15 +352,37 @@ export const recordSearchPhase = mutation({
 });
 
 export const claimChatPhase = mutation({
-  args: { token: v.string(), jurisdictionCode: v.string(), serviceProof: v.string() },
+  args: {
+    token: v.string(), jurisdictionCode: v.optional(v.string()),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    legacyCountryCode: v.optional(v.string()), contextDigest: v.optional(v.string()),
+    serviceProof: v.string(),
+  },
   returns: v.object({ status: v.literal("chat_claimed"), correlationId: v.string(), claimNonce: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
-    const jurisdictionCode = normalizeJurisdiction(args.jurisdictionCode);
-    await requireServiceProof(args.serviceProof, ["claim", args.token, jurisdictionCode]);
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
-    if (row.jurisdictionCode !== jurisdictionCode) throw new ConvexError("TELEMETRY_JURISDICTION_MISMATCH");
+    if (row.jurisdictionId) {
+      const contextDigest = validateDigest(args.contextDigest, true)!;
+      const legacyCountryCode = normalizeLegacySnapshot(args.legacyCountryCode);
+      await requireServiceProof(args.serviceProof, [
+        "claim-jurisdiction-v1", args.token, args.jurisdictionId ?? "",
+        legacyCountryCode ?? "", contextDigest,
+      ]);
+      if (args.jurisdictionId !== row.jurisdictionId || legacyCountryCode !== row.jurisdictionCode) {
+        throw new ConvexError("TELEMETRY_JURISDICTION_MISMATCH");
+      }
+      if (contextDigest !== row.contextDigest) throw new ConvexError("TELEMETRY_CONTEXT_MISMATCH");
+    } else {
+      if (args.jurisdictionCode === undefined || args.jurisdictionId !== undefined ||
+        args.legacyCountryCode !== undefined || args.contextDigest !== undefined) {
+        throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      }
+      const jurisdictionCode = normalizeJurisdiction(args.jurisdictionCode);
+      await requireServiceProof(args.serviceProof, ["claim", args.token, jurisdictionCode]);
+      if (row.jurisdictionCode !== jurisdictionCode) throw new ConvexError("TELEMETRY_JURISDICTION_MISMATCH");
+    }
     if (row.status !== "search_complete") throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
     if (Date.now() >= row.expiresAt) throw new ConvexError("TELEMETRY_CORRELATION_EXPIRED");
     const claimNonce = createOpaqueTelemetryToken();
@@ -332,13 +484,24 @@ export const rollupDailyMetrics = internalMutation({
     const groups = new Map<string, Doc<"queryRuns">[]>();
     for (const row of rows) {
       if (!DAY_PATTERN.test(row.day)) throw new ConvexError("TELEMETRY_DAY_INVALID");
-      const key = `${row.day}:${row.jurisdictionCode}`;
+      if (!row.jurisdictionId && !row.jurisdictionCode) {
+        throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      }
+      const key = row.jurisdictionId
+        ? `${row.day}:id:${row.jurisdictionId}`
+        : `${row.day}:code:${row.jurisdictionCode}`;
       groups.set(key, [...(groups.get(key) ?? []), row]);
     }
     const now = Date.now();
     for (const group of groups.values()) {
-      const { day, jurisdictionCode } = group[0];
-      const existingRows = await ctx.db.query("dailyMetrics").withIndex("by_day_and_jurisdictionCode", (q) => q.eq("day", day).eq("jurisdictionCode", jurisdictionCode)).take(2);
+      const { day, jurisdictionCode, jurisdictionId } = group[0];
+      const existingRows = jurisdictionId
+        ? await ctx.db.query("dailyMetrics").withIndex("by_day_and_jurisdictionId", (q) =>
+            q.eq("day", day).eq("jurisdictionId", jurisdictionId),
+          ).take(2)
+        : await ctx.db.query("dailyMetrics").withIndex("by_day_and_jurisdictionCode", (q) =>
+            q.eq("day", day).eq("jurisdictionCode", jurisdictionCode),
+          ).take(2);
       if (existingRows.length > 1) throw new ConvexError("DUPLICATE_DAILY_METRIC");
       const existing = existingRows[0] ?? null;
       const histogram = histogramFromMetric(existing);
@@ -352,13 +515,22 @@ export const rollupDailyMetrics = internalMutation({
       const latencyGt5000 = totalQuestions - latencyLe5000;
       const value = {
         day,
-        jurisdictionCode,
+        ...(jurisdictionCode ? { jurisdictionCode } : {}),
+        ...(jurisdictionId ? { jurisdictionId } : {}),
+        ...(group[0].jurisdictionName ? { jurisdictionName: group[0].jurisdictionName } : {}),
+        ...(group[0].jurisdictionKind ? { jurisdictionKind: group[0].jurisdictionKind } : {}),
         totalQuestions,
         successCount: (existing?.successCount ?? 0) + group.filter((row) => row.outcome === "success").length,
         failureCount: (existing?.failureCount ?? 0) + group.filter((row) => row.outcome === "failure").length,
         abortedCount: (existing?.abortedCount ?? 0) + group.filter((row) => row.outcome === "aborted").length,
         providerFailureCount: (existing?.providerFailureCount ?? 0) + group.filter((row) => row.searchProviderStatus === "failure" || row.generationProviderStatus === "failure").length,
         noResultCount: (existing?.noResultCount ?? 0) + group.filter((row) => row.searchProviderStatus === "no_result").length,
+        configurationUnavailableCount:
+          (existing?.configurationUnavailableCount ?? 0) +
+          group.reduce((sum, row) => sum + (row.configurationUnavailableCount ?? 0), 0),
+        supplementaryProviderFailureCount:
+          (existing?.supplementaryProviderFailureCount ?? 0) +
+          group.reduce((sum, row) => sum + (row.supplementaryProviderFailureCount ?? 0), 0),
         latencyLe250,
         latencyLe500,
         latencyLe1000,

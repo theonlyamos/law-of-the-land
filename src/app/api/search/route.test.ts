@@ -14,12 +14,18 @@ const groundxMocks = vi.hoisted(() => ({
 const searchJurisdictionMocks = vi.hoisted(() => ({
   fetch: vi.fn(),
 }));
+const plannerMocks = vi.hoisted(() => ({ planTopicScope: vi.fn() }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
+vi.mock("server-only", () => ({}));
 vi.mock("groundx-typescript-sdk", () => ({
   Groundx: class {
     search = { content: groundxMocks.searchContent };
   },
+}));
+vi.mock("@/lib/jurisdiction-topic-planner", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/jurisdiction-topic-planner")>()),
+  planTopicScope: plannerMocks.planTopicScope,
 }));
 
 import { POST } from "./route";
@@ -57,7 +63,10 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
     authMocks.isAuthenticated.mockResolvedValue(true);
     authMocks.fetchAuthMutation.mockResolvedValue(undefined);
-    authMocks.fetchAuthQuery.mockResolvedValue(gh);
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+      getFunctionName(reference) === "jurisdictions:isUnifiedJurisdictionsEnabled" ? false : gh,
+    );
+    plannerMocks.planTopicScope.mockResolvedValue({ geographicHints: [], ancestorDepth: 0, status: "fallback", latencyMs: 1 });
     searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(gh)));
     groundxMocks.searchContent.mockResolvedValue({
       data: { search: { text: "governed answer" } },
@@ -75,7 +84,8 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     const payload = await response.json();
     expect(payload).toMatchObject({ result: "governed answer", jurisdictionCode: "GH" });
     expect(payload.correlationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
+    expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["jurisdictions:isUnifiedJurisdictionsEnabled"]);
     expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
       "https://law-test.convex.site/internal/search-jurisdiction",
       {
@@ -125,11 +135,11 @@ describe("POST /api/search governed jurisdiction lookup", () => {
       enabled: true as const,
       productionBucketId: "22001",
     };
-    authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
-      getFunctionName(reference) === "jurisdictions:listPublicEnabled"
-        ? [publicNigeria]
-        : nigeria,
-    );
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return false;
+      return name === "jurisdictions:listPublicEnabled" ? [publicNigeria] : nigeria;
+    });
     searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(nigeria)));
 
     const response = await POST(request({ query: "What is the law?" }));
@@ -138,7 +148,7 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     expect(await response.json()).toMatchObject({ jurisdictionCode: "NG" });
     expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) =>
       getFunctionName(reference),
-    )).toEqual(["jurisdictions:listPublicEnabled"]);
+    )).toEqual(["jurisdictions:isUnifiedJurisdictionsEnabled", "jurisdictions:listPublicEnabled"]);
     expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
       "https://law-test.convex.site/internal/search-jurisdiction",
       expect.objectContaining({ body: JSON.stringify({ code: "NG" }) }),
@@ -189,7 +199,8 @@ describe("POST /api/search governed jurisdiction lookup", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "That country is not supported yet." });
-    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
+    expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["jurisdictions:isUnifiedJurisdictionsEnabled"]);
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
     expect(groundxMocks.searchContent).not.toHaveBeenCalled();
   });
@@ -226,5 +237,178 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     expect(await response.json()).toEqual({ error: "That country is not supported yet." });
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
     expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/search unified jurisdictions", () => {
+  const selectedId = "selected-jurisdiction-id";
+  const scopeItems = [
+    { jurisdictionId: selectedId, name: "Accra", kind: "geographic", relation: "selected" },
+    { jurisdictionId: "greater-accra-id", name: "Greater Accra", kind: "geographic", relation: "geographic_ancestor" },
+    { jurisdictionId: "ghana-id", name: "Ghana", kind: "geographic", relation: "geographic_ancestor" },
+    { jurisdictionId: "west-africa-id", name: "West Africa", kind: "geographic", relation: "geographic_ancestor" },
+  ] as const;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", searchJurisdictionMocks.fetch);
+    process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://law-test.convex.site";
+    process.env.SEARCH_JURISDICTION_SECRET = "route-search-secret-with-at-least-32-characters";
+    process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
+    authMocks.isAuthenticated.mockResolvedValue(true);
+    authMocks.fetchAuthMutation.mockResolvedValue(undefined);
+    groundxMocks.searchContent.mockResolvedValue({ data: { search: { text: "governed answer" } } });
+  });
+
+  function enableUnified() {
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return true;
+      if (name === "jurisdictions:resolveResearchSelection") {
+        return { id: selectedId, name: "Accra", slug: "accra", kind: "geographic", isDefault: false, legacyCountryCode: "GH" };
+      }
+      if (name === "jurisdictions:resolveResearchScope") {
+        return { selectedJurisdictionId: selectedId, items: scopeItems };
+      }
+      throw new Error(`unexpected query ${name}`);
+    });
+    plannerMocks.planTopicScope.mockResolvedValue({ geographicHints: ["accra"], ancestorDepth: 3, status: "planned", latencyMs: 2 });
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "ready", productionBucketId: "100" },
+      supplementary: scopeItems.slice(1).map((item, index) => ({
+        jurisdictionId: item.jurisdictionId,
+        status: "ready",
+        productionBucketId: String(101 + index),
+      })),
+    })));
+  }
+
+  it("authorizes before secret lookup and caps four provider calls at three concurrent starts", async () => {
+    enableUnified();
+    let active = 0;
+    let peak = 0;
+    groundxMocks.searchContent.mockImplementation(async ({ id }: { id: number }) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 4));
+      active -= 1;
+      return { data: { search: { text: `Law from ${id}.` } } };
+    });
+
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId, country: "GH" }));
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ jurisdictionId: selectedId, legacyCountryCode: "GH" });
+    expect(payload.result.length).toBeLessThanOrEqual(120_000);
+    expect(peak).toBeLessThanOrEqual(3);
+    expect(groundxMocks.searchContent).toHaveBeenCalledTimes(4);
+    expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
+      "https://law-test.convex.site/internal/search-jurisdictions",
+      expect.objectContaining({ body: JSON.stringify({
+        selectedJurisdictionId: selectedId,
+        supplementaryJurisdictionIds: scopeItems.slice(1).map((item) => item.jurisdictionId),
+      }) }),
+    );
+    const phase = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase",
+    )?.[1];
+    expect(phase).toMatchObject({
+      providerStatus: "success", scopeSize: 4, retrievalPlanSize: 4,
+      providerCallCount: 4, contextDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      partialCoverage: false, configurationUnavailableCount: 0,
+      supplementaryProviderFailureCount: 0,
+    });
+  });
+
+  it("rejects a mismatched selector before quota, planner, secret lookup, telemetry, or provider", async () => {
+    enableUnified();
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+      getFunctionName(reference) === "jurisdictions:isUnifiedJurisdictionsEnabled" ? true : null,
+    );
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId, country: "NG" }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "That jurisdiction is not available for research." });
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(plannerMocks.planTopicScope).not.toHaveBeenCalled();
+    expect(searchJurisdictionMocks.fetch).not.toHaveBeenCalled();
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+
+  it("omits an unconfigured supplementary library and returns cause-free named partial coverage", async () => {
+    enableUnified();
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "ready", productionBucketId: "100" },
+      supplementary: [
+        { jurisdictionId: "greater-accra-id", status: "unconfigured" },
+        { jurisdictionId: "ghana-id", status: "ready", productionBucketId: "102" },
+        { jurisdictionId: "west-africa-id", status: "ready", productionBucketId: "103" },
+      ],
+    })));
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+    const payload = await response.json();
+    expect(response.status).toBe(200);
+    expect(groundxMocks.searchContent).toHaveBeenCalledTimes(3);
+    expect(payload.partialCoverage).toEqual([{
+      jurisdictionId: "greater-accra-id", name: "Greater Accra",
+      kind: "geographic", relation: "geographic_ancestor",
+    }]);
+    expect(JSON.stringify(payload)).not.toMatch(/unconfigured|bucket|provider|cause/i);
+  });
+
+  it("returns the uniform unavailable response for an unconfigured selected library without GroundX", async () => {
+    enableUnified();
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "unconfigured" },
+      supplementary: scopeItems.slice(1).map((item) => ({ jurisdictionId: item.jurisdictionId, status: "unconfigured" })),
+    })));
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "That jurisdiction is not available for research." });
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+
+  it("fails before GroundX when the secret response changes supplementary order", async () => {
+    enableUnified();
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "ready", productionBucketId: "100" },
+      supplementary: [
+        { jurisdictionId: "ghana-id", status: "ready", productionBucketId: "102" },
+        { jurisdictionId: "greater-accra-id", status: "ready", productionBucketId: "101" },
+        { jurisdictionId: "west-africa-id", status: "ready", productionBucketId: "103" },
+      ],
+    })));
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+    expect(response.status).toBe(500);
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized internal availability response before GroundX", async () => {
+    enableUnified();
+    const valid = JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "ready", productionBucketId: "100" },
+      supplementary: scopeItems.slice(1).map((item, index) => ({
+        jurisdictionId: item.jurisdictionId, status: "ready", productionBucketId: String(101 + index),
+      })),
+    });
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(`${valid}${" ".repeat(5_000)}`));
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+    expect(response.status).toBe(500);
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+
+  it("fails the request when selected retrieval fails even if supplementary calls settle", async () => {
+    enableUnified();
+    groundxMocks.searchContent.mockImplementation(async ({ id }: { id: number }) => {
+      if (id === 100) throw new Error("selected provider detail");
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      return { data: { search: { text: `Law from ${id}.` } } };
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(await response.json())).not.toContain("selected provider detail");
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("selected provider detail");
+    errorLog.mockRestore();
   });
 });

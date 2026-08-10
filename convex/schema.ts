@@ -640,7 +640,7 @@ export default defineSchema({
     tokenHash: v.string(),
     ownerBinding: v.string(),
     sessionBinding: v.string(),
-    jurisdictionCode: v.string(),
+    jurisdictionCode: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
@@ -665,6 +665,8 @@ export default defineSchema({
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),
     partialCoverage: v.optional(v.boolean()),
+    configurationUnavailableCount: v.optional(v.number()),
+    supplementaryProviderFailureCount: v.optional(v.number()),
   })
     .index("by_tokenHash", ["tokenHash"])
     .index("by_status_and_expiresAt", ["status", "expiresAt"])
@@ -672,7 +674,7 @@ export default defineSchema({
   queryRuns: defineTable({
     correlationId: v.string(),
     day: v.string(),
-    jurisdictionCode: v.string(),
+    jurisdictionCode: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
@@ -706,6 +708,8 @@ export default defineSchema({
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),
     partialCoverage: v.optional(v.boolean()),
+    configurationUnavailableCount: v.optional(v.number()),
+    supplementaryProviderFailureCount: v.optional(v.number()),
   })
     .index("by_correlationId", ["correlationId"])
     .index("by_rollupStatus_and_completedAt", ["rollupStatus", "completedAt"])
@@ -713,7 +717,7 @@ export default defineSchema({
     .index("by_jurisdictionId", ["jurisdictionId"]),
   dailyMetrics: defineTable({
     day: v.string(),
-    jurisdictionCode: v.string(),
+    jurisdictionCode: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
@@ -740,10 +744,13 @@ export default defineSchema({
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),
     partialCoverage: v.optional(v.boolean()),
+    configurationUnavailableCount: v.optional(v.number()),
+    supplementaryProviderFailureCount: v.optional(v.number()),
   })
     .index("by_day", ["day"])
     .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
     .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
+    .index("by_day_and_jurisdictionId", ["day", "jurisdictionId"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
   messages: defineTable({
     sessionId: v.id("chatSessions"),

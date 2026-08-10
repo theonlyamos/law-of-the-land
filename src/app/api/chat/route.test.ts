@@ -6,13 +6,15 @@ const authMocks = vi.hoisted(() => ({
   fetchAuthQuery: vi.fn(),
   isAuthenticated: vi.fn(),
 }));
-const aiMocks = vi.hoisted(() => ({ sendMessage: vi.fn() }));
+const aiMocks = vi.hoisted(() => ({ sendMessage: vi.fn(), create: vi.fn() }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
+vi.mock("server-only", () => ({}));
 vi.mock("@google/genai", () => ({
+  Type: { OBJECT: "OBJECT", STRING: "STRING", ARRAY: "ARRAY" },
   GoogleGenAI: class {
     chats = {
-      create: () => ({ sendMessage: aiMocks.sendMessage }),
+      create: aiMocks.create,
     };
   },
 }));
@@ -41,13 +43,18 @@ beforeEach(() => {
   vi.clearAllMocks();
   process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
   authMocks.isAuthenticated.mockResolvedValue(true);
-  authMocks.fetchAuthQuery.mockResolvedValue({ allowed: true });
+  authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+    getFunctionName(reference) === "jurisdictions:isUnifiedJurisdictionsEnabled"
+      ? false
+      : { allowed: true },
+  );
   authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
     if (getFunctionName(reference) === "telemetry:claimChatPhase") {
       return { status: "chat_claimed", correlationId: "safe-hash", claimNonce, expiresAt: Date.now() + 60_000 };
     }
     return { status: "finalized", correlationId: "safe-hash" };
   });
+  aiMocks.create.mockReturnValue({ sendMessage: aiMocks.sendMessage });
   aiMocks.sendMessage.mockResolvedValue({ text: "The generated answer." });
 });
 
@@ -76,6 +83,7 @@ describe("POST /api/chat telemetry correlation", () => {
     for (const forbidden of ["What is the rule?", "Section 1", "generated answer"]) {
       expect(telemetryPayload).not.toContain(forbidden);
     }
+    expect(aiMocks.create.mock.calls[0][0].config.tools).toEqual([{ googleSearch: {} }]);
   });
 
   it.each([
@@ -121,5 +129,105 @@ describe("POST /api/chat telemetry correlation", () => {
     const finalizeCalls = authMocks.fetchAuthMutation.mock.calls.filter(([reference]) => getFunctionName(reference) === "telemetry:finalizeChatPhase");
     expect(finalizeCalls).toHaveLength(1);
     expect(finalizeCalls[0][1]).toMatchObject({ providerStatus: "success" });
+  });
+});
+
+describe("POST /api/chat governed citations", () => {
+  const jurisdictionId = "selected-jurisdiction-id";
+  const context = JSON.stringify({
+    version: 1,
+    sources: [{
+      sourceRef: "J1",
+      jurisdictionId,
+      name: "Ghana",
+      kind: "geographic",
+      relation: "selected",
+      content: "Section 1 says the rule applies.",
+    }],
+  });
+
+  beforeEach(() => {
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+      getFunctionName(reference) === "jurisdictions:isUnifiedJurisdictionsEnabled"
+        ? true
+        : { allowed: true },
+    );
+    aiMocks.sendMessage.mockResolvedValue({
+      text: JSON.stringify({ answer: "The governed answer.", citations: [{ sourceRef: "J1", label: "Section 1" }] }),
+    });
+  });
+
+  it("claims the exact context digest before Gemini and resolves model refs through governed metadata", async () => {
+    const response = await POST(request({ context, jurisdictionId }));
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      result: "The governed answer.",
+      citations: [{
+        label: "Section 1",
+        jurisdictionId,
+        jurisdictionName: "Ghana",
+        jurisdictionKind: "geographic",
+        relation: "selected",
+      }],
+    });
+    const claimArgs = authMocks.fetchAuthMutation.mock.calls[0][1];
+    expect(claimArgs).toMatchObject({
+      jurisdictionId,
+      legacyCountryCode: "GH",
+      contextDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(aiMocks.create).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        temperature: 0,
+        responseMimeType: "application/json",
+        responseSchema: expect.any(Object),
+      }),
+    }));
+    expect(aiMocks.create.mock.calls[0][0].config.tools).toBeUndefined();
+  });
+
+  it("rejects an unknown source ref, finalizes exactly one failure, and exposes no model provenance", async () => {
+    aiMocks.sendMessage.mockResolvedValue({
+      text: JSON.stringify({
+        answer: "Unsafe answer",
+        citations: [{ sourceRef: "J4", label: "https://provider.example/private" }],
+      }),
+    });
+    const response = await POST(request({ context, jurisdictionId }));
+    const payload = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(payload)).not.toContain("provider.example");
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["telemetry:claimChatPhase", "telemetry:finalizeChatPhase"]);
+    expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({ providerStatus: "failure" });
+  });
+
+  it("rejects oversized exact context before telemetry claim or Gemini", async () => {
+    const response = await POST(request({ context: "x".repeat(120_001), jurisdictionId }));
+    expect(response.status).toBe(400);
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["malformed JSON", "not-json"],
+    ["extra answer key", JSON.stringify({ answer: "Answer", citations: [], provenance: "model" })],
+    ["duplicate citation pair", JSON.stringify({
+      answer: "Answer",
+      citations: [
+        { sourceRef: "J1", label: "Section 1" },
+        { sourceRef: "J1", label: "Section 1" },
+      ],
+    })],
+  ])("fails closed on %s and records one terminal failure", async (_label, text) => {
+    aiMocks.sendMessage.mockResolvedValue({ text });
+    const response = await POST(request({ context, jurisdictionId }));
+    expect(response.status).toBe(500);
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["telemetry:claimChatPhase", "telemetry:finalizeChatPhase"]);
+    expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({ providerStatus: "failure" });
   });
 });

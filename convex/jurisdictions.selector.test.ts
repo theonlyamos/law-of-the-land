@@ -22,6 +22,9 @@ const isUnifiedJurisdictionsEnabled = makeFunctionReference<"query">(
   "jurisdictions:isUnifiedJurisdictionsEnabled",
 );
 const listPublicEnabled = makeFunctionReference<"query">("jurisdictions:listPublicEnabled");
+const resolveResearchSelection = makeFunctionReference<"query">(
+  "jurisdictions:resolveResearchSelection",
+);
 
 const previousEnvironment = process.env.ADMIN_ENVIRONMENT;
 
@@ -76,11 +79,13 @@ async function asUser(t: Backend, label: string) {
 
 async function insertGeographic(
   t: Backend,
-  input: { name: string; status?: "draft" | "enabled"; visibility?: "public" | "members" },
+  input: { name: string; code?: string; status?: "draft" | "enabled"; visibility?: "public" | "members" },
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
+      ...(input.code ? { code: input.code } : {}),
+      ...(input.code ? { legacyCountryCode: input.code } : {}),
       name: input.name,
       slug: input.name.toLowerCase().replaceAll(" ", "-"),
       status: input.status ?? "enabled",
@@ -108,6 +113,46 @@ async function insertGeographic(
     return jurisdictionId;
   });
 }
+
+describe("server-authorized research selection", () => {
+  it("resolves an ID, a unique legacy code, and a matching pair to the same safe projection", async () => {
+    const t = createBackend();
+    const id = await insertGeographic(t, { name: "Ghana", code: "GH" });
+
+    const byId = await t.query(resolveResearchSelection, { jurisdictionId: id, country: undefined });
+    const byCode = await t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "gh" });
+    const byPair = await t.query(resolveResearchSelection, { jurisdictionId: id, country: "GH" });
+
+    expect(byId).toEqual(byCode);
+    expect(byPair).toEqual(byId);
+    expect(byId).toEqual({
+      id,
+      name: "Ghana",
+      slug: "ghana",
+      kind: "geographic",
+      isDefault: false,
+      legacyCountryCode: "GH",
+    });
+    expect(JSON.stringify(byId)).not.toMatch(/productionBucket|SECRET_|visibility|organizationId/);
+  });
+
+  it("returns one unavailable result for mismatches, disabled rows, and inaccessible member rows", async () => {
+    const t = createBackend();
+    const ghanaId = await insertGeographic(t, { name: "Ghana", code: "GH" });
+    await insertGeographic(t, { name: "Nigeria", code: "NG" });
+    const members = await insertOrganizationJurisdiction(t, {
+      name: "Private University",
+      visibility: "members",
+    });
+
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: ghanaId, country: "NG" }))
+      .resolves.toBeNull();
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: members.jurisdictionId, country: undefined }))
+      .resolves.toBeNull();
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "ZZ" }))
+      .resolves.toBeNull();
+  });
+});
 
 async function insertOrganizationJurisdiction(
   t: Backend,

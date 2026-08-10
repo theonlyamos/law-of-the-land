@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { components } from "./_generated/api";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
+import type { Id } from "./_generated/dataModel";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("./**/*.ts")).map(([path, load]) => [path, load]),
@@ -154,6 +155,66 @@ async function jurisdiction(t: Backend, code = "GH") {
   );
 }
 
+async function typedJurisdiction(
+  t: Backend,
+  input: { name: string; kind: "geographic" | "organizational"; legacyCountryCode?: string },
+) {
+  return await t.run(async (ctx) => {
+    const now = Date.now();
+    let organizationId: Id<"organizations"> | undefined;
+    if (input.kind === "organizational") {
+      organizationId = await ctx.db.insert("organizations", {
+        name: input.name,
+        slug: `org-${crypto.randomUUID()}`,
+        class: "intergovernmental",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    const jurisdictionId = await ctx.db.insert("jurisdictions", {
+      ...(input.legacyCountryCode ? {
+        code: input.legacyCountryCode,
+        legacyCountryCode: input.legacyCountryCode,
+      } : {}),
+      name: input.name,
+      slug: `jurisdiction-${crypto.randomUUID()}`,
+      status: "enabled",
+      isDefault: false,
+      providerSyncState: "synced",
+      kind: input.kind,
+      visibility: "public",
+      ...(organizationId ? { organizationId } : {}),
+      createdBy: "fixture",
+      updatedBy: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (input.kind === "geographic") {
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId,
+        googlePlaceId: `place-${crypto.randomUUID()}`,
+        level: "country",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: input.name,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId,
+        scopeMode: "global",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    return jurisdictionId;
+  });
+}
+
 async function issueFor(
   client: ReturnType<Backend["withIdentity"]>,
   token: string,
@@ -227,6 +288,93 @@ afterEach(() => {
 });
 
 describe("privacy-bounded query telemetry", () => {
+  it("binds a code-less jurisdiction ID and exact context digest through search and chat", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "World Health Organization", kind: "organizational" });
+    const otherId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, "unified-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const digest = "d".repeat(64);
+
+    await owner.client.mutation(issue, {
+      token,
+      jurisdictionId,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, ""]),
+    });
+    const searchArgs = {
+      token,
+      providerStatus: "success" as const,
+      latencyMs: 125,
+      resultCount: 2,
+      scopeSize: 4,
+      retrievalPlanSize: 3,
+      providerCallCount: 2,
+      plannerStatus: "planned" as const,
+      plannerLatencyMs: 25,
+      contextDigest: digest,
+      partialCoverage: true,
+      configurationUnavailableCount: 1,
+      supplementaryProviderFailureCount: 0,
+    };
+    await owner.client.mutation(searchPhase, {
+      ...searchArgs,
+      serviceProof: await proof([
+        "search-jurisdiction-v1", token, "success", 125, 2, 4, 3, 2,
+        "planned", 25, digest, 1, 1, 0,
+      ]),
+    });
+    await expect(owner.client.mutation(claim, {
+      token,
+      jurisdictionId: otherId,
+      contextDigest: digest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, otherId, "", digest]),
+    })).rejects.toThrow("TELEMETRY_JURISDICTION_MISMATCH");
+    await expect(owner.client.mutation(claim, {
+      token,
+      jurisdictionId,
+      contextDigest: "e".repeat(64),
+      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", "e".repeat(64)]),
+    })).rejects.toThrow("TELEMETRY_CONTEXT_MISMATCH");
+    const claimed = await owner.client.mutation(claim, {
+      token,
+      jurisdictionId,
+      contextDigest: digest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, jurisdictionId, "", digest]),
+    });
+    await owner.client.mutation(finalize, {
+      token,
+      claimNonce: claimed.claimNonce,
+      providerStatus: "success",
+      latencyMs: 25,
+      serviceProof: await proof(["finalize", token, claimed.claimNonce, "success", 25]),
+    });
+
+    const runs = await t.run((ctx) => ctx.db.query("queryRuns").take(2));
+    expect(runs[0]).toMatchObject({
+      jurisdictionId,
+      jurisdictionName: "World Health Organization",
+      jurisdictionKind: "organizational",
+      contextDigest: digest,
+      configurationUnavailableCount: 1,
+      supplementaryProviderFailureCount: 0,
+    });
+    expect(runs[0]).not.toHaveProperty("jurisdictionCode");
+    for (const forbidden of ["question", "context", "answer", "citations", "sourceRefs", "providerError"]) {
+      expect(runs[0]).not.toHaveProperty(forbidden);
+    }
+    await t.mutation(rollup, { cursor: null });
+    const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").take(2));
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({
+      jurisdictionId,
+      jurisdictionName: "World Health Organization",
+      jurisdictionKind: "organizational",
+      configurationUnavailableCount: 1,
+      supplementaryProviderFailureCount: 0,
+    });
+    expect(metrics[0]).not.toHaveProperty("jurisdictionCode");
+  });
+
   it("stores only a compact terminal outcome and no question, context, answer, token, or provider error", async () => {
     const t = backend();
     await jurisdiction(t);
@@ -456,6 +604,7 @@ describe("daily telemetry rollups", () => {
 describe("admin analytics", () => {
   it("requires assured analytics permission and reads only paginated daily aggregates", async () => {
     const t = backend();
+    const organizationId = await typedJurisdiction(t, { name: "World Health Organization", kind: "organizational" });
     process.env.ADMIN_PANEL_ENABLED = "true";
     process.env.ADMIN_ENVIRONMENT = "test";
     await t.run(async (ctx) => {
@@ -464,11 +613,21 @@ describe("admin analytics", () => {
         day: "2026-07-28", jurisdictionCode: "GH", totalQuestions: 7, successCount: 6, failureCount: 1, abortedCount: 0, providerFailureCount: 1, noResultCount: 2,
         latencyLe250: 1, latencyLe500: 2, latencyLe1000: 2, latencyLe2500: 1, latencyLe5000: 1, latencyGt5000: 0, p50UpperBoundMs: 1000, p95UpperBoundMs: 5000, updatedAt: Date.now(),
       });
+      await ctx.db.insert("dailyMetrics", {
+        day: "2026-07-29", jurisdictionId: organizationId, jurisdictionName: "World Health Organization", jurisdictionKind: "organizational",
+        totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0, providerFailureCount: 0, noResultCount: 0,
+        latencyLe250: 1, latencyLe500: 1, latencyLe1000: 1, latencyLe2500: 1, latencyLe5000: 1, latencyGt5000: 0,
+        p50UpperBoundMs: 250, p95UpperBoundMs: 250, updatedAt: Date.now(),
+      });
       await ctx.db.insert("queryRuns", { correlationId: "raw-run-must-not-leak", day: "2026-07-28", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 99, completedAt: Date.now(), rollupStatus: "pending" });
     });
     const asAuditor = await admin(t);
-    const page = await asAuditor.query(list, { paginationOpts: { numItems: 1, cursor: null }, jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31" });
-    expect(page.page).toEqual([expect.objectContaining({ totalQuestions: 7, p95UpperBoundMs: 5000 })]);
+    const page = await asAuditor.query(list, { paginationOpts: { numItems: 2, cursor: null }, jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31" });
+    expect(page.page).toEqual(expect.arrayContaining([
+      expect.objectContaining({ totalQuestions: 7, p95UpperBoundMs: 5000, jurisdictionCode: "GH" }),
+      expect.objectContaining({ totalQuestions: 1, p95UpperBoundMs: 250 }),
+    ]));
+    expect(page.page.find((row: { totalQuestions: number }) => row.totalQuestions === 1)).not.toHaveProperty("jurisdictionCode");
     expect(JSON.stringify(page)).not.toContain("raw-run-must-not-leak");
     await expect((await admin(t, "support_agent")).query(list, { paginationOpts: { numItems: 1, cursor: null }, jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31" })).rejects.toThrow("permission");
   });

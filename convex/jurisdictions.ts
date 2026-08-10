@@ -21,6 +21,7 @@ import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
 import { normalizePositiveSafeIntegerBucketId } from "./lib/jurisdictionEligibility";
 import {
   activeOrganizationIdsForUser,
+  assertJurisdictionAccess,
   getAccessibleJurisdictionById,
 } from "./lib/jurisdictionAccess";
 import { optionalUserId } from "./lib/requireUser";
@@ -406,11 +407,66 @@ export const listPublicEnabled = query({
   },
 });
 
+const researchJurisdictionValidator = v.union(
+  v.null(),
+  v.object({
+    id: v.id("jurisdictions"),
+    name: v.string(),
+    slug: v.string(),
+    kind: jurisdictionKindValidator,
+    isDefault: v.boolean(),
+    legacyCountryCode: v.optional(v.string()),
+  }),
+);
+
 /** Returns the safe jurisdiction projection when the caller has server-derived access. */
 export const getAccessibleById = query({
   args: { id: v.id("jurisdictions") },
   returns: v.union(accessibleJurisdictionValidator, v.null()),
   handler: async (ctx, args) => await getAccessibleJurisdictionById(ctx, args.id),
+});
+
+/** Resolves the compatibility selector pair without exposing provider configuration. */
+export const resolveResearchSelection = query({
+  args: {
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    country: v.optional(v.string()),
+  },
+  returns: researchJurisdictionValidator,
+  handler: async (ctx, args) => {
+    if (!args.jurisdictionId && args.country === undefined) return null;
+    let country: string | undefined;
+    if (args.country !== undefined) {
+      const normalized = args.country.trim().toUpperCase();
+      if (!isLegacyCountryCode(normalized)) return null;
+      country = normalized;
+    }
+    try {
+      const byId = args.jurisdictionId
+        ? await ctx.db.get("jurisdictions", args.jurisdictionId)
+        : null;
+      const codeRows = country
+        ? await ctx.db
+            .query("jurisdictions")
+            .withIndex("by_code_and_status", (q) =>
+              q.eq("code", country).eq("status", "enabled"),
+            )
+            .take(2)
+        : [];
+      if ((args.jurisdictionId && !byId) || (country && codeRows.length !== 1)) return null;
+      const selected = byId ?? codeRows[0];
+      if (!selected || (byId && country && codeRows[0]?._id !== byId._id)) return null;
+      await assertJurisdictionAccess(ctx, selected);
+      const kind = selected.kind;
+      if (kind !== "geographic" && kind !== "organizational") return null;
+      await assertTypedRelationship(ctx, selected, kind);
+      const projected = projectResearchJurisdiction(selected);
+      if (country && projected.legacyCountryCode !== country) return null;
+      return projected;
+    } catch {
+      return null;
+    }
+  },
 });
 
 /** Browser-safe, bounded selector with member-first organizational pagination. */
