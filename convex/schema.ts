@@ -750,6 +750,11 @@ export default defineSchema({
   })
     .index("by_day", ["day"])
     .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
+    .index("by_jurisdictionCode_and_jurisdictionId_and_day", [
+      "jurisdictionCode",
+      "jurisdictionId",
+      "day",
+    ])
     .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
     .index("by_day_and_jurisdictionId", ["day", "jurisdictionId"])
     .index("by_jurisdictionId_and_day", ["jurisdictionId", "day"])

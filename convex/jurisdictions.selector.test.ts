@@ -147,6 +147,19 @@ describe("server-authorized research selection", () => {
       .resolves.toBeNull();
   });
 
+  it("returns the uniform unavailable result for malformed browser jurisdiction IDs", async () => {
+    const t = createBackend();
+
+    for (const jurisdictionId of ["not-a-convex-id", "", "x".repeat(201)]) {
+      const result = await t.query(resolveResearchSelection, {
+        jurisdictionId,
+        country: undefined,
+      });
+      expect(result).toBeNull();
+      expect(JSON.stringify(result)).not.toMatch(/productionBucket|SECRET_|visibility|organizationId/);
+    }
+  });
+
   it("returns one unavailable result for mismatches, disabled rows, and inaccessible member rows", async () => {
     const t = createBackend();
     const ghanaId = await insertGeographic(t, { name: "Ghana", code: "GH" });

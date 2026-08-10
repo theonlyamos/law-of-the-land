@@ -59,6 +59,7 @@ const publicJurisdictionListItemValidator = v.object({
 // Admin validation currently accepts any two-letter code (26 × 26).
 const MAX_PUBLIC_JURISDICTIONS = 26 * 26;
 const MAX_SEARCH_QUERY_LENGTH = 120;
+const MAX_RESEARCH_JURISDICTION_ID_LENGTH = 200;
 const MAX_CURSOR_LENGTH = 4096;
 const MAX_NESTED_CURSOR_LENGTH = 2048;
 
@@ -429,12 +430,17 @@ export const getAccessibleById = query({
 /** Resolves the compatibility selector pair without exposing provider configuration. */
 export const resolveResearchSelection = query({
   args: {
-    jurisdictionId: v.optional(v.id("jurisdictions")),
+    jurisdictionId: v.optional(v.string()),
     country: v.optional(v.string()),
   },
   returns: researchJurisdictionValidator,
   handler: async (ctx, args) => {
-    if (!args.jurisdictionId && args.country === undefined) return null;
+    if (args.jurisdictionId === undefined && args.country === undefined) return null;
+    if (
+      args.jurisdictionId !== undefined
+      && (args.jurisdictionId.length === 0
+        || args.jurisdictionId.length > MAX_RESEARCH_JURISDICTION_ID_LENGTH)
+    ) return null;
     let country: string | undefined;
     if (args.country !== undefined) {
       const normalized = args.country.trim().toUpperCase();
@@ -442,8 +448,12 @@ export const resolveResearchSelection = query({
       country = normalized;
     }
     try {
-      const byId = args.jurisdictionId
-        ? await ctx.db.get("jurisdictions", args.jurisdictionId)
+      const jurisdictionId = args.jurisdictionId === undefined
+        ? null
+        : ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
+      if (args.jurisdictionId !== undefined && !jurisdictionId) return null;
+      const byId = jurisdictionId
+        ? await ctx.db.get("jurisdictions", jurisdictionId)
         : null;
       const codeRows = country
         ? await ctx.db
@@ -453,7 +463,7 @@ export const resolveResearchSelection = query({
             )
             .take(2)
         : [];
-      if ((args.jurisdictionId && !byId) || (country && codeRows.length !== 1)) return null;
+      if ((jurisdictionId && !byId) || (country && codeRows.length !== 1)) return null;
       const selected = byId ?? codeRows[0];
       if (!selected || (byId && country && codeRows[0]?._id !== byId._id)) return null;
       await assertJurisdictionAccess(ctx, selected);
