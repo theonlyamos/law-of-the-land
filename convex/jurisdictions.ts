@@ -7,16 +7,24 @@ import {
   jurisdictionKindValidator,
   jurisdictionSearchPageValidator,
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
+  MAX_RETRIEVAL_LIBRARIES,
   MAX_SELECTOR_PAGE_SIZE,
+  productionLibraryRequestValidator,
+  productionLibraryResolutionValidator,
+  researchScopeValidator,
+  type ProductionLibraryAvailability,
+  type ProductionLibraryResolution,
   type JurisdictionKind,
 } from "./lib/jurisdictionDomain";
 import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
+import { normalizePositiveSafeIntegerBucketId } from "./lib/jurisdictionEligibility";
 import {
   activeOrganizationIdsForUser,
   getAccessibleJurisdictionById,
 } from "./lib/jurisdictionAccess";
 import { optionalUserId } from "./lib/requireUser";
 import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
+import { resolveResearchScopeForJurisdiction } from "./lib/researchScope";
 
 const accessibleJurisdictionValidator = v.object({
   _id: v.id("jurisdictions"),
@@ -483,4 +491,60 @@ export const isUnifiedJurisdictionsEnabled = query({
   args: {},
   returns: v.boolean(),
   handler: async (ctx) => await readUnifiedJurisdictionsEnabled(ctx),
+});
+
+export const resolveResearchScope = query({
+  args: {
+    jurisdictionId: v.id("jurisdictions"),
+    geographicHints: v.array(v.string()),
+  },
+  returns: researchScopeValidator,
+  handler: async (ctx, args) =>
+    await resolveResearchScopeForJurisdiction(
+      ctx,
+      args.jurisdictionId,
+      args.geographicHints,
+    ),
+});
+
+function productionAvailability(
+  row: Doc<"jurisdictions">,
+): ProductionLibraryAvailability {
+  const productionBucketId = row.productionBucketId === undefined
+    ? null
+    : normalizePositiveSafeIntegerBucketId(row.productionBucketId);
+  return productionBucketId === null
+    ? { jurisdictionId: row._id, status: "unconfigured" }
+    : { jurisdictionId: row._id, status: "ready", productionBucketId };
+}
+
+/** Resolves only provider availability for a transport-authenticated server route. */
+export const getProductionLibraryAvailability = internalQuery({
+  args: productionLibraryRequestValidator.fields,
+  returns: productionLibraryResolutionValidator,
+  handler: async (ctx, args): Promise<ProductionLibraryResolution> => {
+    const rawIds = [args.selectedJurisdictionId, ...args.supplementaryJurisdictionIds];
+    if (
+      args.supplementaryJurisdictionIds.length > MAX_RETRIEVAL_LIBRARIES - 1 ||
+      new Set(rawIds).size !== rawIds.length
+    ) {
+      throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
+    }
+    const normalizedIds = rawIds.map((value) =>
+      ctx.db.normalizeId("jurisdictions", value),
+    );
+    if (normalizedIds.some((id) => id === null)) {
+      throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
+    }
+    const ids = normalizedIds as Id<"jurisdictions">[];
+    if (new Set(ids).size !== ids.length) {
+      throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
+    }
+    const rows = await Promise.all(ids.map((id) => ctx.db.get("jurisdictions", id)));
+    if (rows.some((row) => !row || row.status !== "enabled")) {
+      throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
+    }
+    const availability = (rows as Doc<"jurisdictions">[]).map(productionAvailability);
+    return { selected: availability[0], supplementary: availability.slice(1) };
+  },
 });

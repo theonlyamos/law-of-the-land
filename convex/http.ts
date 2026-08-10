@@ -16,6 +16,8 @@ polar.registerRoutes(http);
 const MAX_GROUNDX_CALLBACK_BYTES = 16_384;
 const MAX_EXPORT_REFERENCE_BYTES = 256;
 const MAX_SEARCH_JURISDICTION_BYTES = 64;
+const MAX_SEARCH_JURISDICTIONS_BYTES = 1_024;
+const MAX_JURISDICTION_ID_LENGTH = 128;
 const completeGroundxCallback = makeFunctionReference<"mutation">(
   "admin/jobs:completeGroundxCallback",
 );
@@ -26,6 +28,9 @@ const bootstrapE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:
 const cleanupE2eFixtures = makeFunctionReference<"mutation">("admin/e2eFixtures:cleanup");
 const controlE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:control");
 const getSearchJurisdiction = internal.jurisdictions.getPublicByCode;
+const getProductionLibraryAvailability = makeFunctionReference<"query">(
+  "jurisdictions:getProductionLibraryAvailability",
+);
 
 async function secretsMatch(left: string, right: string) {
   const [leftHash, rightHash] = await Promise.all([
@@ -72,6 +77,84 @@ http.route({
     return Response.json(jurisdiction, {
       headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" },
     });
+  }),
+});
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedOpaqueId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= MAX_JURISDICTION_ID_LENGTH
+  );
+}
+
+async function readProductionLibraryRequest(request: Request) {
+  const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTIONS_BYTES);
+  if (!bytes || bytes.byteLength === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(parsed)) return null;
+  const keys = Object.keys(parsed);
+  if (
+    keys.length !== 2 ||
+    !keys.includes("selectedJurisdictionId") ||
+    !keys.includes("supplementaryJurisdictionIds") ||
+    !boundedOpaqueId(parsed.selectedJurisdictionId) ||
+    !Array.isArray(parsed.supplementaryJurisdictionIds) ||
+    parsed.supplementaryJurisdictionIds.length > 3 ||
+    !parsed.supplementaryJurisdictionIds.every(boundedOpaqueId)
+  ) {
+    return null;
+  }
+  const supplementaryJurisdictionIds = parsed.supplementaryJurisdictionIds as string[];
+  const ids = [parsed.selectedJurisdictionId, ...supplementaryJurisdictionIds];
+  if (new Set(ids).size !== ids.length) return null;
+  return {
+    selectedJurisdictionId: parsed.selectedJurisdictionId,
+    supplementaryJurisdictionIds,
+  };
+}
+
+http.route({
+  path: "/internal/search-jurisdictions",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!(await authorizeSearchJurisdictionRequest(request))) {
+      return new Response(null, {
+        status: 404,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    const input = await readProductionLibraryRequest(request);
+    if (!input) {
+      return new Response(null, {
+        status: 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    try {
+      const resolution = await ctx.runQuery(getProductionLibraryAvailability, input);
+      return Response.json(resolution, {
+        headers: {
+          "cache-control": "no-store, private",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    } catch (error) {
+      const invalidRequest = String(error).includes("PRODUCTION_LIBRARY_REQUEST_INVALID");
+      return new Response(null, {
+        status: invalidRequest ? 400 : 404,
+        headers: { "cache-control": "no-store" },
+      });
+    }
   }),
 });
 

@@ -124,7 +124,7 @@ export const jurisdictionSearchPageValidator = v.object({
   continueCursor: v.union(v.string(), v.null()),
 });
 
-const researchScopeItemValidator = v.object({
+export const researchScopeItemValidator = v.object({
   jurisdictionId: v.id("jurisdictions"),
   name: v.string(),
   kind: jurisdictionKindValidator,
@@ -143,6 +143,28 @@ export const researchScopeValidator = v.object({
 export const productionLibraryValidator = v.object({
   ...researchScopeItemValidator.fields,
   productionBucketId: v.string(),
+});
+
+export const productionLibraryAvailabilityValidator = v.union(
+  v.object({
+    jurisdictionId: v.id("jurisdictions"),
+    status: v.literal("ready"),
+    productionBucketId: v.string(),
+  }),
+  v.object({
+    jurisdictionId: v.id("jurisdictions"),
+    status: v.literal("unconfigured"),
+  }),
+);
+
+export const productionLibraryRequestValidator = v.object({
+  selectedJurisdictionId: v.string(),
+  supplementaryJurisdictionIds: v.array(v.string()),
+});
+
+export const productionLibraryResolutionValidator = v.object({
+  selected: productionLibraryAvailabilityValidator,
+  supplementary: v.array(productionLibraryAvailabilityValidator),
 });
 
 export const chatCitationValidator = v.object({
@@ -167,6 +189,22 @@ export type ResearchScopeItem = {
 export type ResearchScope = {
   selectedJurisdictionId: Id<"jurisdictions">;
   items: ResearchScopeItem[];
+};
+
+export type ProductionLibraryAvailability =
+  | {
+      jurisdictionId: Id<"jurisdictions">;
+      status: "ready";
+      productionBucketId: string;
+    }
+  | {
+      jurisdictionId: Id<"jurisdictions">;
+      status: "unconfigured";
+    };
+
+export type ProductionLibraryResolution = {
+  selected: ProductionLibraryAvailability;
+  supplementary: ProductionLibraryAvailability[];
 };
 
 export type ChatCitation = {

@@ -49,6 +49,7 @@ import type * as lib_jurisdictionEligibility from "../lib/jurisdictionEligibilit
 import type * as lib_placeClaim from "../lib/placeClaim.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
+import type * as lib_researchScope from "../lib/researchScope.js";
 import type * as lib_telemetryProof from "../lib/telemetryProof.js";
 import type * as polar from "../polar.js";
 import type * as telemetry from "../telemetry.js";
@@ -103,6 +104,7 @@ declare const fullApi: ApiFromModules<{
   "lib/placeClaim": typeof lib_placeClaim;
   "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;
+  "lib/researchScope": typeof lib_researchScope;
   "lib/telemetryProof": typeof lib_telemetryProof;
   polar: typeof polar;
   telemetry: typeof telemetry;
