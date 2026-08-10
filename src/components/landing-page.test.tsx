@@ -12,6 +12,26 @@ vi.mock("next/image", () => ({
   ),
 }));
 
+vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
+  ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
+    <button
+      type="button"
+      onClick={() =>
+        onChange({
+          id: "ghana-id",
+          name: "Ghana",
+          slug: "ghana",
+          kind: "geographic",
+          isDefault: true,
+          legacyCountryCode: "GH",
+        })
+      }
+    >
+      Choose Ghana unified
+    </button>
+  ),
+}));
+
 afterEach(cleanup);
 
 const jurisdictions = [
@@ -33,6 +53,9 @@ function landingProps(overrides: Partial<React.ComponentProps<typeof LandingPage
     country: "GH",
     onCountryChange: vi.fn(),
     jurisdictions,
+    unifiedJurisdictionsEnabled: false,
+    researchJurisdiction: null,
+    onResearchJurisdictionChange: vi.fn(),
     ...overrides,
   };
 }
@@ -241,5 +264,46 @@ describe("professional landing research shell", () => {
     render(<LandingPage {...landingProps({ country: "", jurisdictions: undefined })} />);
 
     expect(screen.getByText("Loading the published jurisdiction register\u2026")).toBeVisible();
+  });
+
+  it("uses search-first selection without rendering a complete coverage register", () => {
+    const props = landingProps({
+      unifiedJurisdictionsEnabled: true,
+      jurisdictions: undefined,
+      country: "",
+    });
+    render(<LandingPage {...props} />);
+
+    expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Choose Ghana unified" }));
+    expect(props.onResearchJurisdictionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "ghana-id", legacyCountryCode: "GH" }),
+    );
+    expect(screen.queryByText("Nigeria")).not.toBeInTheDocument();
+    expect(screen.getByText(/Search by place or organization/i)).toBeVisible();
+  });
+
+  it("explains why a selected code-less organization cannot enter the legacy chat yet", () => {
+    render(
+      <LandingPage
+        {...landingProps({
+          unifiedJurisdictionsEnabled: true,
+          jurisdictions: undefined,
+          country: "",
+          researchJurisdiction: {
+            id: "who-id",
+            name: "World Health Organization",
+            slug: "world-health-organization",
+            kind: "organizational",
+            isDefault: false,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "This jurisdiction will be available for research after the ID-based chat rollout.",
+    );
+    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
   });
 });

@@ -105,9 +105,23 @@ export const jurisdictionDocumentValidator = v.object({
 });
 
 export const jurisdictionSearchPageValidator = v.object({
-  page: v.array(jurisdictionDocumentValidator),
+  page: v.array(
+    v.object({
+      id: v.id("jurisdictions"),
+      name: v.string(),
+      slug: v.string(),
+      kind: jurisdictionKindValidator,
+      isDefault: v.boolean(),
+      legacyCountryCode: v.optional(v.string()),
+    }),
+  ),
+  group: v.union(
+    v.literal("geographic"),
+    v.literal("your_organizations"),
+    v.literal("public_organizations"),
+  ),
   isDone: v.boolean(),
-  continueCursor: v.string(),
+  continueCursor: v.union(v.string(), v.null()),
 });
 
 const researchScopeItemValidator = v.object({
