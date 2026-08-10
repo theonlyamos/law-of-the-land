@@ -235,7 +235,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
   const chatCountry = unifiedJurisdictionsEnabled === true
     ? chatResearchJurisdiction?.legacyCountryCode ?? ""
     : sessionData?.country ?? findJurisdiction(jurisdictions, initialCountry)?.code ?? selectedCountry;
-  const storedStableRollback = unifiedJurisdictionsEnabled === false && Boolean(sessionData?.jurisdictionId);
+  const storedStableRollback = unifiedJurisdictionsEnabled === false &&
+    sessionData !== undefined && sessionData !== null &&
+    sessionData.jurisdictionContract === "unified";
   const selectionReady = storedStableRollback
     ? false
     : unifiedJurisdictionsEnabled === true

@@ -137,22 +137,37 @@ async function admin(t: Backend, role = "auditor") {
 }
 
 async function jurisdiction(t: Backend, code = "GH") {
-  const now = Date.now();
-  await t.run((ctx) =>
-    ctx.db.insert("jurisdictions", {
+  return await t.run(async (ctx) => {
+    const now = Date.now();
+    const jurisdictionId = await ctx.db.insert("jurisdictions", {
       code,
+      legacyCountryCode: code,
       name: code === "GH" ? "Ghana" : "Nigeria",
       slug: code.toLowerCase(),
       status: "enabled",
       isDefault: code === "GH",
       productionBucketId: "11833",
       providerSyncState: "synced",
+      kind: "geographic",
+      visibility: "public",
       createdBy: "fixture",
       updatedBy: "fixture",
       createdAt: now,
       updatedAt: now,
-    }),
-  );
+    });
+    await ctx.db.insert("geographicJurisdictions", {
+      jurisdictionId,
+      googlePlaceId: `place-${code.toLowerCase()}`,
+      level: "country",
+      countryCode: code,
+      latitude: 0,
+      longitude: 0,
+      formattedAddress: code === "GH" ? "Ghana" : "Nigeria",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return jurisdictionId;
+  });
 }
 
 async function typedJurisdiction(
@@ -288,6 +303,173 @@ afterEach(() => {
 });
 
 describe("privacy-bounded query telemetry", () => {
+  it("accepts only the narrow pre-V2 Ghana shape for legacy issuance and terminal failure", async () => {
+    const t = backend();
+    const jurisdictionId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("jurisdictions", {
+        code: "GH", name: "Ghana", slug: "ghana-v1", status: "enabled",
+        isDefault: true, productionBucketId: "11833", providerSyncState: "synced",
+        createdBy: "migration:seed-ghana-jurisdiction-v1",
+        updatedBy: "migration:seed-ghana-jurisdiction-v1", createdAt: now, updatedAt: now,
+      });
+    });
+    const owner = await user(t, "pre-v2-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await issueFor(owner.client, token);
+    await recordSearch(owner.client, token, "failure");
+    await expect(t.run((ctx) => ctx.db.query("queryRuns").take(1)))
+      .resolves.toMatchObject([{
+        jurisdictionId,
+        jurisdictionCode: "GH",
+        jurisdictionName: "Ghana",
+        jurisdictionKind: "geographic",
+        outcome: "failure",
+      }]);
+  });
+
+  it("treats an ID/no-marker historical correlation as unified for its whole lifetime", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, {
+      name: "World Health Organization", kind: "organizational",
+    });
+    const owner = await user(t, "historical-unified-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token,
+      jurisdictionId,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, ""]),
+    });
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("telemetryCorrelations").take(1);
+      await ctx.db.patch(row[0]._id, { jurisdictionContract: undefined });
+    });
+    const digest = "b".repeat(64);
+    await owner.client.mutation(searchPhase, {
+      token, providerStatus: "success", latencyMs: 1, resultCount: 1,
+      scopeSize: 1, retrievalPlanSize: 1, providerCallCount: 1,
+      plannerStatus: "planned", plannerLatencyMs: 1, contextDigest: digest,
+      partialCoverage: false, configurationUnavailableCount: 0,
+      supplementaryProviderFailureCount: 0,
+      serviceProof: await proof([
+        "search-jurisdiction-v1", token, "success", 1, 1, 1, 1, 1,
+        "planned", 1, digest, 0, 0, 0,
+      ]),
+    });
+    await expect(recordSearch(owner.client, token)).rejects.toThrow("TELEMETRY_COUNT_INVALID");
+  });
+
+  it("rejects a corrupt unified correlation without an ID before every phase or terminal write", async () => {
+    const t = backend();
+    await jurisdiction(t);
+    const owner = await user(t, "corrupt-unified-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const issued = await issueFor(owner.client, token);
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("telemetryCorrelations")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", issued.correlationId)).unique();
+      await ctx.db.patch(row!._id, {
+        jurisdictionContract: "unified",
+        jurisdictionId: undefined,
+      });
+    });
+
+    await expect(recordSearch(owner.client, token)).rejects.toThrow("TELEMETRY_JURISDICTION_INVALID");
+    const digest = "a".repeat(64);
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("telemetryCorrelations")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", issued.correlationId)).unique();
+      await ctx.db.patch(row!._id, {
+        status: "search_complete",
+        searchProviderStatus: "success",
+        searchLatencyMs: 1,
+        resultCount: 1,
+        contextDigest: digest,
+      });
+    });
+    await expect(owner.client.mutation(claim, {
+      token,
+      contextDigest: digest,
+      serviceProof: await proof(["claim-jurisdiction-v1", token, "", "", digest]),
+    })).rejects.toThrow("TELEMETRY_JURISDICTION_INVALID");
+    await t.run(async (ctx) => {
+      const row = await ctx.db.query("telemetryCorrelations")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", issued.correlationId)).unique();
+      await ctx.db.patch(row!._id, { status: "chat_claimed", expiresAt: 0 });
+    });
+    const claimNonce = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await expect(owner.client.mutation(finalize, {
+      token, claimNonce, providerStatus: "success", latencyMs: 1,
+      serviceProof: await proof(["finalize", token, claimNonce, "success", 1]),
+    })).rejects.toThrow("TELEMETRY_JURISDICTION_INVALID");
+    await expect(owner.client.mutation(expire, {
+      tokenHash: issued.correlationId,
+    })).rejects.toThrow("TELEMETRY_JURISDICTION_INVALID");
+    await expect(t.run((ctx) => ctx.db.query("queryRuns").take(1))).resolves.toEqual([]);
+  });
+
+  it("dual-writes stable identity while retaining every legacy proof phase", async () => {
+    const t = backend();
+    const jurisdictionId = await jurisdiction(t);
+    const owner = await user(t, "legacy-dual-write-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+
+    await issueFor(owner.client, token);
+    await recordSearch(owner.client, token);
+    const claimed = await owner.client.mutation(claim, {
+      token, jurisdictionCode: "GH",
+      serviceProof: await proof(["claim", token, "GH"]),
+    });
+    await owner.client.mutation(finalize, {
+      token, claimNonce: claimed.claimNonce, providerStatus: "success", latencyMs: 25,
+      serviceProof: await proof(["finalize", token, claimed.claimNonce, "success", 25]),
+    });
+
+    const beforeRollup = await t.run(async (ctx) => ({
+      correlations: await ctx.db.query("telemetryCorrelations").take(1),
+      runs: await ctx.db.query("queryRuns").take(1),
+    }));
+    expect(beforeRollup.correlations).toMatchObject([{
+      jurisdictionContract: "legacy", jurisdictionCode: "GH", jurisdictionId,
+      jurisdictionName: "Ghana", jurisdictionKind: "geographic",
+    }]);
+    expect(beforeRollup.runs).toMatchObject([{
+      jurisdictionCode: "GH", jurisdictionId,
+      jurisdictionName: "Ghana", jurisdictionKind: "geographic",
+    }]);
+
+    await t.run((ctx) => ctx.db.insert("dailyMetrics", {
+      day: beforeRollup.runs[0].day,
+      jurisdictionCode: "GH",
+      totalQuestions: 7,
+      successCount: 7,
+      failureCount: 0,
+      abortedCount: 0,
+      providerFailureCount: 0,
+      noResultCount: 0,
+      latencyLe250: 7,
+      latencyLe500: 7,
+      latencyLe1000: 7,
+      latencyLe2500: 7,
+      latencyLe5000: 7,
+      latencyGt5000: 0,
+      p50UpperBoundMs: 250,
+      p95UpperBoundMs: 250,
+      updatedAt: 1,
+    }));
+
+    await t.mutation(rollup, { cursor: null });
+    const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").take(3));
+    expect(metrics).toHaveLength(2);
+    expect(metrics.find((row) => row.jurisdictionId === undefined)).toMatchObject({
+      jurisdictionCode: "GH", totalQuestions: 7,
+    });
+    expect(metrics.find((row) => row.jurisdictionId === jurisdictionId)).toMatchObject({
+      jurisdictionCode: "GH", jurisdictionId,
+      jurisdictionName: "Ghana", jurisdictionKind: "geographic", totalQuestions: 1,
+    });
+  });
+
   it("binds a code-less jurisdiction ID and exact context digest through search and chat", async () => {
     const t = backend();
     const jurisdictionId = await typedJurisdiction(t, { name: "World Health Organization", kind: "organizational" });
@@ -303,6 +485,8 @@ describe("privacy-bounded query telemetry", () => {
       jurisdictionId,
       serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, ""]),
     });
+    await expect(t.run((ctx) => ctx.db.query("telemetryCorrelations").take(1)))
+      .resolves.toMatchObject([{ jurisdictionContract: "unified" }]);
     const searchArgs = {
       token,
       providerStatus: "success" as const,
@@ -447,7 +631,7 @@ describe("privacy-bounded query telemetry", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
     const t = backend();
-    await jurisdiction(t);
+    const jurisdictionId = await jurisdiction(t);
     const owner = await user(t, "owner");
     const failedToken = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
     await issueFor(owner.client, failedToken);
@@ -464,6 +648,8 @@ describe("privacy-bounded query telemetry", () => {
 
     const runs = await t.run((ctx) => ctx.db.query("queryRuns").take(10));
     expect(runs).toHaveLength(2);
+    expect(runs.every((row) => row.jurisdictionId === jurisdictionId)).toBe(true);
+    expect(runs.every((row) => row.jurisdictionKind === "geographic")).toBe(true);
     expect(runs.map((row) => row.outcome).sort()).toEqual(["aborted", "failure"]);
     expect(runs.find((row) => row.outcome === "failure")).toMatchObject({
       searchProviderStatus: "failure",
@@ -475,7 +661,7 @@ describe("privacy-bounded query telemetry", () => {
   it("marks a pre-provider expiry as skipped and counts only explicit empty search outcomes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
-    const t = backend(); await jurisdiction(t); const owner = await user(t, "owner");
+    const t = backend(); const jurisdictionId = await jurisdiction(t); const owner = await user(t, "owner");
     const issuedOnly = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
     const issued = await issueFor(owner.client, issuedOnly);
     vi.setSystemTime(new Date(issued.expiresAt));
@@ -494,6 +680,9 @@ describe("privacy-bounded query telemetry", () => {
     await t.mutation(rollup, { cursor: null });
     const runs = await t.run((ctx) => ctx.db.query("queryRuns").take(10));
     expect(runs.find((row) => row.correlationId === issued.correlationId)).toMatchObject({ outcome: "aborted", searchProviderStatus: "skipped", generationProviderStatus: "skipped" });
+    expect(runs.find((row) => row.correlationId === issued.correlationId)).toMatchObject({
+      jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic",
+    });
     const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").take(2));
     expect(metrics[0].noResultCount).toBe(1);
     expect(metrics[0].providerFailureCount).toBe(0);

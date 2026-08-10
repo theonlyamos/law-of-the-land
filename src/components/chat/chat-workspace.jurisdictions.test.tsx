@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => ({
     slug: string;
     isDefault: boolean;
   }>,
-  session: null as null | { country: string | null; title: string; jurisdictionId?: string | null; jurisdictionName?: string | null; jurisdictionKind?: "geographic" | "organizational" | null },
+  session: null as null | { country: string | null; title: string; jurisdictionId?: string | null; jurisdictionName?: string | null; jurisdictionKind?: "geographic" | "organizational" | null; jurisdictionContract?: "legacy" | "unified" | null },
   sessions: [] as Array<{ id: string; title: string; lastMessage: string; timestamp: number; messageCount: number }>,
   messages: [] as Array<{ storageId: string; clientId: string | null; role: "user" | "assistant"; content: string; createdAt: number; creationTime: number }>,
 }));
@@ -340,6 +340,7 @@ describe("new-chat jurisdiction selector", () => {
       jurisdictionId: `${kind}-jurisdiction`,
       jurisdictionName: kind === "organizational" ? "Public Organization" : "Ghana",
       jurisdictionKind: kind,
+      jurisdictionContract: "unified",
     };
     mocks.sessions = [{
       id: chatId,
@@ -367,6 +368,27 @@ describe("new-chat jurisdiction selector", () => {
     );
     expect(fetch).not.toHaveBeenCalled();
     expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit legacy ID session writable while the unified rollout is disabled", async () => {
+    mocks.unifiedEnabled = false;
+    mocks.session = {
+      country: "GH",
+      title: "Legacy dual-write chat",
+      jurisdictionId: "ghana-jurisdiction",
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      jurisdictionContract: "legacy",
+    };
+
+    render(<ChatWorkspace chatId="legacy-chat" initialQuery="What changed?" />);
+
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    expect(screen.getByRole("textbox")).not.toBeDisabled();
+    expect(screen.queryByText(
+      "Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.",
+    )).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalled();
   });
 
   it("uses one unavailable state and performs no work for an unresolved route selection", async () => {

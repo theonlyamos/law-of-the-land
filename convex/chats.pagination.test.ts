@@ -9,6 +9,7 @@ import { normalizePageSize } from "./chats";
 import authSchema from "./betterAuth/schema";
 import { citationClaimIssueProofParts, createCitationClaimBindings } from "./lib/chatCitationClaim";
 import { createTelemetryServiceProof } from "./lib/telemetryProof";
+import { resolveLegacyJurisdictionSnapshot } from "./lib/legacyJurisdictionCompatibility";
 import schema from "./schema";
 
 const modules = Object.fromEntries(
@@ -145,6 +146,338 @@ async function createUser(t: TestConvex<typeof schema>, email: string) {
 }
 
 describe("chat pagination", () => {
+  it.each([
+    "disabled",
+    "ghana-shadow",
+    "non-ghana-shadow",
+    "duplicate-default",
+    "bucket",
+    "provider",
+    "visibility",
+    "kind-without-profile",
+    "partial-profile",
+    "organization-link",
+    "locality-profile",
+    "non-root-profile",
+    "profile-code-mismatch",
+  ] as const)("rejects the %s legacy compatibility boundary", async (variant) => {
+    const t = createTestBackend();
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const insertCommon = async (input: {
+        code?: string;
+        legacyCountryCode?: string;
+        status?: "draft" | "enabled" | "archived";
+        isDefault?: boolean;
+        productionBucketId?: string;
+        providerSyncState?: "pending" | "synced" | "drifted" | "failed";
+        kind?: "geographic" | "organizational";
+        visibility?: "public" | "members";
+        organizationId?: Id<"organizations">;
+        slug: string;
+      }) => await ctx.db.insert("jurisdictions", {
+        ...(input.code ? { code: input.code } : {}),
+        ...(input.legacyCountryCode ? { legacyCountryCode: input.legacyCountryCode } : {}),
+        name: input.slug,
+        slug: input.slug,
+        status: input.status ?? "enabled",
+        isDefault: input.isDefault ?? false,
+        productionBucketId: input.productionBucketId,
+        providerSyncState: input.providerSyncState ?? "synced",
+        kind: input.kind,
+        visibility: input.visibility,
+        organizationId: input.organizationId,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const insertProfile = async (
+        jurisdictionId: Id<"jurisdictions">,
+        input: { level?: "country" | "state" | "province" | "region" | "district" | "city" | "town" | "territory" | "other_locality"; countryCode?: string; parentJurisdictionId?: Id<"jurisdictions"> } = {},
+      ) => await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId,
+        googlePlaceId: `place-${variant}`,
+        level: input.level ?? "country",
+        countryCode: input.countryCode ?? "GH",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: variant,
+        parentJurisdictionId: input.parentJurisdictionId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      if (variant === "disabled") {
+        const id = await insertCommon({ slug: variant, legacyCountryCode: "GH", status: "archived", kind: "geographic", visibility: "public" });
+        await insertProfile(id);
+        return;
+      }
+      if (variant === "ghana-shadow" || variant === "non-ghana-shadow") {
+        const code = variant === "ghana-shadow" ? "GH" : "NG";
+        const id = await insertCommon({ slug: `${variant}-canonical`, legacyCountryCode: code, kind: "geographic", visibility: "public" });
+        await insertProfile(id, { countryCode: code });
+        await insertCommon({ slug: `${variant}-shadow`, code });
+        return;
+      }
+      if (variant === "duplicate-default") {
+        await insertCommon({ slug: "default-one", code: "GH", isDefault: true, productionBucketId: "11833" });
+        await insertCommon({ slug: "default-two", code: "GH", isDefault: true, productionBucketId: "11833" });
+        return;
+      }
+      if (["bucket", "provider", "visibility"].includes(variant)) {
+        await insertCommon({
+          slug: variant,
+          code: "GH",
+          isDefault: true,
+          productionBucketId: variant === "bucket" ? "wrong" : "11833",
+          providerSyncState: variant === "provider" ? "drifted" : "synced",
+          visibility: variant === "visibility" ? "members" : undefined,
+        });
+        return;
+      }
+      if (variant === "organization-link") {
+        const organizationId = await ctx.db.insert("organizations", {
+          name: "Wrong organization", slug: "wrong-organization", class: "company",
+          status: "active", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+        });
+        await insertCommon({ slug: variant, code: "GH", isDefault: true, productionBucketId: "11833", organizationId });
+        return;
+      }
+      const id = await insertCommon({
+        slug: variant,
+        legacyCountryCode: "GH",
+        kind: variant === "partial-profile" ? undefined : "geographic",
+        visibility: "public",
+      });
+      if (variant !== "kind-without-profile") {
+        let parentJurisdictionId: Id<"jurisdictions"> | undefined;
+        if (variant === "non-root-profile") {
+          parentJurisdictionId = await insertCommon({ slug: "parent", legacyCountryCode: "NG", kind: "geographic", visibility: "public" });
+        }
+        await insertProfile(id, {
+          level: variant === "locality-profile" ? "town" : "country",
+          countryCode: variant === "profile-code-mismatch" ? "NG" : "GH",
+          parentJurisdictionId,
+        });
+      }
+    });
+
+    const suppliedCountry = variant === "non-ghana-shadow" ? "NG" :
+      variant === "duplicate-default" ? undefined : "GH";
+    await expect(t.run((ctx) =>
+      resolveLegacyJurisdictionSnapshot(ctx, suppliedCountry),
+    )).resolves.toBeNull();
+  });
+
+  it("dual-writes a stable legacy snapshot while flag-off chat behavior stays writable", async () => {
+    const t = createTestBackend();
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const owner = await createUser(t, `legacy-chat-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await client.mutation(api.chats.ensure, { externalId: "legacy-dual-write", country: "GH" });
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, {
+      name: "Republic of Ghana",
+      updatedAt: Date.now(),
+    }));
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "legacy-dual-write", country: "GH",
+      lastMessage: "Legacy remains writable",
+      messages: [{ role: "user", content: "Legacy remains writable", clientId: "legacy-message" }],
+    });
+    const flagId = await t.run((ctx) => ctx.db.insert("featureFlags", {
+      key: "unified_jurisdictions",
+      environment: "test",
+      enabled: true,
+      updatedAt: Date.now(),
+    }));
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "legacy-dual-write", jurisdictionId, country: "GH",
+      lastMessage: "Governed while enabled",
+      messages: [{ role: "user", content: "Governed while enabled", clientId: "enabled-message" }],
+    });
+    await t.run((ctx) => ctx.db.patch(flagId, { enabled: false, updatedAt: Date.now() }));
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "legacy-dual-write", country: "GH",
+      lastMessage: "Writable after rollback",
+      messages: [{ role: "user", content: "Writable after rollback", clientId: "rollback-message" }],
+    });
+
+    const snapshot = await t.run(async (ctx) => ({
+      session: await ctx.db.query("chatSessions")
+        .withIndex("by_user_externalId", (q) =>
+          q.eq("userId", owner.userId).eq("externalId", "legacy-dual-write"))
+        .unique(),
+      messages: await ctx.db.query("messages").take(4),
+    }));
+    expect(snapshot.session).toMatchObject({
+      country: "GH", jurisdictionId, jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic", jurisdictionContract: "legacy",
+      messageCount: 3, lastMessage: "Writable after rollback",
+    });
+    expect(snapshot.messages.map((row) => row.content)).toEqual([
+      "Legacy remains writable",
+      "Governed while enabled",
+      "Writable after rollback",
+    ]);
+    expect(snapshot.messages).toHaveLength(3);
+  });
+
+  it("fails closed before flag-off chat insertion when the legacy mapping is ambiguous", async () => {
+    const t = createTestBackend();
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const owner = await createUser(t, `ambiguous-chat-${crypto.randomUUID()}@example.com`);
+    await createGeographicJurisdiction(t);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const duplicateId = await ctx.db.insert("jurisdictions", {
+        name: "Duplicate Ghana", slug: "duplicate-ghana", status: "enabled",
+        isDefault: false, providerSyncState: "synced", kind: "geographic",
+        visibility: "public", legacyCountryCode: "GH", createdBy: "fixture",
+        updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: duplicateId, googlePlaceId: "duplicate-place-ghana",
+        level: "country", countryCode: "GH", latitude: 0, longitude: 0,
+        formattedAddress: "Duplicate Ghana", createdAt: now, updatedAt: now,
+      });
+    });
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await expect(client.mutation(api.chats.ensure, {
+      externalId: "ambiguous-legacy", country: "GH",
+    })).rejects.toThrow("That jurisdiction is not available");
+    await expect(t.run((ctx) => ctx.db.query("chatSessions").take(2))).resolves.toEqual([]);
+  });
+
+  it("fails closed on an explicit legacy ID session missing its immutable country snapshot", async () => {
+    const t = createTestBackend();
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const owner = await createUser(t, `corrupt-legacy-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    await t.run((ctx) => ctx.db.insert("chatSessions", {
+      userId: owner.userId,
+      externalId: "corrupt-legacy",
+      title: "Corrupt legacy",
+      lastMessage: "",
+      messageCount: 0,
+      updatedAt: 1,
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      jurisdictionContract: "legacy",
+    }));
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await expect(client.query(api.chats.getByExternalId, { externalId: "corrupt-legacy" }))
+      .resolves.toBeNull();
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "corrupt-legacy",
+      lastMessage: "Must not save",
+      messages: [{ role: "user", content: "Must not save", clientId: "blocked" }],
+    })).rejects.toThrow("That jurisdiction is not available");
+  });
+
+  it("fails closed at every chat boundary for an explicit unified session missing its stable ID", async () => {
+    const t = createTestBackend();
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const owner = await createUser(t, `corrupt-unified-${crypto.randomUUID()}@example.com`);
+    await t.run((ctx) => ctx.db.insert("chatSessions", {
+      userId: owner.userId,
+      externalId: "corrupt-unified",
+      title: "Corrupt unified",
+      lastMessage: "Must stay hidden",
+      messageCount: 0,
+      updatedAt: 1,
+      country: "GH",
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+      jurisdictionContract: "unified",
+    }));
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await expect(client.query(api.chats.list, {
+      paginationOpts: { numItems: 10, cursor: null },
+    })).resolves.toMatchObject({ page: [] });
+    await expect(client.query(api.chats.getByExternalId, { externalId: "corrupt-unified" }))
+      .resolves.toBeNull();
+    await expect(client.query(api.chats.listMessages, {
+      externalId: "corrupt-unified",
+      paginationOpts: { numItems: 10, cursor: null },
+    })).resolves.toMatchObject({ page: [] });
+    await expect(client.mutation(api.chats.ensure, {
+      externalId: "corrupt-unified", country: "GH",
+    })).rejects.toThrow("That jurisdiction is not available");
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "corrupt-unified", country: "GH", lastMessage: "Must not write",
+      messages: [{ role: "user", content: "Must not write", clientId: "blocked" }],
+    })).rejects.toThrow("That jurisdiction is not available");
+  });
+
+  it("uses the narrow pre-V2 Ghana default for omitted-country ensure and local migration", async () => {
+    const t = createTestBackend();
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const owner = await createUser(t, `default-chat-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("jurisdictions", {
+        code: "GH", name: "Ghana", slug: "ghana-v1", status: "enabled",
+        isDefault: true, productionBucketId: "11833", providerSyncState: "synced",
+        createdBy: "migration:seed-ghana-jurisdiction-v1",
+        updatedBy: "migration:seed-ghana-jurisdiction-v1", createdAt: now, updatedAt: now,
+      });
+    });
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+
+    await client.mutation(api.chats.ensure, { externalId: "default-ensure" });
+    await expect(client.mutation(api.chats.migrateFromLocal, {
+      sessions: [{
+        externalId: "default-migration", title: "Migrated", lastMessage: "Local",
+        messageCount: 1, updatedAt: 123,
+        messages: [{ role: "user", content: "Local", clientId: "local-message", createdAt: 123 }],
+      }],
+    })).resolves.toEqual({ migratedCount: 1 });
+
+    const rows = await t.run((ctx) => ctx.db.query("chatSessions").take(3));
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        externalId: "default-ensure", country: "GH", jurisdictionId,
+        jurisdictionName: "Ghana", jurisdictionKind: "geographic",
+        jurisdictionContract: "legacy",
+      }),
+      expect.objectContaining({
+        externalId: "default-migration", country: "GH", jurisdictionId,
+        jurisdictionName: "Ghana", jurisdictionKind: "geographic",
+        jurisdictionContract: "legacy",
+      }),
+    ]));
+  });
+
+  it("resolves no default when local migration is empty or every session already exists", async () => {
+    const t = createTestBackend();
+    const owner = await createUser(t, `lazy-migration-${crypto.randomUUID()}@example.com`);
+    await t.run((ctx) => ctx.db.insert("chatSessions", {
+      userId: owner.userId,
+      externalId: "already-present",
+      title: "Existing",
+      lastMessage: "",
+      messageCount: 0,
+      updatedAt: 1,
+    }));
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await expect(client.mutation(api.chats.migrateFromLocal, { sessions: [] }))
+      .resolves.toEqual({ migratedCount: 0 });
+    await expect(client.mutation(api.chats.migrateFromLocal, {
+      sessions: [{
+        externalId: "already-present", title: "Ignored", lastMessage: "Ignored",
+        messageCount: 1, updatedAt: 2, messages: [{ role: "user", content: "Ignored" }],
+      }],
+    })).resolves.toEqual({ migratedCount: 0 });
+  });
+
   it("stores an authorized stable jurisdiction snapshot and keeps it immutable after rename", async () => {
     const t = createTestBackend();
     await enableUnifiedJurisdictions(t);
@@ -159,6 +492,8 @@ describe("chat pagination", () => {
       jurisdictionKind: "geographic",
       country: "GH",
     });
+    await expect(t.run((ctx) => ctx.db.query("chatSessions").take(1)))
+      .resolves.toMatchObject([{ jurisdictionContract: "unified" }]);
     await t.run((ctx) => ctx.db.patch(jurisdictionId, { name: "Republic of Ghana" }));
 
     await expect(client.query(api.chats.getByExternalId, {
@@ -988,6 +1323,7 @@ describe("chat pagination", () => {
 
   it("requires a supplied retry timestamp to exactly match the stored client-ID row", async () => {
     const t = createTestBackend();
+    await createGeographicJurisdiction(t);
     const owner = await createUser(t, `created-at-retry-${crypto.randomUUID()}@example.com`);
     const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
     await client.mutation(api.chats.ensure, { externalId: "created-at-retry", country: "GH" });
@@ -1033,6 +1369,7 @@ describe("chat pagination", () => {
     "%s new client IDs in one append batch preserve the idempotency invariant",
     async (variant) => {
       const t = createTestBackend();
+      await createGeographicJurisdiction(t);
       const owner = await createUser(t, `same-batch-${variant}-${crypto.randomUUID()}@example.com`);
       const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
       await client.mutation(api.chats.ensure, { externalId: `same-batch-${variant}`, country: "GH" });

@@ -47,6 +47,7 @@ import type * as lib_email from "../lib/email.js";
 import type * as lib_jurisdictionAccess from "../lib/jurisdictionAccess.js";
 import type * as lib_jurisdictionDomain from "../lib/jurisdictionDomain.js";
 import type * as lib_jurisdictionEligibility from "../lib/jurisdictionEligibility.js";
+import type * as lib_legacyJurisdictionCompatibility from "../lib/legacyJurisdictionCompatibility.js";
 import type * as lib_placeClaim from "../lib/placeClaim.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
@@ -103,6 +104,7 @@ declare const fullApi: ApiFromModules<{
   "lib/jurisdictionAccess": typeof lib_jurisdictionAccess;
   "lib/jurisdictionDomain": typeof lib_jurisdictionDomain;
   "lib/jurisdictionEligibility": typeof lib_jurisdictionEligibility;
+  "lib/legacyJurisdictionCompatibility": typeof lib_legacyJurisdictionCompatibility;
   "lib/placeClaim": typeof lib_placeClaim;
   "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;

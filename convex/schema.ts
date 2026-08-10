@@ -600,6 +600,9 @@ export default defineSchema({
     jurisdictionId: v.optional(v.id("jurisdictions")),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
+    jurisdictionContract: v.optional(
+      v.union(v.literal("legacy"), v.literal("unified")),
+    ),
   })
     .index("by_user", ["userId"])
     .index("by_updatedAt", ["updatedAt"])
@@ -658,6 +661,9 @@ export default defineSchema({
     jurisdictionId: v.optional(v.id("jurisdictions")),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
+    jurisdictionContract: v.optional(
+      v.union(v.literal("legacy"), v.literal("unified")),
+    ),
     status: v.union(
       v.literal("issued"),
       v.literal("search_complete"),

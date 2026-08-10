@@ -16,6 +16,11 @@ import {
 } from "./lib/telemetryProof";
 import { isLegacyCountryCode } from "./lib/jurisdictionDomain";
 import { assertJurisdictionAccess } from "./lib/jurisdictionAccess";
+import {
+  effectiveJurisdictionContract,
+  hasCoherentJurisdictionContractIdentity,
+  resolveLegacyJurisdictionSnapshot,
+} from "./lib/legacyJurisdictionCompatibility";
 
 const CORRELATION_TTL_MS = 5 * 60_000;
 const CHAT_LEASE_MS = 2 * 60_000;
@@ -122,6 +127,9 @@ async function correlationByToken(ctx: MutationCtx, token: string) {
   if (rows.length !== 1) {
     throw new ConvexError("TELEMETRY_CORRELATION_INVALID");
   }
+  if (!hasCoherentJurisdictionContractIdentity(rows[0])) {
+    throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+  }
   return rows[0];
 }
 
@@ -143,6 +151,9 @@ async function recordTerminal(
     generationLatencyMs: number;
   },
 ) {
+  if (!hasCoherentJurisdictionContractIdentity(row)) {
+    throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+  }
   const existing = await ctx.db
     .query("queryRuns")
     .withIndex("by_correlationId", (q) => q.eq("correlationId", row.tokenHash))
@@ -221,6 +232,7 @@ export const issueCorrelation = mutation({
     let jurisdictionId = args.jurisdictionId;
     let jurisdictionName: string | undefined;
     let jurisdictionKind: "geographic" | "organizational" | undefined;
+    let jurisdictionContract: "legacy" | "unified";
     if (unified) {
       const selected = await ctx.db.get("jurisdictions", args.jurisdictionId!);
       if (!selected || selected.status !== "enabled" ||
@@ -240,19 +252,15 @@ export const issueCorrelation = mutation({
       }
       jurisdictionName = selected.name;
       jurisdictionKind = selected.kind;
+      jurisdictionContract = "unified";
     } else {
       if (legacyCountryCode !== undefined) throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
-      const jurisdictions = await ctx.db
-        .query("jurisdictions")
-        .withIndex("by_code", (q) => q.eq("code", jurisdictionCode))
-        .take(2);
-      if (
-        jurisdictions.length !== 1 ||
-        !isLegacyCountryCode(jurisdictions[0].code) ||
-        jurisdictions[0].code !== jurisdictionCode ||
-        jurisdictions[0].status !== "enabled"
-      ) throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
-      jurisdictionId = undefined;
+      const resolved = await resolveLegacyJurisdictionSnapshot(ctx, jurisdictionCode!);
+      if (!resolved) throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+      jurisdictionId = resolved.jurisdictionId;
+      jurisdictionName = resolved.jurisdictionName;
+      jurisdictionKind = resolved.jurisdictionKind;
+      jurisdictionContract = "legacy";
     }
     const tokenHash = await hashOpaqueTelemetryValue(args.token);
     const prior = await ctx.db
@@ -271,6 +279,7 @@ export const issueCorrelation = mutation({
       ...(jurisdictionId ? { jurisdictionId } : {}),
       ...(jurisdictionName ? { jurisdictionName } : {}),
       ...(jurisdictionKind ? { jurisdictionKind } : {}),
+      jurisdictionContract,
       status: "issued",
       issuedAt,
       expiresAt,
@@ -299,7 +308,7 @@ export const recordSearchPhase = mutation({
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
-    const unified = row.jurisdictionId !== undefined;
+    const unified = effectiveJurisdictionContract(row) === "unified";
     const scopeSize = unified ? boundedCount(args.scopeSize!, MAX_SCOPE_SIZE) : undefined;
     const retrievalPlanSize = unified ? boundedCount(args.retrievalPlanSize!, MAX_PLAN_SIZE) : undefined;
     const providerCallCount = unified ? boundedCount(args.providerCallCount!, MAX_PLAN_SIZE) : undefined;
@@ -363,7 +372,7 @@ export const claimChatPhase = mutation({
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
-    if (row.jurisdictionId) {
+    if (effectiveJurisdictionContract(row) === "unified") {
       const contextDigest = validateDigest(args.contextDigest, true)!;
       const legacyCountryCode = normalizeLegacySnapshot(args.legacyCountryCode);
       await requireServiceProof(args.serviceProof, [
