@@ -4,6 +4,10 @@ import { NextResponse } from "next/server";
 
 import { api } from "../../../../convex/_generated/api";
 import { createTelemetryServiceProof, isOpaqueTelemetryToken } from "../../../../convex/lib/telemetryProof";
+import {
+  citationClaimIssueProofParts,
+  createCitationClaimBindings,
+} from "../../../../convex/lib/chatCitationClaim";
 import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from "@/lib/auth-server";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { digestExactContext, MAX_GOVERNED_CONTEXT_LENGTH, parseGovernedContext } from "@/lib/research-limits";
@@ -23,6 +27,7 @@ const MAX_CITATION_LABEL_LENGTH = 200;
 const REQUESTS_PER_MINUTE = 15;
 const claimChatPhase = makeFunctionReference<"mutation">("telemetry:claimChatPhase");
 const finalizeChatPhase = makeFunctionReference<"mutation">("telemetry:finalizeChatPhase");
+const issueCitationClaim = makeFunctionReference<"mutation">("chats:issueCitationClaim");
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
 
 type CommonBody = {
@@ -32,11 +37,13 @@ type CommonBody = {
   correlationToken: string;
   country?: string;
   jurisdictionId?: string;
+  externalId?: string;
+  assistantClientId?: string;
 };
 
 function parseCommonBody(body: unknown): CommonBody | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
-  const { query, messages, context, correlationToken, country, jurisdictionId } = body as Record<string, unknown>;
+  const { query, messages, context, correlationToken, country, jurisdictionId, externalId, assistantClientId } = body as Record<string, unknown>;
   if (typeof query !== "string" || !query.trim() || query.trim().length > MAX_QUERY_LENGTH) return null;
   if (typeof context !== "string") return null;
   if (typeof correlationToken !== "string" || !isOpaqueTelemetryToken(correlationToken)) return null;
@@ -50,10 +57,15 @@ function parseCommonBody(body: unknown): CommonBody | null {
   }
   if (country !== undefined && (typeof country !== "string" || !/^[A-Za-z]{2}$/u.test(country.trim()))) return null;
   if (jurisdictionId !== undefined && (typeof jurisdictionId !== "string" || !jurisdictionId.trim())) return null;
+  if (externalId !== undefined && (typeof externalId !== "string" || !externalId.trim() || externalId.length > 200)) return null;
+  if (assistantClientId !== undefined &&
+    (typeof assistantClientId !== "string" || !assistantClientId.trim() || assistantClientId.length > 200)) return null;
   return {
     query: query.trim(), messages: history, context, correlationToken,
     ...(typeof country === "string" ? { country: country.trim().toUpperCase() } : {}),
     ...(typeof jurisdictionId === "string" ? { jurisdictionId: jurisdictionId.trim() } : {}),
+    ...(typeof externalId === "string" ? { externalId: externalId.trim() } : {}),
+    ...(typeof assistantClientId === "string" ? { assistantClientId: assistantClientId.trim() } : {}),
   };
 }
 
@@ -179,7 +191,10 @@ export async function POST(request: Request) {
     if (!parsed) return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
     const unified = await fetchAuthQuery(api.jurisdictions.isUnifiedJurisdictionsEnabled, {});
     if (unified) {
-      if (!parsed.jurisdictionId || parsed.context.length > MAX_GOVERNED_CONTEXT_LENGTH) return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
+      if (!parsed.jurisdictionId || !parsed.externalId || !parsed.assistantClientId ||
+        parsed.context.length > MAX_GOVERNED_CONTEXT_LENGTH) {
+        return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
+      }
     } else if (!parsed.country) {
       return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
     }
@@ -207,7 +222,7 @@ export async function POST(request: Request) {
     }
 
     const startedAt = performance.now();
-    let result: { result: string; citations?: ReturnType<typeof governedOutput>["citations"] };
+    let result: { result: string; citations?: ReturnType<typeof governedOutput>["citations"]; citationClaim?: string };
     try {
       if (unified) {
         const governed = parseGovernedContext(parsed.context);
@@ -225,6 +240,33 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
     }
     const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+    if (unified && result.citations?.length) {
+      const bindings = await createCitationClaimBindings(
+        parsed.assistantClientId!,
+        result.result,
+        result.citations,
+      );
+      try {
+        const issued = await fetchAuthMutation(issueCitationClaim, {
+          externalId: parsed.externalId!,
+          jurisdictionId: parsed.jurisdictionId!,
+          assistantClientId: parsed.assistantClientId!,
+          assistantContent: result.result,
+          citations: result.citations,
+          ...bindings,
+          serviceProof: await createTelemetryServiceProof(citationClaimIssueProofParts({
+            externalId: parsed.externalId!,
+            jurisdictionId: parsed.jurisdictionId!,
+            ...bindings,
+          })),
+        }) as { citationClaim: string };
+        result.citationClaim = issued.citationClaim;
+      } catch {
+        try { await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs); } catch { /* lease expiry fallback */ }
+        console.error("Chat citation persistence claim failed");
+        return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
+      }
+    }
     try {
       await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs);
     } catch {

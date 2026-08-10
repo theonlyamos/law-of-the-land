@@ -42,6 +42,7 @@ import type * as lib_adminAccessErrors from "../lib/adminAccessErrors.js";
 import type * as lib_adminPermissions from "../lib/adminPermissions.js";
 import type * as lib_adminStepUp from "../lib/adminStepUp.js";
 import type * as lib_audit from "../lib/audit.js";
+import type * as lib_chatCitationClaim from "../lib/chatCitationClaim.js";
 import type * as lib_email from "../lib/email.js";
 import type * as lib_jurisdictionAccess from "../lib/jurisdictionAccess.js";
 import type * as lib_jurisdictionDomain from "../lib/jurisdictionDomain.js";
@@ -97,6 +98,7 @@ declare const fullApi: ApiFromModules<{
   "lib/adminPermissions": typeof lib_adminPermissions;
   "lib/adminStepUp": typeof lib_adminStepUp;
   "lib/audit": typeof lib_audit;
+  "lib/chatCitationClaim": typeof lib_chatCitationClaim;
   "lib/email": typeof lib_email;
   "lib/jurisdictionAccess": typeof lib_jurisdictionAccess;
   "lib/jurisdictionDomain": typeof lib_jurisdictionDomain;

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   replace: vi.fn(),
   useQuery: vi.fn(),
+  usePaginatedQuery: vi.fn(),
   useMutation: vi.fn(),
   ensureSession: vi.fn(),
   appendMessages: vi.fn(),
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
     isDefault: boolean;
   }>,
   session: null as null | { country: string | null; title: string; jurisdictionId?: string | null; jurisdictionName?: string | null; jurisdictionKind?: "geographic" | "organizational" | null },
+  sessions: [] as Array<{ id: string; title: string; lastMessage: string; timestamp: number; messageCount: number }>,
+  messages: [] as Array<{ storageId: string; clientId: string | null; role: "user" | "assistant"; content: string; createdAt: number; creationTime: number }>,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -34,11 +37,7 @@ vi.mock("next/image", () => ({
 vi.mock("convex/react", () => ({
   useConvexAuth: () => ({ isAuthenticated: true, isLoading: false }),
   useMutation: (reference: unknown) => mocks.useMutation(reference),
-  usePaginatedQuery: () => ({
-    results: [],
-    status: "Exhausted",
-    loadMore: vi.fn(),
-  }),
+  usePaginatedQuery: mocks.usePaginatedQuery,
   useQuery: mocks.useQuery,
 }));
 
@@ -52,6 +51,7 @@ beforeEach(() => {
   mocks.push.mockReset();
   mocks.replace.mockReset();
   mocks.useQuery.mockReset();
+  mocks.usePaginatedQuery.mockReset();
   mocks.useMutation.mockReset();
   mocks.ensureSession.mockReset();
   mocks.appendMessages.mockReset();
@@ -74,6 +74,13 @@ beforeEach(() => {
     },
   ];
   mocks.session = null;
+  mocks.sessions = [];
+  mocks.messages = [];
+  mocks.usePaginatedQuery.mockImplementation((reference) => ({
+    results: getFunctionName(reference) === "chats:list" ? mocks.sessions : mocks.messages,
+    status: "Exhausted",
+    loadMore: vi.fn(),
+  }));
   mocks.useQuery.mockImplementation((reference, args) => {
     const name = getFunctionName(reference);
     if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return mocks.unifiedEnabled;
@@ -166,6 +173,8 @@ describe("new-chat jurisdiction selector", () => {
   });
 
   it("creates and persists a code-less organization chat by stable ID with safe citations", async () => {
+    let resolveEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { resolveEnsure = resolve; }));
     mocks.unifiedEnabled = true;
     mocks.resolvedSelection = {
       id: "organization-jurisdiction",
@@ -183,6 +192,7 @@ describe("new-chat jurisdiction selector", () => {
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         result: "Governed answer",
+        citationClaim: "c".repeat(43),
         citations: [{ label: "[University policy](https://untrusted.example)", jurisdictionId: "organization-jurisdiction", jurisdictionName: "Private University", jurisdictionKind: "organizational", relation: "selected" }],
       }), { status: 200 })));
 
@@ -198,11 +208,25 @@ describe("new-chat jurisdiction selector", () => {
       jurisdictionName: "Private University",
       jurisdictionKind: "organizational",
     }));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+    resolveEnsure();
     await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
     const searchBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
     const chatBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
     expect(searchBody).toEqual({ query: "What is the policy?", jurisdictionId: "organization-jurisdiction" });
-    expect(chatBody).toMatchObject({ jurisdictionId: "organization-jurisdiction", context: "governed context" });
+    expect(chatBody).toMatchObject({
+      jurisdictionId: "organization-jurisdiction",
+      context: "governed context",
+      externalId: "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c",
+      assistantClientId: expect.any(String),
+    });
+    const append = mocks.appendMessages.mock.calls[0][0];
+    expect(append.messages[1]).toMatchObject({
+      role: "assistant",
+      clientId: chatBody.assistantClientId,
+      citationClaim: "c".repeat(43),
+    });
     const sources = await screen.findByRole("region", { name: "Sources" });
     expect(sources).toHaveTextContent("[University policy](https://untrusted.example)");
     expect(sources.querySelector("a")).toBeNull();
@@ -232,6 +256,116 @@ describe("new-chat jurisdiction selector", () => {
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText("The jurisdiction selection could not be verified. Please try again.")).toBeVisible());
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stored ID authoritative when its immutable country snapshot differs from the current code", async () => {
+    mocks.unifiedEnabled = true;
+    mocks.session = {
+      country: "GH",
+      title: "Stored snapshot",
+      jurisdictionId: "stable-jurisdiction",
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic",
+    };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: "governed context",
+        correlationToken: "token",
+        jurisdictionId: "stable-jurisdiction",
+        legacyCountryCode: "NG",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ result: "Current answer" }), { status: 200 })));
+
+    render(<ChatWorkspace
+      chatId="stored-chat"
+      initialQuery="What changed?"
+      initialJurisdiction="stable-jurisdiction"
+      initialCountry="GH"
+    />);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    const searchBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
+    const chatBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
+    expect(searchBody).toEqual({ query: "What changed?", jurisdictionId: "stable-jurisdiction" });
+    expect(chatBody).toMatchObject({ jurisdictionId: "stable-jurisdiction", country: "NG" });
+    expect(mocks.appendMessages.mock.calls[0][0]).toMatchObject({
+      jurisdictionId: "stable-jurisdiction",
+      country: "GH",
+    });
+  });
+
+  it("persists a governed answer with no citations without requesting an empty citation claim", async () => {
+    mocks.unifiedEnabled = true;
+    mocks.resolvedSelection = {
+      id: "organization-jurisdiction",
+      name: "Public Organization",
+      slug: "public-organization",
+      kind: "organizational",
+      isDefault: false,
+    };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: "governed context",
+        correlationToken: "token",
+        jurisdictionId: "organization-jurisdiction",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: "No supported citation was returned.",
+        citations: [],
+      }), { status: 200 })));
+
+    render(<ChatWorkspace
+      chatId="empty-citations-chat"
+      initialQuery="What is the policy?"
+      initialJurisdiction="organization-jurisdiction"
+    />);
+
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    const assistant = mocks.appendMessages.mock.calls[0][0].messages[1];
+    expect(assistant).not.toHaveProperty("citations");
+    expect(assistant).not.toHaveProperty("citationClaim");
+  });
+
+  it.each([
+    { kind: "organizational" as const, country: null },
+    { kind: "geographic" as const, country: "GH" },
+  ])("keeps a stored $kind ID chat readable but explicitly read-only while the unified rollout is disabled", async ({ kind, country }) => {
+    const chatId = `saved-${kind}`;
+    mocks.unifiedEnabled = false;
+    mocks.session = {
+      country,
+      title: "Saved governed chat",
+      jurisdictionId: `${kind}-jurisdiction`,
+      jurisdictionName: kind === "organizational" ? "Public Organization" : "Ghana",
+      jurisdictionKind: kind,
+    };
+    mocks.sessions = [{
+      id: chatId,
+      title: "Saved governed chat",
+      lastMessage: "Previously saved answer",
+      timestamp: Date.now(),
+      messageCount: 1,
+    }];
+    mocks.messages = [{
+      storageId: "stored-message",
+      clientId: "stored-client",
+      role: "assistant",
+      content: "Previously saved answer",
+      createdAt: 1,
+      creationTime: 1,
+    }];
+
+    render(<ChatWorkspace chatId={chatId} initialQuery="Do not submit" />);
+
+    expect(await screen.findByText("Previously saved answer")).toBeVisible();
+    expect(screen.getAllByText("Saved governed chat").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.",
+    );
+    expect(fetch).not.toHaveBeenCalled();
     expect(mocks.appendMessages).not.toHaveBeenCalled();
   });
 

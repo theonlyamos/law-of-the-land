@@ -235,9 +235,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
   const chatCountry = unifiedJurisdictionsEnabled === true
     ? chatResearchJurisdiction?.legacyCountryCode ?? ""
     : sessionData?.country ?? findJurisdiction(jurisdictions, initialCountry)?.code ?? selectedCountry;
-  const selectionReady = unifiedJurisdictionsEnabled === true
-    ? Boolean(chatResearchJurisdiction?.id)
-    : unifiedJurisdictionsEnabled === false && Boolean(chatCountry);
+  const storedStableRollback = unifiedJurisdictionsEnabled === false && Boolean(sessionData?.jurisdictionId);
+  const selectionReady = storedStableRollback
+    ? false
+    : unifiedJurisdictionsEnabled === true
+      ? Boolean(chatResearchJurisdiction?.id)
+      : unifiedJurisdictionsEnabled === false && Boolean(chatCountry);
   const selectionUnavailable = unifiedJurisdictionsEnabled === true &&
     sessionData === null &&
     Boolean(initialJurisdiction || initialCountry) &&
@@ -474,6 +477,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       try {
+        const hasPersistedStableSelection = Boolean(sessionData?.jurisdictionId);
         const searchData = await postJson<{
           result: string;
           correlationToken: string;
@@ -486,7 +490,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
           ...(unifiedJurisdictionsEnabled === true
             ? {
                 jurisdictionId: chatResearchJurisdiction!.id,
-                ...(chatResearchJurisdiction!.legacyCountryCode ? { country: chatResearchJurisdiction!.legacyCountryCode } : {}),
+                ...(!hasPersistedStableSelection && chatResearchJurisdiction!.legacyCountryCode
+                  ? { country: chatResearchJurisdiction!.legacyCountryCode }
+                  : {}),
               }
             : { country: chatCountry }),
         }, controller.signal);
@@ -494,13 +500,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
         if (
           unifiedJurisdictionsEnabled === true &&
           (searchData.jurisdictionId !== chatResearchJurisdiction!.id ||
-            (searchData.legacyCountryCode ?? undefined) !==
-              (chatResearchJurisdiction!.legacyCountryCode ?? undefined))
+            (!hasPersistedStableSelection &&
+              (searchData.legacyCountryCode ?? undefined) !==
+                (chatResearchJurisdiction!.legacyCountryCode ?? undefined)))
         ) {
           throw new ApiError(500, "The jurisdiction selection could not be verified. Please try again.");
         }
 
-        const chatData = await postJson<{ result: string; citations?: ChatCitation[] }>("/api/chat", {
+        const chatData = await postJson<{ result: string; citations?: ChatCitation[]; citationClaim?: string }>("/api/chat", {
           query: trimmed,
           messages: priorForApi,
           context: searchData.result,
@@ -508,11 +515,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
           ...(unifiedJurisdictionsEnabled === true
             ? {
                 jurisdictionId: searchData.jurisdictionId,
+                externalId: chatId,
+                assistantClientId: assistantMessage.clientId,
                 ...(searchData.legacyCountryCode ? { country: searchData.legacyCountryCode } : {}),
               }
             : { country: searchData.jurisdictionCode }),
         }, controller.signal);
         if (!isCurrentRequest()) return;
+        if (unifiedJurisdictionsEnabled === true &&
+          (chatData.citations?.length
+            ? !chatData.citationClaim || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
+            : chatData.citationClaim !== undefined)) {
+          throw new ApiError(500, "The answer could not be verified. Please try again.");
+        }
 
         const completedAssistant = {
           ...assistantMessage,
@@ -558,6 +573,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
                   clientId: completedAssistant.clientId,
                   createdAt: completedAssistant.createdAt,
                   ...(completedAssistant.citations ? {
+                    citationClaim: chatData.citationClaim,
                     citations: completedAssistant.citations.map((citation) => ({
                       ...citation,
                       jurisdictionId: citation.jurisdictionId as Id<"jurisdictions">,
@@ -611,6 +627,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
       router,
       selectedCountry,
       selectionReady,
+      sessionData?.jurisdictionId,
       unifiedJurisdictionsEnabled,
     ]
   );
@@ -906,6 +923,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
             {selectionUnavailable && (
               <p role="alert" className="mb-2 text-sm text-destructive">
                 That jurisdiction is not available for research.
+              </p>
+            )}
+            {storedStableRollback && (
+              <p role="status" className="mb-2 text-sm text-muted-foreground">
+                Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.
               </p>
             )}
             <ChatInput

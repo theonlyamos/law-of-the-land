@@ -1,8 +1,10 @@
 /// <reference types="vite/client" />
 
 import { convexTest, type TestConvex } from "convex-test";
+import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, components, internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { normalizePageSize } from "./chats";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
@@ -23,10 +25,90 @@ function createTestBackend() {
 }
 
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
+const previousTelemetrySecret = process.env.TELEMETRY_INGEST_SECRET;
+const CLAIM_SECRET = "chat-claim-test-secret-with-at-least-32-characters";
+
+const issueCitationClaim = makeFunctionReference<"mutation">("chats:issueCitationClaim");
+
+type Citation = {
+  label: string;
+  jurisdictionId: Id<"jurisdictions">;
+  jurisdictionName: string;
+  jurisdictionKind: "geographic" | "organizational";
+  relation: "selected" | "geographic_ancestor" | "organizational_geography";
+};
+
+function base64url(bytes: ArrayBuffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+async function testHmac(parts: readonly (string | number)[]) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(CLAIM_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return base64url(await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(parts.map((part) => `${String(part).length}:${part}`).join("|")),
+  ));
+}
+
+async function citationBindings(clientId: string, content: string, citations: Citation[]) {
+  const clientIdBinding = await testHmac(["chat-citation-client-id-v1", clientId]);
+  const contentBinding = await testHmac(["chat-citation-content-v1", content]);
+  const citationParts: (string | number)[] = ["chat-citation-dto-v1", citations.length];
+  for (const citation of citations) citationParts.push(
+    citation.label,
+    citation.jurisdictionId,
+    citation.jurisdictionName,
+    citation.jurisdictionKind,
+    citation.relation,
+  );
+  return {
+    clientIdBinding,
+    contentBinding,
+    orderedCitationBinding: await testHmac(citationParts),
+  };
+}
+
+async function issueClaim(
+  client: ReturnType<TestConvex<typeof schema>["withIdentity"]>,
+  input: { externalId: string; jurisdictionId: Id<"jurisdictions">; clientId: string; content: string; citations: Citation[] },
+) {
+  const bindings = await citationBindings(input.clientId, input.content, input.citations);
+  const serviceProof = await testHmac([
+    "issue-chat-citation-claim-v1",
+    input.externalId,
+    input.jurisdictionId,
+    bindings.clientIdBinding,
+    bindings.contentBinding,
+    bindings.orderedCitationBinding,
+  ]);
+  return await client.mutation(issueCitationClaim, {
+    externalId: input.externalId,
+    jurisdictionId: input.jurisdictionId,
+    assistantClientId: input.clientId,
+    assistantContent: input.content,
+    citations: input.citations,
+    assistantClientIdBinding: bindings.clientIdBinding,
+    assistantContentBinding: bindings.contentBinding,
+    orderedCitationBinding: bindings.orderedCitationBinding,
+    serviceProof,
+  });
+}
 
 afterEach(() => {
   if (previousAdminEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
   else process.env.ADMIN_ENVIRONMENT = previousAdminEnvironment;
+  if (previousTelemetrySecret === undefined) delete process.env.TELEMETRY_INGEST_SECRET;
+  else process.env.TELEMETRY_INGEST_SECRET = previousTelemetrySecret;
 });
 
 async function enableUnifiedJurisdictions(t: TestConvex<typeof schema>) {
@@ -95,7 +177,7 @@ async function createUser(t: TestConvex<typeof schema>, email: string) {
         data: {
           token: crypto.randomUUID(),
           userId: user._id,
-          expiresAt: now + 60_000,
+          expiresAt: now + 86_400_000,
           createdAt: now,
           updatedAt: now,
         },
@@ -149,6 +231,7 @@ describe("chat pagination", () => {
 
   it("round-trips only assistant citation snapshots in their original order", async () => {
     const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
     await enableUnifiedJurisdictions(t);
     const owner = await createUser(t, `chat-owner-${crypto.randomUUID()}@example.com`);
     const jurisdictionId = await createGeographicJurisdiction(t);
@@ -161,11 +244,18 @@ describe("chat pagination", () => {
       jurisdictionKind: "geographic" as const,
       relation: "selected" as const,
     }];
+    const claim = await issueClaim(client, {
+      externalId: "cited",
+      jurisdictionId,
+      clientId: "cited-answer",
+      content: "Answer",
+      citations,
+    });
     await client.mutation(api.chats.appendMessages, {
       externalId: "cited",
       lastMessage: "Answer",
       jurisdictionId,
-      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations }],
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
     });
     const page = await client.query(api.chats.listMessages, {
       externalId: "cited",
@@ -177,8 +267,16 @@ describe("chat pagination", () => {
       externalId: "cited",
       lastMessage: "Answer",
       jurisdictionId,
-      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations }],
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
     })).resolves.toEqual({ id: "cited" });
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "cited",
+      lastMessage: "Forged metadata",
+      jurisdictionId,
+      messages: [{ role: "assistant", content: "Forged answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
+    })).rejects.toThrow("CHAT_CLIENT_ID_CONFLICT");
+    await expect(client.query(api.chats.getByExternalId, { externalId: "cited" }))
+      .resolves.toMatchObject({ lastMessage: "Answer", messageCount: 1 });
 
     await expect(client.mutation(api.chats.appendMessages, {
       externalId: "cited",
@@ -191,6 +289,273 @@ describe("chat pagination", () => {
       paginationOpts: { numItems: 20, cursor: null },
     });
     expect(unchanged.page.map((message) => message.content)).toEqual(["Answer"]);
+  });
+
+  it("binds a one-use citation claim to exact owner, session, chat, client, content, and ordered DTO", async () => {
+    const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `claim-owner-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "claim-chat", jurisdictionId });
+    const citations = [{
+      label: "Constitution, article 1",
+      jurisdictionId,
+      jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic" as const,
+      relation: "selected" as const,
+    }];
+    const claim = await issueClaim(client, {
+      externalId: "claim-chat", jurisdictionId, clientId: "assistant-1", content: "Bound answer", citations,
+    });
+
+    const rawClaims = await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2));
+    expect(rawClaims).toHaveLength(1);
+    expect(JSON.stringify(rawClaims)).not.toMatch(/Bound answer|Constitution|article 1|assistant-1/);
+    expect(await t.run((ctx) => ctx.db.query("telemetryCorrelations").take(2))).toEqual([]);
+    expect(await t.run((ctx) => ctx.db.query("queryRuns").take(2))).toEqual([]);
+
+    await client.mutation(api.chats.appendMessages, {
+      externalId: "claim-chat", jurisdictionId, lastMessage: "Bound answer",
+      messages: [{
+        role: "assistant", content: "Bound answer", clientId: "assistant-1",
+        citations, citationClaim: claim.citationClaim,
+      }],
+    });
+    expect(await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2))).toEqual([]);
+
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "claim-chat", jurisdictionId, lastMessage: "Replay",
+      messages: [{
+        role: "assistant", content: "Bound answer", clientId: "assistant-replay",
+        citations, citationClaim: claim.citationClaim,
+      }],
+    })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    const messages = await client.query(api.chats.listMessages, {
+      externalId: "claim-chat", paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(messages.page.map((message) => message.content)).toEqual(["Bound answer"]);
+  });
+
+  it.each<[string, { content?: string; clientId?: string; citations?: "label" | "order" }]>([
+    ["content", { content: "Forged answer" }],
+    ["client id", { clientId: "forged-client" }],
+    ["label", { citations: "label" }],
+    ["order", { citations: "order" }],
+  ])("rejects a citation claim with forged %s without inserting", async (_case, forged) => {
+    const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `claim-forgery-${crypto.randomUUID()}@example.com`);
+    const selectedId = await createGeographicJurisdiction(t);
+    const ancestorId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await ctx.db.insert("jurisdictions", {
+        name: "West Africa", slug: `west-africa-${crypto.randomUUID()}`, status: "enabled", isDefault: false,
+        providerSyncState: "synced", kind: "geographic", visibility: "public",
+        createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: id, googlePlaceId: `place-${crypto.randomUUID()}`, level: "region",
+        countryCode: "GH", latitude: 1, longitude: 1, formattedAddress: "West Africa", createdAt: now, updatedAt: now,
+      });
+      const selectedProfile = await ctx.db.query("geographicJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", selectedId)).unique();
+      await ctx.db.patch(selectedProfile!._id, { level: "town", parentJurisdictionId: id, updatedAt: now });
+      return id;
+    });
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "forgery-chat", jurisdictionId: selectedId });
+    const citations: Citation[] = [
+      { label: "Selected", jurisdictionId: selectedId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", relation: "selected" },
+      { label: "Ancestor", jurisdictionId: ancestorId, jurisdictionName: "West Africa", jurisdictionKind: "geographic", relation: "geographic_ancestor" },
+    ];
+    const claim = await issueClaim(client, {
+      externalId: "forgery-chat", jurisdictionId: selectedId, clientId: "assistant-original", content: "Original", citations,
+    });
+    const forgedCitations = forged.citations === "label"
+      ? [{ ...citations[0], label: "Forged label" }, citations[1]]
+      : forged.citations === "order" ? [...citations].reverse() : citations;
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "forgery-chat", jurisdictionId: selectedId, lastMessage: "Rejected",
+      messages: [{
+        role: "assistant",
+        content: forged.content ?? "Original",
+        clientId: forged.clientId ?? "assistant-original",
+        citations: forgedCitations,
+        citationClaim: claim.citationClaim,
+      }],
+    })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
+  });
+
+  it("rejects claim use by a different owner or auth session and against a different chat selection", async () => {
+    const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `claim-owner-${crypto.randomUUID()}@example.com`);
+    const other = await createUser(t, `claim-other-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const otherJurisdictionId = await createGeographicJurisdiction(t);
+    const ownerClient = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    const otherClient = t.withIdentity({ subject: other.userId, sessionId: other.sessionId });
+    await ownerClient.mutation(api.chats.ensure, { externalId: "bound-chat", jurisdictionId });
+    await ownerClient.mutation(api.chats.ensure, { externalId: "other-chat", jurisdictionId });
+    await ownerClient.mutation(api.chats.ensure, { externalId: "other-selection", jurisdictionId: otherJurisdictionId });
+    await otherClient.mutation(api.chats.ensure, { externalId: "bound-chat", jurisdictionId });
+    const citations: Citation[] = [{ label: "Selected", jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", relation: "selected" }];
+    const claim = await issueClaim(ownerClient, {
+      externalId: "bound-chat", jurisdictionId, clientId: "bound-assistant", content: "Bound", citations,
+    });
+    const append = (client: typeof ownerClient, externalId = "bound-chat") => client.mutation(api.chats.appendMessages, {
+      externalId, jurisdictionId, lastMessage: "Bound",
+      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, citationClaim: claim.citationClaim }],
+    });
+    await expect(append(otherClient)).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    const secondSessionId = await t.run(async (ctx) => (await ctx.runMutation(components.betterAuth.adapter.create, {
+      input: { model: "session", data: { token: crypto.randomUUID(), userId: owner.userId, expiresAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now() } },
+    }))._id);
+    await expect(append(t.withIdentity({ subject: owner.userId, sessionId: secondSessionId })))
+      .rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    await expect(append(ownerClient, "other-chat")).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    await expect(ownerClient.mutation(api.chats.appendMessages, {
+      externalId: "other-selection", jurisdictionId: otherJurisdictionId, lastMessage: "Bound",
+      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, citationClaim: claim.citationClaim }],
+    })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+    expect(await t.run((ctx) => ctx.db.query("messages").take(5))).toEqual([]);
+  });
+
+  it("rejects an expired claim and a service-issued unrelated ancestor", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-10T12:00:00.000Z"));
+      const t = createTestBackend();
+      process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+      await enableUnifiedJurisdictions(t);
+      const owner = await createUser(t, `claim-expiry-${crypto.randomUUID()}@example.com`);
+      const selectedId = await createGeographicJurisdiction(t);
+      const unrelatedId = await t.run(async (ctx) => {
+        const now = Date.now();
+        const id = await ctx.db.insert("jurisdictions", {
+          name: "Unrelated", slug: `unrelated-${crypto.randomUUID()}`, status: "enabled", isDefault: false,
+          providerSyncState: "synced", kind: "geographic", visibility: "public",
+          createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+        });
+        await ctx.db.insert("geographicJurisdictions", {
+          jurisdictionId: id, googlePlaceId: `place-${crypto.randomUUID()}`, level: "country",
+          countryCode: "NG", latitude: 2, longitude: 2, formattedAddress: "Unrelated", createdAt: now, updatedAt: now,
+        });
+        return id;
+      });
+      const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+      await client.mutation(api.chats.ensure, { externalId: "expiry-chat", jurisdictionId: selectedId });
+      const selectedCitation: Citation[] = [{ label: "Selected", jurisdictionId: selectedId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", relation: "selected" }];
+      const claim = await issueClaim(client, {
+        externalId: "expiry-chat", jurisdictionId: selectedId, clientId: "expiring", content: "Expires", citations: selectedCitation,
+      });
+      vi.advanceTimersByTime(120_001);
+      await expect(client.mutation(api.chats.appendMessages, {
+        externalId: "expiry-chat", jurisdictionId: selectedId, lastMessage: "Expires",
+        messages: [{ role: "assistant", content: "Expires", clientId: "expiring", citations: selectedCitation, citationClaim: claim.citationClaim }],
+      })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+
+      const unrelated: Citation[] = [{ label: "Forged", jurisdictionId: unrelatedId, jurisdictionName: "Unrelated", jurisdictionKind: "geographic", relation: "geographic_ancestor" }];
+      await expect(issueClaim(client, {
+        externalId: "expiry-chat", jurisdictionId: selectedId, clientId: "unrelated", content: "Forged", citations: unrelated,
+      })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+      expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts only geographic citations inside a linked organization scope", async () => {
+    const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `claim-org-${crypto.randomUUID()}@example.com`);
+    const linkedId = await createGeographicJurisdiction(t);
+    const unrelatedId = await createGeographicJurisdiction(t);
+    const organizationId = await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.patch(unrelatedId, { name: "Nigeria", legacyCountryCode: "NG", updatedAt: now });
+      const unrelatedProfile = await ctx.db.query("geographicJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", unrelatedId)).unique();
+      await ctx.db.patch(unrelatedProfile!._id, { countryCode: "NG", updatedAt: now });
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Linked University", slug: `linked-university-${crypto.randomUUID()}`, class: "university", status: "active",
+        createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Linked University Policy", slug: `linked-policy-${crypto.randomUUID()}`, status: "enabled", isDefault: false,
+        providerSyncState: "synced", kind: "organizational", visibility: "public", organizationId,
+        createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+      const profileId = await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId, scopeMode: "linked_geographies", createdAt: now, updatedAt: now,
+      });
+      const linkedProfile = await ctx.db.query("geographicJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", linkedId)).unique();
+      await ctx.db.insert("organizationGeographicScopes", {
+        organizationalJurisdictionId: profileId, geographicJurisdictionId: linkedProfile!._id, createdAt: now,
+      });
+      return jurisdictionId;
+    });
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "linked-org-chat", jurisdictionId: organizationId });
+    const allowed: Citation[] = [{
+      label: "Ghana scope", jurisdictionId: linkedId, jurisdictionName: "Ghana",
+      jurisdictionKind: "geographic", relation: "organizational_geography",
+    }];
+    const claim = await issueClaim(client, {
+      externalId: "linked-org-chat", jurisdictionId: organizationId,
+      clientId: "linked-answer", content: "Linked answer", citations: allowed,
+    });
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "linked-org-chat", jurisdictionId: organizationId, lastMessage: "Linked answer",
+      messages: [{ role: "assistant", content: "Linked answer", clientId: "linked-answer", citations: allowed, citationClaim: claim.citationClaim }],
+    })).resolves.toEqual({ id: "linked-org-chat" });
+
+    const unrelated: Citation[] = [{
+      label: "Nigeria scope", jurisdictionId: unrelatedId, jurisdictionName: "Nigeria",
+      jurisdictionKind: "geographic", relation: "organizational_geography",
+    }];
+    await expect(issueClaim(client, {
+      externalId: "linked-org-chat", jurisdictionId: organizationId,
+      clientId: "unrelated-answer", content: "Unrelated answer", citations: unrelated,
+    })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+    const stored = await client.query(api.chats.listMessages, {
+      externalId: "linked-org-chat", paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(stored.page.map((message) => message.content)).toEqual(["Linked answer"]);
+  });
+
+  it("checks stored-ID access while rollout is off but keeps its country snapshot immutable", async () => {
+    const t = createTestBackend();
+    await enableUnifiedJurisdictions(t);
+    const owner = await createUser(t, `snapshot-owner-${crypto.randomUUID()}@example.com`);
+    const jurisdictionId = await createGeographicJurisdiction(t);
+    const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
+    await client.mutation(api.chats.ensure, { externalId: "snapshot-chat", jurisdictionId, country: "GH" });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(jurisdictionId, { legacyCountryCode: "NG", updatedAt: Date.now() });
+      const flag = await ctx.db.query("featureFlags")
+        .withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique();
+      await ctx.db.patch(flag!._id, { enabled: false, updatedAt: Date.now() });
+    });
+    await expect(client.query(api.chats.getByExternalId, { externalId: "snapshot-chat" }))
+      .resolves.toMatchObject({ jurisdictionId, country: "GH" });
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, { status: "archived", updatedAt: Date.now() }));
+    await expect(client.query(api.chats.getByExternalId, { externalId: "snapshot-chat" })).resolves.toBeNull();
+    await expect(client.query(api.chats.listMessages, {
+      externalId: "snapshot-chat", paginationOpts: { numItems: 20, cursor: null },
+    })).resolves.toMatchObject({ page: [] });
+    await expect(client.mutation(api.chats.appendMessages, {
+      externalId: "snapshot-chat", jurisdictionId, lastMessage: "Denied", messages: [{ role: "assistant", content: "Denied" }],
+    })).rejects.toThrow("That jurisdiction is not available");
+    await expect(client.mutation(api.chats.remove, { externalId: "snapshot-chat" }))
+      .rejects.toThrow("That jurisdiction is not available");
   });
 
   it("removes every member-only chat boundary immediately when membership becomes inactive", async () => {

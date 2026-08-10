@@ -24,6 +24,7 @@ import { digestExactContext } from "@/lib/research-limits";
 
 const token = "a".repeat(43);
 const claimNonce = "b".repeat(43);
+const citationClaim = "c".repeat(43);
 
 function request(overrides: Record<string, unknown> = {}) {
   return new Request("http://localhost/api/chat", {
@@ -52,6 +53,9 @@ beforeEach(() => {
   authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
     if (getFunctionName(reference) === "telemetry:claimChatPhase") {
       return { status: "chat_claimed", correlationId: "safe-hash", claimNonce, expiresAt: Date.now() + 60_000 };
+    }
+    if (getFunctionName(reference) === "chats:issueCitationClaim") {
+      return { citationClaim, expiresAt: Date.now() + 60_000 };
     }
     return { status: "finalized", correlationId: "safe-hash" };
   });
@@ -158,8 +162,16 @@ describe("POST /api/chat governed citations", () => {
     });
   });
 
+  const governedRequest = (overrides: Record<string, unknown> = {}) => request({
+    context,
+    jurisdictionId,
+    externalId: "claim-chat",
+    assistantClientId: "assistant-client-1",
+    ...overrides,
+  });
+
   it("claims the exact context digest before Gemini and resolves model refs through governed metadata", async () => {
-    const response = await POST(request({ context, jurisdictionId }));
+    const response = await POST(governedRequest());
     const payload = await response.json();
 
     expect(response.status).toBe(200);
@@ -172,6 +184,7 @@ describe("POST /api/chat governed citations", () => {
         jurisdictionKind: "geographic",
         relation: "selected",
       }],
+      citationClaim,
     });
     const claimArgs = authMocks.fetchAuthMutation.mock.calls[0][1];
     expect(claimArgs).toMatchObject({
@@ -187,6 +200,25 @@ describe("POST /api/chat governed citations", () => {
       }),
     }));
     expect(aiMocks.create.mock.calls[0][0].config.tools).toBeUndefined();
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference))).toEqual([
+      "telemetry:claimChatPhase",
+      "chats:issueCitationClaim",
+      "telemetry:finalizeChatPhase",
+    ]);
+    expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({
+      externalId: "claim-chat",
+      jurisdictionId,
+      assistantClientId: "assistant-client-1",
+      assistantContent: "The governed answer.",
+      citations: payload.citations,
+      assistantClientIdBinding: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      assistantContentBinding: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      orderedCitationBinding: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      serviceProof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    const telemetryCalls = authMocks.fetchAuthMutation.mock.calls.filter(([reference]) =>
+      getFunctionName(reference).startsWith("telemetry:"));
+    expect(JSON.stringify(telemetryCalls)).not.toMatch(/The governed answer|Section 1|assistant-client-1/);
   });
 
   it("rejects an unknown source ref, finalizes exactly one failure, and exposes no model provenance", async () => {
@@ -196,7 +228,7 @@ describe("POST /api/chat governed citations", () => {
         citations: [{ sourceRef: "J4", label: "https://provider.example/private" }],
       }),
     });
-    const response = await POST(request({ context, jurisdictionId }));
+    const response = await POST(governedRequest());
     const payload = await response.json();
 
     expect(response.status).toBe(500);
@@ -207,7 +239,7 @@ describe("POST /api/chat governed citations", () => {
   });
 
   it("rejects oversized exact context before telemetry claim or Gemini", async () => {
-    const response = await POST(request({ context: "x".repeat(120_001), jurisdictionId }));
+    const response = await POST(governedRequest({ context: "x".repeat(120_001) }));
     expect(response.status).toBe(400);
     expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
     expect(aiMocks.sendMessage).not.toHaveBeenCalled();
@@ -227,7 +259,7 @@ describe("POST /api/chat governed citations", () => {
       return { status: "finalized", correlationId: "safe-hash" };
     });
 
-    const response = await POST(request({ context: loneSurrogateContext, jurisdictionId }));
+    const response = await POST(governedRequest({ context: loneSurrogateContext }));
 
     expect(response.status).toBe(400);
     expect(aiMocks.sendMessage).not.toHaveBeenCalled();
@@ -245,10 +277,40 @@ describe("POST /api/chat governed citations", () => {
     })],
   ])("fails closed on %s and records one terminal failure", async (_label, text) => {
     aiMocks.sendMessage.mockResolvedValue({ text });
-    const response = await POST(request({ context, jurisdictionId }));
+    const response = await POST(governedRequest());
     expect(response.status).toBe(500);
     expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
       .toEqual(["telemetry:claimChatPhase", "telemetry:finalizeChatPhase"]);
     expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({ providerStatus: "failure" });
+  });
+
+  it.each([
+    ["missing chat id", { externalId: undefined }],
+    ["oversized chat id", { externalId: "x".repeat(201) }],
+    ["missing assistant client id", { assistantClientId: undefined }],
+    ["oversized assistant client id", { assistantClientId: "x".repeat(201) }],
+  ])("rejects %s before claiming or calling Gemini", async (_label, overrides) => {
+    const response = await POST(governedRequest(overrides));
+    expect(response.status).toBe(400);
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("finalizes a provider success but returns no answer when citation claim issuance fails", async () => {
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      const name = getFunctionName(reference);
+      if (name === "telemetry:claimChatPhase") return { claimNonce };
+      if (name === "chats:issueCitationClaim") throw new Error("claim store unavailable");
+      return { status: "finalized", correlationId: "safe-hash" };
+    });
+    const response = await POST(governedRequest());
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "We couldn't process your request. Please try again." });
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference))).toEqual([
+      "telemetry:claimChatPhase",
+      "chats:issueCitationClaim",
+      "telemetry:finalizeChatPhase",
+    ]);
+    expect(authMocks.fetchAuthMutation.mock.calls[2][1]).toMatchObject({ providerStatus: "success" });
   });
 });

@@ -606,6 +606,19 @@ export default defineSchema({
     .index("by_userId_and_updatedAt", ["userId", "updatedAt"])
     .index("by_user_externalId", ["userId", "externalId"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
+  chatCitationClaims: defineTable({
+    tokenHash: v.string(),
+    ownerBinding: v.string(),
+    sessionBinding: v.string(),
+    chatSessionId: v.id("chatSessions"),
+    jurisdictionId: v.id("jurisdictions"),
+    assistantClientIdBinding: v.string(),
+    assistantContentBinding: v.string(),
+    orderedCitationBinding: v.string(),
+    expiresAt: v.number(),
+  })
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_expiresAt", ["expiresAt"]),
   dailyUsage: defineTable({
     userId: v.string(),
     // UTC day key, e.g. "2026-06-11".

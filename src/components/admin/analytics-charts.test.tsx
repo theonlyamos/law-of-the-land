@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFunctionName } from "convex/server";
 
@@ -36,6 +36,30 @@ const metrics = [
 ];
 
 describe("analytics charts", () => {
+  it("separates and labels stable-ID and legacy series even when they share a country code", async () => {
+    convexMocks.useQuery.mockImplementation((_reference, args) => args === "skip" ? undefined : {
+      page: [
+        { ...metrics[0], id: "stable-1", jurisdictionId: "jurisdiction-ghana", jurisdictionName: "Ghana" },
+        { ...metrics[1], id: "stable-2", jurisdictionId: "jurisdiction-ghana", jurisdictionName: "Ghana" },
+        { ...metrics[0], id: "other-id", jurisdictionId: "jurisdiction-other-ghana", jurisdictionName: "Ghana", totalQuestions: 7 },
+        { ...metrics[1], id: "legacy-gh", totalQuestions: 3 },
+      ],
+      isDone: true,
+      continueCursor: "",
+    });
+    render(<AnalyticsCharts jurisdictionId={null} jurisdictionCode={null} fromDay="2026-07-01" toDay="2026-07-28" />);
+    await act(async () => {
+      observerCallback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    });
+
+    const stable = await screen.findByRole("region", { name: "Ghana — stable ID jurisdiction-ghana" });
+    const otherStable = screen.getByRole("region", { name: "Ghana — stable ID jurisdiction-other-ghana" });
+    const legacy = screen.getByRole("region", { name: "Legacy GH" });
+    expect(within(stable).getByText(/15 questions/)).toBeVisible();
+    expect(within(otherStable).getByText(/7 questions/)).toBeVisible();
+    expect(within(legacy).getByText(/3 questions/)).toBeVisible();
+  });
+
   it("does not import or render chart graphics until the section enters view", async () => {
     render(<AnalyticsCharts jurisdictionId="jurisdiction-ghana" jurisdictionCode={null} fromDay="2026-07-01" toDay="2026-07-28" />);
     expect(screen.getByText("Charts load when this section enters view.")).toBeVisible();
