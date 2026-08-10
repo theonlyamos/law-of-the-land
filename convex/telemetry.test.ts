@@ -604,6 +604,50 @@ describe("daily telemetry rollups", () => {
 });
 
 describe("admin analytics", () => {
+  it("supports a bounded jurisdiction-first daily metric range", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "World Health Organization", kind: "organizational" });
+    const otherId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const totals = {
+      jurisdictionName: "World Health Organization",
+      jurisdictionKind: "organizational" as const,
+      totalQuestions: 1,
+      successCount: 1,
+      failureCount: 0,
+      abortedCount: 0,
+      providerFailureCount: 0,
+      noResultCount: 0,
+      latencyLe250: 1,
+      latencyLe500: 1,
+      latencyLe1000: 1,
+      latencyLe2500: 1,
+      latencyLe5000: 1,
+      latencyGt5000: 0,
+      p50UpperBoundMs: 250,
+      p95UpperBoundMs: 250,
+      updatedAt: Date.now(),
+    };
+    const rows = await t.run(async (ctx) => {
+      await ctx.db.insert("dailyMetrics", { ...totals, day: "2026-07-20", jurisdictionId });
+      await ctx.db.insert("dailyMetrics", { ...totals, day: "2026-07-25", jurisdictionId });
+      await ctx.db.insert("dailyMetrics", { ...totals, day: "2026-08-01", jurisdictionId });
+      await ctx.db.insert("dailyMetrics", {
+        ...totals,
+        day: "2026-07-25",
+        jurisdictionId: otherId,
+        jurisdictionName: "African Union",
+      });
+      return await ctx.db
+        .query("dailyMetrics")
+        .withIndex("by_jurisdictionId_and_day", (q) =>
+          q.eq("jurisdictionId", jurisdictionId).gte("day", "2026-07-01").lte("day", "2026-07-31"),
+        )
+        .take(10);
+    });
+
+    expect(rows.map((row) => row.day)).toEqual(["2026-07-20", "2026-07-25"]);
+  });
+
   it("requires assured analytics permission and reads only paginated daily aggregates", async () => {
     const t = backend();
     const organizationId = await typedJurisdiction(t, { name: "World Health Organization", kind: "organizational" });

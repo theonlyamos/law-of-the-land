@@ -752,6 +752,7 @@ export default defineSchema({
     .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
     .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
     .index("by_day_and_jurisdictionId", ["day", "jurisdictionId"])
+    .index("by_jurisdictionId_and_day", ["jurisdictionId", "day"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
   messages: defineTable({
     sessionId: v.id("chatSessions"),
