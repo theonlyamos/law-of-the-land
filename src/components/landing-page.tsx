@@ -33,7 +33,7 @@ interface LandingPageProps {
   jurisdictions: readonly PublicJurisdiction[] | undefined;
   unifiedJurisdictionsEnabled: boolean | undefined;
   researchJurisdiction: ResearchJurisdiction | null;
-  onResearchJurisdictionChange: (selection: ResearchJurisdiction) => void;
+  onResearchJurisdictionChange: (selection: ResearchJurisdiction | null) => void;
 }
 
 const PRIMARY_LINKS = [

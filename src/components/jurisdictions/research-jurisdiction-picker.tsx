@@ -21,7 +21,7 @@ interface ResultSection {
 
 interface ResearchJurisdictionPickerProps {
   value: ResearchJurisdiction | null;
-  onChange: (selection: ResearchJurisdiction) => void;
+  onChange: (selection: ResearchJurisdiction | null) => void;
   disabled?: boolean;
 }
 
@@ -61,7 +61,8 @@ export function ResearchJurisdictionPicker({
   const client = useConvex();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const session = authClient.useSession();
-  const authKey = session.data?.user.id ?? (isAuthenticated ? "authenticated" : "anonymous");
+  const sessionUserId = session.data?.user.id ?? null;
+  const authKey = sessionUserId ?? (isAuthenticated ? "authenticated" : "anonymous");
   const listboxId = useId();
   const [kind, setKind] = useState<ResearchJurisdictionKind | null>(value?.kind ?? null);
   const [input, setInput] = useState("");
@@ -73,6 +74,7 @@ export function ResearchJurisdictionPicker({
   const [activeIndex, setActiveIndex] = useState(-1);
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
+  const previousIdentity = useRef({ isAuthenticated, userId: sessionUserId });
   const normalizedInput = normalizeQuery(input);
   const rows = sections.flatMap((section) => section.rows);
 
@@ -133,6 +135,22 @@ export function ResearchJurisdictionPicker({
     },
     [],
   );
+
+  useEffect(() => {
+    const previous = previousIdentity.current;
+    const authenticationChanged = previous.isAuthenticated !== isAuthenticated;
+    const accountChanged =
+      previous.userId !== null &&
+      sessionUserId !== null &&
+      previous.userId !== sessionUserId;
+    previousIdentity.current = {
+      isAuthenticated,
+      userId: sessionUserId ?? (isAuthenticated ? previous.userId : null),
+    };
+    if ((authenticationChanged || accountChanged) && value) {
+      onChange(null);
+    }
+  }, [isAuthenticated, onChange, sessionUserId, value]);
 
   function choose(row: ResearchJurisdiction) {
     onChange(row);
@@ -210,17 +228,26 @@ export function ResearchJurisdictionPicker({
             <ul className="grid gap-1">
               {section.rows.map((row) => {
                 const index = rows.findIndex((candidate) => candidate.id === row.id);
+                const kindLabel = row.kind === "geographic" ? "Geographic" : "Organizational";
                 return (
                   <li
                     id={`${listboxId}-${index}`}
                     key={row.id}
                     role="option"
+                    aria-label={`${row.name}, ${kindLabel}, ${row.slug}`}
                     aria-selected={value?.id === row.id}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => choose(row)}
-                    className="min-h-11 cursor-pointer border border-transparent px-3 py-2 text-sm hover:border-input focus-within:ring-2 focus-within:ring-ring"
+                    className={`min-h-11 cursor-pointer border px-3 py-2 text-sm hover:border-input ${
+                      activeIndex === index
+                        ? "border-input bg-muted ring-2 ring-ring"
+                        : "border-transparent"
+                    }`}
                   >
-                    {row.name}
+                    <span className="block font-medium">{row.name}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {kindLabel} <span aria-hidden>·</span> {row.slug}
+                    </span>
                   </li>
                 );
               })}

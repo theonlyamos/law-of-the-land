@@ -128,7 +128,9 @@ describe("ResearchJurisdictionPicker", () => {
       query: "",
       cursor: "opaque-next",
     });
-    expect(screen.getAllByRole("option", { name: "Ghana" })).toHaveLength(1);
+    expect(
+      screen.getAllByRole("option", { name: "Ghana, Geographic, ghana" }),
+    ).toHaveLength(1);
   });
 
   it("ignores an older response and preserves the controlled selection", async () => {
@@ -160,8 +162,10 @@ describe("ResearchJurisdictionPicker", () => {
     rerender(<ResearchJurisdictionPicker value={ghana} onChange={vi.fn()} />);
 
     expect(screen.getByText("Selected: Ghana")).toBeVisible();
-    expect(screen.getByRole("option", { name: "Accra" })).toBeVisible();
-    expect(screen.queryByRole("option", { name: "Old result" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Accra, Geographic, accra" })).toBeVisible();
+    expect(
+      screen.queryByRole("option", { name: "Old result, Geographic, old" }),
+    ).not.toBeInTheDocument();
   });
 
   it("announces member groups, empty results, and recoverable errors", async () => {
@@ -218,10 +222,79 @@ describe("ResearchJurisdictionPicker", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Organizational" }));
     await act(async () => vi.advanceTimersByTime(250));
     await act(async () => Promise.resolve());
-    expect(screen.getByRole("option", { name: "Member Council" })).toBeVisible();
+    expect(
+      screen.getByRole("option", { name: "Member Council, Organizational, ghana" }),
+    ).toBeVisible();
 
     mocks.sessionUserId = "member-b";
     rerender(<ResearchJurisdictionPicker value={null} onChange={vi.fn()} />);
-    expect(screen.queryByRole("option", { name: "Member Council" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Member Council, Organizational, ghana" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears a controlled member selection on account switch and sign-out but not initially", () => {
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    mocks.sessionUserId = "member-a";
+    mocks.query.mockReturnValue(new Promise(() => undefined));
+    const selected = { ...ghana, kind: "organizational" as const, name: "Private Council" };
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <ResearchJurisdictionPicker value={selected} onChange={onChange} />,
+    );
+    expect(onChange).not.toHaveBeenCalled();
+
+    mocks.sessionUserId = "member-b";
+    rerender(<ResearchJurisdictionPicker value={selected} onChange={onChange} />);
+    expect(onChange).toHaveBeenLastCalledWith(null);
+
+    onChange.mockClear();
+    mocks.auth = { isAuthenticated: false, isLoading: false };
+    mocks.sessionUserId = null;
+    rerender(<ResearchJurisdictionPicker value={selected} onChange={onChange} />);
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("clears selection on sign-out even while the session user ID is unresolved", () => {
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    mocks.sessionUserId = null;
+    mocks.query.mockReturnValue(new Promise(() => undefined));
+    const selected = { ...ghana, kind: "organizational" as const, name: "Private Council" };
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <ResearchJurisdictionPicker value={selected} onChange={onChange} />,
+    );
+    expect(onChange).not.toHaveBeenCalled();
+
+    mocks.auth = { isAuthenticated: false, isLoading: false };
+    rerender(<ResearchJurisdictionPicker value={selected} onChange={onChange} />);
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("distinguishes duplicate names and visibly tracks keyboard-active results", async () => {
+    mocks.query.mockResolvedValue({
+      page: [
+        { ...ghana, id: "council-one", name: "Council", slug: "council-global", isDefault: false },
+        { ...ghana, id: "council-two", name: "Council", slug: "council-local", isDefault: false },
+      ],
+      group: "geographic",
+      isDone: true,
+      continueCursor: null,
+    } satisfies SearchPage);
+    render(<ResearchJurisdictionPicker value={null} onChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
+    await act(async () => vi.advanceTimersByTime(250));
+    await act(async () => Promise.resolve());
+
+    const global = screen.getByRole("option", {
+      name: "Council, Geographic, council-global",
+    });
+    expect(
+      screen.getByRole("option", { name: "Council, Geographic, council-local" }),
+    ).toBeVisible();
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Find jurisdiction" }), {
+      key: "ArrowDown",
+    });
+    expect(global).toHaveClass("ring-2");
   });
 });

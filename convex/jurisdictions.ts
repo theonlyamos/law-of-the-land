@@ -194,24 +194,43 @@ async function assertTypedRelationship(
     throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
   }
   if (kind === "geographic") {
-    const profiles = await ctx.db
-      .query("geographicJurisdictions")
-      .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
-      .take(2);
-    if (profiles.length !== 1 || row.organizationId !== undefined) {
+    const [geographicProfiles, organizationalProfiles] = await Promise.all([
+      ctx.db
+        .query("geographicJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
+        .take(2),
+      ctx.db
+        .query("organizationalJurisdictions")
+        .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
+        .take(1),
+    ]);
+    if (
+      geographicProfiles.length !== 1 ||
+      organizationalProfiles.length !== 0 ||
+      row.organizationId !== undefined
+    ) {
       throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
     }
     return;
   }
   if (!row.organizationId) throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
-  const [profiles, organization] = await Promise.all([
+  const [organizationalProfiles, geographicProfiles, organization] = await Promise.all([
     ctx.db
       .query("organizationalJurisdictions")
       .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
       .take(2),
+    ctx.db
+      .query("geographicJurisdictions")
+      .withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id))
+      .take(1),
     ctx.db.get("organizations", row.organizationId),
   ]);
-  if (profiles.length !== 1 || !organization || organization.status !== "active") {
+  if (
+    organizationalProfiles.length !== 1 ||
+    geographicProfiles.length !== 0 ||
+    !organization ||
+    organization.status !== "active"
+  ) {
     throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
   }
 }

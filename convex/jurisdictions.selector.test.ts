@@ -367,6 +367,63 @@ describe("bounded accessible jurisdiction search", () => {
       }),
     ).rejects.toThrow("ORGANIZATION_MEMBERSHIP_LIMIT");
   });
+
+  it("fails closed when a typed row also has an opposite-kind profile", async () => {
+    const geographicBackend = createBackend();
+    const geographicId = await insertGeographic(geographicBackend, {
+      name: "Cross-profile Geography",
+    });
+    await geographicBackend.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId: geographicId,
+        scopeMode: "global",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(
+      geographicBackend.query(searchAccessible, {
+        kind: "geographic",
+        query: "Cross-profile",
+        cursor: null,
+      }),
+    ).rejects.toThrow("JURISDICTION_SELECTOR_STATE_INVALID");
+
+    const organizationBackend = createBackend();
+    const member = await asUser(organizationBackend, "cross-profile-member");
+    const organizational = await insertOrganizationJurisdiction(organizationBackend, {
+      name: "Cross-profile Organization",
+      visibility: "members",
+    });
+    await organizationBackend.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("organizationMemberships", {
+        organizationId: organizational.organizationId,
+        userId: member.userId,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: organizational.jurisdictionId,
+        googlePlaceId: "cross-profile-place",
+        level: "country",
+        latitude: 0,
+        longitude: 0,
+        formattedAddress: "Cross-profile Organization",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(
+      member.client.query(searchAccessible, {
+        kind: "organizational",
+        query: "Cross-profile",
+        cursor: null,
+      }),
+    ).rejects.toThrow("JURISDICTION_SELECTOR_STATE_INVALID");
+  });
 });
 
 describe("unified selector rollout state", () => {
