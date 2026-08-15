@@ -2,6 +2,7 @@
 
 import { api } from "../../../convex/_generated/api";
 import { useMutation } from "convex/react";
+import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { PermissionBoundary } from "./permission-boundary";
 import { StepUpDialog } from "./step-up-dialog";
@@ -49,6 +50,7 @@ function actionKey(prefix: string) {
 }
 
 export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
+  const router = useRouter();
   const approve = useMutation(api.admin.reviews.approveVersion);
   const reject = useMutation(api.admin.reviews.rejectVersion);
   const publish = useMutation(api.admin.publication.publishVersion);
@@ -76,6 +78,7 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
       idempotencyKey: actionKey(decision),
     });
     setMessage(`Version ${item.versionNumber} ${decision === "approve" ? "approved" : "rejected"}.`);
+    router.refresh();
   }
 
   async function confirmRisk(input: { reason: string; confirmation?: string }) {

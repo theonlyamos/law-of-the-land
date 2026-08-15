@@ -3,12 +3,14 @@
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useMutation, usePaginatedQuery } from "convex/react";
+import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 type IncidentStatus = "open" | "investigating" | "monitoring" | "resolved";
 type IncidentSeverity = "low" | "medium" | "high" | "critical";
 
 export function IncidentCreateForm({ canWrite }: { canWrite: boolean }) {
+  const router = useRouter();
   const create = useMutation(api.admin.operations.createIncident);
   const [message, setMessage] = useState("");
   if (!canWrite) return null;
@@ -20,6 +22,7 @@ export function IncidentCreateForm({ canWrite }: { canWrite: boolean }) {
       await create({ title: String(form.get("title")), severity: String(form.get("severity")) as IncidentSeverity, reason: String(form.get("reason")), idempotencyKey: `incident_create_${crypto.randomUUID().replaceAll("-", "")}` });
       formElement.reset();
       setMessage("Incident opened.");
+      router.refresh();
     } catch { setMessage("The incident could not be opened."); }
   }
   return (

@@ -21,6 +21,18 @@ type CalibrationInput = {
 const artifactPath = path.resolve("artifacts/admin-performance.json");
 const publicBaselineArtifactPath = path.resolve("test-results/admin-performance-public-baseline.json");
 
+type PlaceDetailsResponse = {
+  place: {
+    placeId: string;
+    displayName: string;
+    formattedAddress: string;
+    latitude: number;
+    longitude: number;
+    countryCode?: string;
+  };
+  verifiedPlaceClaim: string;
+};
+
 test.describe.configure({ mode: "serial" });
 test.afterAll(() => fs.rmSync(publicBaselineArtifactPath, { force: true }));
 
@@ -108,7 +120,25 @@ async function collectSelectorProfile(page: Page, fixture: BrowserFixtureManifes
   }
 }
 
-async function collectPlacePicker(request: APIRequestContext, cookie: string) {
+async function verifyStubPlaceClaim(details: PlaceDetailsResponse, fixture: BrowserFixtureManifest) {
+  const result = await controlBrowserFixtures(fixture, "verify_place_claim", {
+    claim: details.verifiedPlaceClaim,
+  });
+  expect(result).toEqual({
+    ok: true,
+    place: {
+      googlePlaceId: details.place.placeId,
+      name: "Accra",
+      formattedAddress: "Accra, Ghana",
+      latitude: 5.6037,
+      longitude: -0.187,
+      countryCode: "GH",
+      aliases: ["accra", "gh", "ghana", "greater accra", "greater accra region"],
+    },
+  });
+}
+
+async function collectPlacePicker(request: APIRequestContext, cookie: string, fixture: BrowserFixtureManifest) {
   const autocompleteSamplesMs: number[] = [];
   const detailsSamplesMs: number[] = [];
   let resultCount = 0;
@@ -125,6 +155,7 @@ async function collectPlacePicker(request: APIRequestContext, cookie: string) {
     const details = await request.post("/api/admin/geographic-places/details", { headers: { cookie }, data: { placeId: suggestions[0].placeId, sessionToken } });
     detailsSamplesMs.push(performance.now() - startedAt);
     expect(details.status()).toBe(200);
+    if (index === 0) await verifyStubPlaceClaim(await details.json() as PlaceDetailsResponse, fixture);
   }
   return { branch: "geographic", autocompleteSamplesMs, detailsSamplesMs, resultCount, requestCount: 40, sameSessionCorrelation: true, placesInvocationCount: 40 };
 }
@@ -224,7 +255,7 @@ test("records authenticated admin and bounded jurisdiction performance evidence"
   page.on("request", (entry) => { if (entry.url().includes("/api/admin/geographic-places/")) placesRequests.push(entry.url()); });
   const throttled = await collectSelectorProfile(page, fixture, "throttled", true);
   const baselineP95Ms = percentile95(off.samplesMs);
-  const placePicker = await collectPlacePicker(request, adminCookie);
+  const placePicker = await collectPlacePicker(request, adminCookie, fixture);
   const retrievalObservations = await collectRetrievalPlan(fixture);
   const calibration = approvedCalibration();
   const sections = applyCalibration(buildJurisdictionPerformanceSections({

@@ -151,6 +151,25 @@ function legacyPageCursor(cursor: string | null): string | null {
   return code;
 }
 
+function projectLegacyJurisdiction(row: Doc<"jurisdictions">) {
+  return {
+    _id: row._id,
+    _creationTime: row._creationTime,
+    code: requireLegacyJurisdictionCode(row),
+    name: row.name,
+    slug: row.slug,
+    status: row.status,
+    isDefault: row.isDefault,
+    ...(row.stagingBucketId === undefined ? {} : { stagingBucketId: row.stagingBucketId }),
+    ...(row.productionBucketId === undefined ? {} : { productionBucketId: row.productionBucketId }),
+    providerSyncState: row.providerSyncState,
+    createdBy: row.createdBy,
+    updatedBy: row.updatedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 function legacyJurisdictionProjection(
   rows: Doc<"jurisdictions">[],
   status: Doc<"jurisdictions">["status"] | undefined,
@@ -165,12 +184,12 @@ function legacyJurisdictionProjection(
     else rowsByCode.set(row.code, [row]);
   }
 
-  const projection: Array<Doc<"jurisdictions"> & { code: string }> = [];
+  const projection: Array<ReturnType<typeof projectLegacyJurisdiction>> = [];
   for (const rowsForCode of rowsByCode.values()) {
     if (rowsForCode.length !== 1) continue;
     const row = rowsForCode[0];
     if (status !== undefined && row.status !== status) continue;
-    projection.push({ ...row, code: requireLegacyJurisdictionCode(row) });
+    projection.push(projectLegacyJurisdiction(row));
   }
   return projection;
 }
@@ -337,7 +356,7 @@ export const updateJurisdiction = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
     const row = await updateLegacyJurisdictionForActor(ctx, actor, args, reason);
-    return { ...row, code: requireLegacyJurisdictionCode(row) };
+    return projectLegacyJurisdiction(row);
   },
 });
 
@@ -348,7 +367,7 @@ export const enableJurisdiction = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
     const row = await enableJurisdictionForActor(ctx, actor, args.id, reason);
-    return { ...row, code: requireLegacyJurisdictionCode(row) };
+    return projectLegacyJurisdiction(row);
   },
 });
 
@@ -359,7 +378,7 @@ export const archiveJurisdiction = mutation({
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
     const row = await archiveJurisdictionForActor(ctx, actor, args.id, reason);
-    return { ...row, code: requireLegacyJurisdictionCode(row) };
+    return projectLegacyJurisdiction(row);
   },
 });
 

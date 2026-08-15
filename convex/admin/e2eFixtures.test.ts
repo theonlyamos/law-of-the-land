@@ -9,6 +9,7 @@ import type { Id } from "../_generated/dataModel";
 import schema from "../schema";
 import { authorizeFixtureRequest } from "./e2eFixtures";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
+import { issueVerifiedPlaceClaim } from "../lib/placeClaim";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -37,7 +38,7 @@ const original = { ...process.env };
 const fixtureCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 
 afterEach(() => {
-  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED"]) {
+  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED", "PLACE_CLAIM_SECRET"]) {
     if (original[key] === undefined) delete process.env[key];
     else process.env[key] = original[key];
   }
@@ -212,6 +213,63 @@ describe("isolated admin E2E fixture control plane", () => {
       former: { status: "inactive" },
       run: { fixtureFlagWrite: { enabled: false, updatedBy: `fixture:${fixture.tag}` } },
     });
+  });
+
+  it("verifies only a current owned super-admin place claim without writing fixture state", async () => {
+    enableFixtureMode();
+    process.env.PLACE_CLAIM_SECRET = "test-place-claim-secret-that-is-at-least-32-bytes";
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_placeclaimfixture1" });
+    const place = {
+      googlePlaceId: "stub-accra",
+      name: "Accra",
+      formattedAddress: "Accra, Ghana",
+      latitude: 5.6037,
+      longitude: -0.187,
+      countryCode: "GH",
+      aliases: ["ghana", "greater accra region"],
+    };
+    const validClaim = await issueVerifiedPlaceClaim(fixture.sessions.super_admin.userId, place);
+    const before = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: validClaim,
+    })).resolves.toEqual({
+      ok: true,
+      place: {
+        googlePlaceId: "stub-accra",
+        name: "Accra",
+        formattedAddress: "Accra, Ghana",
+        latitude: 5.6037,
+        longitude: -0.187,
+        countryCode: "GH",
+        aliases: ["accra", "ghana", "greater accra region"],
+      },
+    });
+    const wrongActorClaim = await issueVerifiedPlaceClaim(fixture.sessions.content_manager.userId, place);
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: wrongActorClaim,
+    })).rejects.toThrow("PLACE_CLAIM_FORBIDDEN");
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: `${validClaim.slice(0, -1)}${validClaim.endsWith("a") ? "b" : "a"}`,
+    })).rejects.toThrow("PLACE_CLAIM_INVALID");
+    const after = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+    expect(after).toEqual(before);
   });
 
   it("restores an exact prior flag and leaves a cleanup conflict on concurrent drift", async () => {

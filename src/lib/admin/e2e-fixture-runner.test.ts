@@ -9,6 +9,7 @@ import {
   resolveAdminE2ETarget,
   type FixtureManifest,
 } from "../../../e2e/admin/fixture-runner";
+import { controlBrowserFixtures, type BrowserFixtureManifest } from "../../../e2e/admin/fixtures";
 import { assertIsolatedWebServerEnvironment, buildBrowserEnvironment, buildWebServerEnvironment } from "../../../e2e/admin/web-server-environment.mjs";
 import { clearAdminE2EParentEnvironment } from "../../../e2e/admin/global-teardown";
 
@@ -17,6 +18,7 @@ let initializeAdminE2EProviderIsolation: (typeof import("../../../playwright.con
 
 const approvedCommitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const observationSecret = Buffer.alloc(32, 7).toString("base64url");
+const placeClaimSecret = Buffer.alloc(32, 8).toString("base64url");
 
 const safeEnvironment = {
   ADMIN_E2E_FIXTURE_MODE: "true",
@@ -28,6 +30,7 @@ const safeEnvironment = {
   ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
   ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
   ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+  ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
   ADMIN_E2E_BETTER_AUTH_SECRET: "better-auth-secret-at-least-32-characters",
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
@@ -106,6 +109,8 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: " http://127.0.0.1:3210" }, /exact/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211 " }, /exact/i],
     [{ ...safeEnvironment, ADMIN_E2E_FIXTURE_SECRET: "short" }, /at least 32 characters/i],
+    [{ ...safeEnvironment, ADMIN_E2E_PLACE_CLAIM_SECRET: undefined }, /ADMIN_E2E_PLACE_CLAIM_SECRET/],
+    [{ ...safeEnvironment, ADMIN_E2E_PLACE_CLAIM_SECRET: "not+base64" }, /ADMIN_E2E_PLACE_CLAIM_SECRET/],
     [{ ...safeEnvironment, CONVEX_DEPLOYMENT: "prod:live-law" }, /production Convex deployment/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site" }, /production-looking/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site", ADMIN_E2E_TARGET_ENV: "preview" }, /same isolated deployment/i],
@@ -175,6 +180,7 @@ describe("admin E2E fixture lifecycle", () => {
     expect(manifest.state).toBe("ready");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     expect(JSON.stringify(manifest)).not.toContain(observationSecret);
+    expect(JSON.stringify(manifest)).not.toContain(placeClaimSecret);
     if (process.platform !== "win32") expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
   });
@@ -304,20 +310,67 @@ describe("admin E2E fixture lifecycle", () => {
   });
 });
 
+describe("admin E2E place-claim control client", () => {
+  it("sends only the route-minted claim and rejects a target verification refusal", async () => {
+    const fixture = {
+      tag: "e2e_placeclaimrunner1",
+      convexUrl: "http://127.0.0.1:3210",
+      convexSiteUrl: "http://127.0.0.1:3211",
+      sessions: {},
+      variants: {},
+      jurisdictionUsers: {},
+      records: {},
+    } as unknown as BrowserFixtureManifest;
+    const previousSecret = process.env.ADMIN_E2E_FIXTURE_SECRET;
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const responses = [
+      new Response(JSON.stringify({ ok: true, place: {
+        googlePlaceId: "stub-accra", name: "Accra", formattedAddress: "Accra, Ghana",
+        latitude: 5.6037, longitude: -0.187, countryCode: "GH", aliases: ["accra"],
+      } }), { status: 200 }),
+      new Response(null, { status: 409 }),
+    ];
+    process.env.ADMIN_E2E_FIXTURE_SECRET = "fixture-secret-that-is-at-least-32-chars";
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected fixture control request.");
+      return response;
+    });
+    try {
+      await expect(controlBrowserFixtures(fixture, "verify_place_claim", { claim: "route-minted-claim" }))
+        .resolves.toMatchObject({ ok: true, place: { googlePlaceId: "stub-accra" } });
+      expect(requests[0]).toMatchObject({
+        url: "http://127.0.0.1:3211/admin/e2e-fixtures/control",
+        init: { method: "POST", body: '{"tag":"e2e_placeclaimrunner1","operation":"verify_place_claim","claim":"route-minted-claim"}' },
+      });
+      expect(String(requests[0].init?.body)).not.toContain("superAdminActorId");
+      await expect(controlBrowserFixtures(fixture, "verify_place_claim", { claim: "wrong-or-tampered-claim" }))
+        .rejects.toThrow("Guarded fixture control failed (409)");
+    } finally {
+      vi.unstubAllGlobals();
+      if (previousSecret === undefined) delete process.env.ADMIN_E2E_FIXTURE_SECRET;
+      else process.env.ADMIN_E2E_FIXTURE_SECRET = previousSecret;
+    }
+  });
+});
+
 describe("Playwright web server environment", () => {
-  it("replaces inherited parent-generated values even when VITEST is inherited", async () => {
+  it("replaces only the parent-generated observation secret even when VITEST is inherited", async () => {
     const expectedLocalHead = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const previous = {
       VITEST: process.env.VITEST,
       approved: process.env.ADMIN_E2E_APPROVED_COMMIT_SHA,
       local: process.env.ADMIN_E2E_LOCAL_HEAD_SHA,
       secret: process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET,
+      placeClaim: process.env.ADMIN_E2E_PLACE_CLAIM_SECRET,
     };
     try {
       process.env.VITEST = "true";
       delete process.env.ADMIN_E2E_APPROVED_COMMIT_SHA;
       process.env.ADMIN_E2E_LOCAL_HEAD_SHA = "f".repeat(40);
       process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = "inherited-secret";
+      process.env.ADMIN_E2E_PLACE_CLAIM_SECRET = placeClaimSecret;
       vi.resetModules();
 
       await import("../../../playwright.config");
@@ -325,12 +378,14 @@ describe("Playwright web server environment", () => {
       expect(process.env.ADMIN_E2E_LOCAL_HEAD_SHA).toBe(expectedLocalHead);
       expect(process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).not.toBe("inherited-secret");
       expect(Buffer.from(process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET ?? "", "base64url")).toHaveLength(32);
+      expect(process.env.ADMIN_E2E_PLACE_CLAIM_SECRET).toBe(placeClaimSecret);
     } finally {
       for (const [key, value] of [
         ["VITEST", previous.VITEST],
         ["ADMIN_E2E_APPROVED_COMMIT_SHA", previous.approved],
         ["ADMIN_E2E_LOCAL_HEAD_SHA", previous.local],
         ["ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", previous.secret],
+        ["ADMIN_E2E_PLACE_CLAIM_SECRET", previous.placeClaim],
       ] as const) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -362,11 +417,12 @@ describe("Playwright web server environment", () => {
     });
   });
 
-  it("derives local HEAD without a shell and replaces inherited parent-generated values", () => {
+  it("derives local HEAD without a shell and replaces only the observation secret", () => {
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_LOCAL_HEAD_SHA: "f".repeat(40),
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
     };
     const execFile = vi.fn(() => `${approvedCommitSha}\n`);
     const random = vi.fn(() => Buffer.alloc(32, 9));
@@ -378,10 +434,12 @@ describe("Playwright web server environment", () => {
 
     expect(execFile).toHaveBeenCalledWith("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
     expect(random).toHaveBeenCalledWith(32);
+    expect(random).toHaveBeenCalledTimes(1);
     expect(environment.ADMIN_E2E_LOCAL_HEAD_SHA).toBe(approvedCommitSha);
     expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe(
       Buffer.alloc(32, 9).toString("base64url"),
     );
+    expect(environment.ADMIN_E2E_PLACE_CLAIM_SECRET).toBe(placeClaimSecret);
     expect(JSON.stringify(environment)).not.toContain("inherited-secret");
   });
 
@@ -390,6 +448,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: "a".repeat(40),
       ADMIN_E2E_LOCAL_HEAD_SHA: "f".repeat(40),
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
     };
     const random = vi.fn(() => Buffer.alloc(32, 9));
 
@@ -402,12 +461,14 @@ describe("Playwright web server environment", () => {
     expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe(
       Buffer.alloc(32, 9).toString("base64url"),
     );
+    expect(environment.ADMIN_E2E_PLACE_CLAIM_SECRET).toBe(placeClaimSecret);
   });
 
   it("fails closed when the generated observation secret is not canonical 32-byte base64url", () => {
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+      ADMIN_E2E_PLACE_CLAIM_SECRET: "inherited-place-claim-secret",
     };
 
     expect(() => initializeAdminE2EProviderIsolation(environment, {
@@ -438,6 +499,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       CONVEX_DEPLOYMENT: "dev:safe-preview",
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
@@ -458,10 +520,12 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      PLACE_CLAIM_SECRET: placeClaimSecret,
       CONVEX_DEPLOYMENT: "dev:safe-preview",
     });
     expect(environment).not.toHaveProperty("ADMIN_E2E_FIXTURE_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
+    expect(environment).not.toHaveProperty("ADMIN_E2E_PLACE_CLAIM_SECRET");
     expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
     expect(buildBrowserEnvironment({ ...environment, x_admin_e2e_retrieval_plan_v1: "must-not-leak" }))
@@ -469,6 +533,7 @@ describe("Playwright web server environment", () => {
     expect(JSON.stringify(buildBrowserEnvironment({
       ...environment,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       "x-admin-e2e-retrieval-plan-v1": "must-not-enter-artifacts",
     }))).not.toContain("x-admin-e2e-retrieval-plan-v1");
   });
@@ -482,7 +547,9 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_ROLE_SESSIONS_JSON: "role-cookies",
       ADMIN_E2E_BETTER_AUTH_SECRET: "auth-secret",
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+      PLACE_CLAIM_SECRET: "inherited-place-claim-secret",
       GROUNDX_API_KEY: "groundx-secret",
       RESEND_API_KEY: "resend-secret",
       BETTER_AUTH_SECRET: "app-auth-secret",
@@ -490,7 +557,7 @@ describe("Playwright web server environment", () => {
     });
     expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
     expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
-    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, approvedCommitSha, "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
       expect(JSON.stringify(environment)).not.toContain(secret);
     }
   });
@@ -551,11 +618,23 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: ` ${approvedCommitSha}`,
       ADMIN_E2E_LOCAL_HEAD_SHA: ` ${approvedCommitSha}`,
     })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: undefined,
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: "not+base64",
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: Buffer.alloc(33, 7).toString("base64url"),
+    })).not.toThrow();
     expect(() => assertIsolatedWebServerEnvironment(remoteEnvironment)).not.toThrow();
     expect(() => assertIsolatedWebServerEnvironment(safeEnvironment)).not.toThrow();
   });
 
-  it("does not print the parent secret and clears both parent-generated values", () => {
+  it("does not print the parent secrets and clears every parent-generated value", () => {
     const output: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...values) => output.push(values.join(" ")));
     const warn = vi.spyOn(console, "warn").mockImplementation((...values) => output.push(values.join(" ")));
@@ -569,10 +648,12 @@ describe("Playwright web server environment", () => {
       error.mockRestore();
     }
     expect(output.join("\n")).not.toContain(observationSecret);
+    expect(output.join("\n")).not.toContain(placeClaimSecret);
 
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
     };
     clearAdminE2EParentEnvironment(environment);
     expect(environment).toEqual({});

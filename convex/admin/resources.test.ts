@@ -281,6 +281,40 @@ describe("jurisdiction governance", () => {
     );
   });
 
+  it("projects typed countries through the exact legacy admin contract", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const auditor = await asAdmin(t, "auditor");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        legacyCountryCode: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "enabled",
+        isDefault: true,
+        stagingBucketId: "staging-gh",
+        productionBucketId: "11833",
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const result = await auditor.client.query(listJurisdictions, page);
+    expect(result.page).toEqual([expect.objectContaining({ code: "GH", name: "Ghana" })]);
+    expect(Object.keys(result.page[0]).sort()).toEqual([
+      "_creationTime", "_id", "code", "createdAt", "createdBy", "isDefault",
+      "name", "productionBucketId", "providerSyncState", "slug", "stagingBucketId",
+      "status", "updatedAt", "updatedBy",
+    ].sort());
+  });
+
   it("enforces authority, validation, uniqueness, named transitions, and audit", async () => {
     const t = createBackend();
     await enablePanel(t);

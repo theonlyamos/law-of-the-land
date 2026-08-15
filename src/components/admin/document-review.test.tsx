@@ -1,16 +1,26 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminPermissionProvider } from "./permission-boundary";
 import { DocumentReview } from "./document-review";
+
+const mocks = vi.hoisted(() => ({
+  approve: vi.fn(),
+  refresh: vi.fn(),
+}));
 
 vi.mock("../../../convex/_generated/api", () => ({
   api: { admin: { reviews: { approveVersion: "approve", rejectVersion: "reject" }, publication: {
     publishVersion: "publish", unpublishVersion: "unpublish", rollbackVersion: "rollback",
   } } },
 }));
-vi.mock("convex/react", () => ({ useMutation: () => vi.fn() }));
+vi.mock("convex/react", () => ({ useMutation: (reference: string) => reference === "approve" ? mocks.approve : vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 
 afterEach(cleanup);
+beforeEach(() => {
+  mocks.approve.mockReset().mockResolvedValue({});
+  mocks.refresh.mockReset();
+});
 
 const item = {
   id: "version_2",
@@ -65,6 +75,19 @@ describe("document review workbench", () => {
     render(<AdminPermissionProvider permissions={["document:read"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     expect(screen.queryByRole("button", { name: "Approve version" })).toBeNull();
     expect(screen.getByText(/Read-only review evidence/)).toBeVisible();
+  });
+
+  it("refreshes server-rendered review items after recording a decision", async () => {
+    render(<AdminPermissionProvider permissions={["document:review"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
+    for (const label of [
+      "Official source authenticated", "Metadata is accurate", "X-Ray extraction reviewed", "Citations verified", "Search evaluation passed",
+    ]) fireEvent.click(screen.getByLabelText(label));
+    fireEvent.change(screen.getByLabelText("Evaluation run ID"), { target: { value: "eval-2" } });
+    fireEvent.change(screen.getByLabelText("Decision reason"), { target: { value: "Evidence complete" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve version" }));
+
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+    expect(mocks.approve).toHaveBeenCalledTimes(1);
   });
 
   it("labels missing provider evidence as unavailable instead of synthesizing it", () => {

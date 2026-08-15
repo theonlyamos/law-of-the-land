@@ -53,6 +53,15 @@ function requiredExact(environment, key) {
   return value;
 }
 
+function requiredE2ESecret(environment, key, minimumBytes, maximumBytes) {
+  const value = requiredExact(environment, key);
+  const bytes = Buffer.from(value, "base64url");
+  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1 || bytes.byteLength < minimumBytes || bytes.byteLength > maximumBytes || bytes.toString("base64url") !== value) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  return value;
+}
+
 function parsedEndpoint(value) {
   let url;
   try {
@@ -137,11 +146,8 @@ export function assertIsolatedWebServerEnvironment(environment) {
   if (!SHA_PATTERN.test(approvedCommitSha) || !SHA_PATTERN.test(localHeadSha) || approvedCommitSha !== localHeadSha) {
     throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   }
-  const observationSecret = requiredExact(environment, "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET");
-  const secretBytes = Buffer.from(observationSecret, "base64url");
-  if (!BASE64URL_PATTERN.test(observationSecret) || observationSecret.length % 4 === 1 || secretBytes.byteLength < 32 || secretBytes.byteLength > 128 || secretBytes.toString("base64url") !== observationSecret) {
-    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
-  }
+  requiredE2ESecret(environment, "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", 32, 128);
+  requiredE2ESecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET", 32, 32);
   for (const key of ["ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD"]) {
     required(environment, key);
   }
@@ -157,6 +163,7 @@ export function buildWebServerEnvironment(environment) {
   for (const key of CHILD_PROVIDER_BOUNDARY_KEYS) {
     if (environment[key] !== undefined) result[key] = environment[key];
   }
+  result.PLACE_CLAIM_SECRET = requiredE2ESecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET", 32, 32);
   if (environment.ADMIN_E2E_CONVEX_URL) {
     result.NEXT_PUBLIC_CONVEX_URL = environment.ADMIN_E2E_CONVEX_URL;
   }

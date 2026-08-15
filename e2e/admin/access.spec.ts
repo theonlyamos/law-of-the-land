@@ -26,6 +26,14 @@ function expectOperationSuccess(path: string, result: unknown, args: Record<stri
     "admin/users:queueUserDeletion": ["queued", "user_deletion_queue"],
   };
   if (path === "admin/roles:setAdminRoles") return expect(value).toEqual({ changed: true, roles: ["content_manager"] });
+  if (path === "admin/featureFlags:setAdminPanel") {
+    expect(value).toEqual({
+      environment: args.environment,
+      enabled: args.enabled,
+      correlationId: expect.stringMatching(/^op_[a-f0-9]{32}$/),
+    });
+    return;
+  }
   if (operationActions[path]) {
     const [status, action] = operationActions[path];
     expect(value).toMatchObject({ status, action, targetId: path === "admin/users:revokeSession" ? args.sessionId : args.userId });

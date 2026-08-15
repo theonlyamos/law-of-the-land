@@ -11,6 +11,19 @@ type ParentEnvironmentDependencies = {
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
+function generatedE2ESecret(dependencies: ParentEnvironmentDependencies): string {
+  return dependencies.randomBytes(32).toString("base64url");
+}
+
+function validateGeneratedE2ESecret(secret: string): void {
+  const secretBytes = Buffer.from(secret, "base64url");
+  if (!BASE64URL_PATTERN.test(secret)
+    || secretBytes.byteLength !== 32
+    || secretBytes.toString("base64url") !== secret) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+}
+
 export function initializeAdminE2EProviderIsolation(
   environment: Record<string, string | undefined>,
   dependencies: ParentEnvironmentDependencies = {
@@ -23,14 +36,9 @@ export function initializeAdminE2EProviderIsolation(
     throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   }
   environment.ADMIN_E2E_LOCAL_HEAD_SHA = localHeadSha;
-  const observationSecret = dependencies.randomBytes(32).toString("base64url");
+  const observationSecret = generatedE2ESecret(dependencies);
   environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = observationSecret;
-  const observationSecretBytes = Buffer.from(observationSecret, "base64url");
-  if (!BASE64URL_PATTERN.test(observationSecret)
-    || observationSecretBytes.byteLength !== 32
-    || observationSecretBytes.toString("base64url") !== observationSecret) {
-    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
-  }
+  validateGeneratedE2ESecret(observationSecret);
   const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
   if (approvedCommitSha !== undefined
     && (!SHA_PATTERN.test(approvedCommitSha) || approvedCommitSha !== localHeadSha)) {

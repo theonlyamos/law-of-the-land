@@ -85,6 +85,7 @@ type BootstrapResponse = {
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const FIXTURE_TAG_PATTERN = /^e2e_[a-z0-9]{12,48}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function required(environment: Environment, key: string): string {
   const value = environment[key]?.trim();
@@ -103,6 +104,18 @@ function parsedEndpoint(value: string, key: string): URL {
     throw new Error(`${key} must be a credential-free HTTP(S) origin.`);
   }
   return url;
+}
+
+function requiredCanonicalSecret(environment: Environment, key: string): string {
+  const value = environment[key];
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new Error(`${key} must be an exact canonical 32-byte base64url value.`);
+  }
+  const bytes = Buffer.from(value, "base64url");
+  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1 || bytes.byteLength !== 32 || bytes.toString("base64url") !== value) {
+    throw new Error(`${key} must be an exact canonical 32-byte base64url value.`);
+  }
+  return value;
 }
 
 function hasExplicitPort(value: string): boolean {
@@ -199,6 +212,7 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
   const fixtureSecret = required(environment, "ADMIN_E2E_FIXTURE_SECRET");
   const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");
   const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
+  requiredCanonicalSecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET");
   if (fixtureSecret.length < 32 || betterAuthSecret.length < 32) {
     throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
   }
@@ -284,7 +298,8 @@ export async function bootstrapAdminFixtures(options: {
   }
   const sessions: Partial<Record<FixedRole, string>> = {};
   for (const role of FIXED_ROLES) {
-    const token = payload.sessions?.[role]?.sessionToken;
+    const value = payload.sessions?.[role];
+    const token = value?.sessionToken;
     if (!token) throw new Error(`Admin E2E bootstrap omitted the ${role} session token.`);
     sessions[role] = `better-auth.session_token=${token}.${await makeSignature(token, target.betterAuthSecret)}`;
   }

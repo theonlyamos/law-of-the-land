@@ -3,11 +3,12 @@ import { ConvexError, v } from "convex/values";
 import { hashPassword } from "better-auth/crypto";
 import { components } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
-import type { MutationCtx } from "../_generated/server";
-import { internalAction, internalMutation } from "../_generated/server";
+import type { MutationCtx, QueryCtx } from "../_generated/server";
+import { internalAction, internalMutation, internalQuery } from "../_generated/server";
 import { hashCallbackToken } from "./jobs";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
+import { verifyVerifiedPlaceClaim } from "../lib/placeClaim";
 
 const FIXTURE_MARKER = "isolated-admin-e2e";
 const TAG_RE = /^e2e_[a-z0-9]{12,48}$/;
@@ -109,7 +110,7 @@ async function exactTaggedOrganization(
   return row ?? null;
 }
 
-async function listFixtureUsers(ctx: MutationCtx, tag: string) {
+async function listFixtureUsers(ctx: MutationCtx | QueryCtx, tag: string) {
   const owned = await ctx.db.query("e2eFixtureOwnership")
     .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag).eq("kind", "better_auth_user"))
     .take(501);
@@ -1195,7 +1196,7 @@ async function readMatrixOperation(ctx: MutationCtx, input: { tag: string; path:
   return { path: input.path, success: entry.success, terminal, state };
 }
 
-const controlOperationValidator = v.union(
+const mutationControlOperationValidator = v.union(
   v.literal("arm_provider_outcome"),
   v.literal("expire_conversation_grant"),
   v.literal("read_state"),
@@ -1205,8 +1206,12 @@ const controlOperationValidator = v.union(
   v.literal("deactivate_jurisdiction_member"),
   v.literal("set_unified_jurisdictions_flag"),
 );
+const controlOperationValidator = v.union(
+  mutationControlOperationValidator,
+  v.literal("verify_place_claim"),
+);
 
-async function ownedReadyRun(ctx: MutationCtx, tag: string) {
+async function ownedReadyRun(ctx: MutationCtx | QueryCtx, tag: string) {
   const environment = process.env.ADMIN_E2E_TARGET_ENV as "test" | "preview";
   const [tagRuns, environmentRuns] = await Promise.all([
     ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(2),
@@ -1220,9 +1225,38 @@ async function ownedReadyRun(ctx: MutationCtx, tag: string) {
   return tagRuns[0];
 }
 
+async function ownedSuperAdminActorId(ctx: MutationCtx | QueryCtx, tag: string) {
+  await ownedReadyRun(ctx, tag);
+  const actor = (await listFixtureUsers(ctx, tag))
+    .find((user) => user.email === `super_admin.${tag}@e2e.invalid`);
+  if (!actor) throw new ConvexError("E2E_FIXTURE_ACTOR_NOT_FOUND");
+  return actor.userId;
+}
+
+export const verifyPlaceClaim = internalQuery({
+  args: { tag: v.string(), claim: v.string() },
+  returns: v.object({
+    ok: v.literal(true),
+    place: v.object({
+      googlePlaceId: v.string(),
+      name: v.string(),
+      formattedAddress: v.string(),
+      latitude: v.number(),
+      longitude: v.number(),
+      countryCode: v.optional(v.string()),
+      aliases: v.array(v.string()),
+    }),
+  }),
+  handler: async (ctx, args) => {
+    requireFixtureEnvironment(); requireTag(args.tag);
+    const actorId = await ownedSuperAdminActorId(ctx, args.tag);
+    return { ok: true as const, place: await verifyVerifiedPlaceClaim(args.claim, actorId) };
+  },
+});
+
 export const applyControl = internalMutation({
   args: {
-    tag: v.string(), operation: controlOperationValidator, versionId: v.optional(v.id("documentVersions")),
+    tag: v.string(), operation: mutationControlOperationValidator, versionId: v.optional(v.id("documentVersions")),
     publicationOperation: v.optional(v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish"))),
     providerOutcome: v.optional(v.union(v.literal("succeeded"), v.literal("failed"))),
     membershipId: v.optional(v.id("organizationMemberships")),
@@ -1354,6 +1388,7 @@ export const applyControl = internalMutation({
 });
 
 const applyControlRef = makeFunctionReference<"mutation">("admin/e2eFixtures:applyControl");
+const verifyPlaceClaimRef = makeFunctionReference<"query">("admin/e2eFixtures:verifyPlaceClaim");
 export const control = internalAction({
   args: {
     tag: v.string(),
@@ -1367,10 +1402,15 @@ export const control = internalAction({
     role: v.optional(matrixRoleValidator),
     key: v.optional(v.string()),
     payload: v.optional(v.any()),
+    claim: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     requireFixtureEnvironment(); requireTag(args.tag);
+    if (args.operation === "verify_place_claim") {
+      if (!args.claim) throw new ConvexError("E2E_PLACE_CLAIM_ARGUMENT_REQUIRED");
+      return await ctx.runQuery(verifyPlaceClaimRef, { tag: args.tag, claim: args.claim });
+    }
     return await ctx.runMutation(applyControlRef, args);
   },
 });

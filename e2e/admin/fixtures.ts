@@ -54,12 +54,13 @@ export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManife
 
 export async function controlBrowserFixtures(
   fixture: BrowserFixtureManifest,
-  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation" | "deactivate_jurisdiction_member" | "set_unified_jurisdictions_flag",
+  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation" | "deactivate_jurisdiction_member" | "set_unified_jurisdictions_flag" | "verify_place_claim",
   input: string
     | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } }
     | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" }
     | { membershipId: string }
-    | { enabled: boolean } = "",
+    | { enabled: boolean }
+    | { claim: string } = "",
 ) {
   const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
   if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
@@ -83,6 +84,16 @@ export async function controlBrowserFixtures(
     active?: boolean;
     enabled?: boolean;
     cleanupConflict?: boolean;
+    ok?: true;
+    place?: {
+      googlePlaceId: string;
+      name: string;
+      formattedAddress: string;
+      latitude: number;
+      longitude: number;
+      countryCode?: string;
+      aliases: string[];
+    };
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
     publicationJob: { id: string; status: string; processId: string | null; lastErrorKind: string | null } | null;

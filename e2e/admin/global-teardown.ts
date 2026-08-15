@@ -3,6 +3,7 @@ import { cleanupAdminFixtures } from "./fixture-runner";
 
 export function clearAdminE2EParentEnvironment(environment: Record<string, string | undefined>): void {
   delete environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET;
+  delete environment.ADMIN_E2E_PLACE_CLAIM_SECRET;
   delete environment.ADMIN_E2E_LOCAL_HEAD_SHA;
 }
 

@@ -1,5 +1,7 @@
 import { test } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { ConvexHttpClient } from "convex/browser";
+import { makeFunctionReference } from "convex/server";
 import { loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
 test("billing manager grants a bounded fixture quota override through the UI", async ({ context, page }) => {
@@ -12,6 +14,23 @@ test("billing manager grants a bounded fixture quota override through the UI", a
   await row.getByLabel("Reason").fill("Fixture allowance verification");
   await row.getByRole("button", { name: "Grant temporary override" }).click();
   await expect(row.getByText("Allowance updated.")).toBeVisible();
+  const tokenResponse = await context.request.get("/api/auth/convex/token");
+  expect(tokenResponse.ok(), "billing manager must obtain an isolated Convex JWT").toBe(true);
+  const { token } = await tokenResponse.json() as { token?: string };
+  expect(token).toBeTruthy();
+  const client = new ConvexHttpClient(fixture.convexUrl);
+  client.setAuth(token!);
+  await expect(client.query(
+    makeFunctionReference<"query">("admin/billing:getEffectiveAllowanceForUser"),
+    { userId: fixture.variants.normal.userId },
+  )).resolves.toMatchObject({
+    effectiveLimit: 25,
+    override: {
+      limit: 25,
+      startsAt: expect.any(Number),
+      expiresAt: expect.any(Number),
+    },
+  });
   await page.reload();
   await expect(page.getByRole("row").filter({ hasText: fixture.variants.normal.userId }).first()).toContainText("25");
 });
