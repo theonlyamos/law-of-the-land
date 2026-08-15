@@ -5,6 +5,8 @@ vi.mock("server-only", () => ({}));
 
 import { E2E_JURISDICTION_QUESTIONS } from "../../shared/e2e-jurisdiction-provider-contract";
 import {
+  createChatProvider,
+  createPlacesProvider,
   createResearchProvider,
   createTopicProvider,
   type ResearchCall,
@@ -12,6 +14,20 @@ import {
 
 const SHA = "a".repeat(40);
 const OBSERVATION_SECRET = "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM";
+const SESSION_TOKEN = "de305d54-75b4-431b-adb2-eb6b9e546014";
+const CHAT_STUB_CASES = [
+  ["complete", E2E_JURISDICTION_QUESTIONS.complete, "Isolated Accra complete legal answer."],
+  [
+    "supplementary_failure",
+    E2E_JURISDICTION_QUESTIONS.supplementary_failure,
+    "Isolated Accra supplementary failure legal answer.",
+  ],
+  [
+    "selected_failure",
+    E2E_JURISDICTION_QUESTIONS.selected_failure,
+    "Isolated Accra selected failure legal answer.",
+  ],
+] as const;
 
 function stubEnvironment(): Record<string, string | undefined> {
   return {
@@ -115,9 +131,118 @@ describe("isolated jurisdiction provider adapters", () => {
       1,
     ))).resolves.toContain("evidence 1");
   });
+
+  it.each(CHAT_STUB_CASES)(
+    "returns bounded governed J1 output for the exact %s chat question",
+    async (_scenario, question, expectedAnswer) => {
+      const createGoogleClient = vi.fn();
+      const chat = createChatProvider(stubEnvironment(), { createGoogleClient });
+
+      const text = await chat.generate({
+        mode: "governed",
+        scenarioQuestion: question,
+        query: question,
+        context: "governed server context",
+        history: [],
+      });
+
+      expect(JSON.parse(text ?? "")).toEqual({
+        answer: expectedAnswer,
+        citations: [{ sourceRef: "J1", label: "Isolated Accra legal evidence" }],
+      });
+      expect(text).not.toMatch(/jurisdictionId|jurisdictionName|selected-jurisdiction/);
+      expect(createGoogleClient).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns a compatible plain legacy answer and rejects unknown chat questions before real seams", async () => {
+    let keyReads = 0;
+    const environment = stubEnvironment();
+    Object.defineProperty(environment, "GOOGLE_AI_API_KEY", {
+      get: () => { keyReads += 1; return "must-not-read"; },
+    });
+    const createGoogleClient = vi.fn();
+    const chat = createChatProvider(environment, { createGoogleClient });
+
+    await expect(chat.generate({
+      mode: "legacy",
+      scenarioQuestion: E2E_JURISDICTION_QUESTIONS.complete,
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      instruction: "bounded legacy instruction",
+      history: [],
+    })).resolves.toBe("Isolated Accra complete legal answer.");
+    await expect(chat.generate({
+      mode: "governed",
+      scenarioQuestion: `${E2E_JURISDICTION_QUESTIONS.complete} `,
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      context: "governed server context",
+      history: [],
+    })).rejects.toThrow("E2E_JURISDICTION_PROVIDER_SCENARIO_INVALID");
+
+    expect(keyReads).toBe(0);
+    expect(createGoogleClient).not.toHaveBeenCalled();
+  });
+
+  it("binds the stub place ID to the autocomplete session and never reaches real Places seams", async () => {
+    let keyReads = 0;
+    const environment = stubEnvironment();
+    Object.defineProperty(environment, "PLACES_API_KEY", {
+      get: () => { keyReads += 1; return "must-not-read"; },
+    });
+    const autocomplete = vi.fn();
+    const details = vi.fn();
+    const places = createPlacesProvider(environment, { autocomplete, details });
+
+    const suggestions = await places.autocomplete("Acc", SESSION_TOKEN);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toMatchObject({
+      primaryText: "Accra",
+      secondaryText: "Ghana",
+      types: ["locality", "political"],
+    });
+    await expect(places.details(suggestions[0].placeId, SESSION_TOKEN)).resolves.toMatchObject({
+      placeId: suggestions[0].placeId,
+      displayName: "Accra",
+      formattedAddress: "Accra, Ghana",
+      countryCode: "GH",
+    });
+    await expect(places.details(
+      suggestions[0].placeId,
+      "de305d54-75b4-431b-adb2-eb6b9e546015",
+    )).rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+    await expect(places.details(suggestions[0].placeId, SESSION_TOKEN.toUpperCase()))
+      .rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+    await expect(places.details("forged-place", SESSION_TOKEN))
+      .rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+
+    expect(keyReads).toBe(0);
+    expect(autocomplete).not.toHaveBeenCalled();
+    expect(details).not.toHaveBeenCalled();
+  });
 });
 
 describe("normal jurisdiction provider adapters", () => {
+  it("caches a synchronously rejected chat factory initialization", async () => {
+    const createGoogleClient = vi.fn(() => {
+      throw new Error("factory unavailable");
+    });
+    const chat = createChatProvider(
+      { GOOGLE_AI_API_KEY: "google-key" },
+      { createGoogleClient },
+    );
+    const call = {
+      mode: "legacy" as const,
+      scenarioQuestion: "normal question",
+      query: "normal question",
+      instruction: "normal instruction",
+      history: [],
+    };
+
+    await expect(chat.generate(call)).rejects.toThrow("factory unavailable");
+    await expect(chat.generate(call)).rejects.toThrow("factory unavailable");
+    expect(createGoogleClient).toHaveBeenCalledOnce();
+  });
+
   it("caches a synchronously rejected research factory initialization", async () => {
     const createGroundxClient = vi.fn(() => {
       throw new Error("factory unavailable");
@@ -181,5 +306,43 @@ describe("normal jurisdiction provider adapters", () => {
       .rejects.toThrow("RESEARCH_PROVIDER_NOT_CONFIGURED");
     expect(createGoogleClient).not.toHaveBeenCalled();
     expect(createGroundxClient).not.toHaveBeenCalled();
+  });
+
+  it("preserves normal chat and Places call shapes through injected real seams", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ text: "normal chat answer" });
+    const create = vi.fn().mockReturnValue({ sendMessage });
+    const createGoogleClient = vi.fn().mockResolvedValue({ chats: { create } });
+    const chat = createChatProvider(
+      { GOOGLE_AI_API_KEY: "google-key" },
+      { createGoogleClient },
+    );
+    const autocomplete = vi.fn().mockResolvedValue([]);
+    const details = vi.fn().mockResolvedValue({ placeId: "normal-place" });
+    const places = createPlacesProvider({}, { autocomplete, details });
+
+    await expect(chat.generate({
+      mode: "legacy",
+      scenarioQuestion: "normal question",
+      query: "normal question",
+      instruction: "normal instruction",
+      history: [{ role: "assistant", content: "prior answer" }],
+    })).resolves.toBe("normal chat answer");
+    await expect(places.autocomplete("Acc", SESSION_TOKEN)).resolves.toEqual([]);
+    await expect(places.details("normal-place", SESSION_TOKEN))
+      .resolves.toEqual({ placeId: "normal-place" });
+
+    expect(createGoogleClient).toHaveBeenCalledOnce();
+    expect(createGoogleClient).toHaveBeenCalledWith("google-key");
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gemini-3.1-flash-lite-preview",
+      config: expect.objectContaining({
+        responseMimeType: "text/plain",
+        tools: [{ googleSearch: {} }],
+      }),
+      history: [{ role: "model", parts: [{ text: "prior answer" }] }],
+    }));
+    expect(sendMessage).toHaveBeenCalledWith({ message: "normal question" });
+    expect(autocomplete).toHaveBeenCalledWith("Acc", SESSION_TOKEN);
+    expect(details).toHaveBeenCalledWith("normal-place", SESSION_TOKEN);
   });
 });

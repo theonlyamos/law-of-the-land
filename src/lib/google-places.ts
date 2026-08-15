@@ -1,3 +1,7 @@
+import "server-only";
+
+import { createPlacesProvider } from "./jurisdiction-provider-adapters";
+
 const GOOGLE_PLACES_ORIGIN = "https://places.googleapis.com/v1";
 const AUTOCOMPLETE_FIELD_MASK = "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.types";
 const DETAILS_FIELD_MASK = "id,displayName,formattedAddress,location,addressComponents,types";
@@ -171,14 +175,10 @@ function projectSuggestion(value: unknown): PlaceSuggestion {
   };
 }
 
-export async function autocompletePlaces(
-  input: string,
+async function autocompleteGooglePlaces(
+  query: string,
   sessionToken: string,
 ): Promise<PlaceSuggestion[]> {
-  const query = input.trim();
-  if (query.length < 3 || query.length > 200 || !validSessionToken(sessionToken)) {
-    placesError("GOOGLE_PLACES_INVALID_REQUEST");
-  }
   const payload = record(await providerJson(`${GOOGLE_PLACES_ORIGIN}/places:autocomplete`, {
     method: "POST",
     headers: {
@@ -210,13 +210,10 @@ export async function autocompletePlaces(
     .map(projectSuggestion);
 }
 
-export async function getVerifiedPlace(
+async function getGoogleVerifiedPlace(
   placeId: string,
   sessionToken: string,
 ): Promise<VerifiedPlace> {
-  if (!validPlaceId(placeId) || !validSessionToken(sessionToken)) {
-    placesError("GOOGLE_PLACES_INVALID_REQUEST");
-  }
   const url = `${GOOGLE_PLACES_ORIGIN}/places/${encodeURIComponent(placeId)}?sessionToken=${encodeURIComponent(sessionToken)}`;
   const payload = record(await providerJson(url, {
     method: "GET",
@@ -269,4 +266,32 @@ export async function getVerifiedPlace(
     ...(countryCode === undefined ? {} : { countryCode }),
     addressComponents,
   };
+}
+
+const placesDependencies = {
+  autocomplete: autocompleteGooglePlaces,
+  details: getGoogleVerifiedPlace,
+};
+
+export async function autocompletePlaces(
+  input: string,
+  sessionToken: string,
+): Promise<PlaceSuggestion[]> {
+  const query = input.trim();
+  if (query.length < 3 || query.length > 200 || !validSessionToken(sessionToken)) {
+    placesError("GOOGLE_PLACES_INVALID_REQUEST");
+  }
+  const provider = createPlacesProvider(process.env, placesDependencies);
+  return await provider.autocomplete(query, sessionToken);
+}
+
+export async function getVerifiedPlace(
+  placeId: string,
+  sessionToken: string,
+): Promise<VerifiedPlace> {
+  if (!validPlaceId(placeId) || !validSessionToken(sessionToken)) {
+    placesError("GOOGLE_PLACES_INVALID_REQUEST");
+  }
+  const provider = createPlacesProvider(process.env, placesDependencies);
+  return await provider.details(placeId, sessionToken);
 }

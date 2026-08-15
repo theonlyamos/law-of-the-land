@@ -1,8 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
+
 import { autocompletePlaces, getVerifiedPlace } from "./google-places";
 
 const sessionToken = "de305d54-75b4-431b-adb2-eb6b9e546014";
 const apiKey = "test-google-places-api-key-with-safe-length";
+const E2E_BOUNDARY_KEYS = [
+  "ADMIN_E2E_FIXTURE_MODE",
+  "ADMIN_E2E_TARGET_ENV",
+  "ADMIN_E2E_ISOLATED_TARGET_MARKER",
+  "ADMIN_E2E_PROVIDER_STUB_MODE",
+  "ADMIN_E2E_CONVEX_URL",
+  "ADMIN_E2E_CONVEX_SITE_URL",
+  "ADMIN_E2E_APPROVED_COMMIT_SHA",
+  "ADMIN_E2E_LOCAL_HEAD_SHA",
+  "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET",
+] as const;
+
+function enableStubBoundary() {
+  const sha = "a".repeat(40);
+  Object.assign(process.env, {
+    ADMIN_E2E_FIXTURE_MODE: "true",
+    ADMIN_E2E_TARGET_ENV: "test",
+    ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+    ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+    ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210",
+    ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
+    ADMIN_E2E_APPROVED_COMMIT_SHA: sha,
+    ADMIN_E2E_LOCAL_HEAD_SHA: sha,
+    ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM",
+  });
+}
 
 function prediction(index: number) {
   return {
@@ -20,6 +49,7 @@ function prediction(index: number) {
 
 describe("Google Places server adapter", () => {
   beforeEach(() => {
+    for (const key of E2E_BOUNDARY_KEYS) delete process.env[key];
     process.env.PLACES_API_KEY = apiKey;
     vi.stubGlobal("fetch", vi.fn());
   });
@@ -61,6 +91,30 @@ describe("Google Places server adapter", () => {
         signal: expect.any(AbortSignal),
       },
     );
+  });
+
+  it("selects the stub before key access or fetch and requires the exact place/session pair", async () => {
+    enableStubBoundary();
+    delete process.env.PLACES_API_KEY;
+
+    const suggestions = await autocompletePlaces("Acc", sessionToken);
+
+    expect(suggestions).toHaveLength(1);
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(getVerifiedPlace(suggestions[0].placeId, sessionToken)).resolves.toMatchObject({
+      placeId: suggestions[0].placeId,
+      displayName: "Accra",
+      countryCode: "GH",
+    });
+    await expect(getVerifiedPlace(
+      suggestions[0].placeId,
+      "de305d54-75b4-431b-adb2-eb6b9e546015",
+    )).rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+    await expect(getVerifiedPlace(suggestions[0].placeId, sessionToken.toUpperCase()))
+      .rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+    await expect(getVerifiedPlace("forged-place", sessionToken))
+      .rejects.toThrow("GOOGLE_PLACES_INVALID_REQUEST");
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("requests only verified details and safely projects the provider response", async () => {

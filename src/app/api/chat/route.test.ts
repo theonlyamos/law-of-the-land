@@ -21,10 +21,50 @@ vi.mock("@google/genai", () => ({
 
 import { POST } from "./route";
 import { digestExactContext } from "@/lib/research-limits";
+import { E2E_JURISDICTION_QUESTIONS } from "../../../../shared/e2e-jurisdiction-provider-contract";
 
 const token = "a".repeat(43);
 const claimNonce = "b".repeat(43);
 const citationClaim = "c".repeat(43);
+const CHAT_STUB_CASES = [
+  ["complete", E2E_JURISDICTION_QUESTIONS.complete, "Isolated Accra complete legal answer."],
+  [
+    "supplementary_failure",
+    E2E_JURISDICTION_QUESTIONS.supplementary_failure,
+    "Isolated Accra supplementary failure legal answer.",
+  ],
+  [
+    "selected_failure",
+    E2E_JURISDICTION_QUESTIONS.selected_failure,
+    "Isolated Accra selected failure legal answer.",
+  ],
+] as const;
+const E2E_BOUNDARY_KEYS = [
+  "ADMIN_E2E_FIXTURE_MODE",
+  "ADMIN_E2E_TARGET_ENV",
+  "ADMIN_E2E_ISOLATED_TARGET_MARKER",
+  "ADMIN_E2E_PROVIDER_STUB_MODE",
+  "ADMIN_E2E_CONVEX_URL",
+  "ADMIN_E2E_CONVEX_SITE_URL",
+  "ADMIN_E2E_APPROVED_COMMIT_SHA",
+  "ADMIN_E2E_LOCAL_HEAD_SHA",
+  "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET",
+] as const;
+
+function enableStubBoundary() {
+  const sha = "a".repeat(40);
+  Object.assign(process.env, {
+    ADMIN_E2E_FIXTURE_MODE: "true",
+    ADMIN_E2E_TARGET_ENV: "test",
+    ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+    ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+    ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210",
+    ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
+    ADMIN_E2E_APPROVED_COMMIT_SHA: sha,
+    ADMIN_E2E_LOCAL_HEAD_SHA: sha,
+    ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM",
+  });
+}
 
 function request(overrides: Record<string, unknown> = {}) {
   return new Request("http://localhost/api/chat", {
@@ -43,6 +83,7 @@ function request(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const key of E2E_BOUNDARY_KEYS) delete process.env[key];
   process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
   authMocks.isAuthenticated.mockResolvedValue(true);
   authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
@@ -219,6 +260,57 @@ describe("POST /api/chat governed citations", () => {
     const telemetryCalls = authMocks.fetchAuthMutation.mock.calls.filter(([reference]) =>
       getFunctionName(reference).startsWith("telemetry:"));
     expect(JSON.stringify(telemetryCalls)).not.toMatch(/The governed answer|Section 1|assistant-client-1/);
+  });
+
+  it.each(CHAT_STUB_CASES)(
+    "resolves the exact %s stub J1 through server context and persists the real citation claim",
+    async (_scenario, question, expectedAnswer) => {
+      enableStubBoundary();
+
+      const response = await POST(governedRequest({ query: question }));
+      const payload = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(payload).toEqual({
+        result: expectedAnswer,
+        citations: [{
+          label: "Isolated Accra legal evidence",
+          jurisdictionId,
+          jurisdictionName: "Ghana",
+          jurisdictionKind: "geographic",
+          relation: "selected",
+        }],
+        citationClaim,
+      });
+      expect(aiMocks.create).not.toHaveBeenCalled();
+      expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+      expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
+        .toEqual([
+          "telemetry:claimChatPhase",
+          "chats:issueCitationClaim",
+          "telemetry:finalizeChatPhase",
+        ]);
+      expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({
+        jurisdictionId,
+        assistantContent: payload.result,
+        citations: payload.citations,
+      });
+    },
+  );
+
+  it("fails an inexact stub question after digest claim and before model construction", async () => {
+    enableStubBoundary();
+
+    const response = await POST(governedRequest({
+      query: `${E2E_JURISDICTION_QUESTIONS.complete} `,
+    }));
+
+    expect(response.status).toBe(500);
+    expect(aiMocks.create).not.toHaveBeenCalled();
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["telemetry:claimChatPhase", "telemetry:finalizeChatPhase"]);
+    expect(authMocks.fetchAuthMutation.mock.calls[1][1]).toMatchObject({ providerStatus: "failure" });
   });
 
   it("rejects an unknown source ref, finalizes exactly one failure, and exposes no model provenance", async () => {
