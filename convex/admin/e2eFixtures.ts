@@ -1016,11 +1016,12 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
 
   switch (input.path) {
     case "admin/featureFlags:setAdminPanel": {
-      await insertStepUp(ctx, actor, "admin_panel_set", "admin_panel:test", input.key);
+      const environment = process.env.ADMIN_E2E_TARGET_ENV!;
+      await insertStepUp(ctx, actor, "admin_panel_set", `admin_panel:${environment}`, input.key);
       Object.assign(args, {
-        environment: "test",
+        environment,
         enabled: true,
-        confirmation: "ADMIN_PANEL test ENABLE",
+        confirmation: `ADMIN_PANEL ${environment} ENABLE`,
         reason,
         idempotencyKey: input.key,
       });

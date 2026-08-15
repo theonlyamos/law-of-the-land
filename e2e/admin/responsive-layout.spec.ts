@@ -41,6 +41,9 @@ test("every top-level administration destination stays within the viewport", asy
     for (const pathname of ADMIN_DESTINATIONS) {
       await page.goto(pathname);
       await expect(page).toHaveURL(new RegExp(`${pathname}$`));
+      if (viewport.width < 768) {
+        await page.getByRole("button", { name: "Open administration menu" }).click();
+      }
       await expect(page.getByRole("navigation", { name: "Administration" })).toBeVisible();
 
       const dimensions = await page.evaluate(() => ({

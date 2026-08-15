@@ -60,7 +60,7 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
     await expect(page.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("GH");
     await expect(page.getByRole("radiogroup", { name: "Jurisdiction type" })).toHaveCount(0);
 
-    await installSessionCookie(context, fixture.variants.normal.cookie);
+    await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie);
     await page.goto("/");
     await page.getByLabel("Your legal question").fill(E2E_JURISDICTION_QUESTIONS.complete);
     await page.getByRole("button", { name: /Research this question/ }).click();

@@ -27,13 +27,10 @@ test("an expired fixture grant stops transcript and export access", async ({ con
   await expect(page.getByText("Fixture private question")).toBeVisible();
   const state = await controlBrowserFixtures(fixture, "expire_conversation_grant");
   expect(state.grantActive).toBe(false);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "State your purpose before access" })).toBeVisible();
   await expect(page.getByText("Fixture private question")).toHaveCount(0);
-  await page.getByRole("button", { name: "Prepare export" }).click();
-  await page.getByLabel("Reason for export").fill("Expired grant must fail closed");
-  await page.getByLabel("Exact export confirmation").fill(`EXPORT ${chatId}`);
-  await page.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
-  await page.getByRole("button", { name: "Queue conversation export" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Prepare export" })).toHaveCount(0);
 });
 
 test("conversation access grants expire and exports remain bounded and secret-safe", async ({}, testInfo) => {

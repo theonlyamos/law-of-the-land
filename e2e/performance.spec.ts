@@ -58,10 +58,13 @@ async function readBrowserMetrics(page: Page): Promise<BrowserMetrics> {
 }
 
 async function createMeasuredInteraction(page: Page, target: "public" | "admin") {
-  const element = target === "public" ? page.getByRole("textbox").first() : page.getByRole("link", { name: "Overview" });
+  const element = target === "public"
+    ? page.getByRole("textbox").first()
+    : page.getByRole("button", { name: "Collapse administration navigation" });
   await expect(element).toBeVisible();
   await element.click();
   if (target === "public") await page.keyboard.press("A");
+  else await expect(page.getByRole("button", { name: "Expand administration navigation" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as Window & { __adminPerformanceMetrics: { interactionEntries: number } }).__adminPerformanceMetrics.interactionEntries)).toBeGreaterThan(0);
 }
 

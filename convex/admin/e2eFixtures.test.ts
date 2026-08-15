@@ -309,6 +309,46 @@ describe("isolated admin E2E fixture control plane", () => {
     }))).resolves.toEqual({ jurisdictions: [], chats: [], jobs: [] });
   });
 
+  it("binds the feature-flag matrix operation to the owned preview environment", async () => {
+    enableFixtureMode();
+    process.env.ADMIN_E2E_TARGET_ENV = "preview";
+    process.env.ADMIN_ENVIRONMENT = "preview";
+    const t = backend();
+    const tag = "e2e_previewmatrix1";
+    const key = "matrix_preview_super_admin";
+    await t.run((ctx) => ctx.db.insert("featureFlags", {
+      key: "admin_panel",
+      environment: "preview",
+      enabled: true,
+      updatedAt: Date.now(),
+    }));
+    await t.action(bootstrap, { tag });
+
+    const prepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/featureFlags:setAdminPanel",
+      role: "super_admin",
+      key,
+    });
+
+    expect(prepared.args).toMatchObject({
+      environment: "preview",
+      enabled: true,
+      confirmation: "ADMIN_PANEL preview ENABLE",
+      idempotencyKey: key,
+    });
+    await expect(t.run((ctx) => ctx.db.query("adminStepUpProofs").take(10))).resolves.toEqual([
+      expect.objectContaining({
+        action: "admin_panel_set",
+        targetId: "admin_panel:preview",
+        idempotencyKey: key,
+      }),
+    ]);
+
+    await t.mutation(cleanup, { tag });
+  });
+
   it("prepares and executes unique two-letter jurisdiction codes for every allowed matrix cell", async () => {
     enableFixtureMode();
     const t = backend();

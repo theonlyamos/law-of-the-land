@@ -10,7 +10,7 @@ test("super administrator opens an incident and callback replay remains idempote
   await page.getByLabel("Initial severity").selectOption("high");
   await page.getByLabel("Reason for opening incident").fill("Fixture provider response drill");
   await page.getByRole("button", { name: "Open incident" }).click();
-  await expect(page.getByRole("status")).toContainText("Incident opened");
+  await expect(page.getByRole("status").filter({ hasText: "Incident opened" })).toBeVisible();
   await expect(page.getByRole("row").filter({ hasText: title })).toBeVisible();
 
   const callback = `${fixture.convexSiteUrl}/groundx/callback/${fixture.records.callbackToken}`;

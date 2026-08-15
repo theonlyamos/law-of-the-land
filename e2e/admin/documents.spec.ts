@@ -1,6 +1,25 @@
 import { test } from "@playwright/test";
-import { expect } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { controlBrowserFixtures, loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function versionArticle(page: Page, versionNumber: number, filename: string) {
+  const fileEvidence = page.getByRole("definition").filter({
+    hasText: new RegExp(`^${escapeRegExp(filename)} /`),
+  });
+  const authoritativeOriginal = page.getByRole("region", {
+    name: "Authoritative original",
+    exact: true,
+  }).filter({ has: fileEvidence });
+  const actions = page.getByRole("complementary", {
+    name: `Actions for version ${versionNumber}`,
+    exact: true,
+  });
+  return authoritativeOriginal.locator("xpath=ancestor::article[1]").filter({ has: actions });
+}
 
 async function waitForPublicationJob(
   fixture: Awaited<ReturnType<typeof loadBrowserFixtureManifest>>,
@@ -25,7 +44,8 @@ test("pre-provisioned manager and reviewer sessions see separate document surfac
 test("the reviewer who submitted a fixture version cannot approve it", async ({ context, page }) => {
   const fixture = await loadBrowserFixtureManifest();
   await openAuthenticatedRolePage(context, page, "content_reviewer", "/admin/review", "The publication docket");
-  const article = page.getByRole("article").filter({ hasText: `${fixture.tag}-reviewer-submitted.pdf` });
+  const article = versionArticle(page, 3, `${fixture.tag}-reviewer-submitted.pdf`);
+  await expect(article).toContainText(`${fixture.tag}-reviewer-submitted.pdf`);
   for (const label of [
     "Official source authenticated", "Metadata is accurate", "X-Ray extraction reviewed", "Citations verified", "Search evaluation passed",
   ]) await article.getByLabel(label).check();
@@ -40,7 +60,8 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   const fixture = await loadBrowserFixtureManifest();
   const versionId = fixture.records.reviewVersionId;
   await openAuthenticatedRolePage(context, page, "content_reviewer", "/admin/review", "The publication docket");
-  const article = page.getByRole("article").filter({ hasText: `${fixture.tag}-review.pdf` });
+  const article = versionArticle(page, 2, `${fixture.tag}-review.pdf`);
+  await expect(article).toContainText(`${fixture.tag}-review.pdf`);
   await expect(article).toContainText("ready for review");
   for (const label of [
     "Official source authenticated",
@@ -52,7 +73,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await article.getByLabel("Evaluation run ID").fill(`${fixture.tag}-evaluation`);
   await article.getByLabel("Decision reason").fill("Fixture evidence satisfies the publication checklist");
   await article.getByRole("button", { name: "Approve version" }).click();
-  await expect(page.getByRole("status")).toContainText("Version 2 approved");
+  await expect(page.getByRole("status").filter({ hasText: "Version 2 approved" })).toBeVisible();
 
   await controlBrowserFixtures(fixture, "arm_provider_outcome", {
     versionId,
@@ -65,14 +86,14 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await dialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);
   await dialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
   await dialog.getByRole("button", { name: "Queue publish" }).click();
-  await expect(page.getByRole("status")).toContainText("Publish queued for version 2");
+  await expect(page.getByRole("status").filter({ hasText: "Publish queued for version 2" })).toBeVisible();
 
   let state = await waitForPublicationJob(fixture, versionId, "failed");
   expect(state.activeVersionId).toBe(fixture.records.publishedVersionId);
   expect(state.versions.find((row) => row.id === versionId)).toMatchObject({ status: "approved", failureSummary: "Production copy failed" });
   expect(state.publicationJob).toMatchObject({ status: "failed", lastErrorKind: "provider" });
   await page.reload();
-  const versionTwo = page.getByRole("article").filter({ hasText: `${fixture.tag}-review.pdf` });
+  const versionTwo = versionArticle(page, 2, `${fixture.tag}-review.pdf`);
   await expect(versionTwo).toContainText("approved");
 
   await controlBrowserFixtures(fixture, "arm_provider_outcome", {
@@ -91,7 +112,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   expect(state.versions.find((row) => row.id === fixture.records.publishedVersionId)?.status).toBe("superseded");
 
   await page.reload();
-  const versionOne = page.getByRole("article").filter({ hasText: `${fixture.tag}-published.pdf` });
+  const versionOne = versionArticle(page, 1, `${fixture.tag}-published.pdf`);
   await controlBrowserFixtures(fixture, "arm_provider_outcome", {
     versionId: fixture.records.publishedVersionId,
     publicationOperation: "rollback",
@@ -108,7 +129,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   expect(state.versions.find((row) => row.id === versionId)?.status).toBe("superseded");
 
   await page.reload();
-  const restoredVersion = page.getByRole("article").filter({ hasText: `${fixture.tag}-published.pdf` });
+  const restoredVersion = versionArticle(page, 1, `${fixture.tag}-published.pdf`);
   await controlBrowserFixtures(fixture, "arm_provider_outcome", {
     versionId: fixture.records.publishedVersionId,
     publicationOperation: "unpublish",

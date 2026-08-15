@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
+import { buildBrowserEnvironment } from "./web-server-environment.mjs";
 
 export const FIXTURE_TAG = "admin-e2e-v1";
 
@@ -136,6 +137,18 @@ type AcceptanceSlice = {
   evidence: readonly RegExp[];
 };
 
+export function buildAcceptanceSliceEnvironment(
+  parentEnvironment: Record<string, string | undefined> = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...buildBrowserEnvironment(parentEnvironment),
+    NODE_ENV: "test",
+    ADMIN_PANEL_ENABLED: "true",
+    ADMIN_ENVIRONMENT: "test",
+    BILLING_ENABLED: "true",
+  };
+}
+
 /**
  * Runs production Convex functions against convex-test's process-isolated
  * database. Every worker gets a fresh database and component; process exit is
@@ -164,27 +177,13 @@ export async function runAcceptanceSlice(
 
   const files = [...slice.convex, ...(slice.ui ?? [])];
   const vitest = path.resolve("node_modules/vitest/vitest.mjs");
-  const {
-    ADMIN_E2E_ROLE_SESSIONS_JSON: _roleSessions,
-    ADMIN_E2E_SESSION_MANIFEST: _sessionManifest,
-    ADMIN_E2E_FIXTURE_SECRET: _fixtureSecret,
-    ADMIN_E2E_BETTER_AUTH_SECRET: _authSecret,
-    ADMIN_E2E_ACCOUNT_PASSWORD: _accountPassword,
-    ...safeEnvironment
-  } = process.env;
   const result = spawnSync(
     process.execPath,
     [vitest, "run", "--reporter=verbose", ...files],
     {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: {
-        ...safeEnvironment,
-        ADMIN_PANEL_ENABLED: "true",
-        ADMIN_ENVIRONMENT: "test",
-        BILLING_ENABLED: "true",
-        ADMIN_E2E_FIXTURE_TAG: FIXTURE_TAG,
-      },
+      env: buildAcceptanceSliceEnvironment(),
       timeout: 110_000,
     },
   );
