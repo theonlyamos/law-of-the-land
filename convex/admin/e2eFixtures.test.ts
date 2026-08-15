@@ -59,6 +59,42 @@ function enableFixtureMode() {
 }
 
 describe("isolated admin E2E fixture control plane", () => {
+  it("provides dormant fixture-run ownership with exact tag and environment indexes", async () => {
+    const t = backend();
+    const now = Date.now();
+    const featureFlagId = await t.run((ctx) => ctx.db.insert("featureFlags", {
+      key: "unified_jurisdictions",
+      environment: "test",
+      enabled: true,
+      updatedAt: now,
+      updatedBy: "fixture:e2e_runownership1",
+    }));
+    const runId = await t.run((ctx) => ctx.db.insert("e2eFixtureRuns", {
+      tag: "e2e_runownership1",
+      environment: "test",
+      state: "bootstrapping",
+      priorFlag: { kind: "absent" },
+      fixtureFlagWrite: {
+        rowId: featureFlagId,
+        enabled: true,
+        updatedAt: now,
+        updatedBy: "fixture:e2e_runownership1",
+      },
+      approvedCommitSha: "74a989459da6b197013222f0bb5c118eed994d64",
+      deployedCommitSha: "74a989459da6b197013222f0bb5c118eed994d64",
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    await expect(t.run(async (ctx) => ({
+      byTag: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_runownership1")).unique(),
+      byEnvironment: await ctx.db.query("e2eFixtureRuns").withIndex("by_environment", (q) => q.eq("environment", "test")).unique(),
+    }))).resolves.toMatchObject({
+      byTag: { _id: runId, state: "bootstrapping" },
+      byEnvironment: { _id: runId, environment: "test" },
+    });
+  });
+
   it.each([
     [{}, "E2E_FIXTURES_DISABLED"],
     [{ ADMIN_E2E_FIXTURE_MODE: "false", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e" }, "E2E_PROVIDER_ISOLATION_MISCONFIGURED"],

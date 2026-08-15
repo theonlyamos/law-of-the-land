@@ -15,6 +15,21 @@ const INFRASTRUCTURE_KEYS = new Set([
   "WINDIR",
 ]);
 
+const CHILD_PROVIDER_BOUNDARY_KEYS = [
+  "ADMIN_E2E_FIXTURE_MODE",
+  "ADMIN_E2E_TARGET_ENV",
+  "ADMIN_E2E_ISOLATED_TARGET_MARKER",
+  "ADMIN_E2E_PROVIDER_STUB_MODE",
+  "ADMIN_E2E_CONVEX_URL",
+  "ADMIN_E2E_CONVEX_SITE_URL",
+  "ADMIN_E2E_APPROVED_COMMIT_SHA",
+  "ADMIN_E2E_LOCAL_HEAD_SHA",
+  "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET",
+];
+
+const SHA_PATTERN = /^[a-f0-9]{40}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 function required(environment, key) {
   const value = environment[key]?.trim();
   if (!value) throw new Error(`Admin E2E browser server requires ${key}.`);
@@ -26,7 +41,34 @@ function isLocalhost(hostname) {
 }
 
 function isProductionLooking(hostname) {
-  return /(?:^|[.-])(?:prod|production|live)(?:[.-]|$)/i.test(hostname);
+  return /(?:^|[.:-])(?:prod|production|live)(?:[.:-]|$)/i.test(hostname);
+}
+
+function requiredExact(environment, key) {
+  const value = environment[key];
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  return value;
+}
+
+function parsedEndpoint(environment, key) {
+  let url;
+  try {
+    url = new URL(requiredExact(environment, key));
+  } catch {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  return url;
+}
+
+function remoteDeploymentName(url, suffix) {
+  if (!url.hostname.endsWith(suffix)) return null;
+  const name = url.hostname.slice(0, -suffix.length);
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
 }
 
 /**
@@ -47,19 +89,34 @@ export function assertIsolatedWebServerEnvironment(environment) {
   if (environment.ADMIN_E2E_PROVIDER_STUB_MODE !== "true") {
     throw new Error("Admin E2E browser server requires ADMIN_E2E_PROVIDER_STUB_MODE=true.");
   }
-  if (/^prod(?:uction)?:/i.test(environment.CONVEX_DEPLOYMENT ?? "")) {
+  if (isProductionLooking(environment.CONVEX_DEPLOYMENT ?? "")) {
     throw new Error("Admin E2E browser server refuses a production Convex deployment.");
   }
-  const convexUrl = new URL(required(environment, "ADMIN_E2E_CONVEX_URL"));
-  const siteUrl = new URL(required(environment, "ADMIN_E2E_CONVEX_SITE_URL"));
-  if (!/^https?:$/.test(convexUrl.protocol) || !/^https?:$/.test(siteUrl.protocol) || convexUrl.username || convexUrl.password || siteUrl.username || siteUrl.password) {
-    throw new Error("Admin E2E browser server requires credential-free HTTP(S) fixture URLs.");
-  }
+  const convexUrl = parsedEndpoint(environment, "ADMIN_E2E_CONVEX_URL");
+  const siteUrl = parsedEndpoint(environment, "ADMIN_E2E_CONVEX_SITE_URL");
   if (isProductionLooking(convexUrl.hostname) || isProductionLooking(siteUrl.hostname)) {
     throw new Error("Admin E2E browser server refuses production-looking fixture URLs.");
   }
-  if (isLocalhost(convexUrl.hostname) !== isLocalhost(siteUrl.hostname)) {
+  if (isLocalhost(convexUrl.hostname) !== isLocalhost(siteUrl.hostname)
+    || (isLocalhost(convexUrl.hostname) && convexUrl.hostname !== siteUrl.hostname)) {
     throw new Error("Admin E2E browser server requires matching isolated Convex URLs.");
+  }
+  if (!isLocalhost(convexUrl.hostname)) {
+    const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
+    const siteName = remoteDeploymentName(siteUrl, ".convex.site");
+    if (convexUrl.protocol !== "https:" || siteUrl.protocol !== "https:" || convexUrl.port || siteUrl.port || !backendName || backendName !== siteName) {
+      throw new Error("Admin E2E browser server requires matching isolated Convex URLs.");
+    }
+  }
+  const approvedCommitSha = requiredExact(environment, "ADMIN_E2E_APPROVED_COMMIT_SHA");
+  const localHeadSha = requiredExact(environment, "ADMIN_E2E_LOCAL_HEAD_SHA");
+  if (!SHA_PATTERN.test(approvedCommitSha) || !SHA_PATTERN.test(localHeadSha) || approvedCommitSha !== localHeadSha) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  const observationSecret = requiredExact(environment, "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET");
+  const secretBytes = Buffer.from(observationSecret, "base64url");
+  if (!BASE64URL_PATTERN.test(observationSecret) || observationSecret.length % 4 === 1 || secretBytes.byteLength < 32 || secretBytes.byteLength > 128 || secretBytes.toString("base64url") !== observationSecret) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   }
   for (const key of ["ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD"]) {
     required(environment, key);
@@ -73,6 +130,9 @@ export function assertIsolatedWebServerEnvironment(environment) {
  */
 export function buildWebServerEnvironment(environment) {
   const result = buildBrowserEnvironment(environment);
+  for (const key of CHILD_PROVIDER_BOUNDARY_KEYS) {
+    if (environment[key] !== undefined) result[key] = environment[key];
+  }
   if (environment.ADMIN_E2E_CONVEX_URL) {
     result.NEXT_PUBLIC_CONVEX_URL = environment.ADMIN_E2E_CONVEX_URL;
   }

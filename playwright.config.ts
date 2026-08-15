@@ -1,5 +1,44 @@
 import { defineConfig, devices } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { buildBrowserEnvironment } from "./e2e/admin/web-server-environment.mjs";
+
+type ParentEnvironmentDependencies = {
+  execFileSync(file: string, args: string[], options: { encoding: "utf8" }): string;
+  randomBytes(size: number): { toString(encoding: "base64url"): string };
+};
+
+const SHA_PATTERN = /^[a-f0-9]{40}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+export function initializeAdminE2EProviderIsolation(
+  environment: Record<string, string | undefined>,
+  dependencies: ParentEnvironmentDependencies = {
+    execFileSync: (file, args, options) => execFileSync(file, args, options),
+    randomBytes: (size) => randomBytes(size),
+  },
+): void {
+  const localHeadSha = dependencies.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (!SHA_PATTERN.test(localHeadSha)) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  environment.ADMIN_E2E_LOCAL_HEAD_SHA = localHeadSha;
+  const observationSecret = dependencies.randomBytes(32).toString("base64url");
+  environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = observationSecret;
+  const observationSecretBytes = Buffer.from(observationSecret, "base64url");
+  if (!BASE64URL_PATTERN.test(observationSecret)
+    || observationSecretBytes.byteLength !== 32
+    || observationSecretBytes.toString("base64url") !== observationSecret) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+  const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
+  if (approvedCommitSha !== undefined
+    && (!SHA_PATTERN.test(approvedCommitSha) || approvedCommitSha !== localHeadSha)) {
+    throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  }
+}
+
+initializeAdminE2EProviderIsolation(process.env);
 
 export default defineConfig({
   testDir: "./e2e",

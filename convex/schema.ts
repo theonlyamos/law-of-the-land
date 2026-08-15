@@ -498,6 +498,38 @@ export default defineSchema({
   })
     .index("by_tag", ["tag"])
     .index("by_targetId_and_operation", ["targetId", "operation"]),
+  e2eFixtureRuns: defineTable({
+    tag: v.string(),
+    environment: v.union(v.literal("test"), v.literal("preview")),
+    state: v.union(
+      v.literal("bootstrapping"),
+      v.literal("ready"),
+      v.literal("cleaning"),
+      v.literal("cleanup_conflict"),
+    ),
+    priorFlag: v.union(
+      v.object({ kind: v.literal("absent") }),
+      v.object({
+        kind: v.literal("present"),
+        rowId: v.id("featureFlags"),
+        enabled: v.boolean(),
+        updatedAt: v.number(),
+        updatedBy: v.optional(v.string()),
+      }),
+    ),
+    fixtureFlagWrite: v.object({
+      rowId: v.id("featureFlags"),
+      enabled: v.boolean(),
+      updatedAt: v.number(),
+      updatedBy: v.string(),
+    }),
+    approvedCommitSha: v.string(),
+    deployedCommitSha: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tag", ["tag"])
+    .index("by_environment", ["environment"]),
   adminAccessGrants: defineTable({
     adminId: v.string(),
     chatSessionId: v.id("chatSessions"),

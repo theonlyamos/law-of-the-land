@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bootstrapAdminFixtures,
   cleanupAdminFixtures,
@@ -9,7 +10,13 @@ import {
   type FixtureManifest,
 } from "../../../e2e/admin/fixture-runner";
 import { assertIsolatedWebServerEnvironment, buildBrowserEnvironment, buildWebServerEnvironment } from "../../../e2e/admin/web-server-environment.mjs";
-import playwrightConfig from "../../../playwright.config";
+import { clearAdminE2EParentEnvironment } from "../../../e2e/admin/global-teardown";
+
+let playwrightConfig: (typeof import("../../../playwright.config"))["default"];
+let initializeAdminE2EProviderIsolation: (typeof import("../../../playwright.config"))["initializeAdminE2EProviderIsolation"];
+
+const approvedCommitSha = "74a989459da6b197013222f0bb5c118eed994d64";
+const observationSecret = Buffer.alloc(32, 7).toString("base64url");
 
 const safeEnvironment = {
   ADMIN_E2E_FIXTURE_MODE: "true",
@@ -18,10 +25,19 @@ const safeEnvironment = {
   ADMIN_E2E_PROVIDER_STUB_MODE: "true",
   ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210",
   ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
+  ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+  ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+  ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
   ADMIN_E2E_BETTER_AUTH_SECRET: "better-auth-secret-at-least-32-characters",
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
 } satisfies Record<string, string | undefined>;
+
+beforeAll(async () => {
+  const configModule = await import("../../../playwright.config");
+  playwrightConfig = configModule.default;
+  initializeAdminE2EProviderIsolation = configModule.initializeAdminE2EProviderIsolation;
+});
 
 describe("admin E2E target guard", () => {
   it("accepts only an explicitly enabled isolated localhost target", () => {
@@ -101,6 +117,7 @@ describe("admin E2E fixture lifecycle", () => {
     expect(manifest.sessions.super_admin).toMatch(/^better-auth\.session_token=raw-super-token\.[A-Za-z0-9+/]+=*$/);
     expect(manifest.state).toBe("ready");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
+    expect(JSON.stringify(manifest)).not.toContain(observationSecret);
     if (process.platform !== "win32") expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
   });
@@ -124,6 +141,7 @@ describe("admin E2E fixture lifecycle", () => {
       convexUrl: "http://127.0.0.1:3210",
       convexSiteUrl: "http://127.0.0.1:3211",
     });
+    expect(JSON.stringify(duringRequest)).not.toContain(observationSecret);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0 }), { status: 200 }) });
   });
@@ -189,6 +207,94 @@ describe("admin E2E fixture lifecycle", () => {
 });
 
 describe("Playwright web server environment", () => {
+  it("replaces inherited parent-generated values even when VITEST is inherited", async () => {
+    const expectedLocalHead = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const previous = {
+      VITEST: process.env.VITEST,
+      approved: process.env.ADMIN_E2E_APPROVED_COMMIT_SHA,
+      local: process.env.ADMIN_E2E_LOCAL_HEAD_SHA,
+      secret: process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET,
+    };
+    try {
+      process.env.VITEST = "true";
+      delete process.env.ADMIN_E2E_APPROVED_COMMIT_SHA;
+      process.env.ADMIN_E2E_LOCAL_HEAD_SHA = "f".repeat(40);
+      process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = "inherited-secret";
+      vi.resetModules();
+
+      await import("../../../playwright.config");
+
+      expect(process.env.ADMIN_E2E_LOCAL_HEAD_SHA).toBe(expectedLocalHead);
+      expect(process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).not.toBe("inherited-secret");
+      expect(Buffer.from(process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET ?? "", "base64url")).toHaveLength(32);
+    } finally {
+      for (const [key, value] of [
+        ["VITEST", previous.VITEST],
+        ["ADMIN_E2E_APPROVED_COMMIT_SHA", previous.approved],
+        ["ADMIN_E2E_LOCAL_HEAD_SHA", previous.local],
+        ["ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", previous.secret],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("derives local HEAD without a shell and replaces inherited parent-generated values", () => {
+    const environment: Record<string, string | undefined> = {
+      ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+      ADMIN_E2E_LOCAL_HEAD_SHA: "f".repeat(40),
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+    };
+    const execFile = vi.fn(() => `${approvedCommitSha}\n`);
+    const random = vi.fn(() => Buffer.alloc(32, 9));
+
+    initializeAdminE2EProviderIsolation(environment, {
+      execFileSync: execFile,
+      randomBytes: random,
+    });
+
+    expect(execFile).toHaveBeenCalledWith("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+    expect(random).toHaveBeenCalledWith(32);
+    expect(environment.ADMIN_E2E_LOCAL_HEAD_SHA).toBe(approvedCommitSha);
+    expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe(
+      Buffer.alloc(32, 9).toString("base64url"),
+    );
+    expect(JSON.stringify(environment)).not.toContain("inherited-secret");
+  });
+
+  it("replaces both inherited values before rejecting an approved/local commit mismatch", () => {
+    const environment: Record<string, string | undefined> = {
+      ADMIN_E2E_APPROVED_COMMIT_SHA: "a".repeat(40),
+      ADMIN_E2E_LOCAL_HEAD_SHA: "f".repeat(40),
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+    };
+    const random = vi.fn(() => Buffer.alloc(32, 9));
+
+    expect(() => initializeAdminE2EProviderIsolation(environment, {
+      execFileSync: vi.fn(() => `${approvedCommitSha}\n`),
+      randomBytes: random,
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(random).toHaveBeenCalledWith(32);
+    expect(environment.ADMIN_E2E_LOCAL_HEAD_SHA).toBe(approvedCommitSha);
+    expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe(
+      Buffer.alloc(32, 9).toString("base64url"),
+    );
+  });
+
+  it("fails closed when the generated observation secret is not canonical 32-byte base64url", () => {
+    const environment: Record<string, string | undefined> = {
+      ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "inherited-secret",
+    };
+
+    expect(() => initializeAdminE2EProviderIsolation(environment, {
+      execFileSync: vi.fn(() => `${approvedCommitSha}\n`),
+      randomBytes: vi.fn(() => ({ toString: () => "not+base64" })),
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe("not+base64");
+  });
+
   it("wires the guarded lifecycle and scrubbed server launcher", () => {
     expect(playwrightConfig.globalSetup).toBe("./e2e/admin/global-setup.ts");
     expect(playwrightConfig.globalTeardown).toBe("./e2e/admin/global-teardown.ts");
@@ -203,6 +309,13 @@ describe("Playwright web server environment", () => {
       PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp",
       ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
       ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "preview",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+      ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+      ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
       NEXT_PUBLIC_CONVEX_URL: "https://inherited-live.convex.cloud",
@@ -213,11 +326,27 @@ describe("Playwright web server environment", () => {
       PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp",
       NEXT_PUBLIC_CONVEX_URL: "https://safe-preview.convex.cloud",
       NEXT_PUBLIC_CONVEX_SITE_URL: "https://safe-preview.convex.site",
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "preview",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+      ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
+      ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+      ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
     });
     expect(environment).not.toHaveProperty("ADMIN_E2E_FIXTURE_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
     expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
+    expect(buildBrowserEnvironment({ ...environment, x_admin_e2e_retrieval_plan_v1: "must-not-leak" }))
+      .toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
+    expect(JSON.stringify(buildBrowserEnvironment({
+      ...environment,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      "x-admin-e2e-retrieval-plan-v1": "must-not-enter-artifacts",
+    }))).not.toContain("x-admin-e2e-retrieval-plan-v1");
   });
 
   it("launches Chromium with an explicit allowlist that excludes every parent-held E2E and application secret", () => {
@@ -228,6 +357,8 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_ACCOUNT_PASSWORD: "account-password",
       ADMIN_E2E_ROLE_SESSIONS_JSON: "role-cookies",
       ADMIN_E2E_BETTER_AUTH_SECRET: "auth-secret",
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       GROUNDX_API_KEY: "groundx-secret",
       RESEND_API_KEY: "resend-secret",
       BETTER_AUTH_SECRET: "app-auth-secret",
@@ -235,7 +366,7 @@ describe("Playwright web server environment", () => {
     });
     expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
     expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
-    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, approvedCommitSha, "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
       expect(JSON.stringify(environment)).not.toContain(secret);
     }
   });
@@ -247,6 +378,42 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud",
       ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site",
     })).toThrow(/production-looking/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      CONVEX_DEPLOYMENT: "live:law-of-the-land",
+    })).toThrow(/production Convex deployment/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.2:3211",
+    })).toThrow(/matching isolated Convex URLs/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_APPROVED_COMMIT_SHA: ` ${approvedCommitSha}`,
+      ADMIN_E2E_LOCAL_HEAD_SHA: ` ${approvedCommitSha}`,
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
     expect(() => assertIsolatedWebServerEnvironment(safeEnvironment)).not.toThrow();
+  });
+
+  it("does not print the parent secret and clears both parent-generated values", () => {
+    const output: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...values) => output.push(values.join(" ")));
+    const warn = vi.spyOn(console, "warn").mockImplementation((...values) => output.push(values.join(" ")));
+    const error = vi.spyOn(console, "error").mockImplementation((...values) => output.push(values.join(" ")));
+    try {
+      assertIsolatedWebServerEnvironment(safeEnvironment);
+      buildWebServerEnvironment(safeEnvironment);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+    expect(output.join("\n")).not.toContain(observationSecret);
+
+    const environment: Record<string, string | undefined> = {
+      ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+    };
+    clearAdminE2EParentEnvironment(environment);
+    expect(environment).toEqual({});
   });
 });
