@@ -1,6 +1,8 @@
 import "server-only";
 
-import { GoogleGenAI, Type, type GenerateContentParameters } from "@google/genai";
+import type { GenerateContentParameters, Type } from "@google/genai";
+
+import { createTopicProvider } from "./jurisdiction-provider-adapters";
 
 const DEFAULT_MODEL = "gemini-3.1-flash-lite-preview";
 const DEFAULT_TIMEOUT_MS = 4_000;
@@ -107,16 +109,16 @@ function requestFor(question: string, abortSignal: AbortSignal): GenerateContent
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       responseMimeType: "application/json",
       responseSchema: {
-        type: Type.OBJECT,
+        type: "OBJECT" as Type,
         propertyOrdering: ["geographicHints", "ancestorDepth"],
         properties: {
           geographicHints: {
-            type: Type.ARRAY,
+            type: "ARRAY" as Type,
             maxItems: String(MAX_HINTS),
-            items: { type: Type.STRING, maxLength: String(MAX_HINT_LENGTH) },
+            items: { type: "STRING" as Type, maxLength: String(MAX_HINT_LENGTH) },
           },
           ancestorDepth: {
-            type: Type.INTEGER,
+            type: "INTEGER" as Type,
             format: "enum",
             enum: ["0", "1", "2", "3"],
           },
@@ -129,19 +131,15 @@ function requestFor(question: string, abortSignal: AbortSignal): GenerateContent
   };
 }
 
-async function defaultGenerator(request: GenerateContentParameters) {
-  const apiKey = process.env.GOOGLE_AI_API_KEY;
-  if (!apiKey) throw new Error("TOPIC_PLANNER_NOT_CONFIGURED");
-  const ai = new GoogleGenAI({ apiKey });
-  return await ai.models.generateContent(request);
-}
-
 export async function planTopicScope(
   question: string,
-  generate: TopicScopeGenerator = defaultGenerator,
+  generate?: TopicScopeGenerator,
   options: { timeoutMs?: number } = {},
 ): Promise<TopicScopePlan> {
   const startedAt = performance.now();
+  const topicProvider = generate ? undefined : createTopicProvider(process.env);
+  const activeGenerator = generate
+    ?? ((request: GenerateContentParameters) => topicProvider!.generate(question, request));
   const timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs ?? 0) > 0
     ? Math.min(options.timeoutMs!, DEFAULT_TIMEOUT_MS)
     : DEFAULT_TIMEOUT_MS;
@@ -149,7 +147,7 @@ export async function planTopicScope(
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const response = await Promise.race([
-      generate(requestFor(question, abortController.signal)),
+      activeGenerator(requestFor(question, abortController.signal)),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
           abortController.abort();

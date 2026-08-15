@@ -1,4 +1,3 @@
-import { Groundx } from "groundx-typescript-sdk";
 import { ConvexError } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { NextResponse } from "next/server";
@@ -7,13 +6,31 @@ import { api } from "../../../../convex/_generated/api";
 import type { Id } from "../../../../convex/_generated/dataModel";
 import { createOpaqueTelemetryToken, createTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
 import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from "@/lib/auth-server";
-import { planTopicScope, selectRetrievalScopeItems } from "@/lib/jurisdiction-topic-planner";
+import {
+  authorizedObservationSecret,
+  encodeRetrievalObservationV1,
+  resolveJurisdictionProviderMode,
+  type JurisdictionProviderMode,
+} from "@/lib/e2e-jurisdiction-provider-isolation";
+import {
+  createResearchProvider,
+  createTopicProvider,
+  type ResearchCall,
+  type ResearchProvider,
+} from "@/lib/jurisdiction-provider-adapters";
+import {
+  planTopicScope,
+  selectRetrievalScopeItems,
+  type TopicScopePlan,
+} from "@/lib/jurisdiction-topic-planner";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import {
   buildGovernedContext,
   runBoundedRetrieval,
   type ResearchAuthority,
+  type RetrievalSettlement,
 } from "@/lib/research-limits";
+import type { RetrievalObservationV1 } from "../../../../shared/e2e-jurisdiction-provider-contract";
 
 const MAX_QUERY_LENGTH = 4_000;
 const REQUESTS_PER_MINUTE = 15;
@@ -24,6 +41,7 @@ const UNIFIED_ENDPOINT = "/internal/search-jurisdictions";
 const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const SEARCH_FAILURE = "We couldn't find relevant legal information for your question.";
 const MAX_INTERNAL_RESPONSE_BYTES = 4_096;
+const OBSERVATION_RESPONSE_HEADER = "x-admin-e2e-retrieval-plan-v1";
 
 type LegacyJurisdiction = { enabled: true; productionBucketId: string } | null;
 type Selection = {
@@ -38,6 +56,85 @@ type Availability =
   | { jurisdictionId: string; status: "ready"; productionBucketId: string }
   | { jurisdictionId: string; status: "unconfigured" };
 type AvailabilityResolution = { selected: Availability; supplementary: Availability[] };
+type PlannedResearchCall = ResearchAuthority & ResearchCall;
+type ResearchSettlement = RetrievalSettlement<PlannedResearchCall, string>;
+
+type RetrievalInstrumentation = {
+  active: number;
+  peakConcurrency: number;
+  providerCallCount: number;
+  latencyByOrdinal: Map<number, number>;
+};
+
+function elapsedMilliseconds(startedAt: number): number {
+  return Math.max(0, Math.round(performance.now() - startedAt));
+}
+
+function retrievalObservation(
+  scopeSize: number,
+  plan: readonly ResearchAuthority[],
+  availability: readonly Availability[],
+  settlements: readonly ResearchSettlement[],
+  planner: TopicScopePlan,
+  instrumentation: RetrievalInstrumentation,
+  observationStartedAt: number,
+): RetrievalObservationV1 {
+  const settlementByOrdinal = new Map(
+    settlements.map((settlement) => [settlement.job.ordinal, settlement]),
+  );
+  const libraries = plan.map((item, index) => {
+    const ordinal = index as 0 | 1 | 2 | 3;
+    const settlement = settlementByOrdinal.get(ordinal);
+    const status = availability[index]?.status === "unconfigured"
+      ? "unconfigured" as const
+      : settlement?.status ?? "not_started" as const;
+    return {
+      ordinal,
+      relation: item.relation,
+      status,
+      latencyMs: status === "fulfilled" || status === "rejected"
+        ? instrumentation.latencyByOrdinal.get(ordinal) ?? 0
+        : 0,
+    };
+  });
+  const selectedStatus = libraries[0]?.status;
+  const coverageState = selectedStatus !== "fulfilled"
+    ? "selected_unavailable" as const
+    : libraries.slice(1).some(({ status }) => status !== "fulfilled")
+      ? "supplementary_incomplete" as const
+      : "complete" as const;
+  const componentLatencies = [
+    planner.latencyMs,
+    ...libraries.map(({ latencyMs }) => latencyMs),
+  ];
+  return {
+    version: 1,
+    planner: { status: planner.status, latencyMs: planner.latencyMs },
+    authorizedScopeSize: scopeSize,
+    planSize: plan.length,
+    peakConcurrency: instrumentation.peakConcurrency,
+    totalLatencyMs: Math.max(elapsedMilliseconds(observationStartedAt), ...componentLatencies),
+    libraries,
+    failureCount: libraries.filter(({ status }) => status === "rejected").length,
+    coverageState,
+    providerCallCount: instrumentation.providerCallCount,
+    unexpectedRealProviderCallCount: 0,
+  };
+}
+
+function addObservation(
+  response: NextResponse,
+  authorized: boolean,
+  observation: RetrievalObservationV1,
+): NextResponse {
+  if (authorized) {
+    response.headers.set(
+      OBSERVATION_RESPONSE_HEADER,
+      encodeRetrievalObservationV1(observation),
+    );
+  }
+  return response;
+}
 
 function transportConfiguration() {
   const siteUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/$/u, "");
@@ -143,7 +240,11 @@ async function recordQuestion() {
   }
 }
 
-async function legacySearch(query: string, body: Record<string, unknown>) {
+async function legacySearch(
+  query: string,
+  body: Record<string, unknown>,
+  providerMode: JurisdictionProviderMode,
+) {
   const omitted = body.country === undefined || body.country === null;
   const supplied = typeof body.country === "string" ? body.country.trim().toUpperCase() : "";
   const publicJurisdictions = omitted ? await fetchAuthQuery(api.jurisdictions.listPublicEnabled, {}) : null;
@@ -166,13 +267,18 @@ async function legacySearch(query: string, body: Record<string, unknown>) {
     legacyResolutionUsed: false,
     serviceProof: await createTelemetryServiceProof(["issue", correlationToken, countryCode, 0]),
   });
-  const groundx = new Groundx({ apiKey: process.env.GROUNDX_API_KEY as string });
+  const researchProvider = createResearchProvider(process.env, {}, providerMode);
   const startedAt = performance.now();
-  let response: Awaited<ReturnType<typeof groundx.search.content>>;
+  let text: string;
   try {
-    response = await groundx.search.content({ id: productionBucket, query });
+    text = await researchProvider.search({
+      ordinal: 0,
+      relation: "selected",
+      bucketId: productionBucket,
+      query,
+    });
   } catch {
-    const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+    const latencyMs = elapsedMilliseconds(startedAt);
     try {
       await fetchAuthMutation(recordSearchPhase, {
         token: correlationToken, providerStatus: "failure", latencyMs, resultCount: 0,
@@ -182,8 +288,7 @@ async function legacySearch(query: string, body: Record<string, unknown>) {
     console.error("Search provider request failed");
     return NextResponse.json({ error: SEARCH_FAILURE }, { status: 500 });
   }
-  const text = response.data.search.text;
-  const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+  const latencyMs = elapsedMilliseconds(startedAt);
   const providerStatus = text ? "success" as const : "no_result" as const;
   const resultCount = text ? 1 : 0;
   await fetchAuthMutation(recordSearchPhase, {
@@ -215,7 +320,12 @@ function unifiedSearchProof(
   ]);
 }
 
-async function unifiedSearch(query: string, body: Record<string, unknown>) {
+async function unifiedSearch(
+  query: string,
+  body: Record<string, unknown>,
+  providerMode: JurisdictionProviderMode,
+  observationAuthorized: boolean,
+) {
   if (!exactKeys(body, ["query", ...(body.jurisdictionId !== undefined ? ["jurisdictionId"] : []), ...(body.country !== undefined ? ["country"] : [])])) {
     return NextResponse.json({ error: RESEARCH_UNAVAILABLE }, { status: 400 });
   }
@@ -236,7 +346,12 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
   const legacyResolutionUsed = jurisdictionId === undefined && country !== undefined;
   const quota = await recordQuestion();
   if (quota) return quota;
-  const planner = await planTopicScope(query);
+  const observationStartedAt = performance.now();
+  const topicProvider = createTopicProvider(process.env, {}, providerMode);
+  const planner = await planTopicScope(
+    query,
+    async (request) => await topicProvider.generate(query, request),
+  );
   const scope = await fetchAuthQuery(api.jurisdictions.resolveResearchScope, {
     jurisdictionId: selection.id,
     geographicHints: planner.geographicHints,
@@ -262,8 +377,15 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
   const resolution = parseResolution(rawResolution, selection.id, supplementaryIds);
   if (!resolution) throw new Error("Production availability response invalid");
   const startedAt = performance.now();
+  const availability = [resolution.selected, ...resolution.supplementary];
+  const instrumentation: RetrievalInstrumentation = {
+    active: 0,
+    peakConcurrency: 0,
+    providerCallCount: 0,
+    latencyByOrdinal: new Map(),
+  };
   if (resolution.selected.status === "unconfigured") {
-    const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+    const latencyMs = elapsedMilliseconds(startedAt);
     const data = {
       providerStatus: "failure" as const, latencyMs, resultCount: 0,
       scopeSize: scope.items.length, retrievalPlanSize: plan.length, providerCallCount: 0,
@@ -272,25 +394,62 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
       supplementaryProviderFailureCount: 0,
     };
     await fetchAuthMutation(recordSearchPhase, { ...data, token: correlationToken, serviceProof: await unifiedSearchProof(correlationToken, data) });
-    return NextResponse.json({ error: RESEARCH_UNAVAILABLE }, { status: 400 });
+    return addObservation(
+      NextResponse.json({ error: RESEARCH_UNAVAILABLE }, { status: 400 }),
+      observationAuthorized,
+      retrievalObservation(
+        scope.items.length,
+        plan,
+        availability,
+        [],
+        planner,
+        instrumentation,
+        observationStartedAt,
+      ),
+    );
   }
-  const availability = [resolution.selected, ...resolution.supplementary];
-  const ready = plan.flatMap((item, index) => {
+  const ready: PlannedResearchCall[] = plan.flatMap((item, index) => {
     const itemAvailability = availability[index];
     return itemAvailability.status === "ready"
-      ? [{ ...item, bucket: positiveBucket(itemAvailability.productionBucketId)! }]
+      ? [{
+        ...item,
+        ordinal: index as 0 | 1 | 2 | 3,
+        bucketId: positiveBucket(itemAvailability.productionBucketId)!,
+        query,
+      }]
       : [];
   });
-  const groundx = new Groundx({ apiKey: process.env.GROUNDX_API_KEY as string });
-  const settlements = await runBoundedRetrieval(ready, async (item, options) => {
-    const response = await groundx.search.content(
-      { id: item.bucket, query },
-      { timeout: options.timeoutMs, signal: options.signal },
+  const researchProvider: ResearchProvider = createResearchProvider(
+    process.env,
+    {},
+    providerMode,
+  );
+  let initializationFailed = false;
+  try {
+    await researchProvider.initialize();
+  } catch {
+    initializationFailed = true;
+  }
+  const settlements = initializationFailed ? [] : await runBoundedRetrieval(ready, async (item, options) => {
+    const callStartedAt = performance.now();
+    instrumentation.providerCallCount += 1;
+    instrumentation.active += 1;
+    instrumentation.peakConcurrency = Math.max(
+      instrumentation.peakConcurrency,
+      instrumentation.active,
     );
-    return typeof response.data.search.text === "string" ? response.data.search.text : "";
+    try {
+      return await researchProvider.search(item, options);
+    } finally {
+      instrumentation.latencyByOrdinal.set(
+        item.ordinal,
+        elapsedMilliseconds(callStartedAt),
+      );
+      instrumentation.active -= 1;
+    }
   });
   const selectedResult = settlements[0];
-  const providerCallCount = settlements.filter((item) => item.status !== "not_started").length;
+  const providerCallCount = instrumentation.providerCallCount;
   const configurationUnavailable = new Set(
     plan.filter((_item, index) => index > 0 && availability[index].status === "unconfigured")
       .map((item) => item.jurisdictionId),
@@ -310,7 +469,7 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
     ...deadlineCoverageUnavailable,
   ]);
   if (!selectedResult || selectedResult.status !== "fulfilled") {
-    const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+    const latencyMs = elapsedMilliseconds(startedAt);
     const data = {
       providerStatus: "failure" as const, latencyMs, resultCount: 0,
       scopeSize: scope.items.length, retrievalPlanSize: plan.length, providerCallCount,
@@ -320,7 +479,19 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
     };
     try { await fetchAuthMutation(recordSearchPhase, { ...data, token: correlationToken, serviceProof: await unifiedSearchProof(correlationToken, data) }); } catch { /* expiry fallback */ }
     console.error("Search provider request failed");
-    return NextResponse.json({ error: SEARCH_FAILURE }, { status: 500 });
+    return addObservation(
+      NextResponse.json({ error: SEARCH_FAILURE }, { status: 500 }),
+      observationAuthorized,
+      retrievalObservation(
+        scope.items.length,
+        plan,
+        availability,
+        settlements,
+        planner,
+        instrumentation,
+        observationStartedAt,
+      ),
+    );
   }
   const fulfilled = settlements.flatMap((item) => item.status === "fulfilled"
     ? [{ ...item.job, content: item.value }]
@@ -330,7 +501,7 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
   const partialCoverage = plan.slice(1)
     .filter((item, index, rows) => missing.has(item.jurisdictionId) && rows.findIndex((row) => row.jurisdictionId === item.jurisdictionId) === index)
     .map(({ jurisdictionId: id, name, kind, relation }) => ({ jurisdictionId: id, name, kind, relation }));
-  const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+  const latencyMs = elapsedMilliseconds(startedAt);
   const resultCount = governed.sources.length;
   const data = {
     providerStatus: resultCount ? "success" as const : "no_result" as const,
@@ -341,13 +512,25 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
     supplementaryProviderFailureCount: providerFailures.size,
   };
   await fetchAuthMutation(recordSearchPhase, { ...data, token: correlationToken, serviceProof: await unifiedSearchProof(correlationToken, data) });
-  return NextResponse.json({
-    result: governed.serialized,
-    correlationToken,
-    jurisdictionId: selection.id,
-    ...(selection.legacyCountryCode ? { legacyCountryCode: selection.legacyCountryCode } : {}),
-    ...(partialCoverage.length ? { partialCoverage } : {}),
-  });
+  return addObservation(
+    NextResponse.json({
+      result: governed.serialized,
+      correlationToken,
+      jurisdictionId: selection.id,
+      ...(selection.legacyCountryCode ? { legacyCountryCode: selection.legacyCountryCode } : {}),
+      ...(partialCoverage.length ? { partialCoverage } : {}),
+    }),
+    observationAuthorized,
+    retrievalObservation(
+      scope.items.length,
+      plan,
+      availability,
+      settlements,
+      planner,
+      instrumentation,
+      observationStartedAt,
+    ),
+  );
 }
 
 export async function POST(request: Request) {
@@ -358,10 +541,16 @@ export async function POST(request: Request) {
     const raw = await request.json();
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NextResponse.json({ error: "That search could not be processed. Shorten it and try again." }, { status: 400 });
     const body = raw as Record<string, unknown>;
-    const query = typeof body.query === "string" ? body.query.trim() : "";
+    const rawQuestion = typeof body.query === "string" ? body.query : "";
+    const query = rawQuestion.trim();
     if (!query || query.length > MAX_QUERY_LENGTH) return NextResponse.json({ error: "That search could not be processed. Shorten it and try again." }, { status: 400 });
+    const providerMode = resolveJurisdictionProviderMode(process.env);
+    const observationAuthorized = authorizedObservationSecret(request, providerMode);
+    const providerQuestion = providerMode.mode === "stub" ? rawQuestion : query;
     const unified = await fetchAuthQuery(api.jurisdictions.isUnifiedJurisdictionsEnabled, {});
-    return unified ? await unifiedSearch(query, body) : await legacySearch(query, body);
+    return unified
+      ? await unifiedSearch(providerQuestion, body, providerMode, observationAuthorized)
+      : await legacySearch(providerQuestion, body, providerMode);
   } catch {
     console.error("Search request failed");
     return NextResponse.json({ error: SEARCH_FAILURE }, { status: 500 });

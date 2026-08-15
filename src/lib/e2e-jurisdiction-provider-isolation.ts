@@ -14,6 +14,7 @@ type StubMode = {
   scenarioForQuestion(question: string): E2EProviderScenario;
   observationSecret: string;
 };
+export type JurisdictionProviderMode = { mode: "normal" } | StubMode;
 
 const BOUNDARY_KEYS = [
   "ADMIN_E2E_FIXTURE_MODE",
@@ -98,7 +99,7 @@ function validateObservationSecret(value: string): void {
 
 export function resolveJurisdictionProviderMode(
   environment: Environment,
-): { mode: "normal" } | StubMode {
+): JurisdictionProviderMode {
   if (BOUNDARY_KEYS.every((key) => environment[key] === undefined)) return { mode: "normal" };
   if (exact(environment, "ADMIN_E2E_FIXTURE_MODE") !== "true"
     || !["test", "preview"].includes(exact(environment, "ADMIN_E2E_TARGET_ENV"))
@@ -130,8 +131,30 @@ export function resolveJurisdictionProviderMode(
   };
 }
 
-export function authorizedObservationSecret(request: Request, environment: Environment): boolean {
-  const mode = resolveJurisdictionProviderMode(environment);
+function isResolvedProviderMode(
+  value: Environment | JurisdictionProviderMode,
+): value is JurisdictionProviderMode {
+  const keys = Object.keys(value).sort();
+  if (value.mode === "normal") {
+    return keys.length === 1 && keys[0] === "mode";
+  }
+  if (value.mode !== "stub") return false;
+  const stub = value as Partial<StubMode>;
+  return keys.length === 3
+    && keys[0] === "mode"
+    && keys[1] === "observationSecret"
+    && keys[2] === "scenarioForQuestion"
+    && typeof stub.scenarioForQuestion === "function"
+    && typeof stub.observationSecret === "string";
+}
+
+export function authorizedObservationSecret(
+  request: Request,
+  environmentOrMode: Environment | JurisdictionProviderMode,
+): boolean {
+  const mode = isResolvedProviderMode(environmentOrMode)
+    ? environmentOrMode
+    : resolveJurisdictionProviderMode(environmentOrMode);
   if (mode.mode !== "stub") return false;
   const candidate = request.headers.get(OBSERVATION_HEADER);
   if (candidate === null) return false;

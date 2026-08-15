@@ -7,12 +7,46 @@ import {
   selectRetrievalScopeItems,
   type TopicScopeGenerator,
 } from "./jurisdiction-topic-planner";
+import { E2E_JURISDICTION_QUESTIONS } from "../../shared/e2e-jurisdiction-provider-contract";
 
 function generator(text: string): TopicScopeGenerator {
   return async () => ({ text });
 }
 
 describe("jurisdiction topic planner", () => {
+  it("delegates its default generator to the isolated topic provider", async () => {
+    const sha = "a".repeat(40);
+    const environment = {
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "test",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+      ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210",
+      ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
+      ADMIN_E2E_APPROVED_COMMIT_SHA: sha,
+      ADMIN_E2E_LOCAL_HEAD_SHA: sha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM",
+    };
+    vi.stubEnv("ADMIN_E2E_FIXTURE_MODE", environment.ADMIN_E2E_FIXTURE_MODE);
+    vi.stubEnv("ADMIN_E2E_TARGET_ENV", environment.ADMIN_E2E_TARGET_ENV);
+    vi.stubEnv("ADMIN_E2E_ISOLATED_TARGET_MARKER", environment.ADMIN_E2E_ISOLATED_TARGET_MARKER);
+    vi.stubEnv("ADMIN_E2E_PROVIDER_STUB_MODE", environment.ADMIN_E2E_PROVIDER_STUB_MODE);
+    vi.stubEnv("ADMIN_E2E_CONVEX_URL", environment.ADMIN_E2E_CONVEX_URL);
+    vi.stubEnv("ADMIN_E2E_CONVEX_SITE_URL", environment.ADMIN_E2E_CONVEX_SITE_URL);
+    vi.stubEnv("ADMIN_E2E_APPROVED_COMMIT_SHA", environment.ADMIN_E2E_APPROVED_COMMIT_SHA);
+    vi.stubEnv("ADMIN_E2E_LOCAL_HEAD_SHA", environment.ADMIN_E2E_LOCAL_HEAD_SHA);
+    vi.stubEnv("ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET);
+    try {
+      await expect(planTopicScope(E2E_JURISDICTION_QUESTIONS.complete)).resolves.toMatchObject({
+        geographicHints: ["accra"],
+        ancestorDepth: 3,
+        status: "planned",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("returns a canonical strict plan and sends a bounded no-tools request", async () => {
     const generate = vi.fn(generator('{"geographicHints":["  ACCRA  ","Ghana"],"ancestorDepth":2}'));
 

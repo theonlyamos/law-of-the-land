@@ -171,6 +171,29 @@ describe("jurisdiction provider isolation boundary", () => {
     expect(authorizedObservationSecret(new Request("https://example.invalid"), fullBoundary())).toBe(false);
     expect(authorizedObservationSecret(authorized, {})).toBe(false);
   });
+
+  it("authorizes against an already-resolved stub mode without rereading environment", () => {
+    const mode = resolveJurisdictionProviderMode(fullBoundary());
+    expect(mode.mode).toBe("stub");
+    const authorized = new Request("https://example.invalid", {
+      headers: { "x-admin-e2e-provider-observation": OBSERVATION_SECRET },
+    });
+    const wrong = new Request("https://example.invalid", {
+      headers: { "x-admin-e2e-provider-observation": Buffer.alloc(32, 8).toString("base64url") },
+    });
+
+    expect(authorizedObservationSecret(authorized, mode)).toBe(true);
+    expect(authorizedObservationSecret(wrong, mode)).toBe(false);
+  });
+
+  it("does not mistake an environment mode property for a resolved provider mode", () => {
+    const environment = fullBoundary({ mode: "normal" });
+    const authorized = new Request("https://example.invalid", {
+      headers: { "x-admin-e2e-provider-observation": OBSERVATION_SECRET },
+    });
+
+    expect(authorizedObservationSecret(authorized, environment)).toBe(true);
+  });
 });
 
 describe("retrieval observation codec", () => {

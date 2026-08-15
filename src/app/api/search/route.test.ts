@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFunctionName } from "convex/server";
 import { createTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
+import {
+  decodeRetrievalObservationV1,
+  E2E_JURISDICTION_QUESTIONS,
+} from "../../../../shared/e2e-jurisdiction-provider-contract";
 
 const authMocks = vi.hoisted(() => ({
   fetchAuthMutation: vi.fn(),
@@ -9,6 +13,8 @@ const authMocks = vi.hoisted(() => ({
 }));
 
 const groundxMocks = vi.hoisted(() => ({
+  construct: vi.fn(),
+  initializationError: undefined as Error | undefined,
   searchContent: vi.fn(),
 }));
 
@@ -19,8 +25,19 @@ const plannerMocks = vi.hoisted(() => ({ planTopicScope: vi.fn() }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/e2e-jurisdiction-provider-isolation", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/e2e-jurisdiction-provider-isolation")>();
+  return {
+    ...original,
+    resolveJurisdictionProviderMode: vi.fn(original.resolveJurisdictionProviderMode),
+  };
+});
 vi.mock("groundx-typescript-sdk", () => ({
   Groundx: class {
+    constructor(options: unknown) {
+      groundxMocks.construct(options);
+      if (groundxMocks.initializationError) throw groundxMocks.initializationError;
+    }
     search = { content: groundxMocks.searchContent };
   },
 }));
@@ -30,17 +47,46 @@ vi.mock("@/lib/jurisdiction-topic-planner", async (importOriginal) => ({
 }));
 
 import { POST } from "./route";
+import { resolveJurisdictionProviderMode } from "@/lib/e2e-jurisdiction-provider-isolation";
 
-function request(body: Record<string, unknown>) {
+function request(body: Record<string, unknown>, observationSecret?: string) {
   return new Request("http://localhost/api/search", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-forwarded-for": crypto.randomUUID(),
+      ...(observationSecret
+        ? { "x-admin-e2e-provider-observation": observationSecret }
+        : {}),
     },
     body: JSON.stringify(body),
   });
 }
+
+const STUB_SHA = "a".repeat(40);
+const STUB_OBSERVATION_SECRET = "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM";
+
+function enableStubBoundary() {
+  vi.stubEnv("ADMIN_E2E_FIXTURE_MODE", "true");
+  vi.stubEnv("ADMIN_E2E_TARGET_ENV", "test");
+  vi.stubEnv("ADMIN_E2E_ISOLATED_TARGET_MARKER", "isolated-admin-e2e");
+  vi.stubEnv("ADMIN_E2E_PROVIDER_STUB_MODE", "true");
+  vi.stubEnv("ADMIN_E2E_CONVEX_URL", "http://127.0.0.1:3210");
+  vi.stubEnv("ADMIN_E2E_CONVEX_SITE_URL", "http://127.0.0.1:3211");
+  vi.stubEnv("ADMIN_E2E_APPROVED_COMMIT_SHA", STUB_SHA);
+  vi.stubEnv("ADMIN_E2E_LOCAL_HEAD_SHA", STUB_SHA);
+  vi.stubEnv("ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", STUB_OBSERVATION_SECRET);
+}
+
+function observation(response: Response) {
+  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v1");
+  expect(encoded).not.toBeNull();
+  return decodeRetrievalObservationV1(encoded!);
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const publicGhana = {
   code: "GH",
@@ -58,6 +104,7 @@ const gh = {
 describe("POST /api/search governed jurisdiction lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    groundxMocks.initializationError = undefined;
     vi.stubGlobal("fetch", searchJurisdictionMocks.fetch);
     process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://law-test.convex.site";
     process.env.SEARCH_JURISDICTION_SECRET = "route-search-secret-with-at-least-32-characters";
@@ -253,10 +300,12 @@ describe("POST /api/search unified jurisdictions", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    groundxMocks.initializationError = undefined;
     vi.stubGlobal("fetch", searchJurisdictionMocks.fetch);
     process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://law-test.convex.site";
     process.env.SEARCH_JURISDICTION_SECRET = "route-search-secret-with-at-least-32-characters";
     process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
+    process.env.GROUNDX_API_KEY = "route-groundx-key";
     authMocks.isAuthenticated.mockResolvedValue(true);
     authMocks.fetchAuthMutation.mockResolvedValue(undefined);
     groundxMocks.searchContent.mockResolvedValue({ data: { search: { text: "governed answer" } } });
@@ -416,6 +465,32 @@ describe("POST /api/search unified jurisdictions", () => {
     expect(groundxMocks.searchContent).not.toHaveBeenCalled();
   });
 
+  it("initializes GroundX once before the pool and records a safe zero-call failure", async () => {
+    enableUnified();
+    groundxMocks.initializationError = new Error("constructor secret detail");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await POST(request({ query: "parking rules", jurisdictionId: selectedId }));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: "We couldn't find relevant legal information for your question.",
+    });
+    expect(groundxMocks.construct).toHaveBeenCalledOnce();
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("constructor secret detail");
+    const phase = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:recordSearchPhase",
+    )?.[1];
+    expect(phase).toMatchObject({
+      providerStatus: "failure",
+      providerCallCount: 0,
+      configurationUnavailableCount: 0,
+      supplementaryProviderFailureCount: 0,
+    });
+    errorLog.mockRestore();
+  });
+
   it("rejects an oversized internal availability response before GroundX", async () => {
     enableUnified();
     const valid = JSON.stringify({
@@ -493,5 +568,155 @@ describe("POST /api/search unified jurisdictions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("emits a complete bounded observation only for the authorized parent", async () => {
+    enableUnified();
+    enableStubBoundary();
+    const body = {
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      jurisdictionId: selectedId,
+    };
+
+    const authorized = await POST(request(body, STUB_OBSERVATION_SECRET));
+    const wrong = await POST(request(body, `${STUB_OBSERVATION_SECRET.slice(0, -1)}A`));
+    const missing = await POST(request(body));
+
+    expect(authorized.status).toBe(200);
+    expect((await authorized.clone().json()).jurisdictionId).toBe(selectedId);
+    expect(observation(authorized)).toMatchObject({
+      version: 1,
+      planner: { status: "planned", latencyMs: expect.any(Number) },
+      authorizedScopeSize: 4,
+      planSize: 4,
+      peakConcurrency: 3,
+      libraries: [
+        { ordinal: 0, relation: "selected", status: "fulfilled", latencyMs: expect.any(Number) },
+        { ordinal: 1, relation: "geographic_ancestor", status: "fulfilled", latencyMs: expect.any(Number) },
+        { ordinal: 2, relation: "geographic_ancestor", status: "fulfilled", latencyMs: expect.any(Number) },
+        { ordinal: 3, relation: "geographic_ancestor", status: "fulfilled", latencyMs: expect.any(Number) },
+      ],
+      failureCount: 0,
+      coverageState: "complete",
+      providerCallCount: 4,
+      unexpectedRealProviderCallCount: 0,
+    });
+    expect(wrong.headers.has("x-admin-e2e-retrieval-plan-v1")).toBe(false);
+    expect(missing.headers.has("x-admin-e2e-retrieval-plan-v1")).toBe(false);
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+    expect(resolveJurisdictionProviderMode).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejoins an unconfigured supplementary library into its original plan ordinal", async () => {
+    enableUnified();
+    enableStubBoundary();
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      selected: { jurisdictionId: selectedId, status: "ready", productionBucketId: "100" },
+      supplementary: [
+        { jurisdictionId: "greater-accra-id", status: "unconfigured" },
+        { jurisdictionId: "ghana-id", status: "ready", productionBucketId: "102" },
+        { jurisdictionId: "west-africa-id", status: "ready", productionBucketId: "103" },
+      ],
+    })));
+
+    const response = await POST(request({
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      jurisdictionId: selectedId,
+    }, STUB_OBSERVATION_SECRET));
+
+    expect(response.status).toBe(200);
+    expect(observation(response)).toMatchObject({
+      planSize: 4,
+      libraries: [
+        { ordinal: 0, status: "fulfilled" },
+        { ordinal: 1, status: "unconfigured", latencyMs: 0 },
+        { ordinal: 2, status: "fulfilled" },
+        { ordinal: 3, status: "fulfilled" },
+      ],
+      failureCount: 0,
+      coverageState: "supplementary_incomplete",
+      providerCallCount: 3,
+    });
+  });
+
+  it("records the exact supplementary stub failure without losing later settlements", async () => {
+    enableUnified();
+    enableStubBoundary();
+
+    const response = await POST(request({
+      query: E2E_JURISDICTION_QUESTIONS.supplementary_failure,
+      jurisdictionId: selectedId,
+    }, STUB_OBSERVATION_SECRET));
+    const payload = await response.clone().json();
+
+    expect(response.status).toBe(200);
+    expect(payload.jurisdictionId).toBe(selectedId);
+    expect(payload.partialCoverage).toEqual([expect.objectContaining({
+      jurisdictionId: "greater-accra-id",
+    })]);
+    expect(observation(response)).toMatchObject({
+      libraries: [
+        { ordinal: 0, status: "fulfilled" },
+        { ordinal: 1, status: "rejected" },
+        { ordinal: 2, status: "fulfilled" },
+        { ordinal: 3, status: "fulfilled" },
+      ],
+      failureCount: 1,
+      coverageState: "supplementary_incomplete",
+      providerCallCount: 4,
+    });
+  });
+
+  it("emits an authorized selected-error observation with suppressed work as not started", async () => {
+    enableUnified();
+    enableStubBoundary();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await POST(request({
+      query: E2E_JURISDICTION_QUESTIONS.selected_failure,
+      jurisdictionId: selectedId,
+    }, STUB_OBSERVATION_SECRET));
+
+    expect(response.status).toBe(500);
+    expect(await response.clone().json()).toEqual({
+      error: "We couldn't find relevant legal information for your question.",
+    });
+    expect(observation(response)).toMatchObject({
+      authorizedScopeSize: 4,
+      planSize: 4,
+      peakConcurrency: 3,
+      libraries: [
+        { ordinal: 0, relation: "selected", status: "rejected" },
+        { ordinal: 1, relation: "geographic_ancestor", status: "fulfilled" },
+        { ordinal: 2, relation: "geographic_ancestor", status: "fulfilled" },
+        { ordinal: 3, relation: "geographic_ancestor", status: "not_started", latencyMs: 0 },
+      ],
+      failureCount: 1,
+      coverageState: "selected_unavailable",
+      providerCallCount: 3,
+    });
+    const issueArgs = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:issueCorrelation",
+    )?.[1];
+    expect(issueArgs).toMatchObject({ jurisdictionId: selectedId });
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+    expect(resolveJurisdictionProviderMode).toHaveBeenCalledOnce();
+    errorLog.mockRestore();
+  });
+
+  it("does not trim a non-exact stub question into a known scenario", async () => {
+    enableUnified();
+    enableStubBoundary();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await POST(request({
+      query: `${E2E_JURISDICTION_QUESTIONS.complete} `,
+      jurisdictionId: selectedId,
+    }, STUB_OBSERVATION_SECRET));
+
+    expect(response.status).toBe(500);
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+    expect(resolveJurisdictionProviderMode).toHaveBeenCalledOnce();
+    errorLog.mockRestore();
   });
 });
