@@ -33,6 +33,14 @@ const safeEnvironment = {
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
 } satisfies Record<string, string | undefined>;
 
+const remoteEnvironment = {
+  ...safeEnvironment,
+  ADMIN_E2E_TARGET_ENV: "preview",
+  ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
+  ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
+  CONVEX_DEPLOYMENT: "dev:safe-preview",
+} satisfies Record<string, string | undefined>;
+
 beforeAll(async () => {
   const configModule = await import("../../../playwright.config");
   playwrightConfig = configModule.default;
@@ -60,6 +68,20 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site", ADMIN_E2E_TARGET_ENV: "preview" }, /same isolated deployment/i],
   ])("rejects an unsafe target without making requests", (environment, message) => {
     expect(() => resolveAdminE2ETarget(environment)).toThrow(message);
+  });
+
+  it.each([
+    ["missing", { ...remoteEnvironment, CONVEX_DEPLOYMENT: undefined }],
+    ["malformed", { ...remoteEnvironment, CONVEX_DEPLOYMENT: "preview:safe-preview" }],
+    ["mismatched", { ...remoteEnvironment, CONVEX_DEPLOYMENT: "dev:other-preview" }],
+    ["opaque and missing", {
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_URL: "https://opaque-731.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.convex.site",
+      CONVEX_DEPLOYMENT: undefined,
+    }],
+  ])("rejects a %s remote deployment binding", (_label, environment) => {
+    expect(() => resolveAdminE2ETarget(environment)).toThrow(/CONVEX_DEPLOYMENT/);
   });
 
   it("never falls back to inherited application URLs", () => {
@@ -240,6 +262,14 @@ describe("Playwright web server environment", () => {
     }
   });
 
+  it("accepts a remote target only with its exact development deployment binding", () => {
+    expect(resolveAdminE2ETarget(remoteEnvironment)).toMatchObject({
+      environment: "preview",
+      convexUrl: "https://safe-preview.convex.cloud",
+      convexSiteUrl: "https://safe-preview.convex.site",
+    });
+  });
+
   it("derives local HEAD without a shell and replaces inherited parent-generated values", () => {
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
@@ -316,6 +346,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      CONVEX_DEPLOYMENT: "dev:safe-preview",
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
       NEXT_PUBLIC_CONVEX_URL: "https://inherited-live.convex.cloud",
@@ -335,6 +366,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
+      CONVEX_DEPLOYMENT: "dev:safe-preview",
     });
     expect(environment).not.toHaveProperty("ADMIN_E2E_FIXTURE_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
@@ -387,10 +419,29 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.2:3211",
     })).toThrow(/matching isolated Convex URLs/i);
     expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      CONVEX_DEPLOYMENT: undefined,
+    })).toThrow(/CONVEX_DEPLOYMENT/);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      CONVEX_DEPLOYMENT: "preview:safe-preview",
+    })).toThrow(/CONVEX_DEPLOYMENT/);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      CONVEX_DEPLOYMENT: "dev:other-preview",
+    })).toThrow(/CONVEX_DEPLOYMENT/);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_URL: "https://opaque-731.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.convex.site",
+      CONVEX_DEPLOYMENT: undefined,
+    })).toThrow(/CONVEX_DEPLOYMENT/);
+    expect(() => assertIsolatedWebServerEnvironment({
       ...safeEnvironment,
       ADMIN_E2E_APPROVED_COMMIT_SHA: ` ${approvedCommitSha}`,
       ADMIN_E2E_LOCAL_HEAD_SHA: ` ${approvedCommitSha}`,
     })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment(remoteEnvironment)).not.toThrow();
     expect(() => assertIsolatedWebServerEnvironment(safeEnvironment)).not.toThrow();
   });
 

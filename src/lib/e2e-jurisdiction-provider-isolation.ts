@@ -74,6 +74,17 @@ function remoteDeploymentName(url: URL, suffix: string): string | null {
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
 }
 
+function validateRemoteDevelopmentBinding(
+  environment: Environment,
+  backendName: string,
+  siteName: string,
+): void {
+  const match = /^dev:([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(
+    exact(environment, "CONVEX_DEPLOYMENT"),
+  );
+  if (!match || match[1] !== backendName || match[1] !== siteName) invalidBoundary();
+}
+
 function validatePairedEndpoints(environment: Environment): void {
   const convexUrl = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_URL"));
   const siteUrl = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_SITE_URL"));
@@ -89,6 +100,7 @@ function validatePairedEndpoints(environment: Environment): void {
   const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
   const siteName = remoteDeploymentName(siteUrl, ".convex.site");
   if (!backendName || backendName !== siteName) invalidBoundary();
+  validateRemoteDevelopmentBinding(environment, backendName, siteName);
 }
 
 function validateObservationSecret(value: string): void {

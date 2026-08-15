@@ -35,6 +35,18 @@ function fullBoundary(
   };
 }
 
+function remoteBoundary(
+  overrides: Record<string, string | undefined> = {},
+): Record<string, string | undefined> {
+  return fullBoundary({
+    ADMIN_E2E_TARGET_ENV: "preview",
+    ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
+    ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
+    CONVEX_DEPLOYMENT: "dev:safe-preview",
+    ...overrides,
+  });
+}
+
 const validObservation: RetrievalObservationV1 = {
   version: 1,
   planner: { status: "planned", latencyMs: 12.5 },
@@ -152,6 +164,29 @@ describe("jurisdiction provider isolation boundary", () => {
     expect(() => resolveJurisdictionProviderMode(fullBoundary(overrides))).toThrow(
       "E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID",
     );
+  });
+
+  it("accepts a remote target only with its exact development deployment binding", () => {
+    expect(resolveJurisdictionProviderMode(remoteBoundary())).toMatchObject({ mode: "stub" });
+  });
+
+  it.each([
+    ["missing remote deployment binding", { CONVEX_DEPLOYMENT: undefined }],
+    ["malformed remote deployment binding", { CONVEX_DEPLOYMENT: "preview:safe-preview" }],
+    ["mismatched remote deployment binding", { CONVEX_DEPLOYMENT: "dev:other-preview" }],
+    ["whitespace-padded remote deployment binding", { CONVEX_DEPLOYMENT: " dev:safe-preview" }],
+  ])("rejects %s", (_label, overrides) => {
+    expect(() => resolveJurisdictionProviderMode(remoteBoundary(overrides))).toThrow(
+      "E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID",
+    );
+  });
+
+  it("rejects opaque remote hostnames when the explicit development binding is absent", () => {
+    expect(() => resolveJurisdictionProviderMode(remoteBoundary({
+      ADMIN_E2E_CONVEX_URL: "https://opaque-731.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.convex.site",
+      CONVEX_DEPLOYMENT: undefined,
+    }))).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   });
 
   it("authorizes only the exact parent observation secret", () => {

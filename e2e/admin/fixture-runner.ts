@@ -80,7 +80,23 @@ function productionLooking(url: URL): boolean {
 }
 
 function remoteDeploymentName(url: URL, suffix: string): string | null {
-  return url.hostname.endsWith(suffix) ? url.hostname.slice(0, -suffix.length) : null;
+  if (!url.hostname.endsWith(suffix)) return null;
+  const name = url.hostname.slice(0, -suffix.length);
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
+}
+
+function requireRemoteDevelopmentBinding(
+  environment: Environment,
+  backendName: string,
+  siteName: string,
+): void {
+  const value = environment.CONVEX_DEPLOYMENT;
+  const match = typeof value === "string" && value === value.trim()
+    ? /^dev:([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(value)
+    : null;
+  if (!match || match[1] !== backendName || match[1] !== siteName) {
+    throw new Error("Remote admin E2E targets require CONVEX_DEPLOYMENT=dev:<deployment-name> matching both Convex origins.");
+  }
 }
 
 export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget {
@@ -124,6 +140,7 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     if (!backendName || backendName !== siteName) {
       throw new Error("Admin E2E Convex URLs must address the same isolated deployment.");
     }
+    requireRemoteDevelopmentBinding(environment, backendName, siteName);
   }
   const fixtureSecret = required(environment, "ADMIN_E2E_FIXTURE_SECRET");
   const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");

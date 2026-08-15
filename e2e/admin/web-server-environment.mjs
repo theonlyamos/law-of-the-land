@@ -25,6 +25,7 @@ const CHILD_PROVIDER_BOUNDARY_KEYS = [
   "ADMIN_E2E_APPROVED_COMMIT_SHA",
   "ADMIN_E2E_LOCAL_HEAD_SHA",
   "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET",
+  "CONVEX_DEPLOYMENT",
 ];
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
@@ -71,6 +72,16 @@ function remoteDeploymentName(url, suffix) {
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
 }
 
+function requireRemoteDevelopmentBinding(environment, backendName, siteName) {
+  const value = environment.CONVEX_DEPLOYMENT;
+  const match = typeof value === "string" && value === value.trim()
+    ? /^dev:([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(value)
+    : null;
+  if (!match || match[1] !== backendName || match[1] !== siteName) {
+    throw new Error("Admin E2E browser server requires CONVEX_DEPLOYMENT=dev:<deployment-name> matching both Convex origins.");
+  }
+}
+
 /**
  * Playwright launches webServer before global setup. Validate the same explicit
  * fixture boundary here so an inherited development environment cannot build or
@@ -107,6 +118,7 @@ export function assertIsolatedWebServerEnvironment(environment) {
     if (convexUrl.protocol !== "https:" || siteUrl.protocol !== "https:" || convexUrl.port || siteUrl.port || !backendName || backendName !== siteName) {
       throw new Error("Admin E2E browser server requires matching isolated Convex URLs.");
     }
+    requireRemoteDevelopmentBinding(environment, backendName, siteName);
   }
   const approvedCommitSha = requiredExact(environment, "ADMIN_E2E_APPROVED_COMMIT_SHA");
   const localHeadSha = requiredExact(environment, "ADMIN_E2E_LOCAL_HEAD_SHA");
