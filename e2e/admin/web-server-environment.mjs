@@ -53,10 +53,10 @@ function requiredExact(environment, key) {
   return value;
 }
 
-function parsedEndpoint(environment, key) {
+function parsedEndpoint(value) {
   let url;
   try {
-    url = new URL(requiredExact(environment, key));
+    url = new URL(value);
   } catch {
     throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   }
@@ -66,10 +66,20 @@ function parsedEndpoint(environment, key) {
   return url;
 }
 
-function remoteDeploymentName(url, suffix) {
+function hasExplicitPort(value) {
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+  return /:\d+$/.test(authority);
+}
+
+function remoteDeployment(url, suffix) {
   if (!url.hostname.endsWith(suffix)) return null;
-  const name = url.hostname.slice(0, -suffix.length);
-  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
+  const labels = url.hostname.slice(0, -suffix.length).split(".");
+  if (labels.length !== 2) return null;
+  const [name, region] = labels;
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(region)
+    ? { name, region }
+    : null;
 }
 
 function requireRemoteDevelopmentBinding(environment, backendName, siteName) {
@@ -103,8 +113,10 @@ export function assertIsolatedWebServerEnvironment(environment) {
   if (isProductionLooking(environment.CONVEX_DEPLOYMENT ?? "")) {
     throw new Error("Admin E2E browser server refuses a production Convex deployment.");
   }
-  const convexUrl = parsedEndpoint(environment, "ADMIN_E2E_CONVEX_URL");
-  const siteUrl = parsedEndpoint(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrlValue = requiredExact(environment, "ADMIN_E2E_CONVEX_URL");
+  const siteUrlValue = requiredExact(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrl = parsedEndpoint(convexUrlValue);
+  const siteUrl = parsedEndpoint(siteUrlValue);
   if (isProductionLooking(convexUrl.hostname) || isProductionLooking(siteUrl.hostname)) {
     throw new Error("Admin E2E browser server refuses production-looking fixture URLs.");
   }
@@ -113,12 +125,12 @@ export function assertIsolatedWebServerEnvironment(environment) {
     throw new Error("Admin E2E browser server requires matching isolated Convex URLs.");
   }
   if (!isLocalhost(convexUrl.hostname)) {
-    const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
-    const siteName = remoteDeploymentName(siteUrl, ".convex.site");
-    if (convexUrl.protocol !== "https:" || siteUrl.protocol !== "https:" || convexUrl.port || siteUrl.port || !backendName || backendName !== siteName) {
+    const backend = remoteDeployment(convexUrl, ".convex.cloud");
+    const site = remoteDeployment(siteUrl, ".convex.site");
+    if (convexUrl.protocol !== "https:" || siteUrl.protocol !== "https:" || convexUrl.port || siteUrl.port || hasExplicitPort(convexUrlValue) || hasExplicitPort(siteUrlValue) || !backend || !site || backend.name !== site.name || backend.region !== site.region) {
       throw new Error("Admin E2E browser server requires matching isolated Convex URLs.");
     }
-    requireRemoteDevelopmentBinding(environment, backendName, siteName);
+    requireRemoteDevelopmentBinding(environment, backend.name, site.name);
   }
   const approvedCommitSha = requiredExact(environment, "ADMIN_E2E_APPROVED_COMMIT_SHA");
   const localHeadSha = requiredExact(environment, "ADMIN_E2E_LOCAL_HEAD_SHA");

@@ -14,6 +14,10 @@ type StubMode = {
   scenarioForQuestion(question: string): E2EProviderScenario;
   observationSecret: string;
 };
+type RemoteDeployment = {
+  name: string;
+  region: string;
+};
 export type JurisdictionProviderMode = { mode: "normal" } | StubMode;
 
 const BOUNDARY_KEYS = [
@@ -68,10 +72,20 @@ function parseEndpoint(value: string): URL {
   return url;
 }
 
-function remoteDeploymentName(url: URL, suffix: string): string | null {
+function hasExplicitPort(value: string): boolean {
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+  return /:\d+$/.test(authority);
+}
+
+function remoteDeployment(url: URL, suffix: string): RemoteDeployment | null {
   if (!url.hostname.endsWith(suffix)) return null;
-  const name = url.hostname.slice(0, -suffix.length);
-  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
+  const labels = url.hostname.slice(0, -suffix.length).split(".");
+  if (labels.length !== 2) return null;
+  const [name, region] = labels;
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(region)
+    ? { name, region }
+    : null;
 }
 
 function validateRemoteDevelopmentBinding(
@@ -86,8 +100,10 @@ function validateRemoteDevelopmentBinding(
 }
 
 function validatePairedEndpoints(environment: Environment): void {
-  const convexUrl = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_URL"));
-  const siteUrl = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_SITE_URL"));
+  const convexUrlValue = exact(environment, "ADMIN_E2E_CONVEX_URL");
+  const siteUrlValue = exact(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrl = parseEndpoint(convexUrlValue);
+  const siteUrl = parseEndpoint(siteUrlValue);
   const localBackend = isLocalhost(convexUrl.hostname);
   const localSite = isLocalhost(siteUrl.hostname);
   if (localBackend !== localSite) invalidBoundary();
@@ -96,11 +112,11 @@ function validatePairedEndpoints(environment: Environment): void {
     return;
   }
   if (convexUrl.protocol !== "https:" || siteUrl.protocol !== "https:") invalidBoundary();
-  if (convexUrl.port || siteUrl.port) invalidBoundary();
-  const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
-  const siteName = remoteDeploymentName(siteUrl, ".convex.site");
-  if (!backendName || backendName !== siteName) invalidBoundary();
-  validateRemoteDevelopmentBinding(environment, backendName, siteName);
+  if (convexUrl.port || siteUrl.port || hasExplicitPort(convexUrlValue) || hasExplicitPort(siteUrlValue)) invalidBoundary();
+  const backend = remoteDeployment(convexUrl, ".convex.cloud");
+  const site = remoteDeployment(siteUrl, ".convex.site");
+  if (!backend || !site || backend.name !== site.name || backend.region !== site.region) invalidBoundary();
+  validateRemoteDevelopmentBinding(environment, backend.name, site.name);
 }
 
 function validateObservationSecret(value: string): void {

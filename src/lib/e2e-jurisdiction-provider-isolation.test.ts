@@ -40,9 +40,9 @@ function remoteBoundary(
 ): Record<string, string | undefined> {
   return fullBoundary({
     ADMIN_E2E_TARGET_ENV: "preview",
-    ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
-    ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
-    CONVEX_DEPLOYMENT: "dev:safe-preview",
+    ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud",
+    ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.site",
+    CONVEX_DEPLOYMENT: "dev:adventurous-hummingbird-244",
     ...overrides,
   });
 }
@@ -150,6 +150,10 @@ describe("jurisdiction provider isolation boundary", () => {
     ["mixed local and remote URLs", { ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site" }],
     ["different loopback hosts", { ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.2:3211" }],
     ["mismatched remote deployments", { ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site" }],
+    ["mismatched regional deployment labels", { ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://cautious-penguin-9.eu-west-1.convex.site" }],
+    ["mismatched regional deployment regions", { ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.us-east-1.convex.site" }],
+    ["extra remote hostname label", { ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.site" }],
+    ["explicit remote default ports", { ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud:443", ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.site:443" }],
     ["remote HTTP", { ADMIN_E2E_CONVEX_URL: "http://safe-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "http://safe-preview.convex.site" }],
     ["URL credentials", { ADMIN_E2E_CONVEX_URL: "https://user:password@safe-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site" }],
     ["URL query", { ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud?token=secret", ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site" }],

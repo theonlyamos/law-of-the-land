@@ -105,6 +105,11 @@ function parsedEndpoint(value: string, key: string): URL {
   return url;
 }
 
+function hasExplicitPort(value: string): boolean {
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+  return /:\d+$/.test(authority);
+}
+
 function isLocalhost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "::1" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
@@ -113,10 +118,15 @@ function productionLooking(url: URL): boolean {
   return /(?:^|[.-])(?:prod|production|live)(?:[.-]|$)/i.test(url.hostname);
 }
 
-function remoteDeploymentName(url: URL, suffix: string): string | null {
+function remoteDeployment(url: URL, suffix: string): { name: string; region: string } | null {
   if (!url.hostname.endsWith(suffix)) return null;
-  const name = url.hostname.slice(0, -suffix.length);
-  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
+  const labels = url.hostname.slice(0, -suffix.length).split(".");
+  if (labels.length !== 2) return null;
+  const [name, region] = labels;
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(region)
+    ? { name, region }
+    : null;
 }
 
 function requiredEndpoint(environment: Environment, key: string): string {
@@ -176,12 +186,12 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     if (productionLooking(convexUrl) || productionLooking(convexSiteUrl)) {
       throw new Error("Admin E2E fixtures refuse production-looking target URLs.");
     }
-    const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
-    const siteName = remoteDeploymentName(convexSiteUrl, ".convex.site");
-    if (!backendName || backendName !== siteName) {
+    const backend = remoteDeployment(convexUrl, ".convex.cloud");
+    const site = remoteDeployment(convexSiteUrl, ".convex.site");
+    if (convexUrl.port || convexSiteUrl.port || hasExplicitPort(convexUrlValue) || hasExplicitPort(convexSiteUrlValue) || !backend || !site || backend.name !== site.name || backend.region !== site.region) {
       throw new Error("Admin E2E Convex URLs must address the same isolated deployment.");
     }
-    requireRemoteDevelopmentBinding(environment, backendName, siteName);
+    requireRemoteDevelopmentBinding(environment, backend.name, site.name);
   }
   if (environment.BILLING_ENABLED !== "false") {
     throw new Error("Automated jurisdiction budgets require BILLING_ENABLED=false on the isolated target.");

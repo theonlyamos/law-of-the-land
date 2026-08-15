@@ -15,7 +15,7 @@ import { clearAdminE2EParentEnvironment } from "../../../e2e/admin/global-teardo
 let playwrightConfig: (typeof import("../../../playwright.config"))["default"];
 let initializeAdminE2EProviderIsolation: (typeof import("../../../playwright.config"))["initializeAdminE2EProviderIsolation"];
 
-const approvedCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
+const approvedCommitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const observationSecret = Buffer.alloc(32, 7).toString("base64url");
 
 const safeEnvironment = {
@@ -38,9 +38,9 @@ const safeEnvironment = {
 const remoteEnvironment = {
   ...safeEnvironment,
   ADMIN_E2E_TARGET_ENV: "preview",
-  ADMIN_E2E_CONVEX_URL: "https://safe-preview.convex.cloud",
-  ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
-  CONVEX_DEPLOYMENT: "dev:safe-preview",
+  ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud",
+  ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.site",
+  CONVEX_DEPLOYMENT: "dev:adventurous-hummingbird-244",
 } satisfies Record<string, string | undefined>;
 
 function fixtureRecords() {
@@ -109,6 +109,11 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, CONVEX_DEPLOYMENT: "prod:live-law" }, /production Convex deployment/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site" }, /production-looking/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site", ADMIN_E2E_TARGET_ENV: "preview" }, /same isolated deployment/i],
+    [{ ...remoteEnvironment, ADMIN_E2E_CONVEX_SITE_URL: "https://cautious-penguin-9.eu-west-1.convex.site" }, /same isolated deployment/i],
+    [{ ...remoteEnvironment, ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.us-east-1.convex.site" }, /same isolated deployment/i],
+    [{ ...remoteEnvironment, ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.site" }, /same isolated deployment/i],
+    [{ ...remoteEnvironment, ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud:8443" }, /same isolated deployment/i],
+    [{ ...remoteEnvironment, ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud:443", ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.site:443" }, /same isolated deployment/i],
   ])("rejects an unsafe target without making requests", (environment, message) => {
     expect(() => resolveAdminE2ETarget(environment)).toThrow(message);
   });
@@ -119,8 +124,8 @@ describe("admin E2E target guard", () => {
     ["mismatched", { ...remoteEnvironment, CONVEX_DEPLOYMENT: "dev:other-preview" }],
     ["opaque and missing", {
       ...remoteEnvironment,
-      ADMIN_E2E_CONVEX_URL: "https://opaque-731.convex.cloud",
-      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.convex.site",
+      ADMIN_E2E_CONVEX_URL: "https://opaque-731.eu-west-1.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.eu-west-1.convex.site",
       CONVEX_DEPLOYMENT: undefined,
     }],
   ])("rejects a %s remote deployment binding", (_label, environment) => {
@@ -352,8 +357,8 @@ describe("Playwright web server environment", () => {
   it("accepts a remote target only with its exact development deployment binding", () => {
     expect(resolveAdminE2ETarget(remoteEnvironment)).toMatchObject({
       environment: "preview",
-      convexUrl: "https://safe-preview.convex.cloud",
-      convexSiteUrl: "https://safe-preview.convex.site",
+      convexUrl: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud",
+      convexSiteUrl: "https://adventurous-hummingbird-244.eu-west-1.convex.site",
     });
   });
 
@@ -519,8 +524,26 @@ describe("Playwright web server environment", () => {
     })).toThrow(/CONVEX_DEPLOYMENT/);
     expect(() => assertIsolatedWebServerEnvironment({
       ...remoteEnvironment,
-      ADMIN_E2E_CONVEX_URL: "https://opaque-731.convex.cloud",
-      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.convex.site",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://cautious-penguin-9.eu-west-1.convex.site",
+    })).toThrow(/matching isolated Convex URLs/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.us-east-1.convex.site",
+    })).toThrow(/matching isolated Convex URLs/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.extra.convex.site",
+    })).toThrow(/matching isolated Convex URLs/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.cloud:443",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://adventurous-hummingbird-244.eu-west-1.convex.site:443",
+    })).toThrow(/matching isolated Convex URLs/i);
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...remoteEnvironment,
+      ADMIN_E2E_CONVEX_URL: "https://opaque-731.eu-west-1.convex.cloud",
+      ADMIN_E2E_CONVEX_SITE_URL: "https://opaque-731.eu-west-1.convex.site",
       CONVEX_DEPLOYMENT: undefined,
     })).toThrow(/CONVEX_DEPLOYMENT/);
     expect(() => assertIsolatedWebServerEnvironment({
