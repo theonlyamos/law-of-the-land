@@ -1,4 +1,5 @@
 import { makeSignature } from "better-auth/crypto";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -23,14 +24,40 @@ export type AdminE2ETarget = {
   fixtureSecret: string;
   betterAuthSecret: string;
   accountPassword: string;
+  approvedCommitSha: string;
 };
 
 type FixtureRecoveryManifest = {
-  version: 1;
+  version: 2;
   state: "provisional" | "ready";
   tag: string;
+  targetClass: "test" | "preview";
+  approvedCommitSha: string;
   convexUrl: string;
   convexSiteUrl: string;
+  cleanupEndpoint: "/admin/e2e-fixtures/cleanup";
+};
+
+type FixtureRecords = {
+  chatId: string;
+  resourceId: string;
+  publishedVersionId: string;
+  reviewVersionId: string;
+  separationVersionId: string;
+  conversationGrantId: string;
+  jurisdictionId: string;
+  userId: string;
+  stagingBucketId: string;
+  productionBucketId: string;
+  callbackToken: string;
+  callbackJobId: string;
+  usageUserId: string;
+  jurisdictionCountryId: string;
+  jurisdictionTownId: string;
+  publicOrganizationJurisdictionId: string;
+  jurisdictionMemberOnlyId: string;
+  jurisdictionMemberId: string;
+  jurisdictionFormerMemberId: string;
 };
 
 export type FixtureManifest = FixtureRecoveryManifest & {
@@ -41,16 +68,23 @@ export type FixtureManifest = FixtureRecoveryManifest & {
     noTwoFactor: { userId: string; cookie: string };
     unassured: { userId: string; cookie: string };
   };
-  records: Record<string, unknown>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; cookie: string }>;
+  records: FixtureRecords;
 };
 
 type BootstrapResponse = {
   tag: string;
   providerTransport: "stub";
+  deployedCommitSha: string;
+  billingDisabled: true;
   sessions: Record<FixedRole, { userId: string; sessionToken: string }>;
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
-  records: Record<string, unknown>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; sessionToken: string }>;
+  records: FixtureRecords;
 };
+
+const SHA_PATTERN = /^[a-f0-9]{40}$/;
+const FIXTURE_TAG_PATTERN = /^e2e_[a-z0-9]{12,48}$/;
 
 function required(environment: Environment, key: string): string {
   const value = environment[key]?.trim();
@@ -65,7 +99,7 @@ function parsedEndpoint(value: string, key: string): URL {
   } catch {
     throw new Error(`${key} must be an absolute HTTP(S) URL.`);
   }
-  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
     throw new Error(`${key} must be a credential-free HTTP(S) origin.`);
   }
   return url;
@@ -83,6 +117,13 @@ function remoteDeploymentName(url: URL, suffix: string): string | null {
   if (!url.hostname.endsWith(suffix)) return null;
   const name = url.hostname.slice(0, -suffix.length);
   return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ? name : null;
+}
+
+function requiredEndpoint(environment: Environment, key: string): string {
+  const value = environment[key];
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${key} is required.`);
+  if (value !== value.trim()) throw new Error(`${key} must be supplied as an exact origin without padding.`);
+  return value;
 }
 
 function requireRemoteDevelopmentBinding(
@@ -119,8 +160,8 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
 
   // Never consult NEXT_PUBLIC_CONVEX_* here: a developer shell may contain a
   // live app target. Fixture endpoints must always be separately explicit.
-  const convexUrlValue = required(environment, "ADMIN_E2E_CONVEX_URL");
-  const convexSiteUrlValue = required(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrlValue = requiredEndpoint(environment, "ADMIN_E2E_CONVEX_URL");
+  const convexSiteUrlValue = requiredEndpoint(environment, "ADMIN_E2E_CONVEX_SITE_URL");
   const convexUrl = parsedEndpoint(convexUrlValue, "ADMIN_E2E_CONVEX_URL");
   const convexSiteUrl = parsedEndpoint(convexSiteUrlValue, "ADMIN_E2E_CONVEX_SITE_URL");
   const localBackend = isLocalhost(convexUrl.hostname);
@@ -142,6 +183,9 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     }
     requireRemoteDevelopmentBinding(environment, backendName, siteName);
   }
+  if (environment.BILLING_ENABLED !== "false") {
+    throw new Error("Automated jurisdiction budgets require BILLING_ENABLED=false on the isolated target.");
+  }
   const fixtureSecret = required(environment, "ADMIN_E2E_FIXTURE_SECRET");
   const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");
   const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
@@ -149,6 +193,15 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
   }
   if (accountPassword.length < 12) throw new Error("ADMIN_E2E_ACCOUNT_PASSWORD must be at least 12 characters.");
+  const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
+  const localHeadSha = environment.ADMIN_E2E_LOCAL_HEAD_SHA;
+  if (typeof approvedCommitSha !== "string"
+    || typeof localHeadSha !== "string"
+    || !SHA_PATTERN.test(approvedCommitSha)
+    || !SHA_PATTERN.test(localHeadSha)
+    || approvedCommitSha !== localHeadSha) {
+    throw new Error("Admin E2E requires an exact approved/local lowercase commit SHA match.");
+  }
   return {
     environment: targetEnvironment,
     convexUrl: convexUrl.origin,
@@ -156,7 +209,14 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     fixtureSecret,
     betterAuthSecret,
     accountPassword,
+    approvedCommitSha,
   };
+}
+
+function deriveLocalHeadSha(): string {
+  const value = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (!SHA_PATTERN.test(value)) throw new Error("Admin E2E could not derive an exact lowercase local HEAD SHA.");
+  return value;
 }
 
 async function responseJson<T>(response: Response, operation: string): Promise<T> {
@@ -177,14 +237,23 @@ export async function bootstrapAdminFixtures(options: {
   manifestPath: string;
   request?: RequestFunction;
 }): Promise<FixtureManifest> {
+  if (!FIXTURE_TAG_PATTERN.test(options.fixtureTag)) {
+    throw new Error("Admin E2E fixture tag is invalid.");
+  }
   const target = resolveAdminE2ETarget(options.environment);
+  if (deriveLocalHeadSha() !== target.approvedCommitSha) {
+    throw new Error("Admin E2E approved commit does not match freshly derived local HEAD.");
+  }
   const request = options.request ?? fetch;
   const recoveryManifest: FixtureRecoveryManifest = {
-    version: 1,
+    version: 2,
     state: "provisional",
     tag: options.fixtureTag,
+    targetClass: target.environment,
+    approvedCommitSha: target.approvedCommitSha,
     convexUrl: target.convexUrl,
     convexSiteUrl: target.convexSiteUrl,
+    cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
   };
   await mkdir(dirname(options.manifestPath), { recursive: true, mode: 0o700 });
   await writeFile(options.manifestPath, JSON.stringify(recoveryManifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -197,6 +266,12 @@ export async function bootstrapAdminFixtures(options: {
   const payload = await responseJson<BootstrapResponse>(response, "bootstrap");
   if (payload.tag !== options.fixtureTag) throw new Error("Admin E2E bootstrap returned a mismatched fixture tag.");
   if (payload.providerTransport !== "stub") throw new Error("Admin E2E bootstrap did not confirm isolated provider stubs.");
+  if (payload.deployedCommitSha !== target.approvedCommitSha || !SHA_PATTERN.test(payload.deployedCommitSha)) {
+    throw new Error("Admin E2E bootstrap returned a mismatched deployed commit.");
+  }
+  if (payload.billingDisabled !== true) {
+    throw new Error("Admin E2E bootstrap did not confirm billing is disabled.");
+  }
   const sessions: Partial<Record<FixedRole, string>> = {};
   for (const role of FIXED_ROLES) {
     const token = payload.sessions?.[role]?.sessionToken;
@@ -212,14 +287,36 @@ export async function bootstrapAdminFixtures(options: {
       cookie: `better-auth.session_token=${value.sessionToken}.${await makeSignature(value.sessionToken, target.betterAuthSecret)}`,
     };
   }
+  const jurisdictionUsers = {} as FixtureManifest["jurisdictionUsers"];
+  for (const identity of ["member", "formerMember"] as const) {
+    const value = payload.jurisdictionUsers?.[identity];
+    if (!value?.userId || !value.sessionToken) throw new Error(`Admin E2E bootstrap omitted the ${identity} jurisdiction session.`);
+    jurisdictionUsers[identity] = {
+      userId: value.userId,
+      cookie: `better-auth.session_token=${value.sessionToken}.${await makeSignature(value.sessionToken, target.betterAuthSecret)}`,
+    };
+  }
+  const requiredRecordIds: Array<keyof FixtureRecords> = [
+    "chatId", "resourceId", "publishedVersionId", "reviewVersionId", "separationVersionId",
+    "conversationGrantId", "jurisdictionId", "userId", "stagingBucketId", "productionBucketId",
+    "callbackToken", "callbackJobId", "usageUserId", "jurisdictionCountryId", "jurisdictionTownId",
+    "publicOrganizationJurisdictionId", "jurisdictionMemberOnlyId", "jurisdictionMemberId", "jurisdictionFormerMemberId",
+  ];
+  if (!payload.records || requiredRecordIds.some((key) => typeof payload.records[key] !== "string" || !payload.records[key])) {
+    throw new Error("Admin E2E bootstrap omitted required owned record identifiers.");
+  }
   const manifest: FixtureManifest = {
-    version: 1,
+    version: 2,
     state: "ready",
     tag: payload.tag,
+    targetClass: target.environment,
+    approvedCommitSha: target.approvedCommitSha,
     convexUrl: target.convexUrl,
     convexSiteUrl: target.convexSiteUrl,
+    cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
     sessions,
     variants,
+    jurisdictionUsers,
     records: payload.records,
   };
   const completedPath = `${options.manifestPath}.${crypto.randomUUID()}.ready`;
@@ -241,11 +338,16 @@ export async function cleanupAdminFixtures(options: {
   const request = options.request ?? fetch;
   try {
     const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureRecoveryManifest;
-    if (manifest.version !== 1 || !["provisional", "ready"].includes(manifest.state) || !manifest.tag || !manifest.convexSiteUrl) {
+    if (manifest.version !== 2 || !["provisional", "ready"].includes(manifest.state)
+      || !FIXTURE_TAG_PATTERN.test(manifest.tag) || !manifest.convexSiteUrl) {
       throw new Error("Admin E2E recovery manifest is invalid.");
     }
     const target = resolveAdminE2ETarget(options.environment);
-    if (manifest.convexSiteUrl !== target.convexSiteUrl) {
+    if (manifest.targetClass !== target.environment
+      || manifest.approvedCommitSha !== target.approvedCommitSha
+      || manifest.cleanupEndpoint !== "/admin/e2e-fixtures/cleanup"
+      || manifest.convexUrl !== target.convexUrl
+      || manifest.convexSiteUrl !== target.convexSiteUrl) {
       throw new Error("Admin E2E manifest target does not match the guarded cleanup target.");
     }
     const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
@@ -253,10 +355,13 @@ export async function cleanupAdminFixtures(options: {
       headers: authorizationHeaders(target.fixtureSecret),
       body: JSON.stringify({ tag: manifest.tag }),
     });
-    const payload = await responseJson<{ tag: string; deleted: number }>(response, "cleanup");
+    const payload = await responseJson<{ tag: string; deleted: number; cleanupConflict: boolean }>(response, "cleanup");
     if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
     if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
       throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+    }
+    if (payload.cleanupConflict !== false) {
+      throw new Error("Admin E2E cleanup reported an ownership conflict; operator recovery remains required.");
     }
     await rm(options.manifestPath, { force: true });
   } catch (error) {

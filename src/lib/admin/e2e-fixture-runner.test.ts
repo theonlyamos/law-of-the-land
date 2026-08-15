@@ -15,7 +15,7 @@ import { clearAdminE2EParentEnvironment } from "../../../e2e/admin/global-teardo
 let playwrightConfig: (typeof import("../../../playwright.config"))["default"];
 let initializeAdminE2EProviderIsolation: (typeof import("../../../playwright.config"))["initializeAdminE2EProviderIsolation"];
 
-const approvedCommitSha = "74a989459da6b197013222f0bb5c118eed994d64";
+const approvedCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 const observationSecret = Buffer.alloc(32, 7).toString("base64url");
 
 const safeEnvironment = {
@@ -31,6 +31,8 @@ const safeEnvironment = {
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
   ADMIN_E2E_BETTER_AUTH_SECRET: "better-auth-secret-at-least-32-characters",
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
+  ADMIN_E2E_DEPLOYED_COMMIT_SHA: approvedCommitSha,
+  BILLING_ENABLED: "false",
 } satisfies Record<string, string | undefined>;
 
 const remoteEnvironment = {
@@ -40,6 +42,44 @@ const remoteEnvironment = {
   ADMIN_E2E_CONVEX_SITE_URL: "https://safe-preview.convex.site",
   CONVEX_DEPLOYMENT: "dev:safe-preview",
 } satisfies Record<string, string | undefined>;
+
+function fixtureRecords() {
+  return {
+    chatId: "chat", resourceId: "resource", publishedVersionId: "published", reviewVersionId: "review",
+    separationVersionId: "separation", conversationGrantId: "grant", jurisdictionId: "jurisdiction",
+    userId: "normal", stagingBucketId: "910001", productionBucketId: "910002", callbackToken: "gx_callback",
+    callbackJobId: "job", usageUserId: "usage", jurisdictionCountryId: "country", jurisdictionTownId: "town",
+    publicOrganizationJurisdictionId: "public-org", jurisdictionMemberOnlyId: "member-org",
+    jurisdictionMemberId: "membership", jurisdictionFormerMemberId: "former-membership",
+  };
+}
+
+function bootstrapPayload(tag: string) {
+  return {
+    tag,
+    providerTransport: "stub",
+    deployedCommitSha: approvedCommitSha,
+    billingDisabled: true,
+    sessions: {
+      super_admin: { userId: "super", sessionToken: "raw-super-token" },
+      content_manager: { userId: "manager", sessionToken: "raw-manager-token" },
+      content_reviewer: { userId: "reviewer", sessionToken: "raw-reviewer-token" },
+      support_agent: { userId: "support", sessionToken: "raw-support-token" },
+      billing_manager: { userId: "billing", sessionToken: "raw-billing-token" },
+      auditor: { userId: "auditor", sessionToken: "raw-auditor-token" },
+    },
+    variants: {
+      normal: { userId: "normal", sessionToken: "raw-normal-token" },
+      noTwoFactor: { userId: "no-2fa", sessionToken: "raw-no-2fa-token" },
+      unassured: { userId: "unassured", sessionToken: "raw-unassured-token" },
+    },
+    jurisdictionUsers: {
+      member: { userId: "member", sessionToken: "raw-member-token" },
+      formerMember: { userId: "former", sessionToken: "raw-former-token" },
+    },
+    records: fixtureRecords(),
+  };
+}
 
 beforeAll(async () => {
   const configModule = await import("../../../playwright.config");
@@ -62,6 +102,9 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, ADMIN_E2E_ISOLATED_TARGET_MARKER: "dev" }, /isolated target marker/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: undefined }, /ADMIN_E2E_CONVEX_URL/],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_SITE_URL: undefined }, /ADMIN_E2E_CONVEX_SITE_URL/],
+    [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "http://127.0.0.1:3210/path" }, /origin/i],
+    [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: " http://127.0.0.1:3210" }, /exact/i],
+    [{ ...safeEnvironment, ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211 " }, /exact/i],
     [{ ...safeEnvironment, ADMIN_E2E_FIXTURE_SECRET: "short" }, /at least 32 characters/i],
     [{ ...safeEnvironment, CONVEX_DEPLOYMENT: "prod:live-law" }, /production Convex deployment/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site" }, /production-looking/i],
@@ -102,26 +145,9 @@ describe("admin E2E fixture lifecycle", () => {
     const request = async (url: string, init: RequestInit) => {
       requests.push({ url, init });
       if (init.method === "DELETE") {
-        return new Response(JSON.stringify({ tag: "e2e_runnerfixture1", deleted: 12 }), { status: 200 });
+        return new Response(JSON.stringify({ tag: "e2e_runnerfixture1", deleted: 12, cleanupConflict: false }), { status: 200 });
       }
-      return new Response(JSON.stringify({
-        tag: "e2e_runnerfixture1",
-        providerTransport: "stub",
-        sessions: {
-          super_admin: { userId: "super", sessionToken: "raw-super-token" },
-          content_manager: { userId: "manager", sessionToken: "raw-manager-token" },
-          content_reviewer: { userId: "reviewer", sessionToken: "raw-reviewer-token" },
-          support_agent: { userId: "support", sessionToken: "raw-support-token" },
-          billing_manager: { userId: "billing", sessionToken: "raw-billing-token" },
-          auditor: { userId: "auditor", sessionToken: "raw-auditor-token" },
-        },
-        variants: {
-          normal: { userId: "normal", sessionToken: "raw-normal-token" },
-          noTwoFactor: { userId: "no-2fa", sessionToken: "raw-no-2fa-token" },
-          unassured: { userId: "unassured", sessionToken: "raw-unassured-token" },
-        },
-        records: { callbackToken: "gx_callback" },
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(bootstrapPayload("e2e_runnerfixture1")), { status: 200, headers: { "content-type": "application/json" } });
     };
 
     const manifest = await bootstrapAdminFixtures({
@@ -137,6 +163,10 @@ describe("admin E2E fixture lifecycle", () => {
       init: { method: "POST", headers: { authorization: "Bearer fixture-secret-that-is-at-least-32-chars", "content-type": "application/json" }, body: '{"tag":"e2e_runnerfixture1"}' },
     });
     expect(manifest.sessions.super_admin).toMatch(/^better-auth\.session_token=raw-super-token\.[A-Za-z0-9+/]+=*$/);
+    expect(manifest.jurisdictionUsers.member).toMatchObject({
+      userId: "member",
+      cookie: expect.stringMatching(/^better-auth\.session_token=raw-member-token\./),
+    });
     expect(manifest.state).toBe("ready");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     expect(JSON.stringify(manifest)).not.toContain(observationSecret);
@@ -157,15 +187,44 @@ describe("admin E2E fixture lifecycle", () => {
       },
     })).rejects.toThrow(/bootstrap failed/i);
     expect(duringRequest).toEqual({
-      version: 1,
+      version: 2,
       state: "provisional",
       tag: "e2e_failurewindow1",
+      targetClass: "test",
+      approvedCommitSha,
       convexUrl: "http://127.0.0.1:3210",
       convexSiteUrl: "http://127.0.0.1:3211",
+      cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
     });
     expect(JSON.stringify(duringRequest)).not.toContain(observationSecret);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
-    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0 }), { status: 200 }) });
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0, cleanupConflict: false }), { status: 200 }) });
+  });
+
+  it("rejects a stale approved SHA before writing a provisional manifest", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    await expect(bootstrapAdminFixtures({
+      environment: {
+        ...safeEnvironment,
+        ADMIN_E2E_APPROVED_COMMIT_SHA: "f".repeat(40),
+        ADMIN_E2E_LOCAL_HEAD_SHA: "f".repeat(40),
+      },
+      fixtureTag: "e2e_stalesha1234",
+      manifestPath,
+      request: vi.fn(),
+    })).rejects.toThrow(/freshly derived local HEAD/i);
+    await expect(readFile(manifestPath, "utf8")).rejects.toThrow();
+  });
+
+  it("rejects an unsafe tag before writing a provisional manifest", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    await expect(bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: "e2e_bad-tag",
+      manifestPath,
+      request: vi.fn(),
+    })).rejects.toThrow(/fixture tag/i);
+    await expect(readFile(manifestPath, "utf8")).rejects.toThrow();
   });
 
   it("retains the provisional recovery manifest when a successful response fails validation", async () => {
@@ -174,7 +233,7 @@ describe("admin E2E fixture lifecycle", () => {
       environment: safeEnvironment,
       fixtureTag: "e2e_validationwindow1",
       manifestPath,
-      request: async () => new Response(JSON.stringify({ tag: "e2e_validationwindow1", providerTransport: "stub", sessions: {}, variants: {}, records: {} }), { status: 200 }),
+      request: async () => new Response(JSON.stringify({ tag: "e2e_validationwindow1", providerTransport: "stub", deployedCommitSha: approvedCommitSha, billingDisabled: true, sessions: {}, variants: {}, jurisdictionUsers: {}, records: {} }), { status: 200 }),
     })).rejects.toThrow(/omitted the super_admin session token/i);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
     await rm(manifestPath, { force: true });
@@ -183,33 +242,27 @@ describe("admin E2E fixture lifecycle", () => {
   it("cleans up the exact manifest tag and retains a private recovery manifest when cleanup fails", async () => {
     const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
     const manifest: FixtureManifest = {
-      version: 1,
+      version: 2,
       state: "ready",
       tag: "e2e_exactfixture1",
+      targetClass: "test",
+      approvedCommitSha,
       convexUrl: "http://127.0.0.1:3210",
       convexSiteUrl: "http://127.0.0.1:3211",
+      cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
       sessions: { super_admin: "better-auth.session_token=signed" },
       variants: {
         normal: { userId: "normal", cookie: "better-auth.session_token=normal.signed" },
         noTwoFactor: { userId: "no-2fa", cookie: "better-auth.session_token=no2fa.signed" },
         unassured: { userId: "unassured", cookie: "better-auth.session_token=unassured.signed" },
       },
-      records: {},
-    };
-    const setupRequest = async () => new Response(JSON.stringify({
-      tag: manifest.tag,
-      providerTransport: "stub",
-      sessions: {
-        super_admin: { userId: "super", sessionToken: "a" }, content_manager: { userId: "manager", sessionToken: "b" },
-        content_reviewer: { userId: "reviewer", sessionToken: "c" }, support_agent: { userId: "support", sessionToken: "d" },
-        billing_manager: { userId: "billing", sessionToken: "e" }, auditor: { userId: "auditor", sessionToken: "f" },
+      jurisdictionUsers: {
+        member: { userId: "member", cookie: "better-auth.session_token=member.signed" },
+        formerMember: { userId: "former", cookie: "better-auth.session_token=former.signed" },
       },
-      variants: {
-        normal: { userId: "normal", sessionToken: "normal-token" },
-        noTwoFactor: { userId: "no-2fa", sessionToken: "no2fa-token" },
-        unassured: { userId: "unassured", sessionToken: "unassured-token" },
-      }, records: {},
-    }), { status: 200 });
+      records: fixtureRecords(),
+    };
+    const setupRequest = async () => new Response(JSON.stringify(bootstrapPayload(manifest.tag)), { status: 200 });
     await bootstrapAdminFixtures({ environment: safeEnvironment, fixtureTag: manifest.tag, manifestPath, request: setupRequest });
     let cleanupBody = "";
 
@@ -224,7 +277,25 @@ describe("admin E2E fixture lifecycle", () => {
 
     expect(cleanupBody).toBe('{"tag":"e2e_exactfixture1"}');
     await expect(readFile(manifestPath, "utf8")).resolves.toContain(manifest.tag);
-    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: manifest.tag, deleted: 0 }), { status: 200 }) });
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: manifest.tag, deleted: 0, cleanupConflict: false }), { status: 200 }) });
+  });
+
+  it("treats a typed cleanup conflict as failure and retains the manifest", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    const tag = "e2e_cleanupconflict1";
+    await bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: tag,
+      manifestPath,
+      request: async () => new Response(JSON.stringify(bootstrapPayload(tag)), { status: 200 }),
+    });
+    await expect(cleanupAdminFixtures({
+      environment: safeEnvironment,
+      manifestPath,
+      request: async () => new Response(JSON.stringify({ tag, deleted: 0, cleanupConflict: true }), { status: 200 }),
+    })).rejects.toThrow(/ownership conflict/i);
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain(tag);
+    await rm(manifestPath, { force: true });
   });
 });
 
@@ -260,6 +331,22 @@ describe("Playwright web server environment", () => {
         else process.env[key] = value;
       }
     }
+  });
+
+  it("retains the provisional manifest when the deployed commit differs", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    await expect(bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: "e2e_deploysha123",
+      manifestPath,
+      request: async () => new Response(JSON.stringify({
+        tag: "e2e_deploysha123",
+        providerTransport: "stub",
+        deployedCommitSha: "f".repeat(40),
+      }), { status: 200 }),
+    })).rejects.toThrow(/deployed commit/i);
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
+    await rm(manifestPath, { force: true });
   });
 
   it("accepts a remote target only with its exact development deployment binding", () => {

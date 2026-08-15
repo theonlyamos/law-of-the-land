@@ -17,7 +17,15 @@ describe("admin performance artifact writer", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admin-performance-artifact-"));
     tempDirectories.push(directory);
     const artifactPath = path.join(directory, "admin-performance.json");
-    const metrics = { lcp: 2000, inp: 120, cls: 0.04, routeJsGzip: 100_000, p95: 300, baseline: "public-search-api-unauthenticated" };
+    const metrics = {
+      artifactVersion: 2,
+      lcp: 2000,
+      inp: 120,
+      cls: 0.04,
+      routeJsGzip: 100_000,
+      p95: 300,
+      baseline: "public-search-api-unauthenticated",
+    };
 
     writePerformanceArtifact(artifactPath, metrics);
 
@@ -32,5 +40,17 @@ describe("admin performance artifact writer", () => {
 
     expect(() => writePerformanceArtifact(artifactPath, { lcp: Number.NaN })).toThrow("finite numbers");
     expect(fs.existsSync(artifactPath)).toBe(false);
+  });
+
+  it.each([
+    ["cookie", { artifactVersion: 2, lcp: 1, inp: 1, cls: 0, routeJsGzip: 1, p95: 1, cookie: "secret" }],
+    ["question", { artifactVersion: 2, lcp: 1, inp: 1, cls: 0, routeJsGzip: 1, p95: 1, nested: { question: "private" } }],
+    ["deployment URL", { artifactVersion: 2, lcp: 1, inp: 1, cls: 0, routeJsGzip: 1, p95: 1, target: "https://preview.convex.cloud" }],
+  ])("rejects a secret-bearing %s field before writing", (_label, artifact) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admin-performance-artifact-"));
+    tempDirectories.push(directory);
+    expect(() => writePerformanceArtifact(path.join(directory, "admin-performance.json"), artifact))
+      .toThrow(/redaction-safe/i);
+    expect(fs.readdirSync(directory)).toEqual([]);
   });
 });

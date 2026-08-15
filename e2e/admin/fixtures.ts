@@ -34,7 +34,15 @@ export type BrowserFixtureManifest = {
   convexSiteUrl: string;
   sessions: Record<FixedAdminRole, string>;
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; cookie: string }>;
-  records: Record<string, string>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; cookie: string }>;
+  records: {
+    chatId: string; resourceId: string; publishedVersionId: string; reviewVersionId: string;
+    separationVersionId: string; conversationGrantId: string; jurisdictionId: string; userId: string;
+    stagingBucketId: string; productionBucketId: string; callbackToken: string; callbackJobId: string;
+    usageUserId: string; jurisdictionCountryId: string; jurisdictionTownId: string;
+    publicOrganizationJurisdictionId: string; jurisdictionMemberOnlyId: string;
+    jurisdictionMemberId: string; jurisdictionFormerMemberId: string;
+  };
 };
 
 export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManifest> {
@@ -45,8 +53,12 @@ export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManife
 
 export async function controlBrowserFixtures(
   fixture: BrowserFixtureManifest,
-  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
-  input: string | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } } | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" } = "",
+  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation" | "deactivate_jurisdiction_member" | "set_unified_jurisdictions_flag",
+  input: string
+    | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } }
+    | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" }
+    | { membershipId: string }
+    | { enabled: boolean } = "",
 ) {
   const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
   if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
@@ -56,7 +68,7 @@ export async function controlBrowserFixtures(
     body: JSON.stringify({ tag: fixture.tag, operation, ...(typeof input === "string" ? (input ? { versionId: input } : {}) : input) }),
   });
   if (!response.ok) throw new Error(`Guarded fixture control failed (${response.status}).`);
-  return await response.json() as {
+  const result = await response.json() as {
     path?: string;
     role?: FixedAdminRole;
     args?: Record<string, unknown>;
@@ -66,6 +78,10 @@ export async function controlBrowserFixtures(
     armed?: boolean;
     outcome?: "succeeded" | "failed";
     operation?: "publish" | "rollback" | "unpublish";
+    membershipId?: string;
+    active?: boolean;
+    enabled?: boolean;
+    cleanupConflict?: boolean;
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
     publicationJob: { id: string; status: string; processId: string | null; lastErrorKind: string | null } | null;
@@ -73,6 +89,10 @@ export async function controlBrowserFixtures(
     retention: { deletedTotal: number; lastSuccessfulAt: number | null };
     callbackJob: null | { status: string; payload: string; retentionRedactedAt: number | null };
   };
+  if (result.cleanupConflict === true) {
+    throw new Error("Guarded fixture control reported an ownership conflict; recovery cleanup remains required.");
+  }
+  return result;
 }
 
 export async function roleCookie(role: FixedAdminRole) {
