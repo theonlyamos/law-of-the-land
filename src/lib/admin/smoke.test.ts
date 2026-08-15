@@ -151,6 +151,7 @@ describe("admin performance budgets", () => {
       ADMIN_E2E_FIXTURE_SECRET: "f".repeat(32),
       ADMIN_E2E_BETTER_AUTH_SECRET: "b".repeat(32),
       ADMIN_E2E_ACCOUNT_PASSWORD: "password-1234",
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "s".repeat(32),
       ADMIN_E2E_APPROVED_COMMIT_SHA: "a".repeat(40),
       ADMIN_E2E_LOCAL_HEAD_SHA: "a".repeat(40),
       CONVEX_DEPLOYMENT: "dev:safe-preview",
@@ -162,6 +163,8 @@ describe("admin performance budgets", () => {
       .toThrow(/exact/i);
     expect(() => requireAdminFixtureBoundary({ ...environment, ADMIN_E2E_CONVEX_SITE_URL: `${environment.ADMIN_E2E_CONVEX_SITE_URL} ` }))
       .toThrow(/exact/i);
+    expect(() => requireAdminFixtureBoundary({ ...environment, ADMIN_E2E_SEARCH_JURISDICTION_SECRET: undefined }))
+      .toThrow(/ADMIN_E2E_SEARCH_JURISDICTION_SECRET/);
   });
 
   it("exits nonzero with a clear inconclusive result when the session cookie is absent", () => {

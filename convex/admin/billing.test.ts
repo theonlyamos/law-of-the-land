@@ -16,6 +16,7 @@ const grant = makeFunctionReference<"mutation">("admin/billing:grantQuotaOverrid
 const revoke = makeFunctionReference<"mutation">("admin/billing:revokeQuotaOverride");
 const effective = makeFunctionReference<"query">("admin/billing:getEffectiveAllowanceForUser");
 const listUsage = makeFunctionReference<"query">("admin/billing:listUsage");
+const listSubscriptions = makeFunctionReference<"query">("admin/billing:listSubscriptions");
 const record = makeFunctionReference<"mutation">("usage:recordQuestion");
 const check = makeFunctionReference<"query">("usage:checkAllowance");
 
@@ -133,16 +134,47 @@ describe("audited quota administration", () => {
     const usedAccount = await createAccount(t, "usage-a");
     const zeroAccount = await createAccount(t, "usage-b");
     await t.run((ctx) => ctx.db.insert("dailyUsage", { userId: usedAccount._id, day: "2026-07-28", count: 2 }));
-    const first = await asBilling.query(listUsage, { paginationOpts: { numItems: 2, cursor: null } });
+    const first = await asBilling.query(listUsage, { paginationOpts: { numItems: 2, cursor: null }, now: Date.now() });
     expect(first.isDone).toBe(false);
-    const second = await asBilling.query(listUsage, { paginationOpts: { numItems: 2, cursor: first.continueCursor } });
+    const second = await asBilling.query(listUsage, { paginationOpts: { numItems: 2, cursor: first.continueCursor }, now: Date.now() });
     const before = [...first.page, ...second.page];
     expect(before.find((row: { userId: string }) => row.userId === usedAccount._id)).toMatchObject({ used: 2, canRecord: true });
     expect(before.find((row: { userId: string }) => row.userId === zeroAccount._id)).toMatchObject({ used: 0, baseLimit: 10, effectiveLimit: 10 });
     expect(before[0]).not.toHaveProperty("email");
     vi.setSystemTime(new Date("2026-07-29T00:00:00.000Z"));
-    const after = await asBilling.query(listUsage, { paginationOpts: { numItems: 50, cursor: null } });
+    const after = await asBilling.query(listUsage, { paginationOpts: { numItems: 50, cursor: null }, now: Date.now() });
     expect(after.page.find((row: { userId: string }) => row.userId === usedAccount._id)).toMatchObject({ used: 0, canRecord: true });
+  });
+
+  it("keys both billing registers to one explicit bounded observation time", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-07-28T12:00:00.000Z"));
+    const t = backend(); await enable(t); const asBilling = await admin(t); const account = await createAccount(t, "observed-allowance");
+    const now = Date.now();
+    await asBilling.mutation(grant, {
+      userId: account._id,
+      limit: 25,
+      startsAt: now + 1_000,
+      expiresAt: now + 60_000,
+      reason: "Scheduled account remediation",
+      idempotencyKey: "observed-allowance-grant",
+      confirmation: "",
+    });
+
+    const before = await asBilling.query(listUsage, { paginationOpts: { numItems: 50, cursor: null }, now });
+    const observedAt = now + 1_000;
+    const [usage, subscriptions] = await Promise.all([
+      asBilling.query(listUsage, { paginationOpts: { numItems: 50, cursor: null }, now: observedAt }),
+      asBilling.query(listSubscriptions, { paginationOpts: { numItems: 50, cursor: null }, now: observedAt }),
+    ]);
+
+    expect(before.page.find((row: { userId: string }) => row.userId === account._id)).toMatchObject({ effectiveLimit: 10, override: null });
+    for (const register of [usage, subscriptions]) {
+      expect(register.page.find((row: { userId: string }) => row.userId === account._id)).toMatchObject({
+        effectiveLimit: 25,
+        override: { limit: 25, startsAt: observedAt },
+      });
+    }
+    await expect(asBilling.query(listUsage, { paginationOpts: { numItems: 50, cursor: null }, now: now + 60_001 })).rejects.toThrow("INVALID_BILLING_OBSERVATION_TIME");
   });
 
   it.each(["password=hunter2", "api token sk_live_123", "Contact customer@example.com about remediation"])("rejects unsafe reason %s without persisting it", async (reason) => {

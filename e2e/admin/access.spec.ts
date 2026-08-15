@@ -12,6 +12,9 @@ import {
 } from "./fixtures";
 
 const ADMIN_ROLES = ["super_admin", "content_manager", "content_reviewer", "support_agent", "billing_manager", "auditor"] as const;
+const ALLOWED_CONFIGURATION_ERRORS: Partial<Record<(typeof E2E_PRIVILEGED_FUNCTIONS)[number]["path"], string>> = {
+  "admin/documents:generateUploadUrl": "DOCUMENT_UPLOAD_NOT_CONFIGURED",
+};
 
 function expectOperationSuccess(path: string, result: unknown, args: Record<string, unknown>) {
   const value = result as Record<string, unknown>;
@@ -184,6 +187,13 @@ test("every fixed role executes every privileged function row against the isolat
       }
       const allowed = (operation.allowed as readonly string[]).includes(role);
       if (allowed) {
+        const allowedConfigurationError = ALLOWED_CONFIGURATION_ERRORS[operation.path];
+        if (allowedConfigurationError && error) {
+          expect(error, `${role} ${operation.path}`).toContain(`ConvexError: ${allowedConfigurationError}`);
+          expect(error, `${role} ${operation.path} passed its permission boundary`).not.toContain("ADMIN_FORBIDDEN");
+          expect(result, `${role} ${operation.path} must not return a partial result`).toBeUndefined();
+          continue;
+        }
         expect(error, `${role} ${operation.path}`).toBe("");
         expectOperationSuccess(operation.path, result, args);
         await expectDurableOperationSuccess(fixture, operation, role, key, args, result);

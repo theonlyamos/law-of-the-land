@@ -31,6 +31,7 @@ const safeEnvironment = {
   ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
   ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
   ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
+  ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
   ADMIN_E2E_BETTER_AUTH_SECRET: "better-auth-secret-at-least-32-characters",
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
@@ -111,6 +112,8 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, ADMIN_E2E_FIXTURE_SECRET: "short" }, /at least 32 characters/i],
     [{ ...safeEnvironment, ADMIN_E2E_PLACE_CLAIM_SECRET: undefined }, /ADMIN_E2E_PLACE_CLAIM_SECRET/],
     [{ ...safeEnvironment, ADMIN_E2E_PLACE_CLAIM_SECRET: "not+base64" }, /ADMIN_E2E_PLACE_CLAIM_SECRET/],
+    [{ ...safeEnvironment, ADMIN_E2E_SEARCH_JURISDICTION_SECRET: undefined }, /ADMIN_E2E_SEARCH_JURISDICTION_SECRET/],
+    [{ ...safeEnvironment, ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "short" }, /ADMIN_E2E_SEARCH_JURISDICTION_SECRET/],
     [{ ...safeEnvironment, CONVEX_DEPLOYMENT: "prod:live-law" }, /production Convex deployment/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site" }, /production-looking/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site", ADMIN_E2E_TARGET_ENV: "preview" }, /same isolated deployment/i],
@@ -181,6 +184,7 @@ describe("admin E2E fixture lifecycle", () => {
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     expect(JSON.stringify(manifest)).not.toContain(observationSecret);
     expect(JSON.stringify(manifest)).not.toContain(placeClaimSecret);
+    expect(JSON.stringify(manifest)).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
     if (process.platform !== "win32") expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
   });
@@ -208,6 +212,7 @@ describe("admin E2E fixture lifecycle", () => {
       cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
     });
     expect(JSON.stringify(duringRequest)).not.toContain(observationSecret);
+    expect(JSON.stringify(duringRequest)).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0, cleanupConflict: false }), { status: 200 }) });
   });
@@ -307,6 +312,24 @@ describe("admin E2E fixture lifecycle", () => {
     })).rejects.toThrow(/ownership conflict/i);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain(tag);
     await rm(manifestPath, { force: true });
+  });
+
+  it("requires a target-bound search transport secret and maps it only into the Next child", () => {
+    const searchTransportSecret = safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET;
+    expect(() => resolveAdminE2ETarget({
+      ...safeEnvironment,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: undefined,
+    })).toThrow(/ADMIN_E2E_SEARCH_JURISDICTION_SECRET/);
+    const child = buildWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: searchTransportSecret,
+    });
+    expect(child.SEARCH_JURISDICTION_SECRET).toBe(searchTransportSecret);
+    expect(child).not.toHaveProperty("ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+    expect(JSON.stringify(buildBrowserEnvironment({
+      ...child,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: searchTransportSecret,
+    }))).not.toContain(searchTransportSecret);
   });
 });
 
@@ -500,6 +523,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
       CONVEX_DEPLOYMENT: "dev:safe-preview",
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
@@ -521,11 +545,13 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       PLACE_CLAIM_SECRET: placeClaimSecret,
+      SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
       CONVEX_DEPLOYMENT: "dev:safe-preview",
     });
     expect(environment).not.toHaveProperty("ADMIN_E2E_FIXTURE_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_PLACE_CLAIM_SECRET");
+    expect(environment).not.toHaveProperty("ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
     expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
     expect(buildBrowserEnvironment({ ...environment, x_admin_e2e_retrieval_plan_v1: "must-not-leak" }))
@@ -534,6 +560,7 @@ describe("Playwright web server environment", () => {
       ...environment,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
       "x-admin-e2e-retrieval-plan-v1": "must-not-enter-artifacts",
     }))).not.toContain("x-admin-e2e-retrieval-plan-v1");
   });
@@ -557,7 +584,7 @@ describe("Playwright web server environment", () => {
     });
     expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
     expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
-    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, "search-jurisdiction-secret-that-is-at-least-32-characters", approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
       expect(JSON.stringify(environment)).not.toContain(secret);
     }
   });
@@ -628,6 +655,10 @@ describe("Playwright web server environment", () => {
     })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
     expect(() => assertIsolatedWebServerEnvironment({
       ...safeEnvironment,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: undefined,
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: Buffer.alloc(33, 7).toString("base64url"),
     })).not.toThrow();
     expect(() => assertIsolatedWebServerEnvironment(remoteEnvironment)).not.toThrow();
@@ -649,11 +680,13 @@ describe("Playwright web server environment", () => {
     }
     expect(output.join("\n")).not.toContain(observationSecret);
     expect(output.join("\n")).not.toContain(placeClaimSecret);
+    expect(output.join("\n")).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
 
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
+      ADMIN_E2E_SEARCH_JURISDICTION_SECRET: safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET,
     };
     clearAdminE2EParentEnvironment(environment);
     expect(environment).toEqual({});

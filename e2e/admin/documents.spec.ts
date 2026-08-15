@@ -21,16 +21,27 @@ function versionArticle(page: Page, versionNumber: number, filename: string) {
   return authoritativeOriginal.locator("xpath=ancestor::article[1]").filter({ has: actions });
 }
 
-async function waitForPublicationJob(
+async function waitForPublicationState(
   fixture: Awaited<ReturnType<typeof loadBrowserFixtureManifest>>,
   versionId: string,
-  expectedStatus: "failed" | "succeeded",
+  expectedVersionStatus: "approved" | "published" | "unpublished",
+  expectedFailureSummary: string | null,
+  expectedActiveVersionId: string | null,
 ) {
   let state = await controlBrowserFixtures(fixture, "read_state", versionId);
   await expect.poll(async () => {
     state = await controlBrowserFixtures(fixture, "read_state", versionId);
-    return state.publicationJob?.status ?? null;
-  }, { timeout: 15_000 }).toBe(expectedStatus);
+    const version = state.versions.find((row) => row.id === versionId);
+    return {
+      versionStatus: version?.status ?? null,
+      failureSummary: version?.failureSummary ?? null,
+      activeVersionId: state.activeVersionId,
+    };
+  }, { timeout: 15_000 }).toEqual({
+    versionStatus: expectedVersionStatus,
+    failureSummary: expectedFailureSummary,
+    activeVersionId: expectedActiveVersionId,
+  });
   return state;
 }
 
@@ -88,7 +99,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await dialog.getByRole("button", { name: "Queue publish" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Publish queued for version 2" })).toBeVisible();
 
-  let state = await waitForPublicationJob(fixture, versionId, "failed");
+  let state = await waitForPublicationState(fixture, versionId, "approved", "Production copy failed", fixture.records.publishedVersionId);
   expect(state.activeVersionId).toBe(fixture.records.publishedVersionId);
   expect(state.versions.find((row) => row.id === versionId)).toMatchObject({ status: "approved", failureSummary: "Production copy failed" });
   expect(state.publicationJob).toMatchObject({ status: "failed", lastErrorKind: "provider" });
@@ -107,7 +118,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await retryDialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);
   await retryDialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
   await retryDialog.getByRole("button", { name: "Queue publish" }).click();
-  state = await waitForPublicationJob(fixture, versionId, "succeeded");
+  state = await waitForPublicationState(fixture, versionId, "published", null, versionId);
   expect(state.activeVersionId).toBe(versionId);
   expect(state.versions.find((row) => row.id === fixture.records.publishedVersionId)?.status).toBe("superseded");
 
@@ -124,7 +135,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await rollbackDialog.getByLabel("Exact confirmation").fill(`ROLLBACK ${fixture.records.publishedVersionId}`);
   await rollbackDialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
   await rollbackDialog.getByRole("button", { name: "Queue rollback" }).click();
-  state = await waitForPublicationJob(fixture, fixture.records.publishedVersionId, "succeeded");
+  state = await waitForPublicationState(fixture, fixture.records.publishedVersionId, "published", null, fixture.records.publishedVersionId);
   expect(state.activeVersionId).toBe(fixture.records.publishedVersionId);
   expect(state.versions.find((row) => row.id === versionId)?.status).toBe("superseded");
 
@@ -141,7 +152,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await unpublishDialog.getByLabel("Exact confirmation").fill(`UNPUBLISH ${fixture.records.publishedVersionId}`);
   await unpublishDialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
   await unpublishDialog.getByRole("button", { name: "Queue unpublish" }).click();
-  state = await waitForPublicationJob(fixture, fixture.records.publishedVersionId, "succeeded");
+  state = await waitForPublicationState(fixture, fixture.records.publishedVersionId, "unpublished", null, null);
   expect(state.activeVersionId).toBeNull();
   expect(state.versions.find((row) => row.id === fixture.records.publishedVersionId)?.status).toBe("unpublished");
 });

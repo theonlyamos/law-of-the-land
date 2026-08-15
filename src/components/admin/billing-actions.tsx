@@ -3,6 +3,7 @@
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
 import { useMutation } from "convex/react";
+import { useRouter } from "next/navigation";
 import { useMemo, useState, type FormEvent } from "react";
 
 const LONG_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -22,6 +23,7 @@ export function BillingAllowanceSummary({ used, effectiveLimit, allowed, canReco
 }
 
 export function BillingActions({ userId, activeOverrideId }: { userId: string; activeOverrideId?: Id<"quotaOverrides"> }) {
+  const router = useRouter();
   const grant = useMutation(api.admin.billing.grantQuotaOverride);
   const revoke = useMutation(api.admin.billing.revokeQuotaOverride);
   const [limit, setLimit] = useState("100");
@@ -41,13 +43,14 @@ export function BillingActions({ userId, activeOverrideId }: { userId: string; a
     try {
       await grant({ userId, limit: numericLimit, startsAt: Date.now(), expiresAt, reason, confirmation, idempotencyKey: crypto.randomUUID() });
       setState("saved");
+      router.refresh();
     } catch { setState("error"); }
   }
 
   async function revokeCurrent() {
     if (!activeOverrideId || reason.trim().length < 3) { setState("error"); return; }
     setState("saving");
-    try { await revoke({ overrideId: activeOverrideId, reason, idempotencyKey: crypto.randomUUID() }); setState("saved"); } catch { setState("error"); }
+    try { await revoke({ overrideId: activeOverrideId, reason, idempotencyKey: crypto.randomUUID() }); setState("saved"); router.refresh(); } catch { setState("error"); }
   }
 
   return (

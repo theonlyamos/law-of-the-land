@@ -213,8 +213,12 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
   const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");
   const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
   requiredCanonicalSecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET");
+  const searchJurisdictionSecret = required(environment, "ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
   if (fixtureSecret.length < 32 || betterAuthSecret.length < 32) {
     throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
+  }
+  if (searchJurisdictionSecret.length < 32) {
+    throw new Error("ADMIN_E2E_SEARCH_JURISDICTION_SECRET must be at least 32 characters.");
   }
   if (accountPassword.length < 12) throw new Error("ADMIN_E2E_ACCOUNT_PASSWORD must be at least 12 characters.");
   const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;

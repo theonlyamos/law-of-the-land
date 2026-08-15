@@ -14,6 +14,7 @@ const MAX_DURATION_MS = 90 * 24 * 60 * 60 * 1_000;
 const LARGE_LIMIT = 1_000;
 const LONG_DURATION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_FUTURE_START_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_OBSERVATION_SKEW_MS = 60_000;
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 
 const overrideProjection = v.object({
@@ -48,6 +49,14 @@ function validatePage(options: { numItems: number; cursor: string | null }) {
     throw new ConvexError("INVALID_BILLING_PAGE_SIZE");
   }
   return options;
+}
+
+function validateObservationTime(value: number): number {
+  const serverNow = Date.now();
+  if (!Number.isSafeInteger(value) || value < serverNow - MAX_OBSERVATION_SKEW_MS || value > serverNow + MAX_OBSERVATION_SKEW_MS) {
+    throw new ConvexError("INVALID_BILLING_OBSERVATION_TIME");
+  }
+  return value;
 }
 
 function validateKey(value: string): string {
@@ -96,12 +105,12 @@ export const getEffectiveAllowanceForUser = query({
 });
 
 export const listUsage = query({
-  args: { paginationOpts: paginationOptsValidator },
+  args: { paginationOpts: paginationOptsValidator, now: v.number() },
   returns: v.object({ page: v.array(allowanceProjection), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "billing", "read");
+    const now = validateObservationTime(args.now);
     const page = await ctx.runQuery(components.betterAuth.adapter.findMany, { model: "user", select: ["id"], sortBy: { field: "createdAt", direction: "desc" }, paginationOpts: validatePage(args.paginationOpts) }) as { page: Array<{ _id: string }>; isDone: boolean; continueCursor: string };
-    const now = Date.now();
     return { isDone: page.isDone, continueCursor: page.continueCursor, page: await Promise.all(page.page.map(async (user) => {
       const allowance = await getEffectiveAllowance(ctx, user._id, now);
       return { userId: user._id, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, canRecord: allowance.canRecord, isPro: allowance.isPro, override: projectOverride(allowance.override) };
@@ -110,12 +119,12 @@ export const listUsage = query({
 });
 
 export const listSubscriptions = query({
-  args: { paginationOpts: paginationOptsValidator },
+  args: { paginationOpts: paginationOptsValidator, now: v.number() },
   returns: v.object({ page: v.array(v.object({ userId: v.string(), plan: v.union(v.literal("free"), v.literal("pro")), status: v.union(v.string(), v.null()), currentPeriodStart: v.union(v.string(), v.null()), currentPeriodEnd: v.union(v.string(), v.null()), used: v.number(), baseLimit: v.number(), effectiveLimit: v.number(), allowed: v.boolean(), canRecord: v.boolean(), override: v.union(v.null(), overrideProjection) })), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "billing", "read");
+    const now = validateObservationTime(args.now);
     const result = await ctx.runQuery(components.betterAuth.adapter.findMany, { model: "user", select: ["id"], sortBy: { field: "createdAt", direction: "desc" }, paginationOpts: validatePage(args.paginationOpts) }) as { page: Array<{ _id: string }>; isDone: boolean; continueCursor: string };
-    const now = Date.now();
     return { isDone: result.isDone, continueCursor: result.continueCursor, page: await Promise.all(result.page.map(async (user) => {
       const [subscription, allowance] = await Promise.all([polar.getCurrentSubscription(ctx, { userId: user._id }), getEffectiveAllowance(ctx, user._id, now)]);
       return { userId: user._id, plan: subscription ? "pro" as const : "free" as const, status: subscription?.status ?? null, currentPeriodStart: subscription?.currentPeriodStart ?? null, currentPeriodEnd: subscription?.currentPeriodEnd ?? null, used: allowance.used, baseLimit: allowance.baseLimit, effectiveLimit: allowance.effectiveLimit, allowed: allowance.allowed, canRecord: allowance.canRecord, override: projectOverride(allowance.override) };

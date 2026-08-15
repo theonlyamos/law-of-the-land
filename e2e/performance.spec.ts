@@ -160,13 +160,13 @@ async function collectPlacePicker(request: APIRequestContext, cookie: string, fi
   return { branch: "geographic", autocompleteSamplesMs, detailsSamplesMs, resultCount, requestCount: 40, sameSessionCorrelation: true, placesInvocationCount: 40 };
 }
 
-async function collectRetrievalPlan(fixture: BrowserFixtureManifest) {
+async function collectRetrievalPlan(fixture: BrowserFixtureManifest, cookie: string) {
   const secret = process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET;
   if (!secret) throw new Error("Parent-only retrieval observation secret is unavailable.");
   return await collectPacedRetrievalObservations({
     collect: async () => await collectRetrievalObservation({
       url: "http://127.0.0.1:3000/api/search",
-      cookie: fixture.variants.normal.cookie,
+      cookie,
       observationSecret: secret,
       body: { query: E2E_JURISDICTION_QUESTIONS.complete, jurisdictionId: fixture.records.publicOrganizationJurisdictionId },
     }),
@@ -256,7 +256,7 @@ test("records authenticated admin and bounded jurisdiction performance evidence"
   const throttled = await collectSelectorProfile(page, fixture, "throttled", true);
   const baselineP95Ms = percentile95(off.samplesMs);
   const placePicker = await collectPlacePicker(request, adminCookie, fixture);
-  const retrievalObservations = await collectRetrievalPlan(fixture);
+  const retrievalObservations = await collectRetrievalPlan(fixture, adminCookie);
   const calibration = approvedCalibration();
   const sections = applyCalibration(buildJurisdictionPerformanceSections({
     selectorProfiles: [
