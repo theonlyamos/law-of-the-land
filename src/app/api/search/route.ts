@@ -163,7 +163,8 @@ async function legacySearch(query: string, body: Record<string, unknown>) {
   await fetchAuthMutation(issueCorrelation, {
     token: correlationToken,
     jurisdictionCode: countryCode,
-    serviceProof: await createTelemetryServiceProof(["issue", correlationToken, countryCode]),
+    legacyResolutionUsed: false,
+    serviceProof: await createTelemetryServiceProof(["issue", correlationToken, countryCode, 0]),
   });
   const groundx = new Groundx({ apiKey: process.env.GROUNDX_API_KEY as string });
   const startedAt = performance.now();
@@ -232,6 +233,7 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
     selection = null;
   }
   if (!selection) return NextResponse.json({ error: RESEARCH_UNAVAILABLE }, { status: 400 });
+  const legacyResolutionUsed = jurisdictionId === undefined && country !== undefined;
   const quota = await recordQuestion();
   if (quota) return quota;
   const planner = await planTopicScope(query);
@@ -245,9 +247,11 @@ async function unifiedSearch(query: string, body: Record<string, unknown>) {
   await fetchAuthMutation(issueCorrelation, {
     token: correlationToken,
     jurisdictionId: selection.id,
+    legacyResolutionUsed,
     ...(selection.legacyCountryCode ? { legacyCountryCode: selection.legacyCountryCode } : {}),
     serviceProof: await createTelemetryServiceProof([
-      "issue-jurisdiction-v1", correlationToken, selection.id, selection.legacyCountryCode ?? "",
+      "issue-jurisdiction-v1", correlationToken, selection.id,
+      selection.legacyCountryCode ?? "", legacyResolutionUsed ? 1 : 0,
     ]),
   });
   const supplementaryIds = plan.slice(1).map((item) => item.jurisdictionId);

@@ -21,6 +21,11 @@ import {
   hasCoherentJurisdictionContractIdentity,
   resolveLegacyJurisdictionSnapshot,
 } from "./lib/legacyJurisdictionCompatibility";
+import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
+import {
+  readMigrationEnvironment,
+  recordLegacyJurisdictionDependency,
+} from "./lib/unifiedJurisdictionRollout";
 
 const CORRELATION_TTL_MS = 5 * 60_000;
 const CHAT_LEASE_MS = 2 * 60_000;
@@ -207,6 +212,7 @@ export const issueCorrelation = mutation({
     jurisdictionCode: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
     legacyCountryCode: v.optional(v.string()),
+    legacyResolutionUsed: v.boolean(),
     serviceProof: v.string(),
   },
   returns: v.object({ status: v.literal("issued"), correlationId: v.string(), expiresAt: v.number() }),
@@ -225,9 +231,13 @@ export const issueCorrelation = mutation({
     await requireServiceProof(
       args.serviceProof,
       unified
-        ? ["issue-jurisdiction-v1", args.token, args.jurisdictionId!, legacyCountryCode ?? ""]
-        : ["issue", args.token, jurisdictionCode!],
+        ? ["issue-jurisdiction-v1", args.token, args.jurisdictionId!,
+            legacyCountryCode ?? "", args.legacyResolutionUsed ? 1 : 0]
+        : ["issue", args.token, jurisdictionCode!, args.legacyResolutionUsed ? 1 : 0],
     );
+    if (args.legacyResolutionUsed && (!unified || legacyCountryCode === undefined)) {
+      throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
+    }
     const owner = await requireOwner(ctx);
     let jurisdictionId = args.jurisdictionId;
     let jurisdictionName: string | undefined;
@@ -284,6 +294,13 @@ export const issueCorrelation = mutation({
       issuedAt,
       expiresAt,
     });
+    if (args.legacyResolutionUsed && await readUnifiedJurisdictionsEnabled(ctx)) {
+      await recordLegacyJurisdictionDependency(
+        ctx,
+        readMigrationEnvironment(),
+        issuedAt,
+      );
+    }
     await ctx.scheduler.runAt(expiresAt, finalizeExpiredCorrelationRef, { tokenHash });
     return { status: "issued" as const, correlationId: tokenHash, expiresAt };
   },

@@ -12,6 +12,16 @@
 - [ ] As an assured different Super Admin, open `/admin-recovery`, verify environment `preview`, choose **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the password, and require a correlation ID. Abort on any mismatch.
 - [ ] In the same release shell, require `$env:CONVEX_DEPLOYMENT -ceq $env:APPROVED_ISOLATED_CONVEX_DEPLOYMENT`, run `bunx convex env set ADMIN_PANEL_ENABLED true`, smoke each fixed role, and monitor jobs/incidents. Recovery for any failure is persisted-flag disable through `/admin-recovery`, then `bunx convex env set ADMIN_PANEL_ENABLED false`. Abort instead of running either command if the binding differs.
 
+## Unified jurisdiction rollout gates
+
+- [ ] Deploy the schema plus flag-off stable-ID dual-write code while `unified_jurisdictions` remains disabled. Confirm the exact environment/target and capture the bounded preflight state; do not call a provider or run against an unapproved target.
+- [ ] Obtain a separately reviewed operator-supplied Ghana projection and run `seedGhanaJurisdictionV2` with exact environment/confirmation, reason, and a fresh key. Verify the existing Ghana ID, legal-resource IDs, lifecycle fields, and production bucket `11833` were preserved, exactly one root country profile exists, Ghana has no organization link/profile, and no other active default exists.
+- [ ] For each of `chatSessions`, `telemetryCorrelations`, `queryRuns`, and `dailyMetrics`, complete every opaque-cursor page in dry-run mode, then execute mode, using fresh page keys and the exact confirmations. Resolve every unresolved/mismatch count through a separately approved data correction; never infer from names, merge daily metrics, or edit historical snapshots.
+- [ ] Start every execute target again from `cursor: null` and complete a second clean pass. Require all five fixed readiness blockers absent; a merely completed changed run is not verification.
+- [ ] Run the full flag-off regression. Then, as an assured non-impersonated Super Admin, enable only an authorized non-production environment with `UNIFIED_JURISDICTIONS <environment> ENABLE`, a fresh bound proof/key, and the approved reason. Complete the ID-first smoke/E2E before requesting production approval.
+- [ ] For separately authorized production enablement, re-confirm the exact production environment and target, require readiness again in the same mutation, capture the correlation/audit, and retain `UNIFIED_JURISDICTIONS <environment> DISABLE` with a fresh proof/key as the rollback. Disabling must remain possible while readiness is red.
+- [ ] Do not mark compatibility removal approved. Record flag-on legacy-dependency observation separately; recommend 30 clean days measured from the later of enablement and the last dependency, but require an explicit operator decision on that duration before opening a removal issue.
+
 ## Production promotion gates
 
 - [ ] Attach the completed isolated checklist, approved commit, release window, rollback owner, production Vercel project, exact production Convex deployment name, candidate, and independent approver to the change record. Do not record secrets.

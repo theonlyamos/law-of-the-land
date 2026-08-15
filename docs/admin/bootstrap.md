@@ -161,6 +161,107 @@ npm run build
 & 'C:\Program Files\nodejs\node.exe' 'node_modules\convex\bin\main.js' dev --help
 ```
 
+## Unified jurisdiction ID rollout
+
+This is a separate, additive rollout from the first-admin bootstrap. Deploy the
+schema and the flag-off dual-write code before running it. The migration functions
+are internal operator mutations; they never call Google, GroundX, or another
+provider, and no step below implicitly enables the feature flag. Use only an
+already approved exact target binding and placeholder values supplied through the
+change record. Do not paste production deployment names, secrets, coordinates,
+Place IDs, or jurisdiction IDs into this runbook.
+
+First verify the exact environment and target, confirm
+`unified_jurisdictions` is disabled, and capture the bounded output from
+`getUnifiedJurisdictionRolloutState`. Independently review the canonical Ghana
+Google Places projection. Then invoke the V2 seed with an exact environment,
+confirmation `SEED_GHANA_JURISDICTION_V2 <environment>`, reviewed reason, fresh
+8–128 character idempotency key, and operator-supplied projection. The seed must
+preserve the existing Ghana ID, every legal-resource ID, and production bucket
+`11833`; abort on any conflict instead of repairing it in place.
+
+For each target below, run every returned opaque `ujm1_...` cursor to completion.
+Use a new idempotency key for every page. Never copy a cursor between a target,
+mode, environment, or run:
+
+1. `chatSessions`
+2. `telemetryCorrelations`
+3. `queryRuns`
+4. `dailyMetrics`
+
+For each target, use the exact dry-run confirmation
+`UNIFIED_JURISDICTIONS BACKFILL <environment> <target> DRY_RUN`, inspect its
+`processed`, `updated`, `unresolved`, and `mismatches` counters, then repeat in
+execute mode with `... EXECUTE`. After the first execute run completes, start a
+second full execute run from `cursor: null`. Only that later run completing with
+zero updates, unresolved rows, and mismatches persists verification evidence.
+Daily metrics are patched in place; code/day and ID/day rows are never merged or
+re-keyed.
+
+The following PowerShell shape is illustrative and deliberately contains only
+operator-provided placeholders. Bind `$ApprovedDeployment` and `$Environment` via
+the applicable typed-confirmation procedure above before using it:
+
+```powershell
+$SeedArguments = @{
+  environment = $Environment
+  place = @{
+    googlePlaceId = $env:APPROVED_GHANA_GOOGLE_PLACE_ID
+    formattedAddress = $env:APPROVED_GHANA_FORMATTED_ADDRESS
+    latitude = [double]$env:APPROVED_GHANA_LATITUDE
+    longitude = [double]$env:APPROVED_GHANA_LONGITUDE
+  }
+  confirmation = "SEED_GHANA_JURISDICTION_V2 $Environment"
+  reason = $env:APPROVED_GHANA_MIGRATION_REASON
+  idempotencyKey = "ghana-v2-$([guid]::NewGuid().ToString('N'))"
+} | ConvertTo-Json -Compress -Depth 4
+Invoke-CheckedConvex @('run', 'admin/migrations:seedGhanaJurisdictionV2', $SeedArguments, '--deployment', $ApprovedDeployment)
+
+$Target = 'chatSessions'
+$Mode = 'DRY_RUN'
+$Cursor = $null
+$BackfillArguments = @{
+  environment = $Environment
+  target = $Target
+  cursor = $Cursor
+  batchSize = 100
+  dryRun = ($Mode -ceq 'DRY_RUN')
+  confirmation = "UNIFIED_JURISDICTIONS BACKFILL $Environment $Target $Mode"
+  reason = $env:APPROVED_JURISDICTION_BACKFILL_REASON
+  idempotencyKey = "ujm-$([guid]::NewGuid().ToString('N'))"
+} | ConvertTo-Json -Compress
+Invoke-CheckedConvex @('run', 'admin/migrations:backfillJurisdictionReferences', $BackfillArguments, '--deployment', $ApprovedDeployment)
+```
+
+After all eight dry-run/execute checkpoints and all four second clean execute
+passes, capture the bounded readiness projection and require these blockers to be
+absent: `GHANA_NOT_READY`, `CHAT_SESSIONS_NOT_VERIFIED`,
+`TELEMETRY_CORRELATIONS_NOT_VERIFIED`, `QUERY_RUNS_NOT_VERIFIED`, and
+`DAILY_METRICS_NOT_VERIFIED`. Run the complete flag-off regression before any
+enablement.
+
+The readiness read is fixed-size: at most two rollout rows, two flag rows, two rows
+for each of four execute checkpoints, and at most two rows from each Ghana code,
+geographic-profile, Place-ID, organizational-profile, draft-default, and
+enabled-default index. It never scans a migration target. Ghana readiness requires
+no organization link/profile and no other active default as well as the canonical
+root-country projection.
+
+An assured, non-impersonated Super Admin must then use the recovery control with a
+fresh proof/key, reviewed reason, and exact confirmation
+`UNIFIED_JURISDICTIONS <environment> ENABLE`. Enable an authorized non-production
+environment first and complete the ID-first smoke/E2E. Production enablement is a
+separate approval. Rollback remains available even while readiness is red: use a
+fresh proof/key and `UNIFIED_JURISDICTIONS <environment> DISABLE`; do not delete
+compatibility fields, historical snapshots, checkpoints, or Ghana mappings.
+
+Readiness permits flag enablement only. It does not authorize compatibility
+removal. The recommended later evidence window is 30 consecutive flag-on days with
+all four targets still clean and no accepted legacy-dependent request, measured
+from the later of enablement and the last dependency. An operator must explicitly
+approve 30 days or choose another duration before a separate removal issue; the
+application does not hard-code that policy.
+
 ## Persisted flag enable, disable, and recovery
 
 Auth-gated public mutations are not an unauthenticated CLI recovery mechanism. For the first enablement, the newly bootstrapped Super Admin must complete the forced sign-in and 2FA challenge before opening `/admin-recovery`. After a second Super Admin exists, routine recovery must be performed by a different assured, non-impersonated Super Admin, never by the account whose access or activity is under investigation.

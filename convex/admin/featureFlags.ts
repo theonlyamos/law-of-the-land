@@ -7,6 +7,12 @@ import {
   requireCurrentAdmin,
 } from "../lib/requireAdmin";
 import { validateAuditReason, writeAudit } from "./audit";
+import {
+  JURISDICTION_MIGRATION_VERSION,
+  calculateUnifiedJurisdictionRolloutState,
+  readRolloutStateRow,
+  unifiedJurisdictionRolloutStateValidator,
+} from "../lib/unifiedJurisdictionRollout";
 
 function readAdminEnvironment(): string | null {
   const environment = process.env.ADMIN_ENVIRONMENT;
@@ -126,6 +132,17 @@ export const getAdminPanelRecoveryState = query({
   },
 });
 
+export const getUnifiedJurisdictionRolloutState = query({
+  args: {},
+  returns: unifiedJurisdictionRolloutStateValidator,
+  handler: async (ctx) => {
+    await requireAdminPermission(ctx, "user", "set_role");
+    const environment = readAdminEnvironment();
+    if (!environment) throw new ConvexError("ADMIN_FLAG_ENVIRONMENT_INVALID");
+    return await calculateUnifiedJurisdictionRolloutState(ctx, environment);
+  },
+});
+
 const FLAG_TARGET_PREFIX = "admin_panel:";
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
@@ -146,6 +163,36 @@ async function consumeFlagStepUp(
           .eq("sessionId", sessionId)
           .eq("action", "admin_panel_set")
           .eq("targetId", `${FLAG_TARGET_PREFIX}${environment}`)
+          .eq("idempotencyKey", idempotencyKey),
+    )
+    .take(2);
+  if (
+    proofs.length !== 1 ||
+    proofs[0].consumedAt !== undefined ||
+    proofs[0].expiresAt <= Date.now()
+  ) {
+    throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
+  }
+  await ctx.db.patch(proofs[0]._id, { consumedAt: Date.now() });
+}
+
+async function consumeUnifiedFlagStepUp(
+  ctx: MutationCtx,
+  actorId: string,
+  sessionId: string,
+  environment: string,
+  idempotencyKey: string,
+) {
+  const proofs = await ctx.db
+    .query("adminStepUpProofs")
+    .withIndex(
+      "by_actorId_sessionId_action_targetId_idempotencyKey",
+      (q) =>
+        q
+          .eq("actorId", actorId)
+          .eq("sessionId", sessionId)
+          .eq("action", "unified_jurisdictions_set")
+          .eq("targetId", `unified_jurisdictions:${environment}`)
           .eq("idempotencyKey", idempotencyKey),
     )
     .take(2);
@@ -239,6 +286,172 @@ export const setAdminPanel = mutation({
       targetId: environment,
       reason,
       afterSummary: JSON.stringify({ enabled: args.enabled }),
+      correlationId,
+      outcome: "success",
+    });
+    return { environment, enabled: args.enabled, correlationId };
+  },
+});
+
+export const setUnifiedJurisdictions = mutation({
+  args: {
+    environment: v.string(),
+    enabled: v.boolean(),
+    confirmation: v.string(),
+    reason: v.string(),
+    idempotencyKey: v.string(),
+  },
+  returns: v.object({
+    environment: v.string(),
+    enabled: v.boolean(),
+    correlationId: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const actor = await requireAdminPermission(ctx, "user", "set_role");
+    const environment = readAdminEnvironment();
+    if (!environment || args.environment !== environment) {
+      throw new ConvexError("ADMIN_FLAG_ENVIRONMENT_INVALID");
+    }
+    if (!IDEMPOTENCY_KEY.test(args.idempotencyKey)) {
+      throw new ConvexError("ADMIN_INVALID_IDEMPOTENCY_KEY");
+    }
+    const expected = `UNIFIED_JURISDICTIONS ${environment} ${args.enabled ? "ENABLE" : "DISABLE"}`;
+    if (args.confirmation !== expected) {
+      throw new ConvexError("ADMIN_CONFIRMATION_MISMATCH");
+    }
+    const reason = validateAuditReason(args.reason);
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity || typeof identity.sessionId !== "string") {
+      throw new ConvexError("ADMIN_AUTH_REQUIRED");
+    }
+    const fingerprint = JSON.stringify({ environment, enabled: args.enabled, reason });
+    const existing = await ctx.db
+      .query("adminOperations")
+      .withIndex("by_actorId_and_idempotencyKey", (q) =>
+        q.eq("actorId", actor.userId).eq("idempotencyKey", args.idempotencyKey),
+      )
+      .take(2);
+    if (existing.length > 1) {
+      throw new ConvexError("ADMIN_IDEMPOTENCY_STATE_INVALID");
+    }
+    if (existing[0]) {
+      if (existing[0].action !== "unified_jurisdictions_set" ||
+          existing[0].targetId !== environment ||
+          existing[0].requestFingerprint !== fingerprint ||
+          existing[0].status !== "succeeded" ||
+          !existing[0].result ||
+          existing[0].result.status !== "succeeded" ||
+          existing[0].result.action !== "unified_jurisdictions_set" ||
+          existing[0].result.targetId !== environment ||
+          existing[0].result.correlationId !== existing[0].correlationId) {
+        throw new ConvexError("ADMIN_IDEMPOTENCY_CONFLICT");
+      }
+      return {
+        environment,
+        enabled: args.enabled,
+        correlationId: existing[0].correlationId,
+      };
+    }
+    await consumeUnifiedFlagStepUp(
+      ctx,
+      actor.userId,
+      identity.sessionId,
+      environment,
+      args.idempotencyKey,
+    );
+    if (args.enabled) {
+      const readiness = await calculateUnifiedJurisdictionRolloutState(
+        ctx,
+        environment,
+      );
+      if (!readiness.canEnable) {
+        throw new ConvexError({
+          code: "UNIFIED_JURISDICTIONS_NOT_READY",
+          blockers: readiness.blockers,
+        });
+      }
+    }
+    const flags = await ctx.db
+      .query("featureFlags")
+      .withIndex("by_key_and_environment", (q) =>
+        q.eq("key", "unified_jurisdictions").eq("environment", environment),
+      )
+      .take(2);
+    if (flags.length > 1) throw new ConvexError("ADMIN_FLAG_STATE_INVALID");
+    const now = Date.now();
+    if (flags[0]) {
+      await ctx.db.patch(flags[0]._id, {
+        enabled: args.enabled,
+        updatedAt: now,
+        updatedBy: actor.userId,
+      });
+    } else {
+      await ctx.db.insert("featureFlags", {
+        key: "unified_jurisdictions",
+        environment,
+        enabled: args.enabled,
+        updatedAt: now,
+        updatedBy: actor.userId,
+      });
+    }
+    const rollout = await readRolloutStateRow(ctx, environment);
+    if (args.enabled) {
+      if (!rollout || !Number.isSafeInteger(rollout.legacyObservationGeneration) ||
+          rollout.legacyObservationGeneration < 0 ||
+          rollout.legacyObservationGeneration >= Number.MAX_SAFE_INTEGER) {
+        throw new ConvexError("JURISDICTION_MIGRATION_STATE_INVALID");
+      }
+      await ctx.db.patch(rollout._id, {
+        legacyObservationGeneration: rollout.legacyObservationGeneration + 1,
+        legacyObservationStartedAt: now,
+        legacyLastAcceptedAt: undefined,
+        legacyAcceptedSinceStart: 0,
+        updatedAt: now,
+      });
+    } else if (rollout) {
+      await ctx.db.patch(rollout._id, {
+        legacyObservationStartedAt: undefined,
+        legacyLastAcceptedAt: undefined,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("unifiedJurisdictionRolloutStates", {
+        environment,
+        migrationVersion: JURISDICTION_MIGRATION_VERSION,
+        legacyObservationGeneration: 0,
+        legacyAcceptedSinceStart: 0,
+        updatedAt: now,
+      });
+    }
+    const correlationId = `op_${crypto.randomUUID().replaceAll("-", "")}`;
+    await ctx.db.insert("adminOperations", {
+      actorId: actor.userId,
+      action: "unified_jurisdictions_set",
+      targetId: environment,
+      idempotencyKey: args.idempotencyKey,
+      requestFingerprint: fingerprint,
+      correlationId,
+      status: "succeeded",
+      result: {
+        status: "succeeded",
+        correlationId,
+        action: "unified_jurisdictions_set",
+        targetId: environment,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await writeAudit(ctx, {
+      actorId: actor.userId,
+      actorRoles: actor.roles,
+      action: "admin.unified_jurisdictions_flag_set",
+      targetType: "featureFlag",
+      targetId: environment,
+      reason,
+      afterSummary: JSON.stringify({
+        enabled: args.enabled,
+        migrationVersion: JURISDICTION_MIGRATION_VERSION,
+      }),
       correlationId,
       outcome: "success",
     });

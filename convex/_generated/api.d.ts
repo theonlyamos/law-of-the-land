@@ -53,6 +53,7 @@ import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
 import type * as lib_researchScope from "../lib/researchScope.js";
 import type * as lib_telemetryProof from "../lib/telemetryProof.js";
+import type * as lib_unifiedJurisdictionRollout from "../lib/unifiedJurisdictionRollout.js";
 import type * as polar from "../polar.js";
 import type * as telemetry from "../telemetry.js";
 import type * as usage from "../usage.js";
@@ -110,6 +111,7 @@ declare const fullApi: ApiFromModules<{
   "lib/requireUser": typeof lib_requireUser;
   "lib/researchScope": typeof lib_researchScope;
   "lib/telemetryProof": typeof lib_telemetryProof;
+  "lib/unifiedJurisdictionRollout": typeof lib_unifiedJurisdictionRollout;
   polar: typeof polar;
   telemetry: typeof telemetry;
   usage: typeof usage;

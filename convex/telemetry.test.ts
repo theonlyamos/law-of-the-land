@@ -238,7 +238,8 @@ async function issueFor(
   return client.mutation(issue, {
     token,
     jurisdictionCode: code,
-    serviceProof: await proof(["issue", token, code]),
+    legacyResolutionUsed: false,
+    serviceProof: await proof(["issue", token, code, 0]),
   });
 }
 
@@ -303,6 +304,102 @@ afterEach(() => {
 });
 
 describe("privacy-bounded query telemetry", () => {
+  it("observes a flag-on legacy dependency once while ID-first issuance stays silent", async () => {
+    process.env.ADMIN_ENVIRONMENT = "test";
+    const t = backend();
+    const jurisdictionId = await jurisdiction(t);
+    const startedAt = Date.now() - 1_000;
+    await t.run(async (ctx) => {
+      await ctx.db.insert("featureFlags", {
+        key: "unified_jurisdictions",
+        environment: "test",
+        enabled: true,
+        updatedAt: startedAt,
+      });
+      await ctx.db.insert("unifiedJurisdictionRolloutStates", {
+        environment: "test",
+        migrationVersion: "jurisdiction_ids_v1",
+        legacyObservationGeneration: 1,
+        legacyObservationStartedAt: startedAt,
+        legacyAcceptedSinceStart: 0,
+        updatedAt: startedAt,
+      });
+    });
+    const owner = await user(t, "observation-owner");
+    const legacyToken = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const legacyArgs = {
+      token: legacyToken,
+      jurisdictionId,
+      legacyCountryCode: "GH",
+      legacyResolutionUsed: true,
+      serviceProof: await proof([
+        "issue-jurisdiction-v1", legacyToken, jurisdictionId, "GH", 1,
+      ]),
+    };
+    await owner.client.mutation(issue, legacyArgs);
+    await expect(owner.client.mutation(issue, legacyArgs)).rejects.toThrow(
+      "TELEMETRY_CORRELATION_REPLAYED",
+    );
+    const unifiedToken = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token: unifiedToken,
+      jurisdictionId,
+      legacyCountryCode: "GH",
+      legacyResolutionUsed: false,
+      serviceProof: await proof([
+        "issue-jurisdiction-v1",
+        unifiedToken,
+        jurisdictionId,
+        "GH",
+        0,
+      ]),
+    });
+    await expect(
+      t.run(async (ctx) => {
+        const row = await ctx.db
+          .query("unifiedJurisdictionRolloutStates")
+          .withIndex("by_environment_and_migrationVersion", (q) =>
+            q
+              .eq("environment", "test")
+              .eq("migrationVersion", "jurisdiction_ids_v1"),
+          )
+          .unique();
+        return {
+          count: row?.legacyAcceptedSinceStart,
+          lastAcceptedAt: row?.legacyLastAcceptedAt,
+        };
+      }),
+    ).resolves.toEqual({
+      count: 1,
+      lastAcceptedAt: expect.any(Number),
+    });
+
+    await t.run(async (ctx) => {
+      const flag = await ctx.db
+        .query("featureFlags")
+        .withIndex("by_key_and_environment", (q) =>
+          q.eq("key", "unified_jurisdictions").eq("environment", "test"),
+        )
+        .unique();
+      if (!flag) throw new Error("flag fixture missing");
+      await ctx.db.patch(flag._id, { enabled: false });
+    });
+    const flagOffToken = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token: flagOffToken,
+      jurisdictionId,
+      legacyCountryCode: "GH",
+      legacyResolutionUsed: true,
+      serviceProof: await proof([
+        "issue-jurisdiction-v1", flagOffToken, jurisdictionId, "GH", 1,
+      ]),
+    });
+    await expect(t.run(async (ctx) => {
+      const row = await ctx.db.query("unifiedJurisdictionRolloutStates").unique();
+      return row?.legacyAcceptedSinceStart;
+    })).resolves.toBe(1);
+  });
+
   it("accepts only the narrow pre-V2 Ghana shape for legacy issuance and terminal failure", async () => {
     const t = backend();
     const jurisdictionId = await t.run((ctx) => {
@@ -338,7 +435,8 @@ describe("privacy-bounded query telemetry", () => {
     await owner.client.mutation(issue, {
       token,
       jurisdictionId,
-      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, ""]),
+      legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
     });
     await t.run(async (ctx) => {
       const row = await ctx.db.query("telemetryCorrelations").take(1);
@@ -483,7 +581,8 @@ describe("privacy-bounded query telemetry", () => {
     await owner.client.mutation(issue, {
       token,
       jurisdictionId,
-      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, ""]),
+      legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
     });
     await expect(t.run((ctx) => ctx.db.query("telemetryCorrelations").take(1)))
       .resolves.toMatchObject([{ jurisdictionContract: "unified" }]);
@@ -611,7 +710,7 @@ describe("privacy-bounded query telemetry", () => {
     const attacker = await user(t, "attacker");
     const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
 
-    await expect(owner.client.mutation(issue, { token, jurisdictionCode: "GH", serviceProof: "forged" })).rejects.toThrow("TELEMETRY_SERVICE_PROOF_INVALID");
+    await expect(owner.client.mutation(issue, { token, jurisdictionCode: "GH", legacyResolutionUsed: false, serviceProof: "forged" })).rejects.toThrow("TELEMETRY_SERVICE_PROOF_INVALID");
     await issueFor(owner.client, token);
     await recordSearch(owner.client, token);
     await expect(attacker.client.mutation(claim, { token, jurisdictionCode: "GH", serviceProof: await proof(["claim", token, "GH"]) })).rejects.toThrow("TELEMETRY_CORRELATION_FORBIDDEN");

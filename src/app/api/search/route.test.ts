@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFunctionName } from "convex/server";
+import { createTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
 
 const authMocks = vi.hoisted(() => ({
   fetchAuthMutation: vi.fn(),
@@ -112,6 +113,7 @@ describe("POST /api/search governed jurisdiction lookup", () => {
     expect(telemetryCalls[0][1]).toMatchObject({
       token: payload.correlationToken,
       jurisdictionCode: "GH",
+      legacyResolutionUsed: false,
       serviceProof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(telemetryCalls[1][1]).toMatchObject({
@@ -300,6 +302,18 @@ describe("POST /api/search unified jurisdictions", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({ jurisdictionId: selectedId, legacyCountryCode: "GH" });
+    const issueArgs = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:issueCorrelation",
+    )?.[1];
+    expect(issueArgs).toMatchObject({
+      token: payload.correlationToken,
+      jurisdictionId: selectedId,
+      legacyCountryCode: "GH",
+      legacyResolutionUsed: false,
+    });
+    expect(issueArgs?.serviceProof).toBe(await createTelemetryServiceProof([
+      "issue-jurisdiction-v1", payload.correlationToken, selectedId, "GH", 0,
+    ]));
     expect(payload.result.length).toBeLessThanOrEqual(120_000);
     expect(peak).toBeLessThanOrEqual(3);
     expect(groundxMocks.searchContent).toHaveBeenCalledTimes(4);
@@ -319,6 +333,25 @@ describe("POST /api/search unified jurisdictions", () => {
       partialCoverage: false, configurationUnavailableCount: 0,
       supplementaryProviderFailureCount: 0,
     });
+  });
+
+  it("binds country-only legacy resolution into unified correlation issuance", async () => {
+    enableUnified();
+    const response = await POST(request({ query: "parking rules", country: "GH" }));
+    const payload = await response.json();
+    expect(response.status).toBe(200);
+    const issueArgs = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "telemetry:issueCorrelation",
+    )?.[1];
+    expect(issueArgs).toMatchObject({
+      token: payload.correlationToken,
+      jurisdictionId: selectedId,
+      legacyCountryCode: "GH",
+      legacyResolutionUsed: true,
+    });
+    expect(issueArgs?.serviceProof).toBe(await createTelemetryServiceProof([
+      "issue-jurisdiction-v1", payload.correlationToken, selectedId, "GH", 1,
+    ]));
   });
 
   it("rejects a mismatched selector before quota, planner, secret lookup, telemetry, or provider", async () => {
