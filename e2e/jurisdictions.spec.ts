@@ -21,9 +21,22 @@ async function chooseJurisdiction(
   await page.getByRole("radio", { name: kind }).click();
   const search = page.getByRole("combobox", { name: "Find jurisdiction" });
   await search.fill(name);
-  const accessibleName = new RegExp(`${name}, ${kind}`);
-  await expect(page.getByRole("option", { name: accessibleName })).toBeVisible();
-  await page.getByRole("option", { name: accessibleName }).click();
+  const options = page
+    .getByRole("listbox", { name: "Jurisdiction results" })
+    .getByRole("option");
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const exactFixtureOption = options.filter({
+    has: page.locator("span", { hasText: new RegExp(`^${escapedName}$`) }),
+  });
+  await expect(exactFixtureOption).toHaveCount(1);
+  await expect(exactFixtureOption).toHaveAccessibleName(
+    new RegExp(`^${escapedName}, ${kind}, `),
+  );
+  const optionCount = await options.count();
+  expect(optionCount).toBeGreaterThan(0);
+  expect(optionCount).toBeLessThanOrEqual(20);
+  await exactFixtureOption.click();
+  await expect(exactFixtureOption).toHaveAttribute("aria-selected", "true");
 }
 
 async function parentObservedSearch(
@@ -78,11 +91,7 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
     await page.goto("/");
 
     await chooseJurisdiction(page, "Geographic", `${fixture.tag} Ghana`);
-    await expect(page.getByRole("listbox", { name: "Jurisdiction results" }).getByRole("option"))
-      .toHaveCount(1);
     await chooseJurisdiction(page, "Organizational", `${fixture.tag} Public Organization`);
-    await expect(page.getByRole("listbox", { name: "Jurisdiction results" }).getByRole("option"))
-      .toHaveCount(1);
     expect(placesRequests).toEqual([]);
   });
 

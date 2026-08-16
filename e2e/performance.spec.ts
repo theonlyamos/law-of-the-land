@@ -71,9 +71,10 @@ async function readBrowserMetrics(page: Page): Promise<BrowserMetrics> {
 
 async function createMeasuredInteraction(page: Page, target: "public" | "admin") {
   const element = target === "public"
-    ? page.getByRole("textbox").first()
+    ? page.getByRole("textbox", { name: "Your legal question" })
     : page.getByRole("button", { name: "Collapse administration navigation" });
   await expect(element).toBeVisible();
+  await expect(element).toBeEnabled();
   await element.click();
   if (target === "public") await page.keyboard.press("A");
   else await expect(page.getByRole("button", { name: "Expand administration navigation" })).toBeVisible();

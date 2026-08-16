@@ -34,6 +34,7 @@ const revokeQuotaOverride = makeFunctionReference<"mutation">("admin/billing:rev
 const createIncident = makeFunctionReference<"mutation">("admin/operations:createIncident");
 const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addIncidentNote");
 const createJurisdiction = makeFunctionReference<"mutation">("admin/resources:createJurisdiction");
+const updateJurisdiction = makeFunctionReference<"mutation">("admin/resources:updateJurisdiction");
 const publishVersion = makeFunctionReference<"mutation">("admin/publication:publishVersion");
 const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
 const original = { ...process.env };
@@ -512,6 +513,58 @@ describe("isolated admin E2E fixture control plane", () => {
     }
     expect(new Set(codes).size).toBe(codes.length);
     await t.mutation(cleanup, { tag: "e2e_codefixture1" });
+  });
+
+  it("allocates a distinct cleanup-owned legacy jurisdiction when a matrix update retries", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_updatefixture1";
+    const role = "super_admin" as const;
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag });
+
+    const firstPrepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/resources:updateJurisdiction",
+      role,
+      key: "matrix_update_super_admin_first",
+    });
+    const retryPrepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/resources:updateJurisdiction",
+      role,
+      key: "matrix_update_super_admin_retry",
+    });
+    const preparedRows = await t.run(async (ctx) => ({
+      first: await ctx.db.get("jurisdictions", firstPrepared.args.id),
+      retry: await ctx.db.get("jurisdictions", retryPrepared.args.id),
+    }));
+    expect(preparedRows.first?.code).toMatch(/^[A-Z]{2}$/);
+    expect(preparedRows.retry?.code).toMatch(/^[A-Z]{2}$/);
+    expect(preparedRows.retry?.code).not.toBe(preparedRows.first?.code);
+    expect(preparedRows.first?.createdBy).toBe(`fixture:${tag}`);
+    expect(preparedRows.retry?.createdBy).toBe(`fixture:${tag}`);
+    const sessionId = await t.run(async (ctx) => {
+      const sessions = await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: "session",
+        where: [{ field: "userId", operator: "eq", value: fixture.sessions.super_admin.userId }],
+        select: ["id"],
+        paginationOpts: { numItems: 2, cursor: null },
+      }) as { page: Array<{ _id: string }> };
+      return sessions.page[0]?._id;
+    });
+    if (!sessionId) throw new Error("fixture super_admin session missing");
+
+    await expect(
+      t.withIdentity({ subject: fixture.sessions.super_admin.userId, sessionId }).mutation(updateJurisdiction, retryPrepared.args),
+    ).resolves.toMatchObject({ _id: retryPrepared.args.id, name: retryPrepared.args.name });
+    await t.mutation(cleanup, { tag });
+    await expect(t.run(async (ctx) => ({
+      first: await ctx.db.get("jurisdictions", firstPrepared.args.id),
+      retry: await ctx.db.get("jurisdictions", retryPrepared.args.id),
+    }))).resolves.toEqual({ first: null, retry: null });
   });
 
   it("consumes exact outcomes armed before public publication scheduling without patching terminal jobs", async () => {

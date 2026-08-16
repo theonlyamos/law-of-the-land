@@ -789,12 +789,27 @@ export const cleanup = internalMutation({
 const matrixRoleValidator = v.union(...FIXED_ROLES.map((role) => v.literal(role)));
 const MATRIX_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
-function matrixJurisdictionCode(path: string, role: (typeof FIXED_ROLES)[number]) {
+function matrixJurisdictionCode(path: string, role: (typeof FIXED_ROLES)[number], offset = 0) {
   const pathIndex = E2E_PRIVILEGED_FUNCTIONS.findIndex((entry) => entry.path === path);
   const roleIndex = FIXED_ROLES.indexOf(role);
   if (pathIndex < 0 || roleIndex < 0) throw new ConvexError("E2E_MATRIX_ENTRY_NOT_FOUND");
-  const ordinal = pathIndex * FIXED_ROLES.length + roleIndex;
+  const ordinal = (pathIndex * FIXED_ROLES.length + roleIndex + offset) % (26 * 26);
   return `${String.fromCharCode(65 + Math.floor(ordinal / 26))}${String.fromCharCode(65 + (ordinal % 26))}`;
+}
+
+async function allocateMatrixJurisdictionCode(
+  ctx: MutationCtx,
+  path: string,
+  role: (typeof FIXED_ROLES)[number],
+) {
+  for (let offset = 0; offset < 26 * 26; offset += 1) {
+    const code = matrixJurisdictionCode(path, role, offset);
+    const occupied = await ctx.db.query("jurisdictions")
+      .withIndex("by_code", (q) => q.eq("code", code))
+      .take(1);
+    if (occupied.length === 0) return code;
+  }
+  throw new ConvexError("E2E_MATRIX_JURISDICTION_CODES_EXHAUSTED");
 }
 
 async function fixtureActor(ctx: MutationCtx, tag: string, role: (typeof FIXED_ROLES)[number]) {
@@ -1048,10 +1063,10 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/exports:issueConversationExportReference": { const { chatId, grantId } = await chatAndGrant(); const { storageId } = await mainFixtureRecords(ctx, input.tag); const correlationId = `${marker}-export`; await ctx.db.insert("adminExports", { correlationId, requesterId: actor.userId, requesterSessionId: actor.sessionId, chatSessionId: chatId, accessGrantId: grantId, status: "ready", storageId, expiresAt: Date.now() + 10 * 60_000, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { correlationId, grantId }); break; }
     case "admin/documents:generateUploadUrl": break;
     case "admin/documents:createDocumentVersion": { const resourceId = await createMatrixResource(ctx, input.tag, input.key, "create-version"); const stored = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { resourceId, storageId: stored.storageId, filename: `${marker}.pdf`, mimeType: "application/pdf", byteSize: stored.byteSize, sha256: stored.sha256Hex, sourceUrl: "https://example.invalid/matrix", effectiveAt: "2026-02-01" }); break; }
-    case "admin/resources:createJurisdiction": Object.assign(args, { code: matrixJurisdictionCode(input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
+    case "admin/resources:createJurisdiction": Object.assign(args, { code: await allocateMatrixJurisdictionCode(ctx, input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
     case "admin/resources:updateJurisdiction":
     case "admin/resources:enableJurisdiction":
-    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const id = await ctx.db.insert("jurisdictions", { code: `M${crypto.randomUUID().slice(0, 8).toUpperCase()}`, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
+    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const code = await allocateMatrixJurisdictionCode(ctx, input.path, input.role); const id = await ctx.db.insert("jurisdictions", { code, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
     case "admin/resources:createResource": { const { jurisdiction } = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { jurisdictionId: jurisdiction._id, type: "act", title: `${marker} resource`, issuer: "E2E fixture", officialCitation: `${marker}-create`, sourceUrl: "https://example.invalid/matrix", topics: ["fixture"], effectiveDate: "2026-01-01", reason }); break; }
     case "admin/resources:updateResource":
     case "admin/resources:archiveResource":
