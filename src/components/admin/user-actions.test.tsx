@@ -69,6 +69,9 @@ describe("administrative user actions", () => {
     expect(
       screen.queryByRole("button", { name: "Impersonate user" }),
     ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Queue user deletion" }),
+    ).toBeNull();
   });
 
   it("uses a native accessible step-up dialog for role assignment", () => {
@@ -120,7 +123,7 @@ describe("administrative user actions", () => {
   });
 
   it("states the exact confirmation before queueing deletion", () => {
-    renderActions(["user:support"]);
+    renderActions(["user:ban"]);
     fireEvent.click(
       screen.getByRole("button", { name: "Queue user deletion" }),
     );

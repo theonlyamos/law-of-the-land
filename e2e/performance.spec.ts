@@ -71,12 +71,12 @@ async function readBrowserMetrics(page: Page): Promise<BrowserMetrics> {
 
 async function createMeasuredInteraction(page: Page, target: "public" | "admin") {
   const element = target === "public"
-    ? page.getByRole("textbox", { name: "Your legal question" })
+    ? page.getByRole("link", { name: "Jurisdictions", exact: true })
     : page.getByRole("button", { name: "Collapse administration navigation" });
   await expect(element).toBeVisible();
   await expect(element).toBeEnabled();
   await element.click();
-  if (target === "public") await page.keyboard.press("A");
+  if (target === "public") await expect(page).toHaveURL(/#jurisdictions$/);
   else await expect(page.getByRole("button", { name: "Expand administration navigation" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as Window & { __adminPerformanceMetrics: { interactionEntries: number } }).__adminPerformanceMetrics.interactionEntries)).toBeGreaterThan(0);
 }
