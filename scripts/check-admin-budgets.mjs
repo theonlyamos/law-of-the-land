@@ -34,13 +34,13 @@ export function requireAdminFixtureBoundary(environment = process.env) {
     || environment.BILLING_ENABLED !== "false") {
     throw new Error("The isolated test/preview fixture boundary with provider stubs and BILLING_ENABLED=false is required.");
   }
-  for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_SEARCH_JURISDICTION_SECRET"]) {
+  for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_SEARCH_JURISDICTION_SECRET", "ADMIN_E2E_TELEMETRY_INGEST_SECRET"]) {
     if (typeof environment[key] !== "string" || environment[key].length === 0) throw new Error(`${key} is required.`);
   }
   for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL"]) {
     if (environment[key] !== environment[key].trim()) throw new Error(`${key} must be supplied as an exact origin without padding.`);
   }
-  if (environment.ADMIN_E2E_FIXTURE_SECRET.length < 32 || environment.ADMIN_E2E_BETTER_AUTH_SECRET.length < 32 || environment.ADMIN_E2E_ACCOUNT_PASSWORD.length < 12 || environment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET.length < 32) {
+  if (environment.ADMIN_E2E_FIXTURE_SECRET.length < 32 || environment.ADMIN_E2E_BETTER_AUTH_SECRET.length < 32 || environment.ADMIN_E2E_ACCOUNT_PASSWORD.length < 12 || environment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET.length < 32 || environment.ADMIN_E2E_TELEMETRY_INGEST_SECRET.length < 32) {
     throw new Error("The guarded fixture secrets or account password are too short.");
   }
   if (!SHA_PATTERN.test(environment.ADMIN_E2E_APPROVED_COMMIT_SHA ?? "")

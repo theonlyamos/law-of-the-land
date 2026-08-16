@@ -233,16 +233,20 @@ async function readFixtureTag(request: Request) {
   } catch { return null; }
 }
 
-async function readFixtureControl(request: Request) {
+export async function readFixtureControl(request: Request) {
   const bytes = await readBoundedBody(request, 16_384);
   if (!bytes) return null;
   try {
     const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-    const operations = ["arm_provider_outcome", "expire_conversation_grant", "run_retention", "read_state", "prepare_matrix_operation", "read_matrix_operation", "deactivate_jurisdiction_member", "set_unified_jurisdictions_flag", "verify_place_claim"];
+    const operations = ["arm_provider_outcome", "expire_conversation_grant", "run_retention", "read_state", "prepare_matrix_operation", "read_matrix_operation", "deactivate_jurisdiction_member", "set_unified_jurisdictions_flag", "verify_place_claim", "verify_telemetry_ingest_secret"];
     if (typeof body.tag !== "string" || typeof body.operation !== "string" || !operations.includes(body.operation)) return null;
     if (body.operation === "verify_place_claim") {
       if (Object.keys(body).length !== 3 || typeof body.claim !== "string") return null;
       return { tag: body.tag, operation: body.operation, claim: body.claim };
+    }
+    if (body.operation === "verify_telemetry_ingest_secret") {
+      if (Object.keys(body).length !== 3 || typeof body.proof !== "string") return null;
+      return { tag: body.tag, operation: body.operation, proof: body.proof };
     }
     if (body.operation === "deactivate_jurisdiction_member") {
       if (Object.keys(body).length !== 3 || typeof body.membershipId !== "string") return null;

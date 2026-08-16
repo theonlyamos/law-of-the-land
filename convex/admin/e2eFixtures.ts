@@ -9,6 +9,7 @@ import { hashCallbackToken } from "./jobs";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 import { verifyVerifiedPlaceClaim } from "../lib/placeClaim";
+import { verifyTelemetryServiceProof } from "../lib/telemetryProof";
 
 const FIXTURE_MARKER = "isolated-admin-e2e";
 const TAG_RE = /^e2e_[a-z0-9]{12,48}$/;
@@ -29,6 +30,7 @@ const FIXTURE_PUBLIC_ORGANIZATION_PRODUCTION_BUCKET_ID = "910032";
 const FIXTURE_MEMBER_ORGANIZATION_STAGING_BUCKET_ID = "910041";
 const FIXTURE_MEMBER_ORGANIZATION_PRODUCTION_BUCKET_ID = "910042";
 const SHA_RE = /^[a-f0-9]{40}$/;
+const TELEMETRY_SECRET_PROOF_DOMAIN = "admin-e2e-telemetry-ingest-secret-v1";
 
 function requireFixtureEnvironment() {
   if (resolveE2EProviderIsolation() !== "stub") {
@@ -854,9 +856,10 @@ async function recordFixtureOwnership(
 async function mainFixtureRecords(ctx: MutationCtx, tag: string) {
   const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", tag)).unique();
   if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-  const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(500);
-  const resource = resources.find((row) => row.createdBy === `fixture:${tag}`);
-  if (!resource) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
+  const resource = await ctx.db.query("legalResources")
+    .withIndex("by_jurisdictionId_and_officialCitationKey", (q) => q.eq("jurisdictionId", jurisdiction._id).eq("officialCitationKey", tag))
+    .unique();
+  if (!resource || resource.createdBy !== `fixture:${tag}`) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
   const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", resource._id)).take(20);
   const storageId = versions.find((row) => row.versionNumber === 3)?.originalStorageId;
   if (!storageId) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
@@ -880,12 +883,15 @@ function publicationOperationFromPayload(payload: string): StubPublicationOperat
 }
 
 async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id<"documentVersions">) {
+  await ownedReadyRun(ctx, tag);
   const version = await ctx.db.get(versionId);
   if (!version) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   const resource = await ctx.db.get(version.resourceId);
-  if (!resource) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  if (!resource || resource.createdBy !== `fixture:${tag}`) {
+    throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  }
   const jurisdiction = await ctx.db.get(resource.jurisdictionId);
-  if (!jurisdiction || (jurisdiction.slug !== tag && jurisdiction.createdBy !== `fixture:${tag}`)) {
+  if (!jurisdiction || jurisdiction.slug !== tag || jurisdiction.createdBy !== `fixture:${tag}`) {
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   return { version, resource };
@@ -1209,6 +1215,7 @@ const mutationControlOperationValidator = v.union(
 const controlOperationValidator = v.union(
   mutationControlOperationValidator,
   v.literal("verify_place_claim"),
+  v.literal("verify_telemetry_ingest_secret"),
 );
 
 async function ownedReadyRun(ctx: MutationCtx | QueryCtx, tag: string) {
@@ -1251,6 +1258,19 @@ export const verifyPlaceClaim = internalQuery({
     requireFixtureEnvironment(); requireTag(args.tag);
     const actorId = await ownedSuperAdminActorId(ctx, args.tag);
     return { ok: true as const, place: await verifyVerifiedPlaceClaim(args.claim, actorId) };
+  },
+});
+
+export const verifyTelemetryIngestSecret = internalQuery({
+  args: { tag: v.string(), proof: v.string() },
+  returns: v.object({ ok: v.literal(true) }),
+  handler: async (ctx, args) => {
+    requireFixtureEnvironment(); requireTag(args.tag);
+    await ownedReadyRun(ctx, args.tag);
+    if (!(await verifyTelemetryServiceProof(args.proof, [TELEMETRY_SECRET_PROOF_DOMAIN, args.tag]))) {
+      throw new ConvexError("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    }
+    return { ok: true as const };
   },
 });
 
@@ -1337,12 +1357,12 @@ export const applyControl = internalMutation({
         outcome: args.providerOutcome,
       });
     }
-    const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", args.tag)).unique();
-    if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-    const resources = await ctx.db.query("legalResources")
-      .withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(10);
-    const resource = resources.find((row) => row.createdBy === `fixture:${args.tag}`);
-    if (!resource) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
+    if (args.operation === "read_state" && !args.versionId) {
+      throw new ConvexError("E2E_VERSION_ARGUMENT_REQUIRED");
+    }
+    const { resource } = args.operation === "read_state"
+      ? await requireTaggedVersion(ctx, args.tag, args.versionId!)
+      : await mainFixtureRecords(ctx, args.tag);
 
     if (args.operation === "run_retention") {
       // Never call the global retention engine from fixtures. This boundary
@@ -1389,6 +1409,7 @@ export const applyControl = internalMutation({
 
 const applyControlRef = makeFunctionReference<"mutation">("admin/e2eFixtures:applyControl");
 const verifyPlaceClaimRef = makeFunctionReference<"query">("admin/e2eFixtures:verifyPlaceClaim");
+const verifyTelemetryIngestSecretRef = makeFunctionReference<"query">("admin/e2eFixtures:verifyTelemetryIngestSecret");
 export const control = internalAction({
   args: {
     tag: v.string(),
@@ -1403,6 +1424,7 @@ export const control = internalAction({
     key: v.optional(v.string()),
     payload: v.optional(v.any()),
     claim: v.optional(v.string()),
+    proof: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
@@ -1410,6 +1432,10 @@ export const control = internalAction({
     if (args.operation === "verify_place_claim") {
       if (!args.claim) throw new ConvexError("E2E_PLACE_CLAIM_ARGUMENT_REQUIRED");
       return await ctx.runQuery(verifyPlaceClaimRef, { tag: args.tag, claim: args.claim });
+    }
+    if (args.operation === "verify_telemetry_ingest_secret") {
+      if (!args.proof) throw new ConvexError("E2E_TELEMETRY_INGEST_PROOF_REQUIRED");
+      return await ctx.runQuery(verifyTelemetryIngestSecretRef, { tag: args.tag, proof: args.proof });
     }
     return await ctx.runMutation(applyControlRef, args);
   },

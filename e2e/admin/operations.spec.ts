@@ -14,8 +14,11 @@ test("super administrator opens an incident and callback replay remains idempote
   await page.reload();
   await expect(page.getByRole("row").filter({ hasText: title })).toBeVisible();
 
-  const callback = `${fixture.convexSiteUrl}/groundx/callback/${fixture.records.callbackToken}`;
-  const body = { processId: `${fixture.tag}-process`, targetType: "e2e_fixture", targetId: fixture.tag, status: "complete" };
+  const callback = `${fixture.convexSiteUrl}/groundx/callback`;
+  const body = {
+    callbackData: fixture.records.callbackToken,
+    ingest: { processId: `${fixture.tag}-process`, status: "complete" },
+  };
   expect((await request.post(callback, { data: body })).status()).toBe(202);
   expect((await request.post(callback, { data: body })).status()).toBe(202);
 

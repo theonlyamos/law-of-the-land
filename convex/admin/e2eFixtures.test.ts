@@ -10,6 +10,8 @@ import schema from "../schema";
 import { authorizeFixtureRequest } from "./e2eFixtures";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 import { issueVerifiedPlaceClaim } from "../lib/placeClaim";
+import { createTelemetryServiceProofForSecret } from "../lib/telemetryProof";
+import { readFixtureControl } from "../http";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -38,7 +40,7 @@ const original = { ...process.env };
 const fixtureCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 
 afterEach(() => {
-  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED", "PLACE_CLAIM_SECRET"]) {
+  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED", "PLACE_CLAIM_SECRET", "TELEMETRY_INGEST_SECRET"]) {
     if (original[key] === undefined) delete process.env[key];
     else process.env[key] = original[key];
   }
@@ -270,6 +272,68 @@ describe("isolated admin E2E fixture control plane", () => {
       flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
     }));
     expect(after).toEqual(before);
+  });
+
+  it("verifies only the deployed telemetry ingest secret without writing fixture state", async () => {
+    enableFixtureMode();
+    const telemetrySecret = "test-telemetry-ingest-secret-that-is-at-least-32-bytes";
+    process.env.TELEMETRY_INGEST_SECRET = telemetrySecret;
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_telemetrysecret1" });
+    const proof = await createTelemetryServiceProofForSecret(
+      telemetrySecret,
+      ["admin-e2e-telemetry-ingest-secret-v1", fixture.tag],
+    );
+    const before = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      adminFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", "test")).unique(),
+      unifiedFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof,
+    })).resolves.toEqual({ ok: true });
+    const wrongSecretProof = await createTelemetryServiceProofForSecret(
+      "wrong-telemetry-ingest-secret-that-is-at-least-32-bytes",
+      ["admin-e2e-telemetry-ingest-secret-v1", fixture.tag],
+    );
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof: wrongSecretProof,
+    })).rejects.toThrow("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof: `${proof.slice(0, -1)}${proof.endsWith("a") ? "b" : "a"}`,
+    })).rejects.toThrow("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    const after = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      adminFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", "test")).unique(),
+      unifiedFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+    expect(after).toEqual(before);
+  });
+
+  it("accepts only the exact three-field telemetry verification body", async () => {
+    const exact = { tag: "e2e_telemetryhttp1", operation: "verify_telemetry_ingest_secret", proof: "p".repeat(43) };
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify(exact),
+    }))).resolves.toEqual(exact);
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify({ ...exact, enabled: true }),
+    }))).resolves.toBeNull();
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify({ tag: exact.tag, operation: exact.operation, claim: exact.proof }),
+    }))).resolves.toBeNull();
   });
 
   it("restores an exact prior flag and leaves a cleanup conflict on concurrent drift", async () => {
@@ -529,6 +593,180 @@ describe("isolated admin E2E fixture control plane", () => {
       prior: { status: "superseded" },
       resource: { activeVersionId: fixture.records.reviewVersionId },
     });
+  });
+
+  it("projects document state from the exact supplied fixture version after matrix resources crowd the index", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_statefixture1";
+    const fixture = await t.action(bootstrap, { tag });
+
+    for (let index = 0; index < 11; index += 1) {
+      await t.action(control, {
+        tag,
+        operation: "prepare_matrix_operation",
+        path: "admin/resources:updateResource",
+        role: "content_manager",
+        key: `matrix_state_${index}`,
+      });
+    }
+    await t.run((ctx) => ctx.db.patch(fixture.records.resourceId, { updatedAt: Date.now() + 60_000 }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: fixture.records.reviewVersionId,
+    })).resolves.toMatchObject({
+      activeVersionId: fixture.records.publishedVersionId,
+      versions: expect.arrayContaining([
+        expect.objectContaining({ id: fixture.records.publishedVersionId, versionNumber: 1, status: "published" }),
+        expect.objectContaining({ id: fixture.records.reviewVersionId, versionNumber: 2, status: "ready_for_review" }),
+      ]),
+    });
+  });
+
+  it("requires an exact fixture version before read-state projection", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_stateversionarg1";
+    await t.action(bootstrap, { tag });
+
+    await expect(t.action(control, { tag, operation: "read_state" }))
+      .rejects.toThrow("E2E_VERSION_ARGUMENT_REQUIRED");
+  });
+
+  it("rejects read-state projection for an unowned resource under the tagged jurisdiction without writes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_unownedresource1";
+    const fixture = await t.action(bootstrap, { tag });
+    const foreignVersionId = await t.run(async (ctx) => {
+      const fixtureVersion = await ctx.db.get("documentVersions", fixture.records.reviewVersionId);
+      if (!fixtureVersion) throw new Error("Fixture version missing");
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId: fixture.records.jurisdictionId,
+        type: "act",
+        title: "Unowned resource",
+        issuer: "External operator",
+        officialCitation: "unowned-resource",
+        officialCitationKey: "unowned-resource",
+        sourceUrl: "https://example.invalid/unowned-resource",
+        topics: [],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: "operator",
+        updatedBy: "operator",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      return await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: fixtureVersion.originalStorageId,
+        filename: "unowned-resource.pdf",
+        mimeType: "application/pdf",
+        byteSize: fixtureVersion.byteSize,
+        sha256: fixtureVersion.sha256,
+        sourceUrl: "https://example.invalid/unowned-resource.pdf",
+        effectiveDate: "2026-01-01",
+        status: "draft",
+        submittedBy: "operator",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    const before = await t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: foreignVersionId,
+    })).rejects.toThrow("E2E_FIXTURE_VERSION_MISMATCH");
+
+    await expect(t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }))).resolves.toEqual(before);
+  });
+
+  it("rejects read-state projection through a fixture-created jurisdiction with the wrong slug without writes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_wrongslugfixture1";
+    const fixture = await t.action(bootstrap, { tag });
+    const foreignVersionId = await t.run(async (ctx) => {
+      const fixtureVersion = await ctx.db.get("documentVersions", fixture.records.reviewVersionId);
+      if (!fixtureVersion) throw new Error("Fixture version missing");
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        code: "QZ",
+        name: "Wrong slug fixture jurisdiction",
+        slug: `${tag}-wrong`,
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        createdBy: `fixture:${tag}`,
+        updatedBy: `fixture:${tag}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId,
+        type: "act",
+        title: "Wrong slug resource",
+        issuer: "E2E fixture",
+        officialCitation: "wrong-slug-resource",
+        officialCitationKey: "wrong-slug-resource",
+        sourceUrl: "https://example.invalid/wrong-slug-resource",
+        topics: [],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: `fixture:${tag}`,
+        updatedBy: `fixture:${tag}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      return await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: fixtureVersion.originalStorageId,
+        filename: "wrong-slug-resource.pdf",
+        mimeType: "application/pdf",
+        byteSize: fixtureVersion.byteSize,
+        sha256: fixtureVersion.sha256,
+        sourceUrl: "https://example.invalid/wrong-slug-resource.pdf",
+        effectiveDate: "2026-01-01",
+        status: "draft",
+        submittedBy: fixture.sessions.content_manager.userId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    const before = await t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: foreignVersionId,
+    })).rejects.toThrow("E2E_FIXTURE_VERSION_MISMATCH");
+
+    await expect(t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }))).resolves.toEqual(before);
   });
 
   it("teardown removes only the exact fixture tag and is idempotent", async () => {

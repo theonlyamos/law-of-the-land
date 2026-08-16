@@ -32,6 +32,7 @@ const safeEnvironment = {
   ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
   ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
   ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
+  ADMIN_E2E_TELEMETRY_INGEST_SECRET: "telemetry-ingest-secret-that-is-at-least-32-characters",
   ADMIN_E2E_FIXTURE_SECRET: "fixture-secret-that-is-at-least-32-chars",
   ADMIN_E2E_BETTER_AUTH_SECRET: "better-auth-secret-at-least-32-characters",
   ADMIN_E2E_ACCOUNT_PASSWORD: "local-e2e-password-123",
@@ -85,6 +86,15 @@ function bootstrapPayload(tag: string) {
   };
 }
 
+function successfulBootstrapRequest(tag: string) {
+  return async (url: string, init: RequestInit) => {
+    if (url.endsWith("/admin/e2e-fixtures/control")) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response(JSON.stringify(bootstrapPayload(tag)), { status: 200 });
+  };
+}
+
 beforeAll(async () => {
   const configModule = await import("../../../playwright.config");
   playwrightConfig = configModule.default;
@@ -114,6 +124,8 @@ describe("admin E2E target guard", () => {
     [{ ...safeEnvironment, ADMIN_E2E_PLACE_CLAIM_SECRET: "not+base64" }, /ADMIN_E2E_PLACE_CLAIM_SECRET/],
     [{ ...safeEnvironment, ADMIN_E2E_SEARCH_JURISDICTION_SECRET: undefined }, /ADMIN_E2E_SEARCH_JURISDICTION_SECRET/],
     [{ ...safeEnvironment, ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "short" }, /ADMIN_E2E_SEARCH_JURISDICTION_SECRET/],
+    [{ ...safeEnvironment, ADMIN_E2E_TELEMETRY_INGEST_SECRET: undefined }, /ADMIN_E2E_TELEMETRY_INGEST_SECRET/],
+    [{ ...safeEnvironment, ADMIN_E2E_TELEMETRY_INGEST_SECRET: "short" }, /ADMIN_E2E_TELEMETRY_INGEST_SECRET/],
     [{ ...safeEnvironment, CONVEX_DEPLOYMENT: "prod:live-law" }, /production Convex deployment/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://law-production.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://law-production.convex.site" }, /production-looking/i],
     [{ ...safeEnvironment, ADMIN_E2E_CONVEX_URL: "https://first-preview.convex.cloud", ADMIN_E2E_CONVEX_SITE_URL: "https://other-preview.convex.site", ADMIN_E2E_TARGET_ENV: "preview" }, /same isolated deployment/i],
@@ -160,6 +172,9 @@ describe("admin E2E fixture lifecycle", () => {
       if (init.method === "DELETE") {
         return new Response(JSON.stringify({ tag: "e2e_runnerfixture1", deleted: 12, cleanupConflict: false }), { status: 200 });
       }
+      if (url.endsWith("/admin/e2e-fixtures/control")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
       return new Response(JSON.stringify(bootstrapPayload("e2e_runnerfixture1")), { status: 200, headers: { "content-type": "application/json" } });
     };
 
@@ -170,7 +185,7 @@ describe("admin E2E fixture lifecycle", () => {
       request,
     });
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(requests[0]).toMatchObject({
       url: "http://127.0.0.1:3211/admin/e2e-fixtures/bootstrap",
       init: { method: "POST", headers: { authorization: "Bearer fixture-secret-that-is-at-least-32-chars", "content-type": "application/json" }, body: '{"tag":"e2e_runnerfixture1"}' },
@@ -180,11 +195,25 @@ describe("admin E2E fixture lifecycle", () => {
       userId: "member",
       cookie: expect.stringMatching(/^better-auth\.session_token=raw-member-token\./),
     });
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3211/admin/e2e-fixtures/control",
+      init: {
+        method: "POST",
+        headers: { authorization: "Bearer fixture-secret-that-is-at-least-32-chars", "content-type": "application/json" },
+      },
+    });
+    expect(Object.keys(JSON.parse(String(requests[1].init.body))).sort()).toEqual(["operation", "proof", "tag"]);
+    expect(JSON.parse(String(requests[1].init.body))).toMatchObject({
+      tag: "e2e_runnerfixture1",
+      operation: "verify_telemetry_ingest_secret",
+      proof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
     expect(manifest.state).toBe("ready");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     expect(JSON.stringify(manifest)).not.toContain(observationSecret);
     expect(JSON.stringify(manifest)).not.toContain(placeClaimSecret);
     expect(JSON.stringify(manifest)).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
+    expect(JSON.stringify(manifest)).not.toContain(safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET);
     if (process.platform !== "win32") expect((await stat(manifestPath)).mode & 0o777).toBe(0o600);
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request });
   });
@@ -213,6 +242,7 @@ describe("admin E2E fixture lifecycle", () => {
     });
     expect(JSON.stringify(duringRequest)).not.toContain(observationSecret);
     expect(JSON.stringify(duringRequest)).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
+    expect(JSON.stringify(duringRequest)).not.toContain(safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
     await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0, cleanupConflict: false }), { status: 200 }) });
   });
@@ -249,7 +279,9 @@ describe("admin E2E fixture lifecycle", () => {
       environment: safeEnvironment,
       fixtureTag: "e2e_validationwindow1",
       manifestPath,
-      request: async () => new Response(JSON.stringify({ tag: "e2e_validationwindow1", providerTransport: "stub", deployedCommitSha: approvedCommitSha, billingDisabled: true, sessions: {}, variants: {}, jurisdictionUsers: {}, records: {} }), { status: 200 }),
+      request: async (url) => url.endsWith("/admin/e2e-fixtures/control")
+        ? new Response(JSON.stringify({ ok: true }), { status: 200 })
+        : new Response(JSON.stringify({ tag: "e2e_validationwindow1", providerTransport: "stub", deployedCommitSha: approvedCommitSha, billingDisabled: true, sessions: {}, variants: {}, jurisdictionUsers: {}, records: {} }), { status: 200 }),
     })).rejects.toThrow(/omitted the super_admin session token/i);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
     await rm(manifestPath, { force: true });
@@ -278,7 +310,7 @@ describe("admin E2E fixture lifecycle", () => {
       },
       records: fixtureRecords(),
     };
-    const setupRequest = async () => new Response(JSON.stringify(bootstrapPayload(manifest.tag)), { status: 200 });
+    const setupRequest = successfulBootstrapRequest(manifest.tag);
     await bootstrapAdminFixtures({ environment: safeEnvironment, fixtureTag: manifest.tag, manifestPath, request: setupRequest });
     let cleanupBody = "";
 
@@ -303,7 +335,7 @@ describe("admin E2E fixture lifecycle", () => {
       environment: safeEnvironment,
       fixtureTag: tag,
       manifestPath,
-      request: async () => new Response(JSON.stringify(bootstrapPayload(tag)), { status: 200 }),
+      request: successfulBootstrapRequest(tag),
     });
     await expect(cleanupAdminFixtures({
       environment: safeEnvironment,
@@ -330,6 +362,39 @@ describe("admin E2E fixture lifecycle", () => {
       ...child,
       ADMIN_E2E_SEARCH_JURISDICTION_SECRET: searchTransportSecret,
     }))).not.toContain(searchTransportSecret);
+  });
+
+  it("requires a target-bound telemetry secret and maps it only into the Next child", () => {
+    const telemetrySecret = safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET;
+    expect(() => resolveAdminE2ETarget({
+      ...safeEnvironment,
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: undefined,
+    })).toThrow(/ADMIN_E2E_TELEMETRY_INGEST_SECRET/);
+    const child = buildWebServerEnvironment({
+      ...safeEnvironment,
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: telemetrySecret,
+    });
+    expect(child.TELEMETRY_INGEST_SECRET).toBe(telemetrySecret);
+    expect(child).not.toHaveProperty("ADMIN_E2E_TELEMETRY_INGEST_SECRET");
+    expect(JSON.stringify(buildBrowserEnvironment({
+      ...child,
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: telemetrySecret,
+    }))).not.toContain(telemetrySecret);
+  });
+
+  it("refuses bootstrap and retains recovery state when target telemetry verification fails", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    const tag = "e2e_telemetrymismatch1";
+    await expect(bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: tag,
+      manifestPath,
+      request: async (url) => url.endsWith("/admin/e2e-fixtures/control")
+        ? new Response(JSON.stringify({ error: "Fixture control refused" }), { status: 409 })
+        : new Response(JSON.stringify(bootstrapPayload(tag)), { status: 200 }),
+    })).rejects.toThrow(/telemetry secret verification failed/i);
+    await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
+    await rm(manifestPath, { force: true });
   });
 });
 
@@ -524,6 +589,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: "telemetry-ingest-secret-that-is-at-least-32-characters",
       CONVEX_DEPLOYMENT: "dev:safe-preview",
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
@@ -546,12 +612,14 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       PLACE_CLAIM_SECRET: placeClaimSecret,
       SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
+      TELEMETRY_INGEST_SECRET: "telemetry-ingest-secret-that-is-at-least-32-characters",
       CONVEX_DEPLOYMENT: "dev:safe-preview",
     });
     expect(environment).not.toHaveProperty("ADMIN_E2E_FIXTURE_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_BETTER_AUTH_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_PLACE_CLAIM_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+    expect(environment).not.toHaveProperty("ADMIN_E2E_TELEMETRY_INGEST_SECRET");
     expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
     expect(buildBrowserEnvironment({ ...environment, x_admin_e2e_retrieval_plan_v1: "must-not-leak" }))
@@ -561,6 +629,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       ADMIN_E2E_SEARCH_JURISDICTION_SECRET: "search-jurisdiction-secret-that-is-at-least-32-characters",
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: "telemetry-ingest-secret-that-is-at-least-32-characters",
       "x-admin-e2e-retrieval-plan-v1": "must-not-enter-artifacts",
     }))).not.toContain("x-admin-e2e-retrieval-plan-v1");
   });
@@ -584,7 +653,7 @@ describe("Playwright web server environment", () => {
     });
     expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
     expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
-    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, "search-jurisdiction-secret-that-is-at-least-32-characters", approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, "search-jurisdiction-secret-that-is-at-least-32-characters", "telemetry-ingest-secret-that-is-at-least-32-characters", approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
       expect(JSON.stringify(environment)).not.toContain(secret);
     }
   });
@@ -659,6 +728,10 @@ describe("Playwright web server environment", () => {
     })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
     expect(() => assertIsolatedWebServerEnvironment({
       ...safeEnvironment,
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: undefined,
+    })).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+    expect(() => assertIsolatedWebServerEnvironment({
+      ...safeEnvironment,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: Buffer.alloc(33, 7).toString("base64url"),
     })).not.toThrow();
     expect(() => assertIsolatedWebServerEnvironment(remoteEnvironment)).not.toThrow();
@@ -681,12 +754,14 @@ describe("Playwright web server environment", () => {
     expect(output.join("\n")).not.toContain(observationSecret);
     expect(output.join("\n")).not.toContain(placeClaimSecret);
     expect(output.join("\n")).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
+    expect(output.join("\n")).not.toContain(safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET);
 
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: observationSecret,
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       ADMIN_E2E_SEARCH_JURISDICTION_SECRET: safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET,
+      ADMIN_E2E_TELEMETRY_INGEST_SECRET: safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET,
     };
     clearAdminE2EParentEnvironment(environment);
     expect(environment).toEqual({});

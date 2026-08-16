@@ -46,10 +46,20 @@ export async function hashOpaqueTelemetryValue(value: string): Promise<string> {
 export async function createTelemetryServiceProof(
   parts: readonly (string | number)[],
 ): Promise<string> {
+  return createTelemetryServiceProofForSecret(secret(), parts);
+}
+
+export async function createTelemetryServiceProofForSecret(
+  telemetryIngestSecret: string,
+  parts: readonly (string | number)[],
+): Promise<string> {
+  if (!telemetryIngestSecret || telemetryIngestSecret.length < 32) {
+    throw new Error("Telemetry ingestion is not configured");
+  }
   return encode(
     await crypto.subtle.sign(
       "HMAC",
-      await hmacKey(secret(), ["sign"]),
+      await hmacKey(telemetryIngestSecret, ["sign"]),
       new TextEncoder().encode(frame(parts)),
     ),
   );

@@ -1,4 +1,5 @@
 import { makeSignature } from "better-auth/crypto";
+import { createTelemetryServiceProofForSecret } from "../../convex/lib/telemetryProof";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ const FIXED_ROLES = [
   "billing_manager",
   "auditor",
 ] as const;
+const TELEMETRY_SECRET_PROOF_DOMAIN = "admin-e2e-telemetry-ingest-secret-v1";
 
 type FixedRole = (typeof FIXED_ROLES)[number];
 type Environment = Record<string, string | undefined>;
@@ -24,6 +26,7 @@ export type AdminE2ETarget = {
   fixtureSecret: string;
   betterAuthSecret: string;
   accountPassword: string;
+  telemetryIngestSecret: string;
   approvedCommitSha: string;
 };
 
@@ -214,11 +217,15 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
   const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
   requiredCanonicalSecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET");
   const searchJurisdictionSecret = required(environment, "ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+  const telemetryIngestSecret = required(environment, "ADMIN_E2E_TELEMETRY_INGEST_SECRET");
   if (fixtureSecret.length < 32 || betterAuthSecret.length < 32) {
     throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
   }
   if (searchJurisdictionSecret.length < 32) {
     throw new Error("ADMIN_E2E_SEARCH_JURISDICTION_SECRET must be at least 32 characters.");
+  }
+  if (telemetryIngestSecret.length < 32) {
+    throw new Error("ADMIN_E2E_TELEMETRY_INGEST_SECRET must be at least 32 characters.");
   }
   if (accountPassword.length < 12) throw new Error("ADMIN_E2E_ACCOUNT_PASSWORD must be at least 12 characters.");
   const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
@@ -237,6 +244,7 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     fixtureSecret,
     betterAuthSecret,
     accountPassword,
+    telemetryIngestSecret,
     approvedCommitSha,
   };
 }
@@ -257,6 +265,24 @@ async function responseJson<T>(response: Response, operation: string): Promise<T
 
 function authorizationHeaders(secret: string) {
   return { authorization: `Bearer ${secret}`, "content-type": "application/json" };
+}
+
+async function verifyTargetTelemetryIngestSecret(
+  request: RequestFunction,
+  target: AdminE2ETarget,
+  tag: string,
+): Promise<void> {
+  const proof = await createTelemetryServiceProofForSecret(
+    target.telemetryIngestSecret,
+    [TELEMETRY_SECRET_PROOF_DOMAIN, tag],
+  );
+  const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/control`, {
+    method: "POST",
+    headers: authorizationHeaders(target.fixtureSecret),
+    body: JSON.stringify({ tag, operation: "verify_telemetry_ingest_secret", proof }),
+  });
+  const payload = await responseJson<{ ok?: unknown }>(response, "telemetry secret verification");
+  if (payload.ok !== true) throw new Error("Admin E2E target telemetry secret verification was refused.");
 }
 
 export async function bootstrapAdminFixtures(options: {
@@ -300,6 +326,7 @@ export async function bootstrapAdminFixtures(options: {
   if (payload.billingDisabled !== true) {
     throw new Error("Admin E2E bootstrap did not confirm billing is disabled.");
   }
+  await verifyTargetTelemetryIngestSecret(request, target, options.fixtureTag);
   const sessions: Partial<Record<FixedRole, string>> = {};
   for (const role of FIXED_ROLES) {
     const value = payload.sessions?.[role];

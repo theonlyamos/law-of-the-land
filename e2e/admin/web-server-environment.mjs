@@ -157,6 +157,7 @@ export function assertIsolatedWebServerEnvironment(environment) {
   requiredE2ESecret(environment, "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", 32, 128);
   requiredE2ESecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET", 32, 32);
   requiredTransportSecret(environment, "ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+  requiredTransportSecret(environment, "ADMIN_E2E_TELEMETRY_INGEST_SECRET");
   for (const key of ["ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD"]) {
     required(environment, key);
   }
@@ -174,6 +175,7 @@ export function buildWebServerEnvironment(environment) {
   }
   result.PLACE_CLAIM_SECRET = requiredE2ESecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET", 32, 32);
   result.SEARCH_JURISDICTION_SECRET = requiredTransportSecret(environment, "ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+  result.TELEMETRY_INGEST_SECRET = requiredTransportSecret(environment, "ADMIN_E2E_TELEMETRY_INGEST_SECRET");
   if (environment.ADMIN_E2E_CONVEX_URL) {
     result.NEXT_PUBLIC_CONVEX_URL = environment.ADMIN_E2E_CONVEX_URL;
   }

@@ -384,6 +384,44 @@ describe("POST /api/search unified jurisdictions", () => {
     });
   });
 
+  it("fails safely before the stub provider when telemetry proof is unavailable", async () => {
+    enableStubBoundary();
+    vi.stubEnv("TELEMETRY_INGEST_SECRET", "");
+    authMocks.fetchAuthQuery.mockImplementation(async (reference) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return false;
+      throw new Error(`unexpected query ${name}`);
+    });
+    searchJurisdictionMocks.fetch.mockResolvedValue(new Response(JSON.stringify(gh)));
+
+    const response = await POST(request({ query: E2E_JURISDICTION_QUESTIONS.complete, country: "GH" }));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "We couldn't find relevant legal information for your question." });
+    expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["jurisdictions:isUnifiedJurisdictionsEnabled"]);
+    expect(searchJurisdictionMocks.fetch).toHaveBeenCalledOnce();
+    expect(searchJurisdictionMocks.fetch).toHaveBeenCalledWith(
+      "https://law-test.convex.site/internal/search-jurisdiction",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-search-jurisdiction-secret": "route-search-secret-with-at-least-32-characters",
+        },
+        body: JSON.stringify({ code: "GH" }),
+      },
+    );
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["usage:recordQuestion"]);
+    expect(authMocks.fetchAuthQuery.mock.invocationCallOrder[0])
+      .toBeLessThan(searchJurisdictionMocks.fetch.mock.invocationCallOrder[0]);
+    expect(searchJurisdictionMocks.fetch.mock.invocationCallOrder[0])
+      .toBeLessThan(authMocks.fetchAuthMutation.mock.invocationCallOrder[0]);
+    expect(groundxMocks.construct).not.toHaveBeenCalled();
+    expect(groundxMocks.searchContent).not.toHaveBeenCalled();
+  });
+
   it("binds country-only legacy resolution into unified correlation issuance", async () => {
     enableUnified();
     const response = await POST(request({ query: "parking rules", country: "GH" }));
