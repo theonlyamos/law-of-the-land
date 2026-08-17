@@ -85,13 +85,16 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await article.getByLabel("Decision reason").fill("Fixture evidence satisfies the publication checklist");
   await article.getByRole("button", { name: "Approve version" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Version 2 approved" })).toBeVisible();
+  await page.reload();
+  const approvedVersion = versionArticle(page, 2, `${fixture.tag}-review.pdf`);
+  await expect(approvedVersion).toContainText("approved");
 
   await controlBrowserFixtures(fixture, "arm_provider_outcome", {
     versionId,
     publicationOperation: "publish",
     providerOutcome: "failed",
   });
-  await article.getByRole("button", { name: "Publish version" }).click();
+  await approvedVersion.getByRole("button", { name: "Publish version" }).click();
   const dialog = page.getByRole("dialog", { name: "Publish version 2" });
   await dialog.getByLabel("Reason for this action").fill("Exercise isolated provider failure boundary");
   await dialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);

@@ -197,7 +197,7 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
     });
     expect(selected.response.status).toBe(500);
     expect(selected.observation.coverageState).toBe("selected_unavailable");
-    expect(selected.body).toEqual({ error: "We couldn't search the legal library. Please try again." });
+    expect(selected.body).toEqual({ error: "We couldn't find relevant legal information for your question." });
     expect(JSON.stringify(selected.body)).not.toMatch(/bucket|membership|provider|organization/i);
   });
 
