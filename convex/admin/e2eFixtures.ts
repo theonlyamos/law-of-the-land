@@ -138,7 +138,15 @@ async function listFixtureUsers(ctx: MutationCtx | QueryCtx, tag: string) {
 }
 
 async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOwnership?: boolean } = {}) {
+  const maxOperationUnits = 20;
   let deleted = 0;
+  let operationUnits = 0;
+  const deleteOwned = async (id: Parameters<MutationCtx["db"]["delete"]>[0]) => {
+    await ctx.db.delete(id);
+    deleted += 1;
+    operationUnits += 1;
+    return operationUnits >= maxOperationUnits;
+  };
   const fixtureOwnership = await ctx.db.query("e2eFixtureOwnership")
     .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
     .take(501);
@@ -159,7 +167,6 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
   );
   const fixtureVersionIds = new Set<string>();
   const fixtureOperationIds = new Set<Id<"adminOperations">>();
-  const fixtureStorageIds = new Set<Id<"_storage">>();
 
   const [country, town, publicOrganizationJurisdiction, memberOrganizationJurisdiction] = await Promise.all([
     exactTaggedJurisdiction(ctx, tag, "ghana"),
@@ -191,14 +198,14 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
       .withIndex("by_organizationalJurisdictionId_and_geographicJurisdictionId", (q) =>
         q.eq("organizationalJurisdictionId", profile._id))
       .take(9);
-    for (const scope of scopes) { await ctx.db.delete(scope._id); deleted += 1; }
+    for (const scope of scopes) { if (await deleteOwned(scope._id)) return deleted; }
   }
   for (const row of [country, town]) {
     if (!row) continue;
     const aliases = await ctx.db.query("geographicJurisdictionAliases")
       .withIndex("by_jurisdictionId_and_normalizedAlias", (q) => q.eq("jurisdictionId", row._id))
       .take(20);
-    for (const alias of aliases) { await ctx.db.delete(alias._id); deleted += 1; }
+    for (const alias of aliases) { if (await deleteOwned(alias._id)) return deleted; }
   }
   for (const organization of [publicOrganization, memberOrganization]) {
     if (!organization) continue;
@@ -208,44 +215,58 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
         .take(101);
       for (const membership of memberships) {
         if (!fixtureUserIds.has(membership.userId)) throw new ConvexError("E2E_FIXTURE_OWNERSHIP_MISMATCH");
-        await ctx.db.delete(membership._id); deleted += 1;
+        if (await deleteOwned(membership._id)) return deleted;
       }
     }
   }
-  for (const profile of organizationalProfiles) { await ctx.db.delete(profile._id); deleted += 1; }
-  for (const profile of geographicProfiles) { await ctx.db.delete(profile._id); deleted += 1; }
-  for (const jurisdiction of typedJurisdictions) { await ctx.db.delete(jurisdiction._id); deleted += 1; }
+  for (const profile of organizationalProfiles) { if (await deleteOwned(profile._id)) return deleted; }
+  for (const profile of geographicProfiles) { if (await deleteOwned(profile._id)) return deleted; }
+  for (const jurisdiction of typedJurisdictions) { if (await deleteOwned(jurisdiction._id)) return deleted; }
   for (const organization of [publicOrganization, memberOrganization]) {
-    if (organization) { await ctx.db.delete(organization._id); deleted += 1; }
+    if (organization && await deleteOwned(organization._id)) return deleted;
   }
 
   for (const user of fixtureUsers) {
-    const paginationOpts = { numItems: 100, cursor: null, maximumRowsRead: 100 };
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "session", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "account", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "twoFactor", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "user", where: [{ field: "_id", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    deleted += 1;
+    let dependencyDeleted = false;
+    for (const model of ["session", "account", "twoFactor"] as const) {
+      const remainingUnits = maxOperationUnits - operationUnits;
+      if (remainingUnits === 0) return deleted;
+      const batchSize = Math.min(4, remainingUnits);
+      const result = await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+        input: { model, where: [{ field: "userId", operator: "eq", value: user.userId }] },
+        paginationOpts: { numItems: batchSize, cursor: null, maximumRowsRead: batchSize },
+      }) as { count: number };
+      if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > batchSize) {
+        throw new ConvexError("E2E_FIXTURE_AUTH_CLEANUP_INVALID");
+      }
+      deleted += result.count;
+      operationUnits += result.count;
+      if (result.count !== 0) { dependencyDeleted = true; break; }
+    }
+    if (!dependencyDeleted) {
+      const result = await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+        input: { model: "user", where: [{ field: "_id", operator: "eq", value: user.userId }] },
+        paginationOpts: { numItems: 1, cursor: null, maximumRowsRead: 1 },
+      }) as { count: number };
+      if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > 1) {
+        throw new ConvexError("E2E_FIXTURE_AUTH_CLEANUP_INVALID");
+      }
+      deleted += result.count;
+      operationUnits += result.count;
+    }
+    if (operationUnits >= maxOperationUnits) return deleted;
   }
 
   const fixtureChats = (await ctx.db.query("chatSessions").take(500)).filter((row) => row.userId === `fixture:${tag}`);
   const fixtureChatIds = new Set(fixtureChats.map((row) => row._id));
   for (const chat of fixtureChats) {
     for (const row of await ctx.db.query("messages").withIndex("by_session", (q) => q.eq("sessionId", chat._id)).take(200)) {
-      await ctx.db.delete(row._id); deleted += 1;
+      if (await deleteOwned(row._id)) return deleted;
     }
     for (const grant of await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt").take(500)) {
-      if (grant.chatSessionId === chat._id) { await ctx.db.delete(grant._id); deleted += 1; }
+      if (grant.chatSessionId === chat._id && await deleteOwned(grant._id)) return deleted;
     }
-    await ctx.db.delete(chat._id); deleted += 1;
+    if (await deleteOwned(chat._id)) return deleted;
   }
 
   const fixtureJurisdictions = (await ctx.db.query("jurisdictions").take(500)).filter(
@@ -263,19 +284,22 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
       for (const version of versions) {
         fixtureVersionIds.add(version._id);
         for (const decision of await ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).take(20)) {
-          await ctx.db.delete(decision._id); deleted += 1;
+          if (await deleteOwned(decision._id)) return deleted;
         }
-        fixtureStorageIds.add(version.originalStorageId);
-        await ctx.db.delete(version._id); deleted += 1;
+        if (operationUnits + 3 > maxOperationUnits) return deleted;
+        const originalStorage = await ctx.db.system.get("_storage", version.originalStorageId);
+        operationUnits += 1;
+        if (originalStorage) { await ctx.storage.delete(version.originalStorageId); operationUnits += 1; }
+        if (await deleteOwned(version._id)) return deleted;
       }
       for (const lock of await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).take(20)) {
-        await ctx.db.delete(lock._id); deleted += 1;
+        if (await deleteOwned(lock._id)) return deleted;
       }
       const counter = await ctx.db.query("resourceVersionCounters").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).unique();
-      if (counter) { await ctx.db.delete(counter._id); deleted += 1; }
-      await ctx.db.delete(resource._id); deleted += 1;
+      if (counter && await deleteOwned(counter._id)) return deleted;
+      if (await deleteOwned(resource._id)) return deleted;
     }
-    await ctx.db.delete(jurisdiction._id); deleted += 1;
+    if (await deleteOwned(jurisdiction._id)) return deleted;
   }
 
   const fixtureIncidentIds = new Set(registeredIncidentIds);
@@ -291,6 +315,7 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     }
   }
   for (const operationId of registeredOperationIds) {
+    fixtureOperationIds.add(operationId as Id<"adminOperations">);
     const operation = await ctx.db.get(operationId as Id<"adminOperations">);
     if (operation) rememberOperation(operation);
   }
@@ -305,43 +330,56 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     const incident = await ctx.db.get(incidentId as Id<"systemIncidents">);
     if (!incident) continue;
     for (const row of await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", incident._id)).take(500)) {
-      await ctx.db.delete(row._id); deleted += 1;
+      if (await deleteOwned(row._id)) return deleted;
     }
-    await ctx.db.delete(incident._id); deleted += 1;
+    if (await deleteOwned(incident._id)) return deleted;
   }
   for (const row of await ctx.db.query("adminStepUpProofs").take(500)) {
-    if (fixtureUserIds.has(row.actorId) || fixtureVersionIds.has(row.targetId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureUserIds.has(row.actorId) || fixtureVersionIds.has(row.targetId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of await ctx.db.query("userDeletionRequests").take(500)) {
-    if (fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of await ctx.db.query("verificationEmailRequests").take(500)) {
-    if (fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const operationId of fixtureOperationIds) {
-    for (const row of await ctx.db.query("jobControlResults").withIndex("by_operationId", (q) => q.eq("operationId", operationId)).take(20)) {
-      await ctx.db.delete(row._id); deleted += 1;
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_grantOperationId", (q) => q.eq("grantOperationId", operationId)).take(500)) {
+      if (await deleteOwned(override._id)) return deleted;
     }
-    if (await ctx.db.get(operationId)) { await ctx.db.delete(operationId); deleted += 1; }
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_revokeOperationId", (q) => q.eq("revokeOperationId", operationId)).take(500)) {
+      if (await deleteOwned(override._id)) return deleted;
+    }
+    for (const row of await ctx.db.query("jobControlResults").withIndex("by_operationId", (q) => q.eq("operationId", operationId)).take(20)) {
+      if (await deleteOwned(row._id)) return deleted;
+    }
+    if (await ctx.db.get(operationId) && await deleteOwned(operationId)) return deleted;
   }
   const fixtureExports = (await ctx.db.query("adminExports").take(500)).filter((row) => fixtureUserIds.has(row.requesterId) || fixtureChatIds.has(row.chatSessionId));
   const fixtureExportIds = new Set(fixtureExports.map((row) => row._id));
   for (const row of await ctx.db.query("exportDownloadReferences").take(500)) {
-    if (fixtureExportIds.has(row.exportId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if (fixtureExportIds.has(row.exportId) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of fixtureExports) {
-    if (row.storageId) fixtureStorageIds.add(row.storageId);
-    await ctx.db.delete(row._id); deleted += 1;
+    if (operationUnits + (row.storageId ? 3 : 1) > maxOperationUnits) return deleted;
+    if (row.storageId) {
+      const exportStorage = await ctx.db.system.get("_storage", row.storageId);
+      operationUnits += 1;
+      if (exportStorage) { await ctx.storage.delete(row.storageId); operationUnits += 1; }
+    }
+    if (await deleteOwned(row._id)) return deleted;
   }
 
   for (const job of await ctx.db.query("integrationJobs").take(500)) {
     const taggedJob = job.targetType === "e2e_fixture" && (job.targetId === tag || job.targetId.startsWith(`${tag}-`) || job.targetId.startsWith(`${tag}:`));
     if (!taggedJob && job.targetId !== tag && !fixtureVersionIds.has(job.targetId) && !fixtureUserIds.has(job.actorId)) continue;
-    await ctx.db.delete(job._id); deleted += 1;
+    if (await deleteOwned(job._id)) return deleted;
   }
   for (const userId of fixtureOwnerIds) {
     for (const usage of await ctx.db.query("dailyUsage").withIndex("by_user_day", (q) => q.eq("userId", userId)).take(500)) {
-      await ctx.db.delete(usage._id); deleted += 1;
+      if (await deleteOwned(usage._id)) return deleted;
     }
   }
   const fixtureOverrideIds = new Set<Id<"quotaOverrides">>();
@@ -366,23 +404,20 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     }
   }
   for (const overrideId of fixtureOverrideIds) {
-    await ctx.db.delete(overrideId); deleted += 1;
+    if (await deleteOwned(overrideId)) return deleted;
   }
   for (const userId of fixtureUserIds) {
     for (const event of await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", userId)).take(200)) {
-      await ctx.db.delete(event._id); deleted += 1;
+      if (await deleteOwned(event._id)) return deleted;
     }
   }
   for (const outcome of await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(500)) {
-    await ctx.db.delete(outcome._id); deleted += 1;
+    if (await deleteOwned(outcome._id)) return deleted;
   }
   if (options.deleteOwnership !== false) {
     for (const ownership of fixtureOwnership) {
-      await ctx.db.delete(ownership._id); deleted += 1;
+      if (await deleteOwned(ownership._id)) return deleted;
     }
-  }
-  for (const storageId of fixtureStorageIds) {
-    if (await ctx.db.system.get("_storage", storageId)) await ctx.storage.delete(storageId);
   }
   return deleted;
 }
@@ -693,7 +728,12 @@ export const bootstrap = internalAction({
 
 export const cleanup = internalMutation({
   args: { tag: v.string() },
-  returns: v.object({ tag: v.string(), deleted: v.number(), cleanupConflict: v.boolean() }),
+  returns: v.object({
+    tag: v.string(),
+    deleted: v.number(),
+    cleanupConflict: v.boolean(),
+    cleanupPending: v.boolean(),
+  }),
   handler: async (ctx, { tag }) => {
     requireFixtureEnvironment(); requireTag(tag);
     const environment = process.env.ADMIN_E2E_TARGET_ENV as "test" | "preview";
@@ -703,10 +743,13 @@ export const cleanup = internalMutation({
     ]);
     if (tagRuns.length > 1 || environmentRuns.length > 1) throw new ConvexError("E2E_FIXTURE_RUN_STATE_INVALID");
     const run = tagRuns[0];
-    if (!run) return { tag, deleted: await cleanupFixture(ctx, tag), cleanupConflict: false };
+    if (!run) {
+      const deleted = await cleanupFixture(ctx, tag);
+      return { tag, deleted, cleanupConflict: false, cleanupPending: deleted !== 0 };
+    }
     if (run.environment !== environment || environmentRuns[0]?._id !== run._id) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted: 0, cleanupConflict: true };
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
     }
     const currentFlag = await ctx.db.get(run.fixtureFlagWrite.rowId);
     const expected = run.fixtureFlagWrite;
@@ -717,20 +760,21 @@ export const cleanup = internalMutation({
       || currentFlag.updatedAt !== expected.updatedAt
       || currentFlag.updatedBy !== expected.updatedBy) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted: 0, cleanupConflict: true };
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
     }
     const ownership = await ctx.db.query("e2eFixtureOwnership")
       .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
       .take(501);
     if (ownership.length > 500) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted: 0, cleanupConflict: true };
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
     }
     const ownedUserIds = ownership.filter((row) => row.kind === "better_auth_user").map((row) => row.targetId);
     await ctx.db.patch(run._id, { state: "cleaning", updatedAt: Date.now() });
     let deleted = await cleanupFixture(ctx, tag, { deleteOwnership: false });
-    const residualDeleted = await cleanupFixture(ctx, tag, { deleteOwnership: false });
-    deleted += residualDeleted;
+    if (deleted !== 0) {
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
+    }
     let fixtureUserDependencyStillExists = false;
     for (const userId of ownedUserIds) {
       for (const model of ["session", "account", "twoFactor", "user"] as const) {
@@ -743,9 +787,17 @@ export const cleanup = internalMutation({
         if (result.page.length !== 0) fixtureUserDependencyStillExists = true;
       }
     }
-    if (residualDeleted !== 0 || fixtureUserDependencyStillExists || await globalCleanupBoundsExceeded(ctx)) {
+    if (await globalCleanupBoundsExceeded(ctx)) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted, cleanupConflict: true };
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
+    }
+    if (fixtureUserDependencyStillExists) {
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
+    }
+    if (ownership.length !== 0) {
+      const ownershipBatch = ownership.slice(0, 20);
+      for (const row of ownershipBatch) { await ctx.db.delete(row._id); deleted += 1; }
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
     }
     if (run.priorFlag.kind === "absent") {
       await ctx.db.delete(currentFlag._id);
@@ -771,18 +823,17 @@ export const cleanup = internalMutation({
         && restoredFlags[0].updatedBy === run.priorFlag.updatedBy;
     if (!exactFlagRestored) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted, cleanupConflict: true };
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
     }
-    for (const row of ownership) { await ctx.db.delete(row._id); deleted += 1; }
     const residualOwnership = await ctx.db.query("e2eFixtureOwnership")
       .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
       .take(1);
     if (residualOwnership.length !== 0) {
       await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
-      return { tag, deleted, cleanupConflict: true };
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
     }
     await ctx.db.delete(run._id);
-    return { tag, deleted, cleanupConflict: false };
+    return { tag, deleted, cleanupConflict: false, cleanupPending: false };
   },
 });
 

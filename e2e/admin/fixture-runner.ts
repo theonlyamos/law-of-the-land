@@ -391,6 +391,7 @@ export async function cleanupAdminFixtures(options: {
   manifestPath: string;
   request?: RequestFunction;
 }): Promise<void> {
+  const maxCleanupPasses = 64;
   const request = options.request ?? fetch;
   try {
     const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureRecoveryManifest;
@@ -406,19 +407,35 @@ export async function cleanupAdminFixtures(options: {
       || manifest.convexSiteUrl !== target.convexSiteUrl) {
       throw new Error("Admin E2E manifest target does not match the guarded cleanup target.");
     }
-    const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
-      method: "DELETE",
-      headers: authorizationHeaders(target.fixtureSecret),
-      body: JSON.stringify({ tag: manifest.tag }),
-    });
-    const payload = await responseJson<{ tag: string; deleted: number; cleanupConflict: boolean }>(response, "cleanup");
-    if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
-    if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
-      throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+    let completed = false;
+    for (let pass = 0; pass < maxCleanupPasses; pass += 1) {
+      const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
+        method: "DELETE",
+        headers: authorizationHeaders(target.fixtureSecret),
+        body: JSON.stringify({ tag: manifest.tag }),
+      });
+      const payload = await responseJson<{
+        tag: string;
+        deleted: number;
+        cleanupConflict: boolean;
+        cleanupPending: boolean;
+      }>(response, "cleanup");
+      if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
+      if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
+        throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+      }
+      if (payload.cleanupConflict !== false) {
+        throw new Error("Admin E2E cleanup reported an ownership conflict; operator recovery remains required.");
+      }
+      if (typeof payload.cleanupPending !== "boolean") {
+        throw new Error("Admin E2E cleanup returned an invalid completion state.");
+      }
+      if (!payload.cleanupPending) {
+        completed = true;
+        break;
+      }
     }
-    if (payload.cleanupConflict !== false) {
-      throw new Error("Admin E2E cleanup reported an ownership conflict; operator recovery remains required.");
-    }
+    if (!completed) throw new Error("Admin E2E cleanup exceeded the bounded pass limit; operator recovery remains required.");
     await rm(options.manifestPath, { force: true });
   } catch (error) {
     // Keep the manifest as the only recovery handle when the target did not

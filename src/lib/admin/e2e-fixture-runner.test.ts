@@ -170,7 +170,7 @@ describe("admin E2E fixture lifecycle", () => {
     const request = async (url: string, init: RequestInit) => {
       requests.push({ url, init });
       if (init.method === "DELETE") {
-        return new Response(JSON.stringify({ tag: "e2e_runnerfixture1", deleted: 12, cleanupConflict: false }), { status: 200 });
+        return new Response(JSON.stringify({ tag: "e2e_runnerfixture1", deleted: 12, cleanupConflict: false, cleanupPending: false }), { status: 200 });
       }
       if (url.endsWith("/admin/e2e-fixtures/control")) {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -244,7 +244,7 @@ describe("admin E2E fixture lifecycle", () => {
     expect(JSON.stringify(duringRequest)).not.toContain(safeEnvironment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET);
     expect(JSON.stringify(duringRequest)).not.toContain(safeEnvironment.ADMIN_E2E_TELEMETRY_INGEST_SECRET);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain('"state":"provisional"');
-    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0, cleanupConflict: false }), { status: 200 }) });
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: "e2e_failurewindow1", deleted: 0, cleanupConflict: false, cleanupPending: false }), { status: 200 }) });
   });
 
   it("rejects a stale approved SHA before writing a provisional manifest", async () => {
@@ -325,7 +325,7 @@ describe("admin E2E fixture lifecycle", () => {
 
     expect(cleanupBody).toBe('{"tag":"e2e_exactfixture1"}');
     await expect(readFile(manifestPath, "utf8")).resolves.toContain(manifest.tag);
-    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: manifest.tag, deleted: 0, cleanupConflict: false }), { status: 200 }) });
+    await cleanupAdminFixtures({ environment: safeEnvironment, manifestPath, request: async () => new Response(JSON.stringify({ tag: manifest.tag, deleted: 0, cleanupConflict: false, cleanupPending: false }), { status: 200 }) });
   });
 
   it("treats a typed cleanup conflict as failure and retains the manifest", async () => {
@@ -340,10 +340,35 @@ describe("admin E2E fixture lifecycle", () => {
     await expect(cleanupAdminFixtures({
       environment: safeEnvironment,
       manifestPath,
-      request: async () => new Response(JSON.stringify({ tag, deleted: 0, cleanupConflict: true }), { status: 200 }),
+      request: async () => new Response(JSON.stringify({ tag, deleted: 0, cleanupConflict: true, cleanupPending: false }), { status: 200 }),
     })).rejects.toThrow(/ownership conflict/i);
     await expect(readFile(manifestPath, "utf8")).resolves.toContain(tag);
     await rm(manifestPath, { force: true });
+  });
+
+  it("continues bounded cleanup requests until the target confirms completion", async () => {
+    const manifestPath = join(tmpdir(), `admin-e2e-runner-${crypto.randomUUID()}.json`);
+    const tag = "e2e_boundedcleanup1";
+    await bootstrapAdminFixtures({
+      environment: safeEnvironment,
+      fixtureTag: tag,
+      manifestPath,
+      request: successfulBootstrapRequest(tag),
+    });
+    const responses = [
+      { tag, deleted: 95, cleanupConflict: false, cleanupPending: true },
+      { tag, deleted: 0, cleanupConflict: false, cleanupPending: false },
+    ];
+    let requests = 0;
+
+    await cleanupAdminFixtures({
+      environment: safeEnvironment,
+      manifestPath,
+      request: async () => new Response(JSON.stringify(responses[requests++]), { status: 200 }),
+    });
+
+    expect(requests).toBe(2);
+    await expect(readFile(manifestPath, "utf8")).rejects.toThrow();
   });
 
   it("requires a target-bound search transport secret and maps it only into the Next child", () => {

@@ -53,6 +53,29 @@ function backend() {
   return t;
 }
 
+async function drainCleanup(t: ReturnType<typeof backend>, tag: string) {
+  let deleted = 0;
+  for (let pass = 1; pass <= 64; pass += 1) {
+    const result = await t.mutation(cleanup, { tag }) as {
+      deleted: number;
+      cleanupConflict: boolean;
+      cleanupPending: boolean;
+    };
+    if (result.cleanupConflict) {
+      const snapshot = await t.run(async (ctx) => ({
+        pass,
+        run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+        ownership: (await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(501)).length,
+        flags: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(2),
+      }));
+      throw new Error(`unexpected cleanup conflict ${JSON.stringify(snapshot)}`);
+    }
+    deleted += result.deleted;
+    if (!result.cleanupPending) return { deleted, passes: pass };
+  }
+  throw new Error("cleanup did not complete within 64 passes");
+}
+
 function enableFixtureMode() {
   process.env.ADMIN_E2E_FIXTURE_MODE = "true";
   process.env.ADMIN_E2E_TARGET_ENV = "test";
@@ -345,7 +368,10 @@ describe("isolated admin E2E fixture control plane", () => {
       await ctx.db.insert("featureFlags", { key: "unified_jurisdictions", environment: "test", enabled: false, updatedAt: 2, updatedBy: "operator:prior" });
     });
     const first = await t.action(bootstrap, { tag: "e2e_restorefixture1" });
-    await expect(t.mutation(cleanup, { tag: first.tag })).resolves.toMatchObject({ cleanupConflict: false });
+    await expect(t.mutation(cleanup, { tag: first.tag })).resolves.toMatchObject({ cleanupConflict: false, cleanupPending: true });
+    await expect(t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique()))
+      .resolves.toMatchObject({ updatedBy: `fixture:${first.tag}` });
+    await drainCleanup(t, first.tag);
     await expect(t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique()))
       .resolves.toMatchObject({ enabled: false, updatedAt: 2, updatedBy: "operator:prior" });
 
@@ -379,25 +405,77 @@ describe("isolated admin E2E fixture control plane", () => {
       }
     });
 
-    await expect(t.mutation(cleanup, { tag })).resolves.toMatchObject({ cleanupConflict: true });
+    const firstCleanup = await t.mutation(cleanup, { tag });
+    expect(firstCleanup).toMatchObject({ cleanupConflict: false, cleanupPending: true });
+    expect(firstCleanup.deleted).toBeLessThanOrEqual(20);
     await expect(t.run(async (ctx) => ({
       run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
       outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1),
       ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(1),
       flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
     }))).resolves.toMatchObject({
-      run: { state: "cleanup_conflict" },
-      outcomes: [],
+      run: { state: "cleaning" },
+      outcomes: [expect.objectContaining({ tag })],
       ownership: [expect.objectContaining({ tag })],
       flag: { updatedBy: `fixture:${tag}` },
     });
 
-    await expect(t.mutation(cleanup, { tag })).resolves.toMatchObject({ cleanupConflict: false });
+    const remainder = await drainCleanup(t, tag);
+    expect(remainder.passes).toBeGreaterThan(1);
     await expect(t.run(async (ctx) => ({
       run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1),
       ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(1),
       flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(1),
     }))).resolves.toEqual({ run: [], ownership: [], flag: [] });
+  });
+
+  it("bounds Better Auth dependency deletion and keeps the user discoverable across passes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_authcleanup1";
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag });
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 17; index += 1) {
+        await ctx.db.insert("geographicJurisdictionAliases", {
+          jurisdictionId: fixture.records.jurisdictionCountryId,
+          normalizedAlias: `cleanup alias ${index}`,
+          source: `fixture:${tag}`,
+          createdAt: Date.now(),
+        });
+      }
+      for (let index = 0; index < 25; index += 1) {
+        const now = Date.now();
+        await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: {
+          token: `extra-${index}-${crypto.randomUUID()}`,
+          userId: fixture.variants.normal.userId,
+          expiresAt: now + 60_000,
+          createdAt: now,
+          updatedAt: now,
+        } } });
+      }
+    });
+    const sessionCount = () => t.run(async (ctx) => (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: "session",
+      where: [{ field: "userId", operator: "eq", value: fixture.variants.normal.userId }],
+      select: ["id"],
+      paginationOpts: { numItems: 100, cursor: null },
+    }) as { page: Array<{ _id: string }> }).page.length);
+    let observedBoundedDependencyPass = false;
+    for (let pass = 0; pass < 64; pass += 1) {
+      const before = await sessionCount();
+      const result = await t.mutation(cleanup, { tag });
+      const after = await sessionCount();
+      expect(result.deleted).toBeLessThanOrEqual(20);
+      if (after < before) {
+        expect(before - after).toBeLessThanOrEqual(4);
+        if (!observedBoundedDependencyPass) expect(after).toBeGreaterThan(0);
+        observedBoundedDependencyPass = true;
+      }
+      if (!result.cleanupPending) break;
+    }
+    expect(observedBoundedDependencyPass).toBe(true);
+    await expect(t.run((ctx) => ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1))).resolves.toEqual([]);
   });
 
   it("prepares a distinct tagged success fixture for every public privileged mutation", async () => {
@@ -423,7 +501,7 @@ describe("isolated admin E2E fixture control plane", () => {
         });
       }
     }
-    expect((await t.mutation(cleanup, { tag: "e2e_matrixfixture1" })).deleted).toBeGreaterThan(0);
+    expect((await drainCleanup(t, "e2e_matrixfixture1")).deleted).toBeGreaterThan(0);
     expect((await t.mutation(cleanup, { tag: "e2e_matrixfixture1" })).deleted).toBe(0);
     await expect(t.run(async (ctx) => ({
       jurisdictions: (await ctx.db.query("jurisdictions").take(500)).filter((row) => row.createdBy === "fixture:e2e_matrixfixture1"),
@@ -469,7 +547,7 @@ describe("isolated admin E2E fixture control plane", () => {
       }),
     ]);
 
-    await t.mutation(cleanup, { tag });
+    await drainCleanup(t, tag);
   });
 
   it("prepares and executes unique two-letter jurisdiction codes for every allowed matrix cell", async () => {
@@ -512,7 +590,7 @@ describe("isolated admin E2E fixture control plane", () => {
       await expect(t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId }).mutation(createJurisdiction, prepared.args)).resolves.toEqual(expect.any(String));
     }
     expect(new Set(codes).size).toBe(codes.length);
-    await t.mutation(cleanup, { tag: "e2e_codefixture1" });
+    await drainCleanup(t, "e2e_codefixture1");
   });
 
   it("allocates a distinct cleanup-owned legacy jurisdiction when a matrix update retries", async () => {
@@ -560,7 +638,7 @@ describe("isolated admin E2E fixture control plane", () => {
     await expect(
       t.withIdentity({ subject: fixture.sessions.super_admin.userId, sessionId }).mutation(updateJurisdiction, retryPrepared.args),
     ).resolves.toMatchObject({ _id: retryPrepared.args.id, name: retryPrepared.args.name });
-    await t.mutation(cleanup, { tag });
+    await drainCleanup(t, tag);
     await expect(t.run(async (ctx) => ({
       first: await ctx.db.get("jurisdictions", firstPrepared.args.id),
       retry: await ctx.db.get("jurisdictions", retryPrepared.args.id),
@@ -839,10 +917,12 @@ describe("isolated admin E2E fixture control plane", () => {
     const foreignUser = await t.run((ctx) => ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: "Must survive", email: "foreign.e2e_cleanupfixture1@e2e.invalid", emailVerified: true, role: "user", banned: false, twoFactorEnabled: false, createdAt: Date.now(), updatedAt: Date.now() } } }));
     await t.run((ctx) => ctx.db.insert("chatSessions", { userId: "other", externalId: "e2e_cleanupfixture1-suffix", title: "Must survive", lastMessage: "safe", messageCount: 0, updatedAt: Date.now() }));
 
-    const first = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
-    const second = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
-    expect(first.deleted).toBeGreaterThan(0);
-    expect(second.deleted).toBe(0);
+    const drained = await drainCleanup(t, "e2e_cleanupfixture1");
+    const idempotent = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
+    expect(drained.deleted).toBeGreaterThan(0);
+    expect(drained.passes).toBeGreaterThan(1);
+    expect(idempotent.deleted).toBe(0);
+    expect(idempotent.cleanupPending).toBe(false);
     await expect(t.run((ctx) => ctx.db.query("systemIncidents").take(10))).resolves.toHaveLength(0);
     await expect(t.run((ctx) => ctx.db.query("adminOperations").take(10))).resolves.toHaveLength(0);
     await expect(t.run(async (ctx) => ({ jurisdiction: await ctx.db.get(owned.jurisdictionId), resource: await ctx.db.get(owned.resourceId), quota: await ctx.db.get(owned.quotaId) }))).resolves.toEqual({ jurisdiction: null, resource: null, quota: null });
@@ -1021,10 +1101,11 @@ describe("isolated admin E2E fixture control plane", () => {
       { tag, kind: "better_auth_user" },
     ]);
 
-    const first = await t.mutation(cleanup, { tag });
-    const second = await t.mutation(cleanup, { tag });
-    expect(first.deleted).toBeGreaterThan(0);
-    expect(second.deleted).toBe(0);
+    const drained = await drainCleanup(t, tag);
+    const idempotent = await t.mutation(cleanup, { tag });
+    expect(drained.deleted).toBeGreaterThan(0);
+    expect(drained.passes).toBeGreaterThan(1);
+    expect(idempotent.deleted).toBe(0);
     expect.soft(await t.run(async (ctx) => ({
       ownedOverrides: await Promise.all(records.ownedOverrideIds.map((id) => ctx.db.get(id))),
       ownedOperations: await Promise.all(records.ownedOperationIds.map((id) => ctx.db.get(id))),
