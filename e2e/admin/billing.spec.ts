@@ -1,13 +1,29 @@
-import { test } from "@playwright/test";
-import { expect } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { ConvexHttpClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
 import { loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
+async function findSubscriptionRow(page: Page, userId: string) {
+  for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+    const row = page.getByRole("row").filter({ hasText: userId });
+    const count = await row.count();
+    if (count > 0) {
+      expect(count, `subscription ${userId} must be unique`).toBe(1);
+      return row;
+    }
+
+    const nextPage = page.getByRole("link", { name: "Next subscription page" });
+    if (!(await nextPage.isVisible())) break;
+    await nextPage.click();
+  }
+
+  throw new Error(`Fixture subscription ${userId} was not found within four bounded pages.`);
+}
+
 test("billing manager grants a bounded fixture quota override through the UI", async ({ context, page }) => {
   const fixture = await loadBrowserFixtureManifest();
   await openAuthenticatedRolePage(context, page, "billing_manager", "/admin/billing", "Billing");
-  const row = page.getByRole("row").filter({ hasText: fixture.variants.normal.userId }).first();
+  const row = await findSubscriptionRow(page, fixture.variants.normal.userId);
   await row.getByText("Adjust temporary allowance").click();
   await row.getByLabel("Effective question limit").fill("25");
   await row.getByLabel("Expires").fill(new Date(Date.now() + 24 * 60 * 60_000).toISOString().slice(0, 16));
@@ -32,7 +48,7 @@ test("billing manager grants a bounded fixture quota override through the UI", a
     },
   });
   await page.reload();
-  await expect(page.getByRole("row").filter({ hasText: fixture.variants.normal.userId }).first()).toContainText("25");
+  await expect(await findSubscriptionRow(page, fixture.variants.normal.userId)).toContainText("25");
 });
 
 test("billing roles apply bounded quota overrides without leaking secrets", async ({}, testInfo) => {

@@ -30,14 +30,19 @@ export function initializeAdminE2EProviderIsolation(
     execFileSync: (file, args, options) => execFileSync(file, args, options),
     randomBytes: (size) => randomBytes(size),
   },
+  processKind: "parent" | "worker" = "parent",
 ): void {
   const localHeadSha = dependencies.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (!SHA_PATTERN.test(localHeadSha)) {
     throw new Error("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
   }
   environment.ADMIN_E2E_LOCAL_HEAD_SHA = localHeadSha;
-  const observationSecret = generatedE2ESecret(dependencies);
-  environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = observationSecret;
+  const observationSecret = processKind === "worker"
+    ? environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET ?? ""
+    : generatedE2ESecret(dependencies);
+  if (processKind === "parent") {
+    environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = observationSecret;
+  }
   validateGeneratedE2ESecret(observationSecret);
   const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
   if (approvedCommitSha !== undefined
@@ -46,7 +51,11 @@ export function initializeAdminE2EProviderIsolation(
   }
 }
 
-initializeAdminE2EProviderIsolation(process.env);
+initializeAdminE2EProviderIsolation(
+  process.env,
+  undefined,
+  process.env.TEST_WORKER_INDEX === undefined ? "parent" : "worker",
+);
 
 export default defineConfig({
   testDir: "./e2e",

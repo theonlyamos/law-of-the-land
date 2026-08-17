@@ -266,7 +266,7 @@ export const listReviewQueue = query({
     const status = args.status ?? "ready_for_review";
     const result = await ctx.db.query("documentVersions")
       .withIndex("by_status_and_updatedAt", (q) => q.eq("status", status))
-      .order("asc")
+      .order("desc")
       .paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 50) });
     const page = await Promise.all(result.page.map(async (version) => {
       const [resource, previous, decisions] = await Promise.all([

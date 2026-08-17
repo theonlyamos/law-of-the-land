@@ -556,6 +556,30 @@ describe("Playwright web server environment", () => {
     expect(JSON.stringify(environment)).not.toContain("inherited-secret");
   });
 
+  it("preserves only the canonical parent-generated observation secret in a Playwright worker", () => {
+    const generatedSecret = Buffer.alloc(32, 9).toString("base64url");
+    const environment: Record<string, string | undefined> = {
+      ADMIN_E2E_APPROVED_COMMIT_SHA: approvedCommitSha,
+      ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
+      ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: generatedSecret,
+    };
+    const random = vi.fn(() => Buffer.alloc(32, 3));
+
+    initializeAdminE2EProviderIsolation(environment, {
+      execFileSync: vi.fn(() => `${approvedCommitSha}\n`),
+      randomBytes: random,
+    }, "worker");
+
+    expect(random).not.toHaveBeenCalled();
+    expect(environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET).toBe(generatedSecret);
+
+    environment.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET = "inherited-secret";
+    expect(() => initializeAdminE2EProviderIsolation(environment, {
+      execFileSync: vi.fn(() => `${approvedCommitSha}\n`),
+      randomBytes: random,
+    }, "worker")).toThrow("E2E_JURISDICTION_PROVIDER_BOUNDARY_INVALID");
+  });
+
   it("replaces both inherited values before rejecting an approved/local commit mismatch", () => {
     const environment: Record<string, string | undefined> = {
       ADMIN_E2E_APPROVED_COMMIT_SHA: "a".repeat(40),

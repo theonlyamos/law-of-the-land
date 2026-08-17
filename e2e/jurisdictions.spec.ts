@@ -76,7 +76,16 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
     await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie);
     await page.goto("/");
     await page.getByLabel("Your legal question").fill(E2E_JURISDICTION_QUESTIONS.complete);
+    const chatResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith("/api/chat") && response.request().method() === "POST",
+      { timeout: 30_000 },
+    );
     await page.getByRole("button", { name: /Research this question/ }).click();
+    const chatResponse = await chatResponsePromise;
+    expect(chatResponse.status()).toBe(200);
+    await expect(chatResponse.json()).resolves.toMatchObject({
+      result: expect.stringMatching(/Isolated Accra complete legal answer/i),
+    });
     await expect(page.getByText(/Isolated Accra complete legal answer/i)).toBeVisible();
   });
 

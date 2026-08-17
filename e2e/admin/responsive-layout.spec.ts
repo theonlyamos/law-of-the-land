@@ -28,14 +28,13 @@ const RESPONSIVE_VIEWPORTS = [
   { width: 1440, height: 900 },
 ] as const;
 
-test("every top-level administration destination stays within the viewport", async ({
-  context,
-  page,
-}) => {
-  await loadBrowserFixtureManifest();
-  await installSessionCookie(context, await roleCookie("super_admin"));
-
-  for (const viewport of RESPONSIVE_VIEWPORTS) {
+for (const viewport of RESPONSIVE_VIEWPORTS) {
+  test(`every top-level administration destination stays within the ${viewport.width}px viewport`, async ({
+    context,
+    page,
+  }) => {
+    await loadBrowserFixtureManifest();
+    await installSessionCookie(context, await roleCookie("super_admin"));
     await page.setViewportSize(viewport);
 
     for (const pathname of ADMIN_DESTINATIONS) {
@@ -56,5 +55,5 @@ test("every top-level administration destination stays within the viewport", asy
         `${pathname} must not introduce page-level horizontal scrolling at ${viewport.width}px`,
       ).toBeLessThanOrEqual(dimensions.clientWidth);
     }
-  }
-});
+  });
+}
