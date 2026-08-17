@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { E2E_JURISDICTION_QUESTIONS } from "../shared/e2e-jurisdiction-provider-contract";
-import { writePerformanceArtifact } from "../scripts/admin-performance-artifact.mjs";
+import { readPerformanceArtifact, removePerformanceArtifacts, writePerformanceArtifact } from "../scripts/admin-performance-artifact.mjs";
 import { adminOnlyScriptBytes, buildAdminSliceArtifact, buildJurisdictionPerformanceSections, collectPacedRetrievalObservations, collectRetrievalObservation, percentile95 } from "../scripts/admin-performance-collector.mjs";
 import { controlBrowserFixtures, installSessionCookie, loadBrowserFixtureManifest, type BrowserFixtureManifest } from "./admin/fixtures";
 
@@ -20,6 +20,20 @@ type CalibrationInput = {
 
 const artifactPath = path.resolve("artifacts/admin-performance.json");
 const publicBaselineArtifactPath = path.resolve("test-results/admin-performance-public-baseline.json");
+const intermediateEvidencePath = path.resolve("test-results/admin-performance-intermediate.json");
+
+type SelectorProfileEvidence = Awaited<ReturnType<typeof collectSelectorProfile>> & {
+  flagState: "off" | "on";
+  profile: "desktop" | "mobile" | "throttled";
+  baselineP95Ms: number;
+};
+
+type IntermediatePerformanceEvidence = ReturnType<typeof buildAdminSliceArtifact> & {
+  selectorProfiles: SelectorProfileEvidence[];
+  placePicker: Awaited<ReturnType<typeof collectPlacePicker>>;
+  organizationalPlacesInvocationCount: number;
+  scriptResources: ScriptResource[];
+};
 
 type PlaceDetailsResponse = {
   place: {
@@ -34,7 +48,9 @@ type PlaceDetailsResponse = {
 };
 
 test.describe.configure({ mode: "serial" });
-test.afterAll(() => fs.rmSync(publicBaselineArtifactPath, { force: true }));
+const temporaryArtifactPaths = [publicBaselineArtifactPath, intermediateEvidencePath];
+test.beforeAll(() => removePerformanceArtifacts(temporaryArtifactPaths));
+test.afterAll(() => removePerformanceArtifacts(temporaryArtifactPaths));
 
 async function installPerformanceObservers(page: Page) {
   await page.addInitScript(() => {
@@ -226,14 +242,14 @@ test("records the unauthenticated public-search API baseline performance metrics
   writePerformanceArtifact(publicBaselineArtifactPath, artifact);
 });
 
-test("records authenticated admin and bounded jurisdiction performance evidence", async ({ context, page, request }) => {
+test("records authenticated admin, selector, and Places performance evidence", async ({ context, page, request }) => {
   test.setTimeout(300_000);
   const fixture = await loadBrowserFixtureManifest();
   const adminCookie = fixture.sessions.super_admin;
   if (!adminCookie) throw new Error("Guarded fixture manifest omitted the assured Super Admin session.");
   await installSessionCookie(context, adminCookie);
   expect(fs.existsSync(publicBaselineArtifactPath)).toBe(true);
-  const publicBaseline = JSON.parse(fs.readFileSync(publicBaselineArtifactPath, "utf8")) as BrowserMetrics & { p95: number };
+  const publicBaseline = readPerformanceArtifact(publicBaselineArtifactPath) as BrowserMetrics & { p95: number };
   await installPerformanceObservers(page);
   await page.goto("/admin", { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: "System overview" })).toBeVisible();
@@ -257,9 +273,8 @@ test("records authenticated admin and bounded jurisdiction performance evidence"
   const throttled = await collectSelectorProfile(page, fixture, "throttled", true);
   const baselineP95Ms = percentile95(off.samplesMs);
   const placePicker = await collectPlacePicker(request, adminCookie, fixture);
-  const retrievalObservations = await collectRetrievalPlan(fixture, adminCookie);
-  const calibration = approvedCalibration();
-  const sections = applyCalibration(buildJurisdictionPerformanceSections({
+  writePerformanceArtifact(intermediateEvidencePath, {
+    ...baseArtifact,
     selectorProfiles: [
       { flagState: "off", profile: "desktop", ...off, baselineP95Ms },
       { flagState: "on", profile: "desktop", ...desktop, baselineP95Ms },
@@ -268,9 +283,27 @@ test("records authenticated admin and bounded jurisdiction performance evidence"
     ],
     placePicker,
     organizationalPlacesInvocationCount: placesRequests.length,
+    scriptResources: browserMetrics.scriptResources,
+  });
+});
+
+test("records paced retrieval evidence and writes the final performance artifact", async () => {
+  test.setTimeout(300_000);
+  const fixture = await loadBrowserFixtureManifest();
+  const adminCookie = fixture.sessions.super_admin;
+  if (!adminCookie) throw new Error("Guarded fixture manifest omitted the assured Super Admin session.");
+  expect(fs.existsSync(intermediateEvidencePath)).toBe(true);
+  const intermediate = readPerformanceArtifact(intermediateEvidencePath) as IntermediatePerformanceEvidence;
+  const { selectorProfiles, placePicker, organizationalPlacesInvocationCount, ...baseArtifact } = intermediate;
+  const retrievalObservations = await collectRetrievalPlan(fixture, adminCookie);
+  const calibration = approvedCalibration();
+  const sections = applyCalibration(buildJurisdictionPerformanceSections({
+    selectorProfiles,
+    placePicker,
+    organizationalPlacesInvocationCount,
     retrievalObservations,
   }), calibration);
   const calibratedOutcome = [sections.jurisdictionSelector.calibration, sections.geographicPlacePicker.calibration, sections.retrievalPlan.calibration]
     .every((entry) => entry.status === "approved" && entry.outcome === "pass") ? "pass" : calibration ? "fail" : "incomplete";
-  writePerformanceArtifact(artifactPath, { ...baseArtifact, ...sections, calibratedOutcome, scriptResources: browserMetrics.scriptResources, targetClass: process.env.ADMIN_E2E_TARGET_ENV, browserProfile: "chromium", deviceProfiles: ["desktop-1280x900", "mobile-390x844"], networkProfiles: ["unthrottled", "150ms-1600kbps-down-750kbps-up"] });
+  writePerformanceArtifact(artifactPath, { ...baseArtifact, ...sections, calibratedOutcome, targetClass: process.env.ADMIN_E2E_TARGET_ENV, browserProfile: "chromium", deviceProfiles: ["desktop-1280x900", "mobile-390x844"], networkProfiles: ["unthrottled", "150ms-1600kbps-down-750kbps-up"] });
 });

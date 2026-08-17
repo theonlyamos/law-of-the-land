@@ -4,7 +4,18 @@ import { makeFunctionReference } from "convex/server";
 import { loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
 async function findSubscriptionRow(page: Page, userId: string) {
-  for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+  const current = new URL(page.url());
+  if (current.pathname !== "/admin/billing" || current.search) {
+    await page.goto("/admin/billing");
+  }
+  const visitedPages = new Set<string>();
+
+  while (true) {
+    const pageUrl = page.url();
+    if (visitedPages.has(pageUrl)) {
+      throw new Error("Subscription pagination repeated a cursor before reaching the end of the register.");
+    }
+    visitedPages.add(pageUrl);
     const row = page.getByRole("row").filter({ hasText: userId });
     const count = await row.count();
     if (count > 0) {
@@ -14,10 +25,19 @@ async function findSubscriptionRow(page: Page, userId: string) {
 
     const nextPage = page.getByRole("link", { name: "Next subscription page" });
     if (!(await nextPage.isVisible())) break;
-    await nextPage.click();
+    const href = await nextPage.getAttribute("href");
+    if (!href) throw new Error("Subscription pagination omitted its next cursor URL.");
+    const nextUrl = new URL(href, pageUrl).href;
+    if (visitedPages.has(nextUrl)) {
+      throw new Error("Subscription pagination repeated a cursor before reaching the end of the register.");
+    }
+    await Promise.all([
+      page.waitForURL(nextUrl),
+      nextPage.click(),
+    ]);
   }
 
-  throw new Error(`Fixture subscription ${userId} was not found within four bounded pages.`);
+  throw new Error(`Fixture subscription ${userId} was not found in the complete bounded register.`);
 }
 
 test("billing manager grants a bounded fixture quota override through the UI", async ({ context, page }) => {

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { writePerformanceArtifact } from "../../../scripts/admin-performance-artifact.mjs";
+import { readPerformanceArtifact, removePerformanceArtifacts, writePerformanceArtifact } from "../../../scripts/admin-performance-artifact.mjs";
 
 const tempDirectories: string[] = [];
 
@@ -51,6 +51,41 @@ describe("admin performance artifact writer", () => {
     tempDirectories.push(directory);
     expect(() => writePerformanceArtifact(path.join(directory, "admin-performance.json"), artifact))
       .toThrow(/redaction-safe/i);
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+
+  it("reads only bounded redaction-safe intermediate evidence", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admin-performance-artifact-"));
+    tempDirectories.push(directory);
+    const artifactPath = path.join(directory, "admin-performance.json");
+    const metrics = {
+      artifactVersion: 2,
+      lcp: 2_000,
+      inp: 120,
+      cls: 0.04,
+      routeJsGzip: 100_000,
+      p95: 300,
+      selectorSamples: Array.from({ length: 20 }, (_value, index) => index),
+    };
+    writePerformanceArtifact(artifactPath, metrics);
+
+    expect(readPerformanceArtifact(artifactPath)).toEqual(metrics);
+
+    fs.writeFileSync(artifactPath, JSON.stringify({ ...metrics, cookie: "signed-session" }));
+    expect(() => readPerformanceArtifact(artifactPath)).toThrow(/redaction-safe/i);
+
+    fs.writeFileSync(artifactPath, " ".repeat(2_000_001));
+    expect(() => readPerformanceArtifact(artifactPath)).toThrow(/bounded/i);
+  });
+
+  it("removes every stale intermediate artifact before a new collection run", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admin-performance-artifact-"));
+    tempDirectories.push(directory);
+    const paths = [path.join(directory, "public.json"), path.join(directory, "intermediate.json")];
+    for (const artifactPath of paths) fs.writeFileSync(artifactPath, "stale");
+
+    removePerformanceArtifacts(paths);
+
     expect(fs.readdirSync(directory)).toEqual([]);
   });
 });

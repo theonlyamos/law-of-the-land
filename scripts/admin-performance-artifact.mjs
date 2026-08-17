@@ -4,6 +4,7 @@ import path from "node:path";
 
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
 const FORBIDDEN_KEY = /(?:cookie|token|secret|api.?key|claim|question|provider.?body|user.?id|place.?id|address)/i;
+const MAX_ARTIFACT_BYTES = 2_000_000;
 
 export function assertRedactionSafe(value, depth = 0) {
   if (depth > 12) throw new TypeError("Admin performance artifact must remain bounded and redaction-safe.");
@@ -38,7 +39,7 @@ export function writePerformanceArtifact(artifactPath, artifact) {
   assertFiniteMetrics(artifact);
   assertRedactionSafe(artifact);
   const serialized = JSON.stringify(artifact, null, 2);
-  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > 2_000_000) {
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > MAX_ARTIFACT_BYTES) {
     throw new TypeError("Admin performance artifact must be serializable.");
   }
 
@@ -53,4 +54,22 @@ export function writePerformanceArtifact(artifactPath, artifact) {
     fs.rmSync(temporaryPath, { force: true });
     throw error;
   }
+}
+
+export function readPerformanceArtifact(artifactPath) {
+  if (fs.statSync(artifactPath).size > MAX_ARTIFACT_BYTES) {
+    throw new TypeError("Admin performance artifact must remain bounded and redaction-safe.");
+  }
+  const serialized = fs.readFileSync(artifactPath, "utf8");
+  if (Buffer.byteLength(serialized, "utf8") > MAX_ARTIFACT_BYTES) {
+    throw new TypeError("Admin performance artifact must remain bounded and redaction-safe.");
+  }
+  const artifact = JSON.parse(serialized);
+  assertFiniteMetrics(artifact);
+  assertRedactionSafe(artifact);
+  return artifact;
+}
+
+export function removePerformanceArtifacts(artifactPaths) {
+  for (const artifactPath of artifactPaths) fs.rmSync(artifactPath, { force: true });
 }
