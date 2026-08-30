@@ -170,6 +170,25 @@ function projectLegacyJurisdiction(row: Doc<"jurisdictions">) {
   };
 }
 
+function projectPickerJurisdiction(row: Doc<"jurisdictions">) {
+  return {
+    _id: row._id,
+    _creationTime: row._creationTime,
+    code: row.code ?? row.legacyCountryCode ?? row.slug,
+    name: row.name,
+    slug: row.slug,
+    status: row.status,
+    isDefault: row.isDefault,
+    ...(row.stagingBucketId === undefined ? {} : { stagingBucketId: row.stagingBucketId }),
+    ...(row.productionBucketId === undefined ? {} : { productionBucketId: row.productionBucketId }),
+    providerSyncState: row.providerSyncState,
+    createdBy: row.createdBy,
+    updatedBy: row.updatedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 function legacyJurisdictionProjection(
   rows: Doc<"jurisdictions">[],
   status: Doc<"jurisdictions">["status"] | undefined,
@@ -192,6 +211,28 @@ function legacyJurisdictionProjection(
     projection.push(projectLegacyJurisdiction(row));
   }
   return projection;
+}
+
+function legacyJurisdictionPage(
+  rows: Doc<"jurisdictions">[],
+  status: Doc<"jurisdictions">["status"] | undefined,
+  paginationOpts: { numItems: number; cursor: string | null },
+) {
+  const projection = legacyJurisdictionProjection(rows, status);
+  const cursorCode = legacyPageCursor(paginationOpts.cursor);
+  const start = cursorCode === null
+    ? 0
+    : projection.findIndex((row) => row.code > cursorCode);
+  const pageStart = start < 0 ? projection.length : start;
+  const page = projection.slice(pageStart, pageStart + paginationOpts.numItems);
+  const isDone = pageStart + page.length >= projection.length;
+  return {
+    isDone,
+    continueCursor: isDone || page.length === 0
+      ? ""
+      : `${LEGACY_PAGE_CURSOR_PREFIX}${page[page.length - 1].code}`,
+    page,
+  };
 }
 
 function validateResourceType(value: string): ResourceType {
@@ -299,27 +340,49 @@ export const listJurisdictions = query({
     await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
     const code = args.code === undefined ? undefined : normalizeCode(args.code);
-    const rows = code
-      ? await ctx.db.query("jurisdictions").withIndex("by_code", (q) => q.eq("code", code)).take(2)
-      : await ctx.db
+    if (code) {
+      const [codeRows, legacyCodeRows] = await Promise.all([
+        ctx.db
+          .query("jurisdictions")
+          .withIndex("by_code", (q) => q.eq("code", code))
+          .take(2),
+        args.status === undefined
+          ? ctx.db
+            .query("jurisdictions")
+            .withIndex("by_legacyCountryCode_and_status", (q) => q.eq("legacyCountryCode", code))
+            .take(2)
+          : ctx.db
+            .query("jurisdictions")
+            .withIndex("by_legacyCountryCode_and_status", (q) => q.eq("legacyCountryCode", code).eq("status", args.status!))
+            .take(2),
+      ]);
+      const rows = [...new Map(
+        [...codeRows, ...legacyCodeRows]
+          .filter((row) => args.status === undefined || row.status === args.status)
+          .map((row) => [row._id, row]),
+      ).values()];
+      return {
+        isDone: true,
+        continueCursor: "",
+        page: rows
+          .slice(0, args.paginationOpts.numItems)
+          .map(projectPickerJurisdiction),
+      };
+    }
+    if (args.paginationOpts.cursor?.startsWith(LEGACY_PAGE_CURSOR_PREFIX)) {
+      const rows = await ctx.db
         .query("jurisdictions")
         .withIndex("by_code", (q) => q.gte("code", "AA").lte("code", "ZZ"))
         .take(MAX_LEGACY_JURISDICTIONS + 1);
-    const projection = legacyJurisdictionProjection(rows, args.status);
-    const cursorCode = legacyPageCursor(args.paginationOpts.cursor);
-    const start = cursorCode === null
-      ? 0
-      : projection.findIndex((row) => row.code > cursorCode);
-    const pageStart = start < 0 ? projection.length : start;
-    const page = projection.slice(pageStart, pageStart + args.paginationOpts.numItems);
-    const isDone = pageStart + page.length >= projection.length;
-    return {
-      isDone,
-      continueCursor: isDone || page.length === 0
-        ? ""
-        : `${LEGACY_PAGE_CURSOR_PREFIX}${page[page.length - 1].code}`,
-      page,
-    };
+      return legacyJurisdictionPage(rows, args.status, args.paginationOpts);
+    }
+    const result = args.status === undefined
+      ? await ctx.db.query("jurisdictions").withIndex("by_code").paginate(args.paginationOpts)
+      : await ctx.db
+        .query("jurisdictions")
+        .withIndex("by_status_and_code", (q) => q.eq("status", args.status!))
+        .paginate(args.paginationOpts);
+    return { ...result, page: result.page.map(projectPickerJurisdiction) };
   },
 });
 

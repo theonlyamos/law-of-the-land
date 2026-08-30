@@ -288,7 +288,6 @@ describe("jurisdiction governance", () => {
     await t.run(async (ctx) => {
       const now = Date.now();
       await ctx.db.insert("jurisdictions", {
-        code: "GH",
         legacyCountryCode: "GH",
         name: "Ghana",
         slug: "ghana",
@@ -313,6 +312,75 @@ describe("jurisdiction governance", () => {
       "name", "productionBucketId", "providerSyncState", "slug", "stagingBucketId",
       "status", "updatedAt", "updatedBy",
     ].sort());
+    await expect(auditor.client.query(listJurisdictions, {
+      code: "gh",
+      paginationOpts: { numItems: 25, cursor: null },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({ code: "GH", name: "Ghana" })],
+      isDone: true,
+    });
+  });
+
+  it("returns a code-less organizational jurisdiction's real ID for resource creation", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const organizationJurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Accra Bar Association",
+        slug: "accra-bar-association",
+        class: "professional_association",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Accra Bar Association",
+        slug: "accra-bar-association",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "organizational",
+        visibility: "members",
+        organizationId,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId,
+        scopeMode: "global",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return jurisdictionId;
+    });
+
+    const jurisdictions = await manager.client.query(listJurisdictions, page);
+    const selected = jurisdictions.page.find(
+      (jurisdiction: { _id: string }) => jurisdiction._id === organizationJurisdictionId,
+    );
+    expect(selected).toMatchObject({
+      _id: organizationJurisdictionId,
+      code: "accra-bar-association",
+      name: "Accra Bar Association",
+    });
+
+    await expect(manager.client.mutation(createResource, {
+      jurisdictionId: selected!._id,
+      type: "policy",
+      title: "Professional conduct policy",
+      issuer: "Accra Bar Association",
+      officialCitation: "ABA Policy 1",
+      sourceUrl: "https://example.gov.gh/aba-policy-1",
+      topics: [],
+      effectiveDate: "2026-01-01",
+      reason: "Add organizational authority policy",
+    })).resolves.toBeDefined();
   });
 
   it("enforces authority, validation, uniqueness, named transitions, and audit", async () => {
@@ -744,7 +812,7 @@ describe("legal resource governance", () => {
     ).resolves.toMatchObject({ page: [] });
   });
 
-  it("paginates only unique legacy codes despite code-less and duplicate rows", async () => {
+  it("paginates unified picker rows, including code-less jurisdictions", async () => {
     const t = createBackend();
     await enablePanel(t);
     const auditor = await asAdmin(t, "auditor");
@@ -775,13 +843,20 @@ describe("legal resource governance", () => {
     const first = await auditor.client.query(listJurisdictions, {
       paginationOpts: { numItems: 1, cursor: null },
     });
-    expect(first.page).toMatchObject([{ code: "KE" }]);
+    expect(first.page).toMatchObject([{ name: "A Organization" }]);
     expect(first.isDone).toBe(false);
 
     const second = await auditor.client.query(listJurisdictions, {
       paginationOpts: { numItems: 1, cursor: first.continueCursor },
     });
-    expect(second.page).toMatchObject([{ code: "NG" }]);
-    expect(second.isDone).toBe(true);
+    expect(second.page).toMatchObject([{ code: "GH", name: "Ghana" }]);
+    expect(second.isDone).toBe(false);
+
+    await expect(auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: "legacy-country-code:KE" },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({ code: "NG", name: "Nigeria" })],
+      isDone: true,
+    });
   });
 });

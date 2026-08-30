@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
   createGeographic: vi.fn(),
   createOrganizational: vi.fn(),
   createOrganization: vi.fn(),
+  updateGeographic: vi.fn(),
+  updateOrganizational: vi.fn(),
+  enableJurisdiction: vi.fn(),
+  archiveJurisdiction: vi.fn(),
   queryResult: vi.fn(),
 }));
 
@@ -15,6 +19,10 @@ vi.mock("convex/react", () => ({ useQuery_experimental: (options: unknown) => mo
   const name = getFunctionName(reference);
   if (name === "admin/jurisdictions:createGeographicJurisdiction") return mocks.createGeographic;
   if (name === "admin/jurisdictions:createOrganizationalJurisdiction") return mocks.createOrganizational;
+  if (name === "admin/jurisdictions:updateGeographicJurisdiction") return mocks.updateGeographic;
+  if (name === "admin/jurisdictions:updateOrganizationalJurisdiction") return mocks.updateOrganizational;
+  if (name === "admin/jurisdictions:enableJurisdiction") return mocks.enableJurisdiction;
+  if (name === "admin/jurisdictions:archiveJurisdiction") return mocks.archiveJurisdiction;
   if (name === "admin/organizations:createOrganization") return mocks.createOrganization;
   return vi.fn();
 } }));
@@ -28,7 +36,7 @@ vi.mock("./geographic-place-picker", () => ({ GeographicPlacePicker: ({ onChange
   <button type="button" onClick={() => onChange(null)}>Expire verified Accra</button>
 </>) }));
 
-import { JurisdictionEditor, ResourceEditor } from "./catalog-actions";
+import { JurisdictionEditor, JurisdictionLifecycleActions, ResourceEditor } from "./catalog-actions";
 
 const organizations = [{ id: "org_1", name: "World Health Organization", slug: "who", class: "intergovernmental" as const }];
 const geographies = [{ id: "geo_1", name: "Ghana", level: "country" as const, parent: null }];
@@ -38,6 +46,10 @@ beforeEach(() => {
   mocks.createOrganization.mockResolvedValue("org_new");
   mocks.createGeographic.mockResolvedValue("jurisdiction_geo");
   mocks.createOrganizational.mockResolvedValue("jurisdiction_org");
+  mocks.updateGeographic.mockResolvedValue({ status: "draft" });
+  mocks.updateOrganizational.mockResolvedValue({ status: "draft" });
+  mocks.enableJurisdiction.mockResolvedValue({ status: "enabled" });
+  mocks.archiveJurisdiction.mockResolvedValue({ status: "archived" });
   mocks.queryResult.mockReturnValue({ status: "pending" });
 });
 afterEach(cleanup);
@@ -342,6 +354,77 @@ describe("typed jurisdiction creation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create draft jurisdiction" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/without URLs, email addresses, or sensitive terms/i);
     expect(mocks.createGeographic).not.toHaveBeenCalled();
+  });
+});
+
+describe("jurisdiction lifecycle actions", () => {
+  it("enables a draft jurisdiction with an auditable reason", async () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+    }} />);
+
+    expect(screen.getByRole("group", { name: "Lifecycle actions for Ghana" })).toBeVisible();
+    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for Ghana" }), { target: { value: "Verified provider readiness" } });
+    fireEvent.click(screen.getByRole("button", { name: "Enable Ghana" }));
+
+    await waitFor(() => expect(mocks.enableJurisdiction).toHaveBeenCalledWith({
+      id: "geo_1",
+      reason: "Verified provider readiness",
+    }));
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates a geographic jurisdiction from a fresh verified place", async () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+    }} geographicOptions={geographies} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit geographic settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Select verified Accra" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for Ghana" }), { target: { value: "Correct verified place" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save geographic changes" }));
+
+    await waitFor(() => expect(mocks.updateGeographic).toHaveBeenCalledWith({
+      id: "geo_1", verifiedPlaceClaim: "signed-claim", level: "country", reason: "Correct verified place",
+    }));
+  });
+
+  it("updates organizational scope only from an explicit replacement selection", async () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "org_1", name: "World Health Organization", status: "draft", kind: "organizational", visibility: "members", scopeMode: "linked_geographies",
+      provider: { stagingConfigured: false, productionConfigured: false }, geographic: null,
+    }} geographicOptions={geographies} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit organizational settings" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ghana" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for World Health Organization" }), { target: { value: "Replace governed scope" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save organizational changes" }));
+
+    await waitFor(() => expect(mocks.updateOrganizational).toHaveBeenCalledWith({
+      id: "org_1", visibility: "members", scopeMode: "linked_geographies", geographicJurisdictionIds: ["geo_1"], reason: "Replace governed scope",
+    }));
+  });
+
+  it("keeps archived jurisdictions read-only", () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", status: "archived", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+    }} />);
+
+    expect(screen.queryByRole("group", { name: "Lifecycle actions for Ghana" })).toBeNull();
+  });
+
+  it("keeps legacy migration rows on transitions without typed edit controls", () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { stagingConfigured: false, productionConfigured: true }, geographic: null,
+    }} editable={false} />);
+
+    expect(screen.getByRole("group", { name: "Lifecycle actions for Ghana" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Enable Ghana" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Edit geographic settings" })).toBeNull();
   });
 });
 

@@ -9,6 +9,7 @@ vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
 vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 vi.mock("@/components/admin/catalog-actions", () => ({
   JurisdictionEditor: (props: unknown) => <output data-testid="editor-props">{JSON.stringify(props)}</output>,
+  JurisdictionLifecycleActions: (props: unknown) => <output data-testid="lifecycle-props">{JSON.stringify(props)}</output>,
 }));
 import JurisdictionsPage from "./page";
 
@@ -65,6 +66,41 @@ describe("typed jurisdiction register", () => {
     expect(screen.getByText("Production: Configured")).toBeVisible();
     expect(screen.queryByText(/bucket/i)).toBeNull();
     expect(screen.queryByText(/place/i)).toBeNull();
+  });
+
+  it("passes draft jurisdictions to lifecycle controls for a writer", async () => {
+    mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "manager", roles: ["content_manager"] } });
+    mocks.fetchAuthQuery.mockImplementation((reference: Parameters<typeof getFunctionName>[0]) => {
+      if (getFunctionName(reference) === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
+        id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
+        provider: { syncState: "pending", stagingConfigured: false, productionConfigured: false }, migrationState: "typed",
+        geographic: { level: "country", parent: null }, organization: null, scopeMode: null,
+      }], isDone: true, continueCursor: "" });
+      return Promise.resolve({ page: [], isDone: true, continueCursor: "" });
+    });
+
+    render(await JurisdictionsPage({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"id":"geo_1"');
+    expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"status":"draft"');
+    expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"editable":true');
+  });
+
+  it("keeps legacy migration rows on lifecycle transitions without typed editing", async () => {
+    mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "manager", roles: ["content_manager"] } });
+    mocks.fetchAuthQuery.mockImplementation((reference: Parameters<typeof getFunctionName>[0]) => {
+      if (getFunctionName(reference) === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
+        id: "legacy_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
+        provider: { syncState: "pending", stagingConfigured: false, productionConfigured: true }, migrationState: "legacy",
+        geographic: null, organization: null, scopeMode: null,
+      }], isDone: true, continueCursor: "" });
+      return Promise.resolve({ page: [], isDone: true, continueCursor: "" });
+    });
+
+    render(await JurisdictionsPage({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"id":"legacy_1"');
+    expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"editable":false');
   });
 
   it("keeps the safe table available when writer selector options fail", async () => {

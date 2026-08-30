@@ -277,6 +277,121 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
   );
 }
 
+export function JurisdictionLifecycleActions({
+  jurisdiction,
+  geographicOptions = [],
+  geographicPage,
+  editable = true,
+}: {
+  jurisdiction: {
+    id: string; name: string; status: "draft" | "enabled" | "archived"; kind: "geographic" | "organizational";
+    visibility: "public" | "members"; scopeMode: null | "global" | "linked_geographies";
+    provider: { stagingConfigured: boolean; productionConfigured: boolean };
+    geographic: null | { level: GeographicLevel; parent: null | { id: string; name: string; level: GeographicLevel } };
+  };
+  geographicOptions?: readonly GeographicOption[];
+  geographicPage?: OptionPage;
+  editable?: boolean;
+}) {
+  const router = useRouter();
+  const enable = useMutation(api.admin.jurisdictions.enableJurisdiction);
+  const archive = useMutation(api.admin.jurisdictions.archiveJurisdiction);
+  const updateGeographic = useMutation(api.admin.jurisdictions.updateGeographicJurisdiction);
+  const updateOrganizational = useMutation(api.admin.jurisdictions.updateOrganizationalJurisdiction);
+  const [reason, setReason] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [selection, setSelection] = useState<GeographicPlaceSelection | null>(null);
+  const [level, setLevel] = useState<GeographicLevel>(jurisdiction.geographic?.level ?? "country");
+  const [parentId, setParentId] = useState(jurisdiction.geographic?.parent?.id ?? "");
+  const [visibility, setVisibility] = useState(jurisdiction.visibility);
+  const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">(jurisdiction.scopeMode ?? "global");
+  const [linkedIds, setLinkedIds] = useState<string[]>([]);
+  const [stagingBucketId, setStagingBucketId] = useState("");
+  const [productionBucketId, setProductionBucketId] = useState("");
+
+  async function run(action: "enable" | "archive") {
+    const auditReason = reason.trim();
+    if (!safeReason(auditReason)) {
+      setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      if (action === "enable") {
+        await enable({ id: jurisdiction.id as Id<"jurisdictions">, reason: auditReason });
+      } else {
+        await archive({ id: jurisdiction.id as Id<"jurisdictions">, reason: auditReason });
+      }
+      router.refresh();
+    } catch {
+      setError("The lifecycle change was not accepted. Review readiness, linked records, and your catalog permissions.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function saveUpdate() {
+    const auditReason = reason.trim();
+    if (!safeReason(auditReason)) {
+      setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
+      return;
+    }
+    if ((jurisdiction.provider.stagingConfigured && !stagingBucketId.trim()) || (jurisdiction.provider.productionConfigured && !productionBucketId.trim())) {
+      setError("Re-enter each configured provider bucket ID before saving; stored provider identifiers are never displayed.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      const buckets = { ...(optionalBucket(stagingBucketId) ? { stagingBucketId: optionalBucket(stagingBucketId) } : {}), ...(optionalBucket(productionBucketId) ? { productionBucketId: optionalBucket(productionBucketId) } : {}) };
+      if (jurisdiction.kind === "geographic") {
+        if (!selection || selection.expiresAt <= Date.now()) throw new Error("EXPIRED_PLACE");
+        if (level !== "country" && !parentId) throw new Error("PARENT_REQUIRED");
+        await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), ...buckets, reason: auditReason });
+      } else {
+        const geographicJurisdictionIds = [...new Set(linkedIds)];
+        if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], ...buckets, reason: auditReason });
+      }
+      router.refresh();
+    } catch {
+      setError("The update was not accepted. Recheck the verified place, governed scope, provider readiness, and catalog permissions.");
+    } finally { setPending(false); }
+  }
+
+  if (jurisdiction.status === "archived") return null;
+
+  return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
+    <label className={labelClass}>Audit reason
+      <input aria-label={`Audit reason for ${jurisdiction.name}`} value={reason} onChange={(event) => setReason(event.target.value)} required minLength={3} maxLength={500} className={fieldClass} />
+    </label>
+    <div className="flex flex-wrap gap-2">
+      {editable ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
+      {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
+      <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button>
+    </div>
+    {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
+      <p className="text-sm">Stored provider IDs are never displayed. Re-enter configured IDs to preserve them; changing a linked organizational scope replaces its current links.</p>
+      {jurisdiction.kind === "geographic" ? <>
+        <Suspense fallback={<p role="status">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={(next) => { setSelection(next); setParentId(""); }} disabled={pending} /></Suspense>
+        <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+        {level !== "country" ? <GeographicParentField key={level} level={level} selection={selection} value={parentId} onChange={setParentId} initial={geographicOptions} /> : null}
+      </> : <>
+        <label className={labelClass}>Visibility<select aria-label="Visibility" value={visibility} onChange={(event) => setVisibility(event.target.value as typeof visibility)} className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
+        <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
+        {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
+      </>}
+      <label className={labelClass}>Staging bucket ID<input value={stagingBucketId} onChange={(event) => setStagingBucketId(event.target.value)} maxLength={300} className={fieldClass} /></label>
+      <label className={labelClass}>Production bucket ID<input value={productionBucketId} onChange={(event) => setProductionBucketId(event.target.value)} inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
+      <button type="button" disabled={pending} onClick={saveUpdate} className={buttonClass}>Save {jurisdiction.kind} changes</button>
+    </div> : null}
+    {error ? <p role="alert" className="text-sm text-red-800">{error}</p> : null}
+  </div>;
+}
+
 function text(data: FormData, key: string) { return String(data.get(key) ?? ""); }
 
 type ResourceInput = {

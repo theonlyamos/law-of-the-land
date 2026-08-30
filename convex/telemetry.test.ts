@@ -558,13 +558,10 @@ describe("privacy-bounded query telemetry", () => {
 
     await t.mutation(rollup, { cursor: null });
     const metrics = await t.run((ctx) => ctx.db.query("dailyMetrics").take(3));
-    expect(metrics).toHaveLength(2);
-    expect(metrics.find((row) => row.jurisdictionId === undefined)).toMatchObject({
-      jurisdictionCode: "GH", totalQuestions: 7,
-    });
-    expect(metrics.find((row) => row.jurisdictionId === jurisdictionId)).toMatchObject({
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({
       jurisdictionCode: "GH", jurisdictionId,
-      jurisdictionName: "Ghana", jurisdictionKind: "geographic", totalQuestions: 1,
+      jurisdictionName: "Ghana", jurisdictionKind: "geographic", totalQuestions: 8,
     });
   });
 

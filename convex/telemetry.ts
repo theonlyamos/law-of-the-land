@@ -507,13 +507,14 @@ export const rollupDailyMetrics = internalMutation({
   returns: v.object({ processed: v.number(), done: v.boolean(), cursor: v.union(v.string(), v.null()) }),
   handler: async (ctx, _args) => {
     const rows = await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "pending")).take(ROLLUP_BATCH);
+    const unifiedJurisdictionsEnabled = await readUnifiedJurisdictionsEnabled(ctx);
     const groups = new Map<string, Doc<"queryRuns">[]>();
     for (const row of rows) {
       if (!DAY_PATTERN.test(row.day)) throw new ConvexError("TELEMETRY_DAY_INVALID");
       if (!row.jurisdictionId && !row.jurisdictionCode) {
         throw new ConvexError("TELEMETRY_JURISDICTION_INVALID");
       }
-      const key = row.jurisdictionId
+      const key = row.jurisdictionId && (unifiedJurisdictionsEnabled || !row.jurisdictionCode)
         ? `${row.day}:id:${row.jurisdictionId}`
         : `${row.day}:code:${row.jurisdictionCode}`;
       groups.set(key, [...(groups.get(key) ?? []), row]);
@@ -521,7 +522,7 @@ export const rollupDailyMetrics = internalMutation({
     const now = Date.now();
     for (const group of groups.values()) {
       const { day, jurisdictionCode, jurisdictionId } = group[0];
-      const existingRows = jurisdictionId
+      const existingRows = jurisdictionId && (unifiedJurisdictionsEnabled || !jurisdictionCode)
         ? await ctx.db.query("dailyMetrics").withIndex("by_day_and_jurisdictionId", (q) =>
             q.eq("day", day).eq("jurisdictionId", jurisdictionId),
           ).take(2)
