@@ -37,6 +37,9 @@ type AuthFixture = {
 const setAdminPanel = makeFunctionReference<"mutation">(
   "admin/featureFlags:setAdminPanel",
 );
+const recordAdminStepUpProof = makeFunctionReference<"mutation">(
+  "admin/users:recordAdminStepUpProof",
+);
 const setUnifiedJurisdictions = makeFunctionReference<"mutation">(
   "admin/featureFlags:setUnifiedJurisdictions",
 );
@@ -228,6 +231,39 @@ describe("admin permission registry", () => {
       operations: await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actor.userId).eq("idempotencyKey", "flag-enable-1")).take(2),
       audits: (await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", actor.userId)).take(10)).filter((row) => row.action === "admin.panel_flag_set" && row.correlationId === replay.correlationId),
     }))).resolves.toMatchObject({ operations: [expect.any(Object)], audits: [expect.any(Object)] });
+  });
+
+  it("records a unified-jurisdictions step-up proof only for the current environment", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+
+    await expect(t.mutation(recordAdminStepUpProof, {
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      action: "unified_jurisdictions_set",
+      targetId: "unified_jurisdictions:test",
+      idempotencyKey: "unified-proof-current-environment",
+    })).resolves.toBeNull();
+    await expect(t.mutation(recordAdminStepUpProof, {
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      action: "unified_jurisdictions_set",
+      targetId: "unified_jurisdictions:production",
+      idempotencyKey: "unified-proof-wrong-environment",
+    })).rejects.toThrow("ADMIN_STEP_UP_SCOPE_INVALID");
+
+    await expect(t.run((ctx) =>
+      ctx.db.query("adminStepUpProofs").take(2),
+    )).resolves.toMatchObject([{
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      action: "unified_jurisdictions_set",
+      targetId: "unified_jurisdictions:test",
+      idempotencyKey: "unified-proof-current-environment",
+    }]);
   });
 
   it("enables unified jurisdictions only after Ghana and every second clean execute pass are ready", async () => {

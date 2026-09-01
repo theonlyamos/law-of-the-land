@@ -2,6 +2,7 @@
 
 import {
   useEffect,
+  useId,
   useRef,
   useState,
   type FormEvent,
@@ -39,6 +40,8 @@ export function StepUpDialog({
 }: StepUpDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
   const [error, setError] = useState("");
 
@@ -111,8 +114,8 @@ export function StepUpDialog({
   return (
     <dialog
       ref={dialogRef}
-      aria-labelledby="admin-step-up-title"
-      aria-describedby="admin-step-up-description"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
       onCancel={(event) => {
         event.preventDefault();
         if (status !== "working") onClose();
@@ -125,13 +128,13 @@ export function StepUpDialog({
             Account authority
           </p>
           <h2
-            id="admin-step-up-title"
+            id={titleId}
             className="mt-2 text-2xl font-semibold tracking-[-0.035em]"
           >
             {title}
           </h2>
           <p
-            id="admin-step-up-description"
+            id={descriptionId}
             className="mt-3 max-w-[58ch] text-sm leading-6 text-[oklch(39%_0.035_252)]"
           >
             {description}
