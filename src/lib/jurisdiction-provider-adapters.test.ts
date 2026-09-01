@@ -334,7 +334,7 @@ describe("normal jurisdiction provider adapters", () => {
     expect(createGoogleClient).toHaveBeenCalledOnce();
     expect(createGoogleClient).toHaveBeenCalledWith("google-key");
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
-      model: "gemini-3.1-flash-lite-preview",
+      model: "gemini-3.5-flash-lite",
       config: expect.objectContaining({
         responseMimeType: "text/plain",
         tools: [{ googleSearch: {} }],
@@ -344,5 +344,27 @@ describe("normal jurisdiction provider adapters", () => {
     expect(sendMessage).toHaveBeenCalledWith({ message: "normal question" });
     expect(autocomplete).toHaveBeenCalledWith("Acc", SESSION_TOKEN);
     expect(details).toHaveBeenCalledWith("normal-place", SESSION_TOKEN);
+  });
+
+  it("uses the configured chat model for provider requests", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ text: "normal chat answer" });
+    const create = vi.fn().mockReturnValue({ sendMessage });
+    const createGoogleClient = vi.fn().mockResolvedValue({ chats: { create } });
+    const chat = createChatProvider(
+      { GOOGLE_AI_API_KEY: "google-key", GOOGLE_AI_MODEL: "gemini-3.5-flash" },
+      { createGoogleClient },
+    );
+
+    await expect(chat.generate({
+      mode: "legacy",
+      scenarioQuestion: "normal question",
+      query: "normal question",
+      instruction: "normal instruction",
+      history: [],
+    })).resolves.toBe("normal chat answer");
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gemini-3.5-flash",
+    }));
   });
 });

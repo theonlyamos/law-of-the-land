@@ -1241,6 +1241,15 @@ export const recordAdminStepUpProof = internalMutation({
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
       }
+    } else if (args.action === "unified_jurisdictions_set") {
+      if (
+        typeof session.impersonatedBy === "string" ||
+        !hasRolePermission(parseAdminRoles(actor.role), "user", "set_role") ||
+        args.targetId !==
+          `unified_jurisdictions:${process.env.ADMIN_ENVIRONMENT}`
+      ) {
+        throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+      }
     } else if (args.action.startsWith("document_")) {
       const permission = args.action === "document_rollback" ? "rollback" : "publish";
       const version = await ctx.db.get(args.targetId as Id<"documentVersions">);

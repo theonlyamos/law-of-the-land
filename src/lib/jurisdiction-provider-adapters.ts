@@ -198,7 +198,7 @@ export function createResearchProvider(
   };
 }
 
-const CHAT_MODEL = "gemini-3.1-flash-lite-preview";
+const DEFAULT_CHAT_MODEL = "gemini-3.5-flash-lite";
 const MAX_CHAT_OUTPUT_TOKENS = 8_192;
 const MAX_CHAT_ANSWER_LENGTH = 32_000;
 const MAX_CHAT_CITATIONS = 16;
@@ -214,10 +214,10 @@ function chatHistory(history: ChatHistoryMessage[]) {
   }));
 }
 
-function chatRequest(call: ChatCall): CreateChatParameters {
+function chatRequest(call: ChatCall, model: string): CreateChatParameters {
   if (call.mode === "legacy") {
     return {
-      model: CHAT_MODEL,
+      model,
       config: {
         temperature: 0.2,
         maxOutputTokens: MAX_CHAT_OUTPUT_TOKENS,
@@ -229,7 +229,7 @@ function chatRequest(call: ChatCall): CreateChatParameters {
     };
   }
   return {
-    model: CHAT_MODEL,
+    model,
     config: {
       temperature: 0,
       maxOutputTokens: MAX_CHAT_OUTPUT_TOKENS,
@@ -286,6 +286,7 @@ export function createChatProvider(
   }
 
   let clientPromise: Promise<ChatClient> | undefined;
+  const model = environment.GOOGLE_AI_MODEL?.trim() || DEFAULT_CHAT_MODEL;
   return {
     async generate(call) {
       if (!clientPromise) {
@@ -295,7 +296,7 @@ export function createChatProvider(
         );
       }
       const client = await clientPromise;
-      const chat = client.chats.create(chatRequest(call));
+      const chat = client.chats.create(chatRequest(call, model));
       const message = call.mode === "governed"
         ? JSON.stringify({ governedContext: call.context, untrustedQuestion: call.query })
         : call.query;
