@@ -106,11 +106,21 @@ export function DocumentUpload({
         sourceUrl,
         effectiveAt,
       });
-      await stageDocumentVersion({
-        versionId,
-        reason: "Stage newly uploaded governed original",
-        idempotencyKey: `stage-${versionId}`,
-      });
+      try {
+        await stageDocumentVersion({
+          versionId,
+          reason: "Stage newly uploaded governed original",
+          idempotencyKey: `stage-${versionId}`,
+        });
+      } catch {
+        setFile(null);
+        setState({
+          kind: "error",
+          message: "Draft version recorded, but GroundX staging could not be started. Configure the jurisdiction staging bucket, then retry staging from version history.",
+        });
+        router.refresh();
+        return;
+      }
       setFile(null);
       setState({
         kind: "success",

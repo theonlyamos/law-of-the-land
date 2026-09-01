@@ -141,6 +141,37 @@ describe("document original upload", () => {
     );
   });
 
+  it("explains that the draft was recorded when only staging fails", async () => {
+    generateUploadUrl.mockResolvedValue("https://upload.example/token-secret");
+    createDocumentVersion.mockResolvedValue("version_1");
+    stageDocumentVersion.mockRejectedValue(new Error("GROUNDX_STAGING_NOT_CONFIGURED"));
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ storageId: "storage_1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    renderUpload();
+    const file = new File(["abc"], "law.pdf", { type: "application/pdf" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: async () => new TextEncoder().encode("abc").buffer,
+    });
+    fireEvent.change(screen.getByLabelText("Original legal file"), {
+      target: { files: [file] },
+    });
+    fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Draft version recorded, but GroundX staging could not be started/i,
+    );
+    expect(createDocumentVersion).toHaveBeenCalledTimes(1);
+    expect(stageDocumentVersion).toHaveBeenCalledWith({
+      versionId: "version_1",
+      reason: "Stage newly uploaded governed original",
+      idempotencyKey: "stage-version_1",
+    });
+  });
+
   it("announces a storage failure without submitting authoritative metadata", async () => {
     generateUploadUrl.mockResolvedValue("https://upload.example/token-secret");
     vi.mocked(fetch).mockResolvedValue(new Response("denied", { status: 403 }));

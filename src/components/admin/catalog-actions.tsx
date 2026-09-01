@@ -298,9 +298,11 @@ export function JurisdictionLifecycleActions({
   const archive = useMutation(api.admin.jurisdictions.archiveJurisdiction);
   const updateGeographic = useMutation(api.admin.jurisdictions.updateGeographicJurisdiction);
   const updateOrganizational = useMutation(api.admin.jurisdictions.updateOrganizationalJurisdiction);
+  const provisionStaging = useMutation(api.admin.jobs.provisionJurisdictionStagingBucket);
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false);
   const [selection, setSelection] = useState<GeographicPlaceSelection | null>(null);
   const [level, setLevel] = useState<GeographicLevel>(jurisdiction.geographic?.level ?? "country");
@@ -362,6 +364,30 @@ export function JurisdictionLifecycleActions({
     } finally { setPending(false); }
   }
 
+  async function provisionStagingBucket() {
+    const auditReason = reason.trim();
+    if (!safeReason(auditReason)) {
+      setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      await provisionStaging({
+        jurisdictionId: jurisdiction.id as Id<"jurisdictions">,
+        reason: auditReason,
+        idempotencyKey: `provision-staging-${jurisdiction.id}-${crypto.randomUUID().replaceAll("-", "")}`,
+      });
+      setNotice("Staging bucket provisioning was queued. Refresh shortly to see the configured bucket.");
+      router.refresh();
+    } catch {
+      setError("Staging bucket provisioning was not accepted. Confirm this enabled jurisdiction has a production bucket and your catalog permissions allow it.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   if (jurisdiction.status === "archived") return null;
 
   return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
@@ -371,6 +397,7 @@ export function JurisdictionLifecycleActions({
     <div className="flex flex-wrap gap-2">
       {editable ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
       {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
+      {editable && jurisdiction.status === "enabled" && !jurisdiction.provider.stagingConfigured && jurisdiction.provider.productionConfigured ? <button type="button" disabled={pending} onClick={provisionStagingBucket} className={buttonClass}>Provision staging bucket</button> : null}
       <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button>
     </div>
     {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
@@ -388,6 +415,7 @@ export function JurisdictionLifecycleActions({
       <label className={labelClass}>Production bucket ID<input value={productionBucketId} onChange={(event) => setProductionBucketId(event.target.value)} inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
       <button type="button" disabled={pending} onClick={saveUpdate} className={buttonClass}>Save {jurisdiction.kind} changes</button>
     </div> : null}
+    {notice ? <p role="status" aria-live="polite" className="text-sm text-[oklch(32%_0.07_150)]">{notice}</p> : null}
     {error ? <p role="alert" className="text-sm text-red-800">{error}</p> : null}
   </div>;
 }

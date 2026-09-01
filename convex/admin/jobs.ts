@@ -300,6 +300,74 @@ export const enqueueSystemJob = internalMutation({
   },
 });
 
+export const provisionJurisdictionStagingBucket = mutation({
+  args: {
+    jurisdictionId: v.id("jurisdictions"),
+    reason: v.string(),
+    idempotencyKey: v.string(),
+  },
+  returns: enqueueResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
+    const reason = validateAuditReason(args.reason);
+    const jurisdiction = await ctx.db.get(args.jurisdictionId);
+    if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    if (jurisdiction.status !== "enabled") throw new ConvexError("JURISDICTION_NOT_ENABLED");
+    if (!/^[1-9][0-9]*$/.test(jurisdiction.productionBucketId ?? "")) {
+      throw new ConvexError("GROUNDX_PRODUCTION_NOT_CONFIGURED");
+    }
+    if (jurisdiction.stagingBucketId !== undefined) {
+      throw new ConvexError("GROUNDX_STAGING_ALREADY_CONFIGURED");
+    }
+
+    const existing = await ctx.db
+      .query("integrationJobs")
+      .withIndex("by_targetType_and_targetId", (q) =>
+        q.eq("targetType", "jurisdictionStagingBucket").eq("targetId", jurisdiction._id),
+      )
+      .order("desc")
+      .take(20);
+    const active = existing.find(
+      (job) =>
+        job.type === "create_bucket" &&
+        ["queued", "running", "waiting_callback", "manual_review"].includes(job.status),
+    );
+    if (active) {
+      return {
+        jobId: active._id,
+        callbackToken: null,
+        callbackTokenHash: active.callbackTokenHash,
+        duplicate: true,
+      };
+    }
+
+    const queued = await persistJob(
+      ctx,
+      {
+        type: "create_bucket",
+        targetType: "jurisdictionStagingBucket",
+        targetId: jurisdiction._id,
+        payload: { name: `law-of-the-land-${jurisdiction.slug}-staging` },
+        idempotencyKey: args.idempotencyKey,
+      },
+      { id: actor.userId, roles: actor.roles },
+    );
+    const job = await ctx.db.get(queued.jobId);
+    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    await writeAudit(ctx, {
+      actorId: actor.userId,
+      actorRoles: actor.roles,
+      action: "jurisdiction.staging_bucket.provision_queued",
+      targetType: "jurisdiction",
+      targetId: jurisdiction._id,
+      reason,
+      correlationId: job.correlationId,
+      outcome: "success",
+    });
+    return queued;
+  },
+});
+
 export const getJobForRun = internalQuery({
   args: { jobId: v.id("integrationJobs"), leaseToken: v.string() },
   returns: v.union(v.null(), jobDocumentValidator),
@@ -460,6 +528,48 @@ async function applyStagingOutcome(ctx: MutationCtx, job: Doc<"integrationJobs">
   if (locks[0]?.jobId === job._id) await ctx.db.delete(locks[0]._id);
 }
 
+async function applyJurisdictionStagingBucketOutcome(
+  ctx: MutationCtx,
+  job: Doc<"integrationJobs">,
+  outcome: "succeeded" | "failed",
+  processId: string,
+) {
+  if (job.type !== "create_bucket" || job.targetType !== "jurisdictionStagingBucket") return;
+  const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+  if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
+  if (outcome === "failed") return;
+
+  const bucketId = /^bucket-([1-9][0-9]*)$/.exec(processId)?.[1];
+  if (!bucketId || bucketId === jurisdiction.productionBucketId) {
+    throw new ConvexError("GROUNDX_STAGING_BUCKET_INVALID");
+  }
+  if (jurisdiction.stagingBucketId !== undefined) {
+    if (jurisdiction.stagingBucketId !== bucketId) {
+      throw new ConvexError("GROUNDX_STAGING_BUCKET_CONFLICT");
+    }
+    return;
+  }
+
+  const now = Date.now();
+  await ctx.db.patch(jurisdiction._id, {
+    stagingBucketId: bucketId,
+    providerSyncState: "synced",
+    updatedBy: job.actorId,
+    updatedAt: now,
+  });
+  await writeAudit(ctx, {
+    actorId: job.actorId,
+    actorRoles: job.actorRoles,
+    action: "jurisdiction.staging_bucket.provisioned",
+    targetType: "jurisdiction",
+    targetId: jurisdiction._id,
+    reason: "Provision distinct GroundX staging bucket",
+    afterSummary: JSON.stringify({ stagingBucketId: bucketId }),
+    correlationId: job.correlationId,
+    outcome: "success",
+  });
+}
+
 async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, processId: string, status: ProviderStatus, evidence?: DocumentEvidence) {
   if (job.processId !== undefined && job.processId !== processId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
   if (["succeeded", "failed", "cancelled"].includes(job.status)) {
@@ -505,6 +615,12 @@ async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, proces
     await applyStagingOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, evidence);
     await applyPublicationJobOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, job.type === "copy_documents" ? evidence?.documentId : undefined);
   }
+  await applyJurisdictionStagingBucketOutcome(
+    ctx,
+    job,
+    nextStatus === "succeeded" ? "succeeded" : "failed",
+    processId,
+  );
   await auditJob(ctx, job, nextStatus === "succeeded" ? "success" : "failure", `integration.job_${nextStatus}`);
   return { accepted: true, duplicate: false };
 }
@@ -607,7 +723,7 @@ export const recordProviderFailure = internalMutation({
     const retryable = ["rate_limit", "timeout", "network"].includes(args.kind);
     const ambiguousSideEffect =
       job.processId === undefined &&
-      ["ingest_remote", "copy_documents", "delete_documents"].includes(job.type) &&
+      ["create_bucket", "ingest_remote", "copy_documents", "delete_documents"].includes(job.type) &&
       ["timeout", "network"].includes(args.kind);
     const attemptCount = job.attemptCount + 1;
     if (!ambiguousSideEffect && retryable && attemptCount <= RETRY_DELAYS_MS.length) {
@@ -638,6 +754,9 @@ export const recordProviderFailure = internalMutation({
     if (status === "failed" && job.targetType === "documentVersion") {
       await applyStagingOutcome(ctx, job, "failed", job.processId ?? job.correlationId);
       await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
+    }
+    if (status === "failed") {
+      await applyJurisdictionStagingBucketOutcome(ctx, job, "failed", job.processId ?? job.correlationId);
     }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");
     return { status, nextAttemptAt: null };

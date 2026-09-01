@@ -43,6 +43,9 @@ const reconcileStaleJobs = makeFunctionReference<"mutation">(
 const reconcileManualReviewJob = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileManualReviewJob",
 );
+const provisionJurisdictionStagingBucket = makeFunctionReference<"mutation">(
+  "admin/jobs:provisionJurisdictionStagingBucket",
+);
 const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
 
 function createBackend() {
@@ -136,6 +139,47 @@ async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
 }
 
 describe("durable GroundX jobs", () => {
+  it("records a newly provisioned staging bucket on its enabled jurisdiction", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "enabled",
+        isDefault: true,
+        productionBucketId: "11833",
+        providerSyncState: "synced",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const queued = await admin.client.mutation(provisionJurisdictionStagingBucket, {
+      jurisdictionId,
+      reason: "Provision Ghana staging bucket",
+      idempotencyKey: "provision-ghana-staging",
+    });
+    const leaseToken = await claimLease(t, queued.jobId);
+    await t.mutation(applyProviderResult, {
+      jobId: queued.jobId,
+      leaseToken,
+      processId: "bucket-11834",
+      status: "complete",
+    });
+
+    await expect(t.run((ctx) => ctx.db.get(jurisdictionId))).resolves.toMatchObject({
+      stagingBucketId: "11834",
+      productionBucketId: "11833",
+      providerSyncState: "synced",
+    });
+  });
+
   it("does not expose the generic provider dispatcher as a privileged public function", () => {
     expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain("admin/jobs:enqueueJob");
   });
@@ -297,6 +341,24 @@ describe("durable GroundX jobs", () => {
       attemptCount: 1,
       lastErrorKind: "network",
     });
+  });
+
+  it("never automatically replays an ambiguous bucket creation transport failure", async () => {
+    const t = convexTest(schema, modules);
+    const created = await t.mutation(enqueueJob, request({
+      type: "create_bucket",
+      targetType: "jurisdictionStagingBucket",
+      targetId: "ghana",
+      payload: { name: "law-of-the-land-ghana-staging" },
+      idempotencyKey: "uncertain-bucket-create",
+    }));
+    const leaseToken = await claimLease(t, created.jobId);
+
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: created.jobId,
+      leaseToken,
+      kind: "network",
+    })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
   });
 
   it("retries transport and rate-limit failures at 1, 5, and 20 minutes then requires review", async () => {

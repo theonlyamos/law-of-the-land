@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   updateOrganizational: vi.fn(),
   enableJurisdiction: vi.fn(),
   archiveJurisdiction: vi.fn(),
+  provisionStaging: vi.fn(),
   queryResult: vi.fn(),
 }));
 
@@ -23,6 +24,7 @@ vi.mock("convex/react", () => ({ useQuery_experimental: (options: unknown) => mo
   if (name === "admin/jurisdictions:updateOrganizationalJurisdiction") return mocks.updateOrganizational;
   if (name === "admin/jurisdictions:enableJurisdiction") return mocks.enableJurisdiction;
   if (name === "admin/jurisdictions:archiveJurisdiction") return mocks.archiveJurisdiction;
+  if (name === "admin/jobs:provisionJurisdictionStagingBucket") return mocks.provisionStaging;
   if (name === "admin/organizations:createOrganization") return mocks.createOrganization;
   return vi.fn();
 } }));
@@ -50,6 +52,7 @@ beforeEach(() => {
   mocks.updateOrganizational.mockResolvedValue({ status: "draft" });
   mocks.enableJurisdiction.mockResolvedValue({ status: "enabled" });
   mocks.archiveJurisdiction.mockResolvedValue({ status: "archived" });
+  mocks.provisionStaging.mockResolvedValue({ jobId: "job_1", duplicate: false });
   mocks.queryResult.mockReturnValue({ status: "pending" });
 });
 afterEach(cleanup);
@@ -358,6 +361,23 @@ describe("typed jurisdiction creation", () => {
 });
 
 describe("jurisdiction lifecycle actions", () => {
+  it("queues a distinct staging bucket for an enabled jurisdiction", async () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", status: "enabled", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { stagingConfigured: false, productionConfigured: true }, geographic: { level: "country", parent: null },
+    }} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for Ghana" }), { target: { value: "Provision document staging" } });
+    fireEvent.click(screen.getByRole("button", { name: "Provision staging bucket" }));
+
+    await waitFor(() => expect(mocks.provisionStaging).toHaveBeenCalledWith({
+      jurisdictionId: "geo_1",
+      reason: "Provision document staging",
+      idempotencyKey: expect.stringMatching(/^provision-staging-geo_1-/),
+    }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/provisioning was queued/i);
+  });
+
   it("enables a draft jurisdiction with an auditable reason", async () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
       id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,

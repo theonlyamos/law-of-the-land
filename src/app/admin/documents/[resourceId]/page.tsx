@@ -4,6 +4,7 @@ import { hasRolePermission } from "../../../../../convex/lib/adminPermissions";
 import { CatalogStatus, VersionHistory } from "@/components/admin/resource-register";
 import { ResourceEditor } from "@/components/admin/catalog-actions";
 import { DocumentUpload } from "@/components/admin/document-upload";
+import { DocumentStageRetry } from "@/components/admin/document-stage-retry";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
 import Link from "next/link";
@@ -72,6 +73,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
       ) : null}
       <section className="mt-10" aria-labelledby="version-history-heading">
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.065_67)]">Immutable originals</p><h2 id="version-history-heading" className="mt-2 text-2xl font-semibold tracking-[-0.03em]">Version and review history</h2></div><p className="max-w-[42ch] text-sm text-[oklch(42%_0.035_252)]">Metadata only. Original file bodies are never downloaded by this register.</p></div>
+        {canUpload ? <DocumentStageRetry versions={(versions.page as Doc<"documentVersions">[]).map((version) => ({ id: version._id, versionNumber: version.versionNumber, status: version.status, stagingDocumentId: version.groundxStagingDocumentId }))} /> : null}
         <VersionHistory versions={(versions.page as Doc<"documentVersions">[]).map((version) => ({ id: version._id, versionNumber: version.versionNumber, filename: version.filename, mimeType: version.mimeType, byteSize: version.byteSize, sha256: version.sha256, status: version.status, createdAt: version.createdAt }))} />
       </section>
     </article>
