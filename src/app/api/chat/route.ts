@@ -42,6 +42,17 @@ type CommonBody = {
   assistantClientId?: string;
 };
 
+type ChatResult = {
+  result: string;
+  citations?: ReturnType<typeof governedOutput>["citations"];
+  citationClaim?: string;
+};
+
+type ChatStreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "done"; result: string; citations?: ReturnType<typeof governedOutput>["citations"]; citationClaim?: string }
+  | { type: "error"; error: string };
+
 function parseCommonBody(body: unknown): CommonBody | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const { query, messages, context, correlationToken, country, jurisdictionId, externalId, assistantClientId } = body as Record<string, unknown>;
@@ -108,6 +119,258 @@ function governedOutput(text: string | undefined, sources: ReturnType<typeof par
   return { answer: value.answer.trim(), citations };
 }
 
+type GovernedAnswerParserMode =
+  | "before-object"
+  | "expect-key"
+  | "read-key"
+  | "expect-colon"
+  | "expect-value"
+  | "skip-value"
+  | "read-answer"
+  | "after-value"
+  | "done"
+  | "invalid";
+
+class GovernedAnswerStreamParser {
+  private mode: GovernedAnswerParserMode = "before-object";
+  private depth = 0;
+  private key = "";
+  private stringMode: "key" | "skip" | null = null;
+  private stringEscaped = false;
+  private answerEscaped = false;
+  private answerUnicode: string | null = null;
+
+  push(text: string): string {
+    let delta = "";
+    for (const character of text) {
+      if (this.mode === "read-answer") {
+        delta += this.readAnswerCharacter(character);
+        continue;
+      }
+      if (this.stringMode) {
+        this.readStringCharacter(character);
+        continue;
+      }
+      this.readStructureCharacter(character);
+    }
+    return delta;
+  }
+
+  private readStringCharacter(character: string) {
+    if (this.stringEscaped) {
+      if (this.stringMode === "key") this.key += character;
+      this.stringEscaped = false;
+      return;
+    }
+    if (character === "\\") {
+      this.stringEscaped = true;
+      return;
+    }
+    if (character !== '"') {
+      if (this.stringMode === "key") this.key += character;
+      return;
+    }
+    const wasKey = this.stringMode === "key";
+    this.stringMode = null;
+    if (wasKey) this.mode = "expect-colon";
+  }
+
+  private readAnswerCharacter(character: string): string {
+    if (this.answerUnicode !== null) {
+      if (!/^[0-9a-fA-F]$/u.test(character)) {
+        this.mode = "invalid";
+        return "";
+      }
+      this.answerUnicode += character;
+      if (this.answerUnicode.length === 4) {
+        const value = String.fromCharCode(Number.parseInt(this.answerUnicode, 16));
+        this.answerUnicode = null;
+        this.answerEscaped = false;
+        return value;
+      }
+      return "";
+    }
+    if (this.answerEscaped) {
+      const escaped = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      }[character];
+      if (escaped !== undefined) {
+        this.answerEscaped = false;
+        return escaped;
+      }
+      if (character === "u") {
+        this.answerUnicode = "";
+        return "";
+      }
+      this.mode = "invalid";
+      return "";
+    }
+    if (character === "\\") {
+      this.answerEscaped = true;
+      return "";
+    }
+    if (character === '"') {
+      this.mode = "after-value";
+      return "";
+    }
+    if (character < " ") {
+      this.mode = "invalid";
+      return "";
+    }
+    return character;
+  }
+
+  private readStructureCharacter(character: string) {
+    if (this.mode === "before-object") {
+      if (/\s/u.test(character)) return;
+      if (character === "{") {
+        this.depth = 1;
+        this.mode = "expect-key";
+      } else {
+        this.mode = "invalid";
+      }
+      return;
+    }
+    if (this.mode === "expect-key") {
+      if (/\s/u.test(character)) return;
+      if (character === '"') {
+        this.key = "";
+        this.stringMode = "key";
+        this.mode = "read-key";
+      } else if (character === "}") {
+        this.depth = 0;
+        this.mode = "done";
+      } else {
+        this.mode = "invalid";
+      }
+      return;
+    }
+    if (this.mode === "expect-colon") {
+      if (/\s/u.test(character)) return;
+      this.mode = character === ":" ? "expect-value" : "invalid";
+      return;
+    }
+    if (this.mode === "expect-value") {
+      if (/\s/u.test(character)) return;
+      if (this.key === "answer") {
+        if (character === '"') {
+          this.mode = "read-answer";
+          this.answerEscaped = false;
+          this.answerUnicode = null;
+        } else {
+          this.mode = "invalid";
+        }
+        return;
+      }
+      this.mode = "skip-value";
+    }
+    if (this.mode === "skip-value") {
+      if (character === '"') {
+        this.stringMode = "skip";
+      } else if (character === "{" || character === "[") {
+        this.depth += 1;
+      } else if (character === "}" || character === "]") {
+        this.depth -= 1;
+        if (this.depth < 0) this.mode = "invalid";
+        else if (this.depth === 0) this.mode = "done";
+      } else if (character === "," && this.depth === 1) {
+        this.mode = "expect-key";
+      }
+      return;
+    }
+    if (this.mode === "after-value") {
+      if (/\s/u.test(character)) return;
+      if (character === ",") {
+        this.mode = "expect-key";
+      } else if (character === "}") {
+        this.depth = 0;
+        this.mode = "done";
+      } else {
+        this.mode = "invalid";
+      }
+    }
+  }
+}
+
+function legacyInstruction(context: string, query: string) {
+  return `Today's date is ${new Date().toISOString().split("T")[0]}.\n\nYou are a helpful virtual assistant that answers questions using the content below. Create detailed answers by combining your understanding of the world with the content provided below.\n\nCite the section names and/or article numbers from the context that support your answer. Do not invent references, and do not include web links — citations should point to the legal text itself.\nFormat your response in markdown.\nUse proper line breaks between paragraphs.\n\nContext:\n=======\n${context}\n=======\n\nCurrent query: ${query}`;
+}
+
+async function generateChatResult(
+  parsed: CommonBody,
+  unified: boolean,
+  onDelta?: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<ChatResult> {
+  if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
+  const chatProvider = createChatProvider(process.env);
+  if (!onDelta) {
+    if (unified) {
+      const governed = parseGovernedContext(parsed.context);
+      const model = governedOutput(await chatProvider.generate({
+        mode: "governed",
+        scenarioQuestion: parsed.scenarioQuestion,
+        context: parsed.context,
+        query: parsed.query,
+        history: parsed.messages,
+      }), governed.sources);
+      return { result: model.answer, citations: model.citations };
+    }
+    const context = parsed.context.slice(0, MAX_GOVERNED_CONTEXT_LENGTH);
+    return {
+      result: (await chatProvider.generate({
+        mode: "legacy",
+        scenarioQuestion: parsed.scenarioQuestion,
+        instruction: legacyInstruction(context, parsed.query),
+        query: parsed.query,
+        history: parsed.messages,
+      })) ?? "",
+    };
+  }
+
+  if (unified) {
+    const governed = parseGovernedContext(parsed.context);
+    let rawResult = "";
+    const answerParser = new GovernedAnswerStreamParser();
+    for await (const chunk of chatProvider.stream({
+      mode: "governed",
+      scenarioQuestion: parsed.scenarioQuestion,
+      context: parsed.context,
+      query: parsed.query,
+      history: parsed.messages,
+    }, signal)) {
+      if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
+      rawResult += chunk;
+      const delta = answerParser.push(chunk);
+      if (delta) onDelta(delta);
+    }
+    const model = governedOutput(rawResult, governed.sources);
+    return { result: model.answer, citations: model.citations };
+  }
+
+  let result = "";
+  const context = parsed.context.slice(0, MAX_GOVERNED_CONTEXT_LENGTH);
+  for await (const chunk of chatProvider.stream({
+    mode: "legacy",
+    scenarioQuestion: parsed.scenarioQuestion,
+    instruction: legacyInstruction(context, parsed.query),
+    query: parsed.query,
+    history: parsed.messages,
+  }, signal)) {
+    if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
+    result += chunk;
+    if (chunk) onDelta(chunk);
+  }
+  return { result };
+}
+
 async function finalize(
   token: string,
   claimNonce: string,
@@ -117,6 +380,115 @@ async function finalize(
   await fetchAuthMutation(finalizeChatPhase, {
     token, claimNonce, providerStatus, latencyMs,
     serviceProof: await createTelemetryServiceProof(["finalize", token, claimNonce, providerStatus, latencyMs]),
+  });
+}
+
+async function finalizeSuccessfulChat(
+  parsed: CommonBody,
+  unified: boolean,
+  claim: { claimNonce: string },
+  startedAt: number,
+  result: ChatResult,
+): Promise<ChatResult> {
+  const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+  if (unified && result.citations?.length) {
+    const bindings = await createCitationClaimBindings(
+      parsed.assistantClientId!,
+      result.result,
+      result.citations,
+    );
+    try {
+      const issued = await fetchAuthMutation(issueCitationClaim, {
+        externalId: parsed.externalId!,
+        jurisdictionId: parsed.jurisdictionId!,
+        assistantClientId: parsed.assistantClientId!,
+        assistantContent: result.result,
+        citations: result.citations,
+        ...bindings,
+        serviceProof: await createTelemetryServiceProof(await citationClaimIssueProofParts({
+          externalId: parsed.externalId!,
+          jurisdictionId: parsed.jurisdictionId!,
+          ...bindings,
+        })),
+      }) as { citationClaim: string };
+      result.citationClaim = issued.citationClaim;
+    } catch {
+      try { await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs); } catch { /* lease expiry fallback */ }
+      console.error("Chat citation persistence claim failed");
+      throw new Error("CHAT_CITATION_CLAIM_FAILED");
+    }
+  }
+  try {
+    await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs);
+  } catch {
+    console.error("Chat telemetry finalization failed");
+    throw new Error("CHAT_TELEMETRY_FINALIZATION_FAILED");
+  }
+  return result;
+}
+
+function streamingResponse(
+  parsed: CommonBody,
+  unified: boolean,
+  claim: { claimNonce: string },
+  startedAt: number,
+  signal: AbortSignal,
+) {
+  const encoder = new TextEncoder();
+  const generation = new AbortController();
+  let cancelled = signal.aborted;
+  const abortGeneration = (reason?: unknown) => {
+    cancelled = true;
+    if (!generation.signal.aborted) generation.abort(reason);
+  };
+  return new Response(new ReadableStream({
+    start(controller) {
+      const cancel = () => abortGeneration(signal.reason);
+      if (signal.aborted) cancel();
+      else signal.addEventListener("abort", cancel, { once: true });
+      const send = (event: ChatStreamEvent) => {
+        if (cancelled) return;
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        } catch {
+          cancelled = true;
+        }
+      };
+      void (async () => {
+        try {
+          let result: ChatResult;
+          try {
+            result = await generateChatResult(parsed, unified, (text) => send({ type: "delta", text }), generation.signal);
+          } catch {
+            const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
+            try { await finalize(parsed.correlationToken, claim.claimNonce, "failure", latencyMs); } catch { /* lease expiry fallback */ }
+            if (!generation.signal.aborted) {
+              console.error("Chat provider request failed");
+              send({ type: "error", error: CHAT_FAILURE });
+            }
+            return;
+          }
+          try {
+            const complete = await finalizeSuccessfulChat(parsed, unified, claim, startedAt, result);
+            send({ type: "done", ...complete });
+          } catch {
+            send({ type: "error", error: CHAT_FAILURE });
+          }
+        } finally {
+          signal.removeEventListener("abort", cancel);
+          try { controller.close(); } catch { /* consumer already cancelled */ }
+        }
+      })();
+    },
+    cancel(reason) {
+      abortGeneration(reason);
+    },
+  }), {
+    headers: {
+      "cache-control": "no-store, no-transform",
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "x-accel-buffering": "no",
+    },
   });
 }
 
@@ -160,68 +532,22 @@ export async function POST(request: Request) {
     }
 
     const startedAt = performance.now();
-    let result: { result: string; citations?: ReturnType<typeof governedOutput>["citations"]; citationClaim?: string };
+    if (request.headers.get("accept")?.includes("application/x-ndjson")) {
+      return streamingResponse(parsed, unified, claim, startedAt, request.signal);
+    }
+
+    let result: ChatResult;
     try {
-      const chatProvider = createChatProvider(process.env);
-      if (unified) {
-        const governed = parseGovernedContext(parsed.context);
-        const model = governedOutput(await chatProvider.generate({
-          mode: "governed",
-          scenarioQuestion: parsed.scenarioQuestion,
-          context: parsed.context,
-          query: parsed.query,
-          history: parsed.messages,
-        }), governed.sources);
-        result = { result: model.answer, citations: model.citations };
-      } else {
-        const context = parsed.context.slice(0, MAX_GOVERNED_CONTEXT_LENGTH);
-        const instruction = `Today's date is ${new Date().toISOString().split("T")[0]}.\n\nYou are a helpful virtual assistant that answers questions using the content below. Create detailed answers by combining your understanding of the world with the content provided below.\n\nCite the section names and/or article numbers from the context that support your answer. Do not invent references, and do not include web links — citations should point to the legal text itself.\nFormat your response in markdown.\nUse proper line breaks between paragraphs.\n\nContext:\n=======\n${context}\n=======\n\nCurrent query: ${parsed.query}`;
-        result = { result: (await chatProvider.generate({
-          mode: "legacy",
-          scenarioQuestion: parsed.scenarioQuestion,
-          instruction,
-          query: parsed.query,
-          history: parsed.messages,
-        })) ?? "" };
-      }
+      result = await generateChatResult(parsed, unified);
     } catch {
       const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
       try { await finalize(parsed.correlationToken, claim.claimNonce, "failure", latencyMs); } catch { /* lease expiry fallback */ }
       console.error("Chat provider request failed");
       return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
     }
-    const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-    if (unified && result.citations?.length) {
-      const bindings = await createCitationClaimBindings(
-        parsed.assistantClientId!,
-        result.result,
-        result.citations,
-      );
-      try {
-        const issued = await fetchAuthMutation(issueCitationClaim, {
-          externalId: parsed.externalId!,
-          jurisdictionId: parsed.jurisdictionId!,
-          assistantClientId: parsed.assistantClientId!,
-          assistantContent: result.result,
-          citations: result.citations,
-          ...bindings,
-          serviceProof: await createTelemetryServiceProof(await citationClaimIssueProofParts({
-            externalId: parsed.externalId!,
-            jurisdictionId: parsed.jurisdictionId!,
-            ...bindings,
-          })),
-        }) as { citationClaim: string };
-        result.citationClaim = issued.citationClaim;
-      } catch {
-        try { await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs); } catch { /* lease expiry fallback */ }
-        console.error("Chat citation persistence claim failed");
-        return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
-      }
-    }
     try {
-      await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs);
+      result = await finalizeSuccessfulChat(parsed, unified, claim, startedAt, result);
     } catch {
-      console.error("Chat telemetry finalization failed");
       return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
     }
     return NextResponse.json(result);

@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useRouter } from "next/navigation";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
@@ -45,6 +45,20 @@ import {
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
 
+function assistantMarkdown(content: string): string {
+  if (!content.includes("\\n\\n") && !content.includes("\\r\\n\\r\\n")) return content;
+  return content.replaceAll("\\r\\n", "\n").replaceAll("\\n", "\n");
+}
+
+const assistantMarkdownComponents = {
+  ol: ({ children, start }: { children?: ReactNode; start?: number }) => (
+    <ol start={start} style={{ listStyleType: "decimal" }}>{children}</ol>
+  ),
+  ul: ({ children }: { children?: ReactNode }) => (
+    <ul style={{ listStyleType: "disc" }}>{children}</ul>
+  ),
+};
+
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
@@ -57,6 +71,71 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
     throw new ApiError(response.status, data?.error);
   }
   return (await response.json()) as T;
+}
+
+type ChatResponse = {
+  result: string;
+  citations?: ChatCitation[];
+  citationClaim?: string;
+};
+
+async function postChat(
+  body: unknown,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<ChatResponse> {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(response.status, data?.error);
+  }
+  if (!response.headers.get("content-type")?.includes("application/x-ndjson")) {
+    return (await response.json()) as ChatResponse;
+  }
+  if (!response.body) throw new ApiError(500);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completed: ChatResponse | null = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let lineEnd = buffer.indexOf("\n");
+    while (lineEnd >= 0) {
+      const line = buffer.slice(0, lineEnd);
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf("\n");
+      if (!line) continue;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        throw new ApiError(500);
+      }
+      if (event.type === "delta" && typeof event.text === "string") {
+        onDelta(event.text);
+      } else if (event.type === "done" && typeof event.result === "string") {
+        completed = {
+          result: event.result,
+          ...(Array.isArray(event.citations) ? { citations: event.citations as ChatCitation[] } : {}),
+          ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
+        };
+      } else if (event.type === "error" && typeof event.error === "string") {
+        throw new ApiError(500, event.error);
+      } else {
+        throw new ApiError(500);
+      }
+    }
+    if (done) break;
+  }
+  if (!completed) throw new ApiError(500);
+  return completed;
 }
 
 class ApiError extends Error {
@@ -478,6 +557,23 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
       });
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
+      let streamedAnswer = "";
+      let streamRenderFrame: number | undefined;
+      const renderStreamedAnswer = () => {
+        streamRenderFrame = undefined;
+        if (!isCurrentRequest()) return;
+        setLocalMessages((previous) => previous.map((message) =>
+          message.localId === assistantMessage.localId
+            ? { ...message, content: streamedAnswer || "..." }
+            : message,
+        ));
+      };
+      const cancelPendingStreamRender = () => {
+        if (streamRenderFrame === undefined) return;
+        window.cancelAnimationFrame(streamRenderFrame);
+        streamRenderFrame = undefined;
+      };
+
       try {
         const hasPersistedStableSelection = Boolean(sessionData?.jurisdictionId);
         const searchData = await postJson<{
@@ -508,8 +604,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
         ) {
           throw new ApiError(500, "The jurisdiction selection could not be verified. Please try again.");
         }
-
-        const chatData = await postJson<{ result: string; citations?: ChatCitation[]; citationClaim?: string }>("/api/chat", {
+        const chatData = await postChat({
           query: trimmed,
           messages: priorForApi,
           context: searchData.result,
@@ -522,8 +617,13 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
                 ...(searchData.legacyCountryCode ? { country: searchData.legacyCountryCode } : {}),
               }
             : { country: searchData.jurisdictionCode }),
+        }, (text) => {
+          streamedAnswer += text;
+          if (!isCurrentRequest() || streamRenderFrame !== undefined) return;
+          streamRenderFrame = window.requestAnimationFrame(renderStreamedAnswer);
         }, controller.signal);
         if (!isCurrentRequest()) return;
+        cancelPendingStreamRender();
         if (unifiedJurisdictionsEnabled === true &&
           (chatData.citations?.length
             ? !chatData.citationClaim || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
@@ -612,6 +712,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
           })
         );
       } finally {
+        cancelPendingStreamRender();
         if (isCurrentRequest()) {
           setIsLoading(false);
           if (activeRequestRef.current === controller) activeRequestRef.current = null;
@@ -876,7 +977,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJur
                     </div>
                   ) : (
                     <div className="min-w-0 text-sm leading-7">
-                      <div className="markdown-content"><ReactMarkdown>{message.content}</ReactMarkdown></div>
+                      <div className="markdown-content">
+                        <ReactMarkdown components={assistantMarkdownComponents}>
+                          {assistantMarkdown(message.content)}
+                        </ReactMarkdown>
+                      </div>
                       {message.citations?.length ? (
                         <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">
                           <h2 className="font-semibold text-foreground">Sources</h2>
