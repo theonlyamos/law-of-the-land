@@ -138,7 +138,7 @@ class GovernedAnswerStreamParser {
   private stringMode: "key" | "skip" | null = null;
   private stringEscaped = false;
   private answerEscaped = false;
-  private answerUnicode = "";
+  private answerUnicode: string | null = null;
 
   push(text: string): string {
     let delta = "";
@@ -176,7 +176,7 @@ class GovernedAnswerStreamParser {
   }
 
   private readAnswerCharacter(character: string): string {
-    if (this.answerUnicode) {
+    if (this.answerUnicode !== null) {
       if (!/^[0-9a-fA-F]$/u.test(character)) {
         this.mode = "invalid";
         return "";
@@ -184,7 +184,7 @@ class GovernedAnswerStreamParser {
       this.answerUnicode += character;
       if (this.answerUnicode.length === 4) {
         const value = String.fromCharCode(Number.parseInt(this.answerUnicode, 16));
-        this.answerUnicode = "";
+        this.answerUnicode = null;
         this.answerEscaped = false;
         return value;
       }
@@ -263,7 +263,7 @@ class GovernedAnswerStreamParser {
         if (character === '"') {
           this.mode = "read-answer";
           this.answerEscaped = false;
-          this.answerUnicode = "";
+          this.answerUnicode = null;
         } else {
           this.mode = "invalid";
         }

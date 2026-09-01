@@ -352,6 +352,26 @@ describe("POST /api/chat governed citations", () => {
     ]);
   });
 
+  it("streams governed Unicode escapes without waiting for the terminal result", async () => {
+    aiMocks.sendMessageStream.mockResolvedValue((async function* () {
+      yield { text: '{"answer":"Caf\\u' };
+      yield { text: "00" };
+      yield { text: 'e9","citations":[{"sourceRef":"J1","label":"Section 1"}]}' };
+    })());
+
+    const response = await POST(governedRequest({}, "application/x-ndjson"));
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(events).toEqual([
+      { type: "delta", text: "Caf" },
+      { type: "delta", text: "é" },
+      expect.objectContaining({ type: "done", result: "Café" }),
+    ]);
+  });
+
   it("claims the exact context digest before Gemini and resolves model refs through governed metadata", async () => {
     const response = await POST(governedRequest());
     const payload = await response.json();
