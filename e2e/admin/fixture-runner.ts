@@ -1,4 +1,6 @@
 import { makeSignature } from "better-auth/crypto";
+import { createTelemetryServiceProofForSecret } from "../../convex/lib/telemetryProof";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,6 +13,7 @@ const FIXED_ROLES = [
   "billing_manager",
   "auditor",
 ] as const;
+const TELEMETRY_SECRET_PROOF_DOMAIN = "admin-e2e-telemetry-ingest-secret-v1";
 
 type FixedRole = (typeof FIXED_ROLES)[number];
 type Environment = Record<string, string | undefined>;
@@ -23,14 +26,41 @@ export type AdminE2ETarget = {
   fixtureSecret: string;
   betterAuthSecret: string;
   accountPassword: string;
+  telemetryIngestSecret: string;
+  approvedCommitSha: string;
 };
 
 type FixtureRecoveryManifest = {
-  version: 1;
+  version: 2;
   state: "provisional" | "ready";
   tag: string;
+  targetClass: "test" | "preview";
+  approvedCommitSha: string;
   convexUrl: string;
   convexSiteUrl: string;
+  cleanupEndpoint: "/admin/e2e-fixtures/cleanup";
+};
+
+type FixtureRecords = {
+  chatId: string;
+  resourceId: string;
+  publishedVersionId: string;
+  reviewVersionId: string;
+  separationVersionId: string;
+  conversationGrantId: string;
+  jurisdictionId: string;
+  userId: string;
+  stagingBucketId: string;
+  productionBucketId: string;
+  callbackToken: string;
+  callbackJobId: string;
+  usageUserId: string;
+  jurisdictionCountryId: string;
+  jurisdictionTownId: string;
+  publicOrganizationJurisdictionId: string;
+  jurisdictionMemberOnlyId: string;
+  jurisdictionMemberId: string;
+  jurisdictionFormerMemberId: string;
 };
 
 export type FixtureManifest = FixtureRecoveryManifest & {
@@ -41,16 +71,24 @@ export type FixtureManifest = FixtureRecoveryManifest & {
     noTwoFactor: { userId: string; cookie: string };
     unassured: { userId: string; cookie: string };
   };
-  records: Record<string, unknown>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; cookie: string }>;
+  records: FixtureRecords;
 };
 
 type BootstrapResponse = {
   tag: string;
   providerTransport: "stub";
+  deployedCommitSha: string;
+  billingDisabled: true;
   sessions: Record<FixedRole, { userId: string; sessionToken: string }>;
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
-  records: Record<string, unknown>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; sessionToken: string }>;
+  records: FixtureRecords;
 };
+
+const SHA_PATTERN = /^[a-f0-9]{40}$/;
+const FIXTURE_TAG_PATTERN = /^e2e_[a-z0-9]{12,48}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function required(environment: Environment, key: string): string {
   const value = environment[key]?.trim();
@@ -65,10 +103,27 @@ function parsedEndpoint(value: string, key: string): URL {
   } catch {
     throw new Error(`${key} must be an absolute HTTP(S) URL.`);
   }
-  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
     throw new Error(`${key} must be a credential-free HTTP(S) origin.`);
   }
   return url;
+}
+
+function requiredCanonicalSecret(environment: Environment, key: string): string {
+  const value = environment[key];
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new Error(`${key} must be an exact canonical 32-byte base64url value.`);
+  }
+  const bytes = Buffer.from(value, "base64url");
+  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1 || bytes.byteLength !== 32 || bytes.toString("base64url") !== value) {
+    throw new Error(`${key} must be an exact canonical 32-byte base64url value.`);
+  }
+  return value;
+}
+
+function hasExplicitPort(value: string): boolean {
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+  return /:\d+$/.test(authority);
 }
 
 function isLocalhost(hostname: string): boolean {
@@ -79,8 +134,36 @@ function productionLooking(url: URL): boolean {
   return /(?:^|[.-])(?:prod|production|live)(?:[.-]|$)/i.test(url.hostname);
 }
 
-function remoteDeploymentName(url: URL, suffix: string): string | null {
-  return url.hostname.endsWith(suffix) ? url.hostname.slice(0, -suffix.length) : null;
+function remoteDeployment(url: URL, suffix: string): { name: string; region: string } | null {
+  if (!url.hostname.endsWith(suffix)) return null;
+  const labels = url.hostname.slice(0, -suffix.length).split(".");
+  if (labels.length !== 2) return null;
+  const [name, region] = labels;
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(region)
+    ? { name, region }
+    : null;
+}
+
+function requiredEndpoint(environment: Environment, key: string): string {
+  const value = environment[key];
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${key} is required.`);
+  if (value !== value.trim()) throw new Error(`${key} must be supplied as an exact origin without padding.`);
+  return value;
+}
+
+function requireRemoteDevelopmentBinding(
+  environment: Environment,
+  backendName: string,
+  siteName: string,
+): void {
+  const value = environment.CONVEX_DEPLOYMENT;
+  const match = typeof value === "string" && value === value.trim()
+    ? /^dev:([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(value)
+    : null;
+  if (!match || match[1] !== backendName || match[1] !== siteName) {
+    throw new Error("Remote admin E2E targets require CONVEX_DEPLOYMENT=dev:<deployment-name> matching both Convex origins.");
+  }
 }
 
 export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget {
@@ -103,8 +186,8 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
 
   // Never consult NEXT_PUBLIC_CONVEX_* here: a developer shell may contain a
   // live app target. Fixture endpoints must always be separately explicit.
-  const convexUrlValue = required(environment, "ADMIN_E2E_CONVEX_URL");
-  const convexSiteUrlValue = required(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const convexUrlValue = requiredEndpoint(environment, "ADMIN_E2E_CONVEX_URL");
+  const convexSiteUrlValue = requiredEndpoint(environment, "ADMIN_E2E_CONVEX_SITE_URL");
   const convexUrl = parsedEndpoint(convexUrlValue, "ADMIN_E2E_CONVEX_URL");
   const convexSiteUrl = parsedEndpoint(convexSiteUrlValue, "ADMIN_E2E_CONVEX_SITE_URL");
   const localBackend = isLocalhost(convexUrl.hostname);
@@ -119,19 +202,41 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     if (productionLooking(convexUrl) || productionLooking(convexSiteUrl)) {
       throw new Error("Admin E2E fixtures refuse production-looking target URLs.");
     }
-    const backendName = remoteDeploymentName(convexUrl, ".convex.cloud");
-    const siteName = remoteDeploymentName(convexSiteUrl, ".convex.site");
-    if (!backendName || backendName !== siteName) {
+    const backend = remoteDeployment(convexUrl, ".convex.cloud");
+    const site = remoteDeployment(convexSiteUrl, ".convex.site");
+    if (convexUrl.port || convexSiteUrl.port || hasExplicitPort(convexUrlValue) || hasExplicitPort(convexSiteUrlValue) || !backend || !site || backend.name !== site.name || backend.region !== site.region) {
       throw new Error("Admin E2E Convex URLs must address the same isolated deployment.");
     }
+    requireRemoteDevelopmentBinding(environment, backend.name, site.name);
+  }
+  if (environment.BILLING_ENABLED !== "false") {
+    throw new Error("Automated jurisdiction budgets require BILLING_ENABLED=false on the isolated target.");
   }
   const fixtureSecret = required(environment, "ADMIN_E2E_FIXTURE_SECRET");
   const betterAuthSecret = required(environment, "ADMIN_E2E_BETTER_AUTH_SECRET");
   const accountPassword = required(environment, "ADMIN_E2E_ACCOUNT_PASSWORD");
+  requiredCanonicalSecret(environment, "ADMIN_E2E_PLACE_CLAIM_SECRET");
+  const searchJurisdictionSecret = required(environment, "ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
+  const telemetryIngestSecret = required(environment, "ADMIN_E2E_TELEMETRY_INGEST_SECRET");
   if (fixtureSecret.length < 32 || betterAuthSecret.length < 32) {
     throw new Error("Admin E2E fixture and Better Auth secrets must each be at least 32 characters.");
   }
+  if (searchJurisdictionSecret.length < 32) {
+    throw new Error("ADMIN_E2E_SEARCH_JURISDICTION_SECRET must be at least 32 characters.");
+  }
+  if (telemetryIngestSecret.length < 32) {
+    throw new Error("ADMIN_E2E_TELEMETRY_INGEST_SECRET must be at least 32 characters.");
+  }
   if (accountPassword.length < 12) throw new Error("ADMIN_E2E_ACCOUNT_PASSWORD must be at least 12 characters.");
+  const approvedCommitSha = environment.ADMIN_E2E_APPROVED_COMMIT_SHA;
+  const localHeadSha = environment.ADMIN_E2E_LOCAL_HEAD_SHA;
+  if (typeof approvedCommitSha !== "string"
+    || typeof localHeadSha !== "string"
+    || !SHA_PATTERN.test(approvedCommitSha)
+    || !SHA_PATTERN.test(localHeadSha)
+    || approvedCommitSha !== localHeadSha) {
+    throw new Error("Admin E2E requires an exact approved/local lowercase commit SHA match.");
+  }
   return {
     environment: targetEnvironment,
     convexUrl: convexUrl.origin,
@@ -139,7 +244,15 @@ export function resolveAdminE2ETarget(environment: Environment): AdminE2ETarget 
     fixtureSecret,
     betterAuthSecret,
     accountPassword,
+    telemetryIngestSecret,
+    approvedCommitSha,
   };
+}
+
+function deriveLocalHeadSha(): string {
+  const value = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (!SHA_PATTERN.test(value)) throw new Error("Admin E2E could not derive an exact lowercase local HEAD SHA.");
+  return value;
 }
 
 async function responseJson<T>(response: Response, operation: string): Promise<T> {
@@ -154,20 +267,47 @@ function authorizationHeaders(secret: string) {
   return { authorization: `Bearer ${secret}`, "content-type": "application/json" };
 }
 
+async function verifyTargetTelemetryIngestSecret(
+  request: RequestFunction,
+  target: AdminE2ETarget,
+  tag: string,
+): Promise<void> {
+  const proof = await createTelemetryServiceProofForSecret(
+    target.telemetryIngestSecret,
+    [TELEMETRY_SECRET_PROOF_DOMAIN, tag],
+  );
+  const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/control`, {
+    method: "POST",
+    headers: authorizationHeaders(target.fixtureSecret),
+    body: JSON.stringify({ tag, operation: "verify_telemetry_ingest_secret", proof }),
+  });
+  const payload = await responseJson<{ ok?: unknown }>(response, "telemetry secret verification");
+  if (payload.ok !== true) throw new Error("Admin E2E target telemetry secret verification was refused.");
+}
+
 export async function bootstrapAdminFixtures(options: {
   environment: Environment;
   fixtureTag: string;
   manifestPath: string;
   request?: RequestFunction;
 }): Promise<FixtureManifest> {
+  if (!FIXTURE_TAG_PATTERN.test(options.fixtureTag)) {
+    throw new Error("Admin E2E fixture tag is invalid.");
+  }
   const target = resolveAdminE2ETarget(options.environment);
+  if (deriveLocalHeadSha() !== target.approvedCommitSha) {
+    throw new Error("Admin E2E approved commit does not match freshly derived local HEAD.");
+  }
   const request = options.request ?? fetch;
   const recoveryManifest: FixtureRecoveryManifest = {
-    version: 1,
+    version: 2,
     state: "provisional",
     tag: options.fixtureTag,
+    targetClass: target.environment,
+    approvedCommitSha: target.approvedCommitSha,
     convexUrl: target.convexUrl,
     convexSiteUrl: target.convexSiteUrl,
+    cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
   };
   await mkdir(dirname(options.manifestPath), { recursive: true, mode: 0o700 });
   await writeFile(options.manifestPath, JSON.stringify(recoveryManifest), { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -180,9 +320,17 @@ export async function bootstrapAdminFixtures(options: {
   const payload = await responseJson<BootstrapResponse>(response, "bootstrap");
   if (payload.tag !== options.fixtureTag) throw new Error("Admin E2E bootstrap returned a mismatched fixture tag.");
   if (payload.providerTransport !== "stub") throw new Error("Admin E2E bootstrap did not confirm isolated provider stubs.");
+  if (payload.deployedCommitSha !== target.approvedCommitSha || !SHA_PATTERN.test(payload.deployedCommitSha)) {
+    throw new Error("Admin E2E bootstrap returned a mismatched deployed commit.");
+  }
+  if (payload.billingDisabled !== true) {
+    throw new Error("Admin E2E bootstrap did not confirm billing is disabled.");
+  }
+  await verifyTargetTelemetryIngestSecret(request, target, options.fixtureTag);
   const sessions: Partial<Record<FixedRole, string>> = {};
   for (const role of FIXED_ROLES) {
-    const token = payload.sessions?.[role]?.sessionToken;
+    const value = payload.sessions?.[role];
+    const token = value?.sessionToken;
     if (!token) throw new Error(`Admin E2E bootstrap omitted the ${role} session token.`);
     sessions[role] = `better-auth.session_token=${token}.${await makeSignature(token, target.betterAuthSecret)}`;
   }
@@ -195,14 +343,36 @@ export async function bootstrapAdminFixtures(options: {
       cookie: `better-auth.session_token=${value.sessionToken}.${await makeSignature(value.sessionToken, target.betterAuthSecret)}`,
     };
   }
+  const jurisdictionUsers = {} as FixtureManifest["jurisdictionUsers"];
+  for (const identity of ["member", "formerMember"] as const) {
+    const value = payload.jurisdictionUsers?.[identity];
+    if (!value?.userId || !value.sessionToken) throw new Error(`Admin E2E bootstrap omitted the ${identity} jurisdiction session.`);
+    jurisdictionUsers[identity] = {
+      userId: value.userId,
+      cookie: `better-auth.session_token=${value.sessionToken}.${await makeSignature(value.sessionToken, target.betterAuthSecret)}`,
+    };
+  }
+  const requiredRecordIds: Array<keyof FixtureRecords> = [
+    "chatId", "resourceId", "publishedVersionId", "reviewVersionId", "separationVersionId",
+    "conversationGrantId", "jurisdictionId", "userId", "stagingBucketId", "productionBucketId",
+    "callbackToken", "callbackJobId", "usageUserId", "jurisdictionCountryId", "jurisdictionTownId",
+    "publicOrganizationJurisdictionId", "jurisdictionMemberOnlyId", "jurisdictionMemberId", "jurisdictionFormerMemberId",
+  ];
+  if (!payload.records || requiredRecordIds.some((key) => typeof payload.records[key] !== "string" || !payload.records[key])) {
+    throw new Error("Admin E2E bootstrap omitted required owned record identifiers.");
+  }
   const manifest: FixtureManifest = {
-    version: 1,
+    version: 2,
     state: "ready",
     tag: payload.tag,
+    targetClass: target.environment,
+    approvedCommitSha: target.approvedCommitSha,
     convexUrl: target.convexUrl,
     convexSiteUrl: target.convexSiteUrl,
+    cleanupEndpoint: "/admin/e2e-fixtures/cleanup",
     sessions,
     variants,
+    jurisdictionUsers,
     records: payload.records,
   };
   const completedPath = `${options.manifestPath}.${crypto.randomUUID()}.ready`;
@@ -221,26 +391,51 @@ export async function cleanupAdminFixtures(options: {
   manifestPath: string;
   request?: RequestFunction;
 }): Promise<void> {
+  const maxCleanupPasses = 64;
   const request = options.request ?? fetch;
   try {
     const manifest = JSON.parse(await readFile(options.manifestPath, "utf8")) as FixtureRecoveryManifest;
-    if (manifest.version !== 1 || !["provisional", "ready"].includes(manifest.state) || !manifest.tag || !manifest.convexSiteUrl) {
+    if (manifest.version !== 2 || !["provisional", "ready"].includes(manifest.state)
+      || !FIXTURE_TAG_PATTERN.test(manifest.tag) || !manifest.convexSiteUrl) {
       throw new Error("Admin E2E recovery manifest is invalid.");
     }
     const target = resolveAdminE2ETarget(options.environment);
-    if (manifest.convexSiteUrl !== target.convexSiteUrl) {
+    if (manifest.targetClass !== target.environment
+      || manifest.approvedCommitSha !== target.approvedCommitSha
+      || manifest.cleanupEndpoint !== "/admin/e2e-fixtures/cleanup"
+      || manifest.convexUrl !== target.convexUrl
+      || manifest.convexSiteUrl !== target.convexSiteUrl) {
       throw new Error("Admin E2E manifest target does not match the guarded cleanup target.");
     }
-    const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
-      method: "DELETE",
-      headers: authorizationHeaders(target.fixtureSecret),
-      body: JSON.stringify({ tag: manifest.tag }),
-    });
-    const payload = await responseJson<{ tag: string; deleted: number }>(response, "cleanup");
-    if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
-    if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
-      throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+    let completed = false;
+    for (let pass = 0; pass < maxCleanupPasses; pass += 1) {
+      const response = await request(`${target.convexSiteUrl}/admin/e2e-fixtures/cleanup`, {
+        method: "DELETE",
+        headers: authorizationHeaders(target.fixtureSecret),
+        body: JSON.stringify({ tag: manifest.tag }),
+      });
+      const payload = await responseJson<{
+        tag: string;
+        deleted: number;
+        cleanupConflict: boolean;
+        cleanupPending: boolean;
+      }>(response, "cleanup");
+      if (payload.tag !== manifest.tag) throw new Error("Admin E2E cleanup returned a mismatched fixture tag.");
+      if (!Number.isSafeInteger(payload.deleted) || payload.deleted < 0) {
+        throw new Error("Admin E2E cleanup returned an invalid deletion count.");
+      }
+      if (payload.cleanupConflict !== false) {
+        throw new Error("Admin E2E cleanup reported an ownership conflict; operator recovery remains required.");
+      }
+      if (typeof payload.cleanupPending !== "boolean") {
+        throw new Error("Admin E2E cleanup returned an invalid completion state.");
+      }
+      if (!payload.cleanupPending) {
+        completed = true;
+        break;
+      }
     }
+    if (!completed) throw new Error("Admin E2E cleanup exceeded the bounded pass limit; operator recovery remains required.");
     await rm(options.manifestPath, { force: true });
   } catch (error) {
     // Keep the manifest as the only recovery handle when the target did not

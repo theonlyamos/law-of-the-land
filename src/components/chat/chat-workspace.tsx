@@ -12,12 +12,17 @@ import { ChatInput } from "@/components/ui/chat-input";
 import { PageLoader, Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import { PublicJurisdictionSelector } from "@/components/landing/public-jurisdiction-selector";
+import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import {
   chooseJurisdictionCode,
   findJurisdiction,
+  type ChatCitation,
+  type PartialCoverage,
   type PublicJurisdiction,
+  type ResearchJurisdiction,
 } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import {
   beginComposerBottomScroll,
   beginPrependScroll,
@@ -109,15 +114,22 @@ interface ChatWorkspaceProps {
   initialQuery: string | null;
   /** Jurisdiction for a chat being created via ?country=; existing chats use their stored value. */
   initialCountry?: string | null;
+  /** Stable jurisdiction for a chat being created via ?jurisdiction=. */
+  initialJurisdiction?: string | null;
 }
 
-export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWorkspaceProps) {
+export function ChatWorkspace({ chatId, initialQuery, initialCountry, initialJurisdiction }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
+  const unifiedJurisdictionsEnabled = useQuery(api.jurisdictions.isUnifiedJurisdictionsEnabled);
+  const publicJurisdictions = useQuery(
+    api.jurisdictions.listPublicEnabled,
+    unifiedJurisdictionsEnabled === false ? {} : "skip",
+  );
   const jurisdictions: readonly PublicJurisdiction[] = publicJurisdictions ?? [];
   const [query, setQuery] = useState("");
   const [selectedCountry, setSelectedCountry] = useState("");
+  const [selectedResearchJurisdiction, setSelectedResearchJurisdiction] = useState<ResearchJurisdiction | null>(null);
   const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -151,6 +163,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     api.chats.getByExternalId,
     isAuthenticated && chatId ? { externalId: chatId } : "skip"
   );
+  const resolvedInitialSelection = useQuery(
+    api.jurisdictions.resolveResearchSelection,
+    unifiedJurisdictionsEnabled === true &&
+      !sessionData?.jurisdictionId &&
+      (initialJurisdiction || sessionData?.country || initialCountry)
+      ? {
+          ...(!sessionData && initialJurisdiction ? { jurisdictionId: initialJurisdiction as Id<"jurisdictions"> } : {}),
+          ...(sessionData?.country || initialCountry ? { country: sessionData?.country ?? initialCountry! } : {}),
+        }
+      : "skip",
+  );
   const {
     results: messageResults,
     status: messagesPaginationStatus,
@@ -181,6 +204,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
         content: message.content,
         createdAt: message.createdAt,
         creationTime: message.creationTime,
+        citations: message.citations,
       });
     }
     return [...byStorageId.values()].sort(
@@ -198,10 +222,31 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     chatId !== null &&
     (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage");
   // Existing chats answer from the jurisdiction they were started in.
-  const chatCountry =
-    sessionData?.country ??
-    findJurisdiction(jurisdictions, initialCountry)?.code ??
-    selectedCountry;
+  const chatResearchJurisdiction: ResearchJurisdiction | null = sessionData?.jurisdictionId
+    ? {
+        id: sessionData.jurisdictionId,
+        name: sessionData.jurisdictionName ?? "Jurisdiction",
+        slug: "",
+        kind: sessionData.jurisdictionKind ?? "geographic",
+        isDefault: false,
+        ...(sessionData.country ? { legacyCountryCode: sessionData.country } : {}),
+      }
+    : resolvedInitialSelection ?? selectedResearchJurisdiction;
+  const chatCountry = unifiedJurisdictionsEnabled === true
+    ? chatResearchJurisdiction?.legacyCountryCode ?? ""
+    : sessionData?.country ?? findJurisdiction(jurisdictions, initialCountry)?.code ?? selectedCountry;
+  const storedStableRollback = unifiedJurisdictionsEnabled === false &&
+    sessionData !== undefined && sessionData !== null &&
+    sessionData.jurisdictionContract === "unified";
+  const selectionReady = storedStableRollback
+    ? false
+    : unifiedJurisdictionsEnabled === true
+      ? Boolean(chatResearchJurisdiction?.id)
+      : unifiedJurisdictionsEnabled === false && Boolean(chatCountry);
+  const selectionUnavailable = unifiedJurisdictionsEnabled === true &&
+    sessionData === null &&
+    Boolean(initialJurisdiction || initialCountry) &&
+    resolvedInitialSelection === null;
 
   const invalidateChatRequests = useCallback(() => {
     requestGenerationRef.current += 1;
@@ -336,24 +381,32 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       externalId: chatId,
       start: () => ensureSession({
         externalId: chatId,
-        country: chatCountry || undefined,
+        ...(unifiedJurisdictionsEnabled === true && chatResearchJurisdiction
+          ? {
+              jurisdictionId: chatResearchJurisdiction.id as Id<"jurisdictions">,
+              jurisdictionName: chatResearchJurisdiction.name,
+              jurisdictionKind: chatResearchJurisdiction.kind,
+              ...(chatResearchJurisdiction.legacyCountryCode ? { country: chatResearchJurisdiction.legacyCountryCode } : {}),
+            }
+          : { country: chatCountry || undefined }),
       }),
     });
     routeEnsureRef.current = entry;
     return entry;
-  }, [chatCountry, chatId, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
+  }, [chatCountry, chatId, chatResearchJurisdiction, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData, unifiedJurisdictionsEnabled]);
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       const trimmed = searchQuery.trim();
-      if (!trimmed || isLoading || !chatCountry) return;
+      if (!trimmed || isLoading || !selectionReady) return;
 
       // New-chat mode: the chat page picks the question up from ?q= and runs it.
       if (!chatId) {
         setIsLoading(true);
-        router.push(
-          `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&country=${selectedCountry}`
-        );
+        const selection = unifiedJurisdictionsEnabled === true
+          ? `&jurisdiction=${encodeURIComponent(chatResearchJurisdiction!.id)}${chatResearchJurisdiction!.legacyCountryCode ? `&country=${encodeURIComponent(chatResearchJurisdiction!.legacyCountryCode!)}` : ""}`
+          : `&country=${encodeURIComponent(selectedCountry)}`;
+        router.push(`/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}${selection}`);
         return;
       }
 
@@ -426,26 +479,64 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       try {
+        const hasPersistedStableSelection = Boolean(sessionData?.jurisdictionId);
         const searchData = await postJson<{
           result: string;
           correlationToken: string;
-          jurisdictionCode: string;
+          jurisdictionCode?: string;
+          jurisdictionId?: string;
+          legacyCountryCode?: string;
+          partialCoverage?: PartialCoverage[];
         }>("/api/search", {
           query: trimmed,
-          country: chatCountry,
+          ...(unifiedJurisdictionsEnabled === true
+            ? {
+                jurisdictionId: chatResearchJurisdiction!.id,
+                ...(!hasPersistedStableSelection && chatResearchJurisdiction!.legacyCountryCode
+                  ? { country: chatResearchJurisdiction!.legacyCountryCode }
+                  : {}),
+              }
+            : { country: chatCountry }),
         }, controller.signal);
         if (!isCurrentRequest()) return;
+        if (
+          unifiedJurisdictionsEnabled === true &&
+          (searchData.jurisdictionId !== chatResearchJurisdiction!.id ||
+            (!hasPersistedStableSelection &&
+              (searchData.legacyCountryCode ?? undefined) !==
+                (chatResearchJurisdiction!.legacyCountryCode ?? undefined)))
+        ) {
+          throw new ApiError(500, "The jurisdiction selection could not be verified. Please try again.");
+        }
 
-        const chatData = await postJson<{ result: string }>("/api/chat", {
+        const chatData = await postJson<{ result: string; citations?: ChatCitation[]; citationClaim?: string }>("/api/chat", {
           query: trimmed,
           messages: priorForApi,
           context: searchData.result,
           correlationToken: searchData.correlationToken,
-          country: searchData.jurisdictionCode,
+          ...(unifiedJurisdictionsEnabled === true
+            ? {
+                jurisdictionId: searchData.jurisdictionId,
+                externalId: chatId,
+                assistantClientId: assistantMessage.clientId,
+                ...(searchData.legacyCountryCode ? { country: searchData.legacyCountryCode } : {}),
+              }
+            : { country: searchData.jurisdictionCode }),
         }, controller.signal);
         if (!isCurrentRequest()) return;
+        if (unifiedJurisdictionsEnabled === true &&
+          (chatData.citations?.length
+            ? !chatData.citationClaim || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
+            : chatData.citationClaim !== undefined)) {
+          throw new ApiError(500, "The answer could not be verified. Please try again.");
+        }
 
-        const completedAssistant = { ...assistantMessage, content: chatData.result };
+        const completedAssistant = {
+          ...assistantMessage,
+          content: chatData.result,
+          ...(chatData.citations?.length ? { citations: chatData.citations } : {}),
+          ...(searchData.partialCoverage?.length ? { partialCoverage: searchData.partialCoverage } : {}),
+        };
         setLocalMessages((previous) =>
           previous.map((message) =>
             message.localId === assistantMessage.localId ? completedAssistant : message
@@ -463,13 +554,35 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
                 : undefined,
               lastMessage: chatData.result,
-              country: chatCountry,
-              messages: [userMessage, completedAssistant].map((message) => ({
-                role: message.role,
-                content: message.content,
-                clientId: message.clientId,
-                createdAt: message.createdAt,
-              })),
+              ...(unifiedJurisdictionsEnabled === true && chatResearchJurisdiction
+                ? {
+                    jurisdictionId: chatResearchJurisdiction.id as Id<"jurisdictions">,
+                    jurisdictionName: chatResearchJurisdiction.name,
+                    jurisdictionKind: chatResearchJurisdiction.kind,
+                    ...(chatResearchJurisdiction.legacyCountryCode ? { country: chatResearchJurisdiction.legacyCountryCode } : {}),
+                  }
+                : { country: chatCountry }),
+              messages: [
+                {
+                  role: "user" as const,
+                  content: userMessage.content,
+                  clientId: userMessage.clientId,
+                  createdAt: userMessage.createdAt,
+                },
+                {
+                  role: "assistant" as const,
+                  content: completedAssistant.content,
+                  clientId: completedAssistant.clientId,
+                  createdAt: completedAssistant.createdAt,
+                  ...(completedAssistant.citations ? {
+                    citationClaim: chatData.citationClaim,
+                    citations: completedAssistant.citations.map((citation) => ({
+                      ...citation,
+                      jurisdictionId: citation.jurisdictionId as Id<"jurisdictions">,
+                    })),
+                  } : {}),
+                },
+              ],
             }),
           });
         } catch (error) {
@@ -508,18 +621,22 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     [
       appendMessages,
       chatCountry,
+      chatResearchJurisdiction,
       chatId,
       displayMessages,
       ensureSessionForNewSubmission,
       isLoading,
       router,
       selectedCountry,
+      selectionReady,
+      sessionData?.jurisdictionId,
+      unifiedJurisdictionsEnabled,
     ]
   );
 
   useEffect(() => {
     if (!initialQuery?.trim()) return;
-    if (!chatCountry) return;
+    if (!selectionReady) return;
     const q = initialQuery.trim();
     const key = `${chatId}|${q}`;
     if (processedBootstrap.current.has(key)) return;
@@ -531,7 +648,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
     if (sessionData && persistedMessages.length > 0) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [chatCountry, chatId, handleSearch, initialQuery, persistedMessages.length, router, sessionData]);
+  }, [chatId, handleSearch, initialQuery, persistedMessages.length, router, selectionReady, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -660,20 +777,31 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 Ask about a law in plain language. Answers come from the legal document library and
                 cite the sections they are based on.
               </p>
-              {publicJurisdictions !== undefined && jurisdictions.length === 0 ? (
+              {unifiedJurisdictionsEnabled === false && publicJurisdictions !== undefined && jurisdictions.length === 0 ? (
                 <p role="status" className="mx-auto mt-5 max-w-md text-center text-sm text-muted-foreground">
                   No jurisdictions are currently available. Please try again later.
                 </p>
               ) : null}
               {!sessionData && !chatId ? (
-                <PublicJurisdictionSelector
-                  id="new-chat-jurisdiction"
-                  label="Research jurisdiction"
-                  jurisdictions={publicJurisdictions}
-                  value={selectedCountry}
-                  onChange={setSelectedCountry}
-                  className="mx-auto mt-6 max-w-xs text-center"
-                />
+                unifiedJurisdictionsEnabled === true ? (
+                  <div className="mx-auto mt-6 max-w-md text-left">
+                    <ResearchJurisdictionPicker
+                      value={selectedResearchJurisdiction}
+                      onChange={setSelectedResearchJurisdiction}
+                    />
+                  </div>
+                ) : unifiedJurisdictionsEnabled === false ? (
+                  <PublicJurisdictionSelector
+                    id="new-chat-jurisdiction"
+                    label="Research jurisdiction"
+                    jurisdictions={publicJurisdictions}
+                    value={selectedCountry}
+                    onChange={setSelectedCountry}
+                    className="mx-auto mt-6 max-w-xs text-center"
+                  />
+                ) : (
+                  <p role="status" className="mx-auto mt-6 max-w-md text-center text-sm text-muted-foreground">Loading jurisdiction access…</p>
+                )
               ) : null}
               <div className="mt-8">
                 <ChatInput
@@ -682,7 +810,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                   onSearch={() => void handleSearch(query)}
                   onKeyDown={handleKeyDown}
                   isLoading={
-                    isLoading || publicJurisdictions === undefined || !selectedCountry
+                    isLoading || !selectionReady
                   }
                   rows={3}
                   placeholder="e.g. What are my rights as a tenant?"
@@ -747,8 +875,26 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                       <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:300ms]" />
                     </div>
                   ) : (
-                    <div className="markdown-content min-w-0 text-sm leading-7">
-                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    <div className="min-w-0 text-sm leading-7">
+                      <div className="markdown-content"><ReactMarkdown>{message.content}</ReactMarkdown></div>
+                      {message.citations?.length ? (
+                        <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">
+                          <h2 className="font-semibold text-foreground">Sources</h2>
+                          <ol className="mt-1 list-decimal space-y-1 pl-5">
+                            {message.citations.map((citation, citationIndex) => (
+                              <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`}>
+                                <span className="font-medium text-foreground">{citation.label}</span>{" — "}
+                                {citation.jurisdictionName} ({citation.jurisdictionKind === "organizational" ? "organization" : "geographic jurisdiction"}; {citation.relation === "selected" ? "selected" : citation.relation === "geographic_ancestor" ? "geographic ancestor" : "organization geography"})
+                              </li>
+                            ))}
+                          </ol>
+                        </section>
+                      ) : null}
+                      {message.source === "local" && message.partialCoverage?.length ? (
+                        <p role="status" className="mt-3 border-l-2 border-amber-700 pl-3 text-xs leading-5 text-muted-foreground">
+                          Partial coverage: this answer could not include {message.partialCoverage.map((item) => item.name).join(", ")}.
+                        </p>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -776,12 +922,22 @@ export function ChatWorkspace({ chatId, initialQuery, initialCountry }: ChatWork
                 {deleteError}
               </p>
             )}
+            {selectionUnavailable && (
+              <p role="alert" className="mb-2 text-sm text-destructive">
+                That jurisdiction is not available for research.
+              </p>
+            )}
+            {storedStableRollback && (
+              <p role="status" className="mb-2 text-sm text-muted-foreground">
+                Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.
+              </p>
+            )}
             <ChatInput
               query={query}
               onQueryChange={setQuery}
               onSearch={() => void handleSearch(query)}
               onKeyDown={handleKeyDown}
-              isLoading={isLoading}
+              isLoading={isLoading || !selectionReady}
               rows={4}
               placeholder={
                 displayMessages.length === 0

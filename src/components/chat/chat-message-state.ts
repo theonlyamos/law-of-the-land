@@ -1,3 +1,5 @@
+import type { ChatCitation, PartialCoverage } from "@/lib/countries";
+
 export type MessageRole = "user" | "assistant";
 
 export interface PersistedChatMessage {
@@ -7,6 +9,7 @@ export interface PersistedChatMessage {
   content: string;
   createdAt: number;
   creationTime: number;
+  citations?: ChatCitation[];
 }
 
 export interface LocalChatMessage {
@@ -17,6 +20,8 @@ export interface LocalChatMessage {
   createdAt: number;
   sequence: number;
   state: "pending" | "error";
+  citations?: ChatCitation[];
+  partialCoverage?: PartialCoverage[];
 }
 
 export type DisplayChatMessage =

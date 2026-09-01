@@ -9,6 +9,9 @@ import type { Id } from "../_generated/dataModel";
 import schema from "../schema";
 import { authorizeFixtureRequest } from "./e2eFixtures";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
+import { issueVerifiedPlaceClaim } from "../lib/placeClaim";
+import { createTelemetryServiceProofForSecret } from "../lib/telemetryProof";
+import { readFixtureControl } from "../http";
 
 const modules = Object.fromEntries(
   Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [
@@ -31,12 +34,14 @@ const revokeQuotaOverride = makeFunctionReference<"mutation">("admin/billing:rev
 const createIncident = makeFunctionReference<"mutation">("admin/operations:createIncident");
 const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addIncidentNote");
 const createJurisdiction = makeFunctionReference<"mutation">("admin/resources:createJurisdiction");
+const updateJurisdiction = makeFunctionReference<"mutation">("admin/resources:updateJurisdiction");
 const publishVersion = makeFunctionReference<"mutation">("admin/publication:publishVersion");
 const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
 const original = { ...process.env };
+const fixtureCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 
 afterEach(() => {
-  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT"]) {
+  for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED", "PLACE_CLAIM_SECRET", "TELEMETRY_INGEST_SECRET"]) {
     if (original[key] === undefined) delete process.env[key];
     else process.env[key] = original[key];
   }
@@ -48,6 +53,29 @@ function backend() {
   return t;
 }
 
+async function drainCleanup(t: ReturnType<typeof backend>, tag: string) {
+  let deleted = 0;
+  for (let pass = 1; pass <= 64; pass += 1) {
+    const result = await t.mutation(cleanup, { tag }) as {
+      deleted: number;
+      cleanupConflict: boolean;
+      cleanupPending: boolean;
+    };
+    if (result.cleanupConflict) {
+      const snapshot = await t.run(async (ctx) => ({
+        pass,
+        run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+        ownership: (await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(501)).length,
+        flags: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(2),
+      }));
+      throw new Error(`unexpected cleanup conflict ${JSON.stringify(snapshot)}`);
+    }
+    deleted += result.deleted;
+    if (!result.cleanupPending) return { deleted, passes: pass };
+  }
+  throw new Error("cleanup did not complete within 64 passes");
+}
+
 function enableFixtureMode() {
   process.env.ADMIN_E2E_FIXTURE_MODE = "true";
   process.env.ADMIN_E2E_TARGET_ENV = "test";
@@ -56,14 +84,56 @@ function enableFixtureMode() {
   process.env.ADMIN_E2E_ACCOUNT_PASSWORD = "local-e2e-password-123";
   process.env.ADMIN_PANEL_ENABLED = "true";
   process.env.ADMIN_ENVIRONMENT = "test";
+  process.env.ADMIN_E2E_APPROVED_COMMIT_SHA = fixtureCommitSha;
+  process.env.ADMIN_E2E_DEPLOYED_COMMIT_SHA = fixtureCommitSha;
+  process.env.BILLING_ENABLED = "false";
 }
 
 describe("isolated admin E2E fixture control plane", () => {
+  it("provides dormant fixture-run ownership with exact tag and environment indexes", async () => {
+    const t = backend();
+    const now = Date.now();
+    const featureFlagId = await t.run((ctx) => ctx.db.insert("featureFlags", {
+      key: "unified_jurisdictions",
+      environment: "test",
+      enabled: true,
+      updatedAt: now,
+      updatedBy: "fixture:e2e_runownership1",
+    }));
+    const runId = await t.run((ctx) => ctx.db.insert("e2eFixtureRuns", {
+      tag: "e2e_runownership1",
+      environment: "test",
+      state: "bootstrapping",
+      priorFlag: { kind: "absent" },
+      fixtureFlagWrite: {
+        rowId: featureFlagId,
+        enabled: true,
+        updatedAt: now,
+        updatedBy: "fixture:e2e_runownership1",
+      },
+      approvedCommitSha: "74a989459da6b197013222f0bb5c118eed994d64",
+      deployedCommitSha: "74a989459da6b197013222f0bb5c118eed994d64",
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    await expect(t.run(async (ctx) => ({
+      byTag: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_runownership1")).unique(),
+      byEnvironment: await ctx.db.query("e2eFixtureRuns").withIndex("by_environment", (q) => q.eq("environment", "test")).unique(),
+    }))).resolves.toMatchObject({
+      byTag: { _id: runId, state: "bootstrapping" },
+      byEnvironment: { _id: runId, environment: "test" },
+    });
+  });
+
   it.each([
     [{}, "E2E_FIXTURES_DISABLED"],
     [{ ADMIN_E2E_FIXTURE_MODE: "false", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e" }, "E2E_PROVIDER_ISOLATION_MISCONFIGURED"],
     [{ ADMIN_E2E_FIXTURE_MODE: "true", ADMIN_E2E_TARGET_ENV: "production", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e" }, "E2E_PROVIDER_ISOLATION_MISCONFIGURED"],
     [{ ADMIN_E2E_FIXTURE_MODE: "true", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "anything-else" }, "E2E_PROVIDER_ISOLATION_MISCONFIGURED"],
+    [{ ADMIN_E2E_FIXTURE_MODE: "true", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e", ADMIN_E2E_PROVIDER_STUB_MODE: "true", ADMIN_E2E_ACCOUNT_PASSWORD: "fixture-password-123", ADMIN_E2E_APPROVED_COMMIT_SHA: fixtureCommitSha, ADMIN_E2E_DEPLOYED_COMMIT_SHA: "f".repeat(40), ADMIN_ENVIRONMENT: "test", BILLING_ENABLED: "false" }, "E2E_FIXTURE_COMMIT_MISMATCH"],
+    [{ ADMIN_E2E_FIXTURE_MODE: "true", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e", ADMIN_E2E_PROVIDER_STUB_MODE: "true", ADMIN_E2E_ACCOUNT_PASSWORD: "fixture-password-123", ADMIN_E2E_APPROVED_COMMIT_SHA: fixtureCommitSha, ADMIN_E2E_DEPLOYED_COMMIT_SHA: fixtureCommitSha, ADMIN_ENVIRONMENT: "preview", BILLING_ENABLED: "false" }, "E2E_FIXTURE_ENVIRONMENT_MISMATCH"],
+    [{ ADMIN_E2E_FIXTURE_MODE: "true", ADMIN_E2E_TARGET_ENV: "test", ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e", ADMIN_E2E_PROVIDER_STUB_MODE: "true", ADMIN_E2E_ACCOUNT_PASSWORD: "fixture-password-123", ADMIN_E2E_APPROVED_COMMIT_SHA: fixtureCommitSha, ADMIN_E2E_DEPLOYED_COMMIT_SHA: fixtureCommitSha, ADMIN_ENVIRONMENT: "test", BILLING_ENABLED: "true" }, "E2E_FIXTURE_BILLING_MUST_BE_DISABLED"],
   ])("refuses bootstrap outside an explicitly marked isolated target: %o", async (environment, error) => {
     Object.assign(process.env, environment);
     const t = backend();
@@ -76,6 +146,8 @@ describe("isolated admin E2E fixture control plane", () => {
     await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
     const result = await t.action(bootstrap, { tag: "e2e_contractfixture1" });
     expect(result.providerTransport).toBe("stub");
+    expect(result.deployedCommitSha).toBe(fixtureCommitSha);
+    expect(result.billingDisabled).toBe(true);
 
     expect(Object.keys(result.sessions).sort()).toEqual([
       "auditor", "billing_manager", "content_manager", "content_reviewer", "super_admin", "support_agent",
@@ -85,13 +157,325 @@ describe("isolated admin E2E fixture control plane", () => {
       noTwoFactor: { userId: expect.any(String), sessionToken: expect.any(String) },
       unassured: { userId: expect.any(String), sessionToken: expect.any(String) },
     });
+    expect(result.jurisdictionUsers).toMatchObject({
+      member: { userId: expect.any(String), sessionToken: expect.any(String) },
+      formerMember: { userId: expect.any(String), sessionToken: expect.any(String) },
+    });
     expect(result.records).toMatchObject({
       chatId: expect.any(String), resourceId: expect.any(String), stagingBucketId: expect.stringMatching(/^\d+$/),
       productionBucketId: expect.stringMatching(/^\d+$/), callbackToken: expect.stringMatching(/^gx_[a-f0-9]{64}$/),
+      jurisdictionCountryId: expect.any(String), jurisdictionTownId: expect.any(String),
+      publicOrganizationJurisdictionId: expect.any(String), jurisdictionMemberOnlyId: expect.any(String),
+      jurisdictionMemberId: expect.any(String), jurisdictionFormerMemberId: expect.any(String),
     });
     expect(JSON.stringify(result)).not.toContain("ADMIN_E2E");
     const jobs = await t.run((ctx) => ctx.db.query("integrationJobs").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", "e2e_contractfixture1")).take(10));
     expect(jobs).toHaveLength(1);
+    await expect(t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_contractfixture1")).unique(),
+      flags: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(2),
+    }))).resolves.toMatchObject({
+      run: {
+        state: "ready",
+        priorFlag: { kind: "absent" },
+        fixtureFlagWrite: { enabled: true, updatedBy: "fixture:e2e_contractfixture1" },
+        approvedCommitSha: fixtureCommitSha,
+        deployedCommitSha: fixtureCommitSha,
+      },
+      flags: [{ enabled: true, updatedBy: "fixture:e2e_contractfixture1" }],
+    });
+  });
+
+  it("atomically refuses a second run in the same environment without changing the owned flag", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    await t.action(bootstrap, { tag: "e2e_atomicfixture1" });
+    const before = await t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique());
+    await expect(t.action(bootstrap, { tag: "e2e_atomicfixture2" })).rejects.toThrow(/E2E_FIXTURE_RUN_ACTIVE/);
+    const after = await t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique());
+    expect(after).toEqual(before);
+    await expect(t.run((ctx) => ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_atomicfixture2")).take(2))).resolves.toEqual([]);
+  });
+
+  it("refuses pre-existing Ghana state regardless of lifecycle without committing fixture ownership", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() });
+      await ctx.db.insert("jurisdictions", {
+        code: "GH", name: "Shared Ghana", slug: "shared-ghana", status: "archived", isDefault: false,
+        providerSyncState: "synced", createdBy: "operator", updatedBy: "operator", createdAt: 1, updatedAt: 1,
+      });
+    });
+    await expect(t.action(bootstrap, { tag: "e2e_sharedghana1" })).rejects.toThrow(/E2E_FIXTURE_SHARED_TARGET/);
+    await expect(t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_sharedghana1")).take(2),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(2),
+    }))).resolves.toEqual({ run: [], flag: [] });
+  });
+
+  it("deactivates only the tag-owned member and updates only the owned flag write", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_controlfixture1" });
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "deactivate_jurisdiction_member",
+      membershipId: fixture.records.jurisdictionMemberId,
+    })).resolves.toEqual({ membershipId: fixture.records.jurisdictionMemberId, active: false });
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "set_unified_jurisdictions_flag",
+      enabled: false,
+    })).resolves.toMatchObject({ enabled: false });
+    await expect(t.run(async (ctx) => ({
+      member: await ctx.db.get(fixture.records.jurisdictionMemberId),
+      former: await ctx.db.get(fixture.records.jurisdictionFormerMemberId),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+    }))).resolves.toMatchObject({
+      member: { status: "inactive" },
+      former: { status: "inactive" },
+      run: { fixtureFlagWrite: { enabled: false, updatedBy: `fixture:${fixture.tag}` } },
+    });
+  });
+
+  it("verifies only a current owned super-admin place claim without writing fixture state", async () => {
+    enableFixtureMode();
+    process.env.PLACE_CLAIM_SECRET = "test-place-claim-secret-that-is-at-least-32-bytes";
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_placeclaimfixture1" });
+    const place = {
+      googlePlaceId: "stub-accra",
+      name: "Accra",
+      formattedAddress: "Accra, Ghana",
+      latitude: 5.6037,
+      longitude: -0.187,
+      countryCode: "GH",
+      aliases: ["ghana", "greater accra region"],
+    };
+    const validClaim = await issueVerifiedPlaceClaim(fixture.sessions.super_admin.userId, place);
+    const before = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: validClaim,
+    })).resolves.toEqual({
+      ok: true,
+      place: {
+        googlePlaceId: "stub-accra",
+        name: "Accra",
+        formattedAddress: "Accra, Ghana",
+        latitude: 5.6037,
+        longitude: -0.187,
+        countryCode: "GH",
+        aliases: ["accra", "ghana", "greater accra region"],
+      },
+    });
+    const wrongActorClaim = await issueVerifiedPlaceClaim(fixture.sessions.content_manager.userId, place);
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: wrongActorClaim,
+    })).rejects.toThrow("PLACE_CLAIM_FORBIDDEN");
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_place_claim",
+      claim: `${validClaim.slice(0, -1)}${validClaim.endsWith("a") ? "b" : "a"}`,
+    })).rejects.toThrow("PLACE_CLAIM_INVALID");
+    const after = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+    expect(after).toEqual(before);
+  });
+
+  it("verifies only the deployed telemetry ingest secret without writing fixture state", async () => {
+    enableFixtureMode();
+    const telemetrySecret = "test-telemetry-ingest-secret-that-is-at-least-32-bytes";
+    process.env.TELEMETRY_INGEST_SECRET = telemetrySecret;
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_telemetrysecret1" });
+    const proof = await createTelemetryServiceProofForSecret(
+      telemetrySecret,
+      ["admin-e2e-telemetry-ingest-secret-v1", fixture.tag],
+    );
+    const before = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      adminFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", "test")).unique(),
+      unifiedFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof,
+    })).resolves.toEqual({ ok: true });
+    const wrongSecretProof = await createTelemetryServiceProofForSecret(
+      "wrong-telemetry-ingest-secret-that-is-at-least-32-bytes",
+      ["admin-e2e-telemetry-ingest-secret-v1", fixture.tag],
+    );
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof: wrongSecretProof,
+    })).rejects.toThrow("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    await expect(t.action(control, {
+      tag: fixture.tag,
+      operation: "verify_telemetry_ingest_secret",
+      proof: `${proof.slice(0, -1)}${proof.endsWith("a") ? "b" : "a"}`,
+    })).rejects.toThrow("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    const after = await t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).unique(),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(500),
+      adminFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", "test")).unique(),
+      unifiedFlag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }));
+    expect(after).toEqual(before);
+  });
+
+  it("accepts only the exact three-field telemetry verification body", async () => {
+    const exact = { tag: "e2e_telemetryhttp1", operation: "verify_telemetry_ingest_secret", proof: "p".repeat(43) };
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify(exact),
+    }))).resolves.toEqual(exact);
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify({ ...exact, enabled: true }),
+    }))).resolves.toBeNull();
+    await expect(readFixtureControl(new Request("https://fixture.invalid", {
+      method: "POST",
+      body: JSON.stringify({ tag: exact.tag, operation: exact.operation, claim: exact.proof }),
+    }))).resolves.toBeNull();
+  });
+
+  it("restores an exact prior flag and leaves a cleanup conflict on concurrent drift", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: 1 });
+      await ctx.db.insert("featureFlags", { key: "unified_jurisdictions", environment: "test", enabled: false, updatedAt: 2, updatedBy: "operator:prior" });
+    });
+    const first = await t.action(bootstrap, { tag: "e2e_restorefixture1" });
+    await expect(t.mutation(cleanup, { tag: first.tag })).resolves.toMatchObject({ cleanupConflict: false, cleanupPending: true });
+    await expect(t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique()))
+      .resolves.toMatchObject({ updatedBy: `fixture:${first.tag}` });
+    await drainCleanup(t, first.tag);
+    await expect(t.run((ctx) => ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique()))
+      .resolves.toMatchObject({ enabled: false, updatedAt: 2, updatedBy: "operator:prior" });
+
+    const second = await t.action(bootstrap, { tag: "e2e_restorefixture2" });
+    await t.run(async (ctx) => {
+      const flag = await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique();
+      if (!flag) throw new Error("fixture flag missing");
+      await ctx.db.patch(flag._id, { updatedAt: flag.updatedAt + 1, updatedBy: "operator:drift" });
+    });
+    await expect(t.mutation(cleanup, { tag: second.tag })).resolves.toMatchObject({ cleanupConflict: true, deleted: 0 });
+    await expect(t.run((ctx) => ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", second.tag)).unique()))
+      .resolves.toMatchObject({ state: "cleanup_conflict" });
+    await expect(t.action(bootstrap, { tag: "e2e_restorefixture3" })).rejects.toThrow(/E2E_FIXTURE_RUN_ACTIVE/);
+  });
+
+  it("persists a cleanup conflict until a bounded residual pass proves the fixture is absent", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_residualfixture1";
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    await t.action(bootstrap, { tag });
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 501; index += 1) {
+        await ctx.db.insert("e2eProviderStubOutcomes", {
+          tag,
+          targetId: `residual-${index}`,
+          operation: "publish",
+          outcome: "succeeded",
+          armedAt: index,
+        });
+      }
+    });
+
+    const firstCleanup = await t.mutation(cleanup, { tag });
+    expect(firstCleanup).toMatchObject({ cleanupConflict: false, cleanupPending: true });
+    expect(firstCleanup.deleted).toBeLessThanOrEqual(20);
+    await expect(t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(1),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).unique(),
+    }))).resolves.toMatchObject({
+      run: { state: "cleaning" },
+      outcomes: [expect.objectContaining({ tag })],
+      ownership: [expect.objectContaining({ tag })],
+      flag: { updatedBy: `fixture:${tag}` },
+    });
+
+    const remainder = await drainCleanup(t, tag);
+    expect(remainder.passes).toBeGreaterThan(1);
+    await expect(t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", tag)).take(1),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(1),
+    }))).resolves.toEqual({ run: [], ownership: [], flag: [] });
+  });
+
+  it("bounds Better Auth dependency deletion and keeps the user discoverable across passes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_authcleanup1";
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag });
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 17; index += 1) {
+        await ctx.db.insert("geographicJurisdictionAliases", {
+          jurisdictionId: fixture.records.jurisdictionCountryId,
+          normalizedAlias: `cleanup alias ${index}`,
+          source: `fixture:${tag}`,
+          createdAt: Date.now(),
+        });
+      }
+      for (let index = 0; index < 25; index += 1) {
+        const now = Date.now();
+        await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: {
+          token: `extra-${index}-${crypto.randomUUID()}`,
+          userId: fixture.variants.normal.userId,
+          expiresAt: now + 60_000,
+          createdAt: now,
+          updatedAt: now,
+        } } });
+      }
+    });
+    const sessionCount = () => t.run(async (ctx) => (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: "session",
+      where: [{ field: "userId", operator: "eq", value: fixture.variants.normal.userId }],
+      select: ["id"],
+      paginationOpts: { numItems: 100, cursor: null },
+    }) as { page: Array<{ _id: string }> }).page.length);
+    let observedBoundedDependencyPass = false;
+    for (let pass = 0; pass < 64; pass += 1) {
+      const before = await sessionCount();
+      const result = await t.mutation(cleanup, { tag });
+      const after = await sessionCount();
+      expect(result.deleted).toBeLessThanOrEqual(20);
+      if (after < before) {
+        expect(before - after).toBeLessThanOrEqual(4);
+        if (!observedBoundedDependencyPass) expect(after).toBeGreaterThan(0);
+        observedBoundedDependencyPass = true;
+      }
+      if (!result.cleanupPending) break;
+    }
+    expect(observedBoundedDependencyPass).toBe(true);
+    await expect(t.run((ctx) => ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(1))).resolves.toEqual([]);
   });
 
   it("prepares a distinct tagged success fixture for every public privileged mutation", async () => {
@@ -117,13 +501,53 @@ describe("isolated admin E2E fixture control plane", () => {
         });
       }
     }
-    expect((await t.mutation(cleanup, { tag: "e2e_matrixfixture1" })).deleted).toBeGreaterThan(0);
+    expect((await drainCleanup(t, "e2e_matrixfixture1")).deleted).toBeGreaterThan(0);
     expect((await t.mutation(cleanup, { tag: "e2e_matrixfixture1" })).deleted).toBe(0);
     await expect(t.run(async (ctx) => ({
       jurisdictions: (await ctx.db.query("jurisdictions").take(500)).filter((row) => row.createdBy === "fixture:e2e_matrixfixture1"),
       chats: (await ctx.db.query("chatSessions").take(500)).filter((row) => row.userId === "fixture:e2e_matrixfixture1"),
       jobs: (await ctx.db.query("integrationJobs").take(500)).filter((row) => row.targetId.includes("e2e_matrixfixture1")),
     }))).resolves.toEqual({ jurisdictions: [], chats: [], jobs: [] });
+  });
+
+  it("binds the feature-flag matrix operation to the owned preview environment", async () => {
+    enableFixtureMode();
+    process.env.ADMIN_E2E_TARGET_ENV = "preview";
+    process.env.ADMIN_ENVIRONMENT = "preview";
+    const t = backend();
+    const tag = "e2e_previewmatrix1";
+    const key = "matrix_preview_super_admin";
+    await t.run((ctx) => ctx.db.insert("featureFlags", {
+      key: "admin_panel",
+      environment: "preview",
+      enabled: true,
+      updatedAt: Date.now(),
+    }));
+    await t.action(bootstrap, { tag });
+
+    const prepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/featureFlags:setAdminPanel",
+      role: "super_admin",
+      key,
+    });
+
+    expect(prepared.args).toMatchObject({
+      environment: "preview",
+      enabled: true,
+      confirmation: "ADMIN_PANEL preview ENABLE",
+      idempotencyKey: key,
+    });
+    await expect(t.run((ctx) => ctx.db.query("adminStepUpProofs").take(10))).resolves.toEqual([
+      expect.objectContaining({
+        action: "admin_panel_set",
+        targetId: "admin_panel:preview",
+        idempotencyKey: key,
+      }),
+    ]);
+
+    await drainCleanup(t, tag);
   });
 
   it("prepares and executes unique two-letter jurisdiction codes for every allowed matrix cell", async () => {
@@ -166,7 +590,59 @@ describe("isolated admin E2E fixture control plane", () => {
       await expect(t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId }).mutation(createJurisdiction, prepared.args)).resolves.toEqual(expect.any(String));
     }
     expect(new Set(codes).size).toBe(codes.length);
-    await t.mutation(cleanup, { tag: "e2e_codefixture1" });
+    await drainCleanup(t, "e2e_codefixture1");
+  });
+
+  it("allocates a distinct cleanup-owned legacy jurisdiction when a matrix update retries", async () => {
+    enableFixtureMode();
+    const t = backend();
+    const tag = "e2e_updatefixture1";
+    const role = "super_admin" as const;
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag });
+
+    const firstPrepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/resources:updateJurisdiction",
+      role,
+      key: "matrix_update_super_admin_first",
+    });
+    const retryPrepared = await t.action(control, {
+      tag,
+      operation: "prepare_matrix_operation",
+      path: "admin/resources:updateJurisdiction",
+      role,
+      key: "matrix_update_super_admin_retry",
+    });
+    const preparedRows = await t.run(async (ctx) => ({
+      first: await ctx.db.get("jurisdictions", firstPrepared.args.id),
+      retry: await ctx.db.get("jurisdictions", retryPrepared.args.id),
+    }));
+    expect(preparedRows.first?.code).toMatch(/^[A-Z]{2}$/);
+    expect(preparedRows.retry?.code).toMatch(/^[A-Z]{2}$/);
+    expect(preparedRows.retry?.code).not.toBe(preparedRows.first?.code);
+    expect(preparedRows.first?.createdBy).toBe(`fixture:${tag}`);
+    expect(preparedRows.retry?.createdBy).toBe(`fixture:${tag}`);
+    const sessionId = await t.run(async (ctx) => {
+      const sessions = await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: "session",
+        where: [{ field: "userId", operator: "eq", value: fixture.sessions.super_admin.userId }],
+        select: ["id"],
+        paginationOpts: { numItems: 2, cursor: null },
+      }) as { page: Array<{ _id: string }> };
+      return sessions.page[0]?._id;
+    });
+    if (!sessionId) throw new Error("fixture super_admin session missing");
+
+    await expect(
+      t.withIdentity({ subject: fixture.sessions.super_admin.userId, sessionId }).mutation(updateJurisdiction, retryPrepared.args),
+    ).resolves.toMatchObject({ _id: retryPrepared.args.id, name: retryPrepared.args.name });
+    await drainCleanup(t, tag);
+    await expect(t.run(async (ctx) => ({
+      first: await ctx.db.get("jurisdictions", firstPrepared.args.id),
+      retry: await ctx.db.get("jurisdictions", retryPrepared.args.id),
+    }))).resolves.toEqual({ first: null, retry: null });
   });
 
   it("consumes exact outcomes armed before public publication scheduling without patching terminal jobs", async () => {
@@ -250,6 +726,180 @@ describe("isolated admin E2E fixture control plane", () => {
     });
   });
 
+  it("projects document state from the exact supplied fixture version after matrix resources crowd the index", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_statefixture1";
+    const fixture = await t.action(bootstrap, { tag });
+
+    for (let index = 0; index < 11; index += 1) {
+      await t.action(control, {
+        tag,
+        operation: "prepare_matrix_operation",
+        path: "admin/resources:updateResource",
+        role: "content_manager",
+        key: `matrix_state_${index}`,
+      });
+    }
+    await t.run((ctx) => ctx.db.patch(fixture.records.resourceId, { updatedAt: Date.now() + 60_000 }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: fixture.records.reviewVersionId,
+    })).resolves.toMatchObject({
+      activeVersionId: fixture.records.publishedVersionId,
+      versions: expect.arrayContaining([
+        expect.objectContaining({ id: fixture.records.publishedVersionId, versionNumber: 1, status: "published" }),
+        expect.objectContaining({ id: fixture.records.reviewVersionId, versionNumber: 2, status: "ready_for_review" }),
+      ]),
+    });
+  });
+
+  it("requires an exact fixture version before read-state projection", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_stateversionarg1";
+    await t.action(bootstrap, { tag });
+
+    await expect(t.action(control, { tag, operation: "read_state" }))
+      .rejects.toThrow("E2E_VERSION_ARGUMENT_REQUIRED");
+  });
+
+  it("rejects read-state projection for an unowned resource under the tagged jurisdiction without writes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_unownedresource1";
+    const fixture = await t.action(bootstrap, { tag });
+    const foreignVersionId = await t.run(async (ctx) => {
+      const fixtureVersion = await ctx.db.get("documentVersions", fixture.records.reviewVersionId);
+      if (!fixtureVersion) throw new Error("Fixture version missing");
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId: fixture.records.jurisdictionId,
+        type: "act",
+        title: "Unowned resource",
+        issuer: "External operator",
+        officialCitation: "unowned-resource",
+        officialCitationKey: "unowned-resource",
+        sourceUrl: "https://example.invalid/unowned-resource",
+        topics: [],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: "operator",
+        updatedBy: "operator",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      return await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: fixtureVersion.originalStorageId,
+        filename: "unowned-resource.pdf",
+        mimeType: "application/pdf",
+        byteSize: fixtureVersion.byteSize,
+        sha256: fixtureVersion.sha256,
+        sourceUrl: "https://example.invalid/unowned-resource.pdf",
+        effectiveDate: "2026-01-01",
+        status: "draft",
+        submittedBy: "operator",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    const before = await t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: foreignVersionId,
+    })).rejects.toThrow("E2E_FIXTURE_VERSION_MISMATCH");
+
+    await expect(t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }))).resolves.toEqual(before);
+  });
+
+  it("rejects read-state projection through a fixture-created jurisdiction with the wrong slug without writes", async () => {
+    enableFixtureMode();
+    const t = backend();
+    await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const tag = "e2e_wrongslugfixture1";
+    const fixture = await t.action(bootstrap, { tag });
+    const foreignVersionId = await t.run(async (ctx) => {
+      const fixtureVersion = await ctx.db.get("documentVersions", fixture.records.reviewVersionId);
+      if (!fixtureVersion) throw new Error("Fixture version missing");
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        code: "QZ",
+        name: "Wrong slug fixture jurisdiction",
+        slug: `${tag}-wrong`,
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        createdBy: `fixture:${tag}`,
+        updatedBy: `fixture:${tag}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId,
+        type: "act",
+        title: "Wrong slug resource",
+        issuer: "E2E fixture",
+        officialCitation: "wrong-slug-resource",
+        officialCitationKey: "wrong-slug-resource",
+        sourceUrl: "https://example.invalid/wrong-slug-resource",
+        topics: [],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: `fixture:${tag}`,
+        updatedBy: `fixture:${tag}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      return await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: fixtureVersion.originalStorageId,
+        filename: "wrong-slug-resource.pdf",
+        mimeType: "application/pdf",
+        byteSize: fixtureVersion.byteSize,
+        sha256: fixtureVersion.sha256,
+        sourceUrl: "https://example.invalid/wrong-slug-resource.pdf",
+        effectiveDate: "2026-01-01",
+        status: "draft",
+        submittedBy: fixture.sessions.content_manager.userId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    const before = await t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }));
+
+    await expect(t.action(control, {
+      tag,
+      operation: "read_state",
+      versionId: foreignVersionId,
+    })).rejects.toThrow("E2E_FIXTURE_VERSION_MISMATCH");
+
+    await expect(t.run(async (ctx) => ({
+      version: await ctx.db.get(foreignVersionId),
+      outcomes: await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(10),
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).unique(),
+    }))).resolves.toEqual(before);
+  });
+
   it("teardown removes only the exact fixture tag and is idempotent", async () => {
     enableFixtureMode();
     const t = backend();
@@ -267,14 +917,31 @@ describe("isolated admin E2E fixture control plane", () => {
     const foreignUser = await t.run((ctx) => ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: "Must survive", email: "foreign.e2e_cleanupfixture1@e2e.invalid", emailVerified: true, role: "user", banned: false, twoFactorEnabled: false, createdAt: Date.now(), updatedAt: Date.now() } } }));
     await t.run((ctx) => ctx.db.insert("chatSessions", { userId: "other", externalId: "e2e_cleanupfixture1-suffix", title: "Must survive", lastMessage: "safe", messageCount: 0, updatedAt: Date.now() }));
 
-    const first = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
-    const second = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
-    expect(first.deleted).toBeGreaterThan(0);
-    expect(second.deleted).toBe(0);
+    const drained = await drainCleanup(t, "e2e_cleanupfixture1");
+    const idempotent = await t.mutation(cleanup, { tag: "e2e_cleanupfixture1" });
+    expect(drained.deleted).toBeGreaterThan(0);
+    expect(drained.passes).toBeGreaterThan(1);
+    expect(idempotent.deleted).toBe(0);
+    expect(idempotent.cleanupPending).toBe(false);
     await expect(t.run((ctx) => ctx.db.query("systemIncidents").take(10))).resolves.toHaveLength(0);
     await expect(t.run((ctx) => ctx.db.query("adminOperations").take(10))).resolves.toHaveLength(0);
     await expect(t.run(async (ctx) => ({ jurisdiction: await ctx.db.get(owned.jurisdictionId), resource: await ctx.db.get(owned.resourceId), quota: await ctx.db.get(owned.quotaId) }))).resolves.toEqual({ jurisdiction: null, resource: null, quota: null });
     await expect(t.run((ctx) => ctx.runQuery(components.betterAuth.adapter.findOne, { model: "user", where: [{ field: "_id", operator: "eq", value: foreignUser._id }] }))).resolves.toMatchObject({ _id: foreignUser._id });
+    for (const userId of [
+      ...Object.values(fixture.sessions as Record<string, { userId: string }>).map((session) => session.userId),
+      ...Object.values(fixture.variants as Record<string, { userId: string }>).map((session) => session.userId),
+      ...Object.values(fixture.jurisdictionUsers as Record<string, { userId: string }>).map((session) => session.userId),
+    ]) {
+      await expect(t.run((ctx) => ctx.runQuery(components.betterAuth.adapter.findOne, {
+        model: "user",
+        where: [{ field: "_id", operator: "eq", value: userId }],
+      }))).resolves.toBeNull();
+    }
+    await expect(t.run(async (ctx) => ({
+      run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", fixture.tag)).take(1),
+      ownership: await ctx.db.query("e2eFixtureOwnership").withIndex("by_tag_and_kind", (q) => q.eq("tag", fixture.tag)).take(1),
+      flag: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(1),
+    }))).resolves.toEqual({ run: [], ownership: [], flag: [] });
     const survivor = await t.run((ctx) => ctx.db.query("chatSessions").withIndex("by_user_externalId", (q) => q.eq("userId", "other").eq("externalId", "e2e_cleanupfixture1-suffix")).unique());
     expect(survivor?.title).toBe("Must survive");
   });
@@ -434,10 +1101,11 @@ describe("isolated admin E2E fixture control plane", () => {
       { tag, kind: "better_auth_user" },
     ]);
 
-    const first = await t.mutation(cleanup, { tag });
-    const second = await t.mutation(cleanup, { tag });
-    expect(first.deleted).toBeGreaterThan(0);
-    expect(second.deleted).toBe(0);
+    const drained = await drainCleanup(t, tag);
+    const idempotent = await t.mutation(cleanup, { tag });
+    expect(drained.deleted).toBeGreaterThan(0);
+    expect(drained.passes).toBeGreaterThan(1);
+    expect(idempotent.deleted).toBe(0);
     expect.soft(await t.run(async (ctx) => ({
       ownedOverrides: await Promise.all(records.ownedOverrideIds.map((id) => ctx.db.get(id))),
       ownedOperations: await Promise.all(records.ownedOperationIds.map((id) => ctx.db.get(id))),

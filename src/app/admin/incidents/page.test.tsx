@@ -1,9 +1,9 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ authorizeAdminPage: vi.fn(), fetchAuthQuery: vi.fn(), redirect: vi.fn() }));
+const mocks = vi.hoisted(() => ({ authorizeAdminPage: vi.fn(), fetchAuthQuery: vi.fn(), redirect: vi.fn(), refresh: vi.fn() }));
 vi.mock("@/lib/admin/server", () => ({ authorizeAdminPage: mocks.authorizeAdminPage }));
 vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
-vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
+vi.mock("next/navigation", () => ({ redirect: mocks.redirect, useRouter: () => ({ refresh: mocks.refresh }) }));
 vi.mock("convex/react", () => ({ useMutation: () => vi.fn(), usePaginatedQuery: () => ({ results: [], status: "Exhausted", loadMore: vi.fn() }) }));
 import IncidentsPage from "./page";
 beforeEach(() => { mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor", roles: ["auditor"] } }); mocks.fetchAuthQuery.mockResolvedValue({ page: [{ id: "inc-1", title: "Callback backlog", severity: "high", status: "investigating", ownerId: "admin_masked", createdAt: 1, updatedAt: 2 }], isDone: true, continueCursor: "" }); mocks.redirect.mockImplementation(() => { throw new Error("NEXT_REDIRECT"); }); });

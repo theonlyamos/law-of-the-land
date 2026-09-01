@@ -1468,7 +1468,7 @@ export const queueUserDeletion = mutation({
   },
   returns: operationResultValidator,
   handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "user", "support");
+    const actor = await requireEnabledAdminPermission(ctx, "user", "ban");
     validateAuditReason(args.reason);
     validateIdempotencyKey(args.idempotencyKey);
     requireExactConfirmation(args.confirmation, `DELETE ${args.userId}`);

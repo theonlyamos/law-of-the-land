@@ -36,7 +36,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
    ```
 2. Install dependencies: `bun install`
 3. Create a Convex project: `bunx convex dev` (fills in `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL`)
-4. Copy `.env.example` to `.env.local` and fill in the remaining values (GroundX, Google AI, Better Auth secret, optional OAuth credentials)
+4. Copy `.env.example` to `.env.local` and fill in the remaining values (GroundX, Google AI, Google Places when geographic jurisdiction verification is used, Better Auth secret, optional OAuth credentials)
 5. Run the Convex dev server and the app together: `bun run dev:all` (or `bun run dev` if Convex is already running)
 
 The app will be available at `http://localhost:3000`. Never commit `.env.local` to version control.
@@ -46,7 +46,9 @@ The app will be available at `http://localhost:3000`. Never commit `.env.local` 
 The app deploys to Vercel from the `main` branch, with the build command
 `npx convex deploy --cmd 'bun run build'` so Convex functions and schema deploy
 before the frontend. See `.env.example` for which variables belong on Vercel
-versus the Convex dashboard.
+versus the Convex dashboard. When geographic jurisdiction verification is
+enabled, set the server-only `PLACES_API_KEY` in each applicable Vercel
+environment; do not use a `NEXT_PUBLIC_` name.
 
 ### Admin control plane operations
 

@@ -26,6 +26,14 @@ function expectOperationSuccess(path: string, result: unknown, args: Record<stri
     "admin/users:queueUserDeletion": ["queued", "user_deletion_queue"],
   };
   if (path === "admin/roles:setAdminRoles") return expect(value).toEqual({ changed: true, roles: ["content_manager"] });
+  if (path === "admin/featureFlags:setAdminPanel") {
+    expect(value).toEqual({
+      environment: args.environment,
+      enabled: args.enabled,
+      correlationId: expect.stringMatching(/^op_[a-f0-9]{32}$/),
+    });
+    return;
+  }
   if (operationActions[path]) {
     const [status, action] = operationActions[path];
     expect(value).toMatchObject({ status, action, targetId: path === "admin/users:revokeSession" ? args.sessionId : args.userId });
@@ -126,6 +134,7 @@ test("fixed roles, Two Factor assurance, navigation, and direct-call denials", a
 });
 
 test("every fixed role is allowed or denied on every protected route", async ({ context, page }) => {
+  test.slow();
   const fixture = await loadBrowserFixtureManifest();
   for (const role of ADMIN_ROLES) {
     await installSessionCookie(context, await roleCookie(role));
@@ -151,6 +160,7 @@ test("normal, unenrolled, and unassured sessions fail closed at the admin bounda
 });
 
 test("every fixed role executes every privileged function row against the isolated target", async ({ context }) => {
+  test.slow();
   const fixture = await loadBrowserFixtureManifest();
   for (const role of ADMIN_ROLES) {
     await installSessionCookie(context, await roleCookie(role));

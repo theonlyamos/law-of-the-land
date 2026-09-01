@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
+import { buildBrowserEnvironment } from "./web-server-environment.mjs";
 
 export const FIXTURE_TAG = "admin-e2e-v1";
 
@@ -34,7 +35,15 @@ export type BrowserFixtureManifest = {
   convexSiteUrl: string;
   sessions: Record<FixedAdminRole, string>;
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; cookie: string }>;
-  records: Record<string, string>;
+  jurisdictionUsers: Record<"member" | "formerMember", { userId: string; cookie: string }>;
+  records: {
+    chatId: string; resourceId: string; publishedVersionId: string; reviewVersionId: string;
+    separationVersionId: string; conversationGrantId: string; jurisdictionId: string; userId: string;
+    stagingBucketId: string; productionBucketId: string; callbackToken: string; callbackJobId: string;
+    usageUserId: string; jurisdictionCountryId: string; jurisdictionTownId: string;
+    publicOrganizationJurisdictionId: string; jurisdictionMemberOnlyId: string;
+    jurisdictionMemberId: string; jurisdictionFormerMemberId: string;
+  };
 };
 
 export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManifest> {
@@ -45,8 +54,13 @@ export async function loadBrowserFixtureManifest(): Promise<BrowserFixtureManife
 
 export async function controlBrowserFixtures(
   fixture: BrowserFixtureManifest,
-  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation",
-  input: string | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } } | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" } = "",
+  operation: "arm_provider_outcome" | "expire_conversation_grant" | "run_retention" | "read_state" | "prepare_matrix_operation" | "read_matrix_operation" | "deactivate_jurisdiction_member" | "set_unified_jurisdictions_flag" | "verify_place_claim",
+  input: string
+    | { path: string; role: FixedAdminRole; key: string; payload?: { args: Record<string, unknown>; result: unknown } }
+    | { versionId: string; publicationOperation: "publish" | "rollback" | "unpublish"; providerOutcome: "succeeded" | "failed" }
+    | { membershipId: string }
+    | { enabled: boolean }
+    | { claim: string } = "",
 ) {
   const secret = process.env.ADMIN_E2E_FIXTURE_SECRET;
   if (!secret) throw new Error("ADMIN_E2E_FIXTURE_SECRET is required for guarded fixture control.");
@@ -56,7 +70,7 @@ export async function controlBrowserFixtures(
     body: JSON.stringify({ tag: fixture.tag, operation, ...(typeof input === "string" ? (input ? { versionId: input } : {}) : input) }),
   });
   if (!response.ok) throw new Error(`Guarded fixture control failed (${response.status}).`);
-  return await response.json() as {
+  const result = await response.json() as {
     path?: string;
     role?: FixedAdminRole;
     args?: Record<string, unknown>;
@@ -66,6 +80,20 @@ export async function controlBrowserFixtures(
     armed?: boolean;
     outcome?: "succeeded" | "failed";
     operation?: "publish" | "rollback" | "unpublish";
+    membershipId?: string;
+    active?: boolean;
+    enabled?: boolean;
+    cleanupConflict?: boolean;
+    ok?: true;
+    place?: {
+      googlePlaceId: string;
+      name: string;
+      formattedAddress: string;
+      latitude: number;
+      longitude: number;
+      countryCode?: string;
+      aliases: string[];
+    };
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
     publicationJob: { id: string; status: string; processId: string | null; lastErrorKind: string | null } | null;
@@ -73,6 +101,10 @@ export async function controlBrowserFixtures(
     retention: { deletedTotal: number; lastSuccessfulAt: number | null };
     callbackJob: null | { status: string; payload: string; retentionRedactedAt: number | null };
   };
+  if (result.cleanupConflict === true) {
+    throw new Error("Guarded fixture control reported an ownership conflict; recovery cleanup remains required.");
+  }
+  return result;
 }
 
 export async function roleCookie(role: FixedAdminRole) {
@@ -116,6 +148,18 @@ type AcceptanceSlice = {
   evidence: readonly RegExp[];
 };
 
+export function buildAcceptanceSliceEnvironment(
+  parentEnvironment: Record<string, string | undefined> = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...buildBrowserEnvironment(parentEnvironment),
+    NODE_ENV: "test",
+    ADMIN_PANEL_ENABLED: "true",
+    ADMIN_ENVIRONMENT: "test",
+    BILLING_ENABLED: "true",
+  };
+}
+
 /**
  * Runs production Convex functions against convex-test's process-isolated
  * database. Every worker gets a fresh database and component; process exit is
@@ -144,27 +188,13 @@ export async function runAcceptanceSlice(
 
   const files = [...slice.convex, ...(slice.ui ?? [])];
   const vitest = path.resolve("node_modules/vitest/vitest.mjs");
-  const {
-    ADMIN_E2E_ROLE_SESSIONS_JSON: _roleSessions,
-    ADMIN_E2E_SESSION_MANIFEST: _sessionManifest,
-    ADMIN_E2E_FIXTURE_SECRET: _fixtureSecret,
-    ADMIN_E2E_BETTER_AUTH_SECRET: _authSecret,
-    ADMIN_E2E_ACCOUNT_PASSWORD: _accountPassword,
-    ...safeEnvironment
-  } = process.env;
   const result = spawnSync(
     process.execPath,
     [vitest, "run", "--reporter=verbose", ...files],
     {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: {
-        ...safeEnvironment,
-        ADMIN_PANEL_ENABLED: "true",
-        ADMIN_ENVIRONMENT: "test",
-        BILLING_ENABLED: "true",
-        ADMIN_E2E_FIXTURE_TAG: FIXTURE_TAG,
-      },
+      env: buildAcceptanceSliceEnvironment(),
       timeout: 110_000,
     },
   );

@@ -2,95 +2,397 @@
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery_experimental as useQueryState } from "convex/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { type FormEvent, useState } from "react";
+import { lazy, Suspense, type FormEvent, useEffect, useState } from "react";
+import type { GeographicPlaceSelection } from "./geographic-place-picker";
 
 const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[oklch(98%_0.01_82)] px-3 text-base text-[oklch(23%_0.045_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700";
 const labelClass = "grid gap-2 text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]";
 const buttonClass = "inline-flex min-h-11 items-center justify-center bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
 const secondaryButtonClass = "inline-flex min-h-11 items-center justify-center border border-[oklch(48%_0.045_252)] px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
 
-type JurisdictionInput = {
-  id: string;
-  code: string;
-  name: string;
-  slug: string;
-  status: "draft" | "enabled" | "archived";
-  isDefault: boolean;
-  stagingBucketId?: string;
-  productionBucketId?: string;
+const GeographicPlacePicker = lazy(() => import("./geographic-place-picker").then((module) => ({ default: module.GeographicPlacePicker })));
+
+type GeographicLevel = "country" | "state" | "province" | "region" | "district" | "city" | "town" | "territory" | "other_locality";
+type OrganizationClass = "intergovernmental" | "government" | "company" | "university" | "nonprofit" | "professional_association" | "other";
+type OrganizationOption = { id: string; name: string; slug: string; class: OrganizationClass };
+type GeographicOption = { id: string; name: string; level: GeographicLevel; parent: null | { id: string; name: string; level: GeographicLevel } };
+type OptionPage = { currentCursor?: string | null; nextCursor: string; isDone: boolean };
+
+export type JurisdictionEditorProps = {
+  organizations?: readonly OrganizationOption[];
+  organizationPage?: OptionPage;
+  geographicOptions?: readonly GeographicOption[];
+  geographicPage?: OptionPage;
 };
 
-function text(data: FormData, key: string) { return String(data.get(key) ?? ""); }
-function optionalText(data: FormData, key: string) { const value = text(data, key).trim(); return value || undefined; }
+const LEVELS: readonly GeographicLevel[] = ["country", "state", "province", "region", "district", "city", "town", "territory", "other_locality"];
+const ORGANIZATION_CLASSES: readonly OrganizationClass[] = ["intergovernmental", "government", "company", "university", "nonprofit", "professional_association", "other"];
+const PARENTS: Record<GeographicLevel, readonly GeographicLevel[]> = {
+  country: [],
+  state: ["country"], province: ["country"], region: ["country"], territory: ["country"],
+  district: ["country", "state", "province", "region", "territory"],
+  city: ["country", "state", "province", "region", "territory", "district"],
+  town: ["country", "state", "province", "region", "territory", "district"],
+  other_locality: ["country", "state", "province", "region", "territory", "district"],
+};
 
-export function JurisdictionEditor({ jurisdiction }: { jurisdiction?: JurisdictionInput }) {
+function optionalBucket(value: string) { const result = value.trim(); return result || undefined; }
+function safeReason(value: string) {
+  const result = value.trim();
+  return result.length >= 3 && result.length <= 500 &&
+    !/(?:^|[^A-Za-z0-9+.-])[a-z][a-z0-9+.-]*:(?:\/\/)?\S+/i.test(result) &&
+    !/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(result) &&
+    !/\b(?:token|auth|password|passwd|cookie|credentials?|signature|authorization|bearer|secret|private\s+key|api\s+key|(?:access|refresh|id|session)\s+token)\b/i.test(result.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " "));
+}
+function validWebsite(value: string) {
+  if (!value) return true;
+  if (value.length > 500) return false;
+  try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password; } catch { return false; }
+}
+
+function mergeById<T extends { id: string }>(current: readonly T[], next: readonly T[]) {
+  return [...new Map([...current, ...next].map((option) => [option.id, option])).values()];
+}
+
+function retryQuery<T>(request: T, setRequest: (value: T | null) => void) {
+  setRequest(null);
+  window.setTimeout(() => setRequest(request), 0);
+}
+
+function OrganizationSelect({ initial, page, preferredId = "" }: { initial: readonly OrganizationOption[]; page?: OptionPage; preferredId?: string }) {
+  const [options, setOptions] = useState(() => [...initial]);
+  const [selected, setSelected] = useState(preferredId);
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [cursor, setCursor] = useState(page?.nextCursor ?? "");
+  const [done, setDone] = useState(page?.isDone ?? true);
+  const [request, setRequest] = useState<null | { query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
+  const queryState = useQueryState({ query: api.admin.organizations.listActiveOrganizationOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
+  useEffect(() => { if (preferredId) setSelected(preferredId); }, [preferredId]);
+  useEffect(() => {
+    if (!result || !request) return;
+    setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => option.id === selected), result.page));
+    setCursor(result.continueCursor); setDone(result.isDone); setRequest(null);
+  }, [request, result, selected]);
+  function search() {
+    const value = query.trim();
+    if (value && value.length < 2) return;
+    setActiveQuery(value); setRequest({ ...(value ? { query: value } : {}), paginationOpts: { numItems: 20, cursor: null } });
+  }
+  return <div className="grid min-w-0 gap-2 sm:col-span-2">
+    <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find organization<input aria-label="Find organization" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search organizations</button></div>
+    <label className={labelClass}>Organization<select aria-label="Organization" name="organizationId" value={selected} onChange={(event) => setSelected(event.target.value)} required className={fieldClass}><option value="">Select an active organization</option>{options.map((organization) => <option key={organization.id} value={organization.id}>{organization.name} ({organization.class.replaceAll("_", " ")})</option>)}</select></label>
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Organizations could not be loaded. Your current selection is preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry organizations</button></div> : null}
+    {!done ? <button type="button" onClick={() => setRequest({ ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor } })} className={secondaryButtonClass}>Load more organizations</button> : null}
+  </div>;
+}
+
+function GeographicParentField({ level, selection, value, onChange, initial }: { level: GeographicLevel; selection: GeographicPlaceSelection | null; value: string; onChange(value: string): void; initial: readonly GeographicOption[] }) {
+  const aliases = selection ? [...new Set(selection.place.addressComponents.flatMap((component) => [component.longText.trim(), component.shortText.trim()]).filter(Boolean))].slice(0, 20) : [];
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(true);
+  const suggestionState = useQueryState({ query: api.admin.jurisdictions.suggestGeographicParentsByAliases, args: suggestionsEnabled && selection && aliases.length > 0 ? { childLevel: level, aliases } : "skip" });
+  const suggested = suggestionState.status === "success" ? suggestionState.data : undefined;
+  const [options, setOptions] = useState(() => initial.filter((option) => PARENTS[level].includes(option.level)));
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [cursor, setCursor] = useState("");
+  const [done, setDone] = useState(false);
+  const [lookupStarted, setLookupStarted] = useState(false);
+  const [request, setRequest] = useState<null | { purpose: "parent"; childLevel: GeographicLevel; query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
+  const queryState = useQueryState({ query: api.admin.jurisdictions.listGeographicJurisdictionOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
+  useEffect(() => { if (suggested) setOptions((current) => mergeById(current, suggested)); }, [suggested]);
+  useEffect(() => {
+    if (!result || !request) return;
+    setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => option.id === value), mergeById(suggested ?? [], result.page)));
+    setCursor(result.continueCursor); setDone(result.isDone); setRequest(null);
+  }, [request, result, suggested]);
+  function search() { const normalized = query.trim(); if (normalized && normalized.length < 2) return; setLookupStarted(true); setActiveQuery(normalized); setRequest({ purpose: "parent", childLevel: level, ...(normalized ? { query: normalized } : {}), paginationOpts: { numItems: 20, cursor: null } }); }
+  return <div className="grid min-w-0 gap-2 sm:col-span-2">
+    <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find governed parent<input aria-label="Find governed parent" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search parents</button></div>
+    <label className={labelClass}>Governed parent<select aria-label="Governed parent" value={value} onChange={(event) => onChange(event.target.value)} disabled={options.length === 0} className={fieldClass}><option value="">Select an eligible parent</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name} ({option.level})</option>)}</select></label>
+    {suggestionState.status === "error" ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Parent suggestions could not be loaded. Choose from the preserved governed options or retry.</p><button type="button" onClick={() => { setSuggestionsEnabled(false); window.setTimeout(() => setSuggestionsEnabled(true), 0); }} className={secondaryButtonClass}>Retry parent suggestions</button></div> : null}
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Governed parents could not be loaded. Your current selection is preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry parents</button></div> : null}
+    {!done ? <button type="button" onClick={() => { setLookupStarted(true); setRequest({ purpose: "parent", childLevel: level, ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor: cursor || null } }); }} className={secondaryButtonClass}>Load more parents</button> : null}
+    {options.length === 0 && done && lookupStarted ? <p className="break-words text-sm">No governed parent matched the completed lookup. <Link href="/admin/jurisdictions?create=parent" className="font-semibold underline underline-offset-4">Create the parent jurisdiction first</Link>.</p> : <p role="status" aria-live="polite" className="text-sm">{options.length === 0 ? "Search or load more before concluding that no governed parent exists." : "Choose a parent explicitly; address matches are suggestions only."}</p>}
+  </div>;
+}
+
+function LinkedGeographyField({ initial, page, selected, onChange }: { initial: readonly GeographicOption[]; page?: OptionPage; selected: readonly string[]; onChange(ids: string[]): void }) {
+  const [options, setOptions] = useState(() => [...initial]);
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [cursor, setCursor] = useState(page?.nextCursor ?? "");
+  const [done, setDone] = useState(page?.isDone ?? true);
+  const [request, setRequest] = useState<null | { purpose: "linked_scope"; query?: string; paginationOpts: { numItems: number; cursor: string | null } }>(null);
+  const queryState = useQueryState({ query: api.admin.jurisdictions.listGeographicJurisdictionOptions, args: request ?? "skip" });
+  const result = queryState.status === "success" ? queryState.data : undefined;
+  useEffect(() => {
+    if (!result || !request) return;
+    setOptions((current) => request.paginationOpts.cursor ? mergeById(current, result.page) : mergeById(current.filter((option) => selected.includes(option.id)), result.page));
+    setCursor(result.continueCursor); setDone(result.isDone); setRequest(null);
+  }, [request, result, selected]);
+  function search() { const normalized = query.trim(); if (normalized && normalized.length < 2) return; setActiveQuery(normalized); setRequest({ purpose: "linked_scope", ...(normalized ? { query: normalized } : {}), paginationOpts: { numItems: 20, cursor: null } }); }
+  return <fieldset className="grid min-w-0 gap-2 sm:col-span-2 lg:col-span-4"><legend className="text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]">Linked geographies (choose 1-8)</legend>
+    <div className="flex flex-wrap items-end gap-2"><label className={`${labelClass} min-w-[12rem] flex-1`}>Find linked geography<input aria-label="Find linked geography" value={query} maxLength={100} onChange={(event) => setQuery(event.target.value)} className={fieldClass} /></label><button type="button" disabled={query.trim().length === 1} onClick={search} className={secondaryButtonClass}>Search geographies</button></div>
+    <div className="flex flex-wrap gap-x-5 gap-y-2">{options.map((option) => <label key={option.id} className="flex min-h-11 items-center gap-2 break-words"><input type="checkbox" aria-label={option.name} checked={selected.includes(option.id)} disabled={!selected.includes(option.id) && selected.length >= 8} onChange={(event) => onChange(event.target.checked ? [...new Set([...selected, option.id])] : selected.filter((id) => id !== option.id))} />{option.name}</label>)}</div>
+    {queryState.status === "error" && request ? <div className="flex flex-wrap items-center gap-2"><p role="alert" className="text-sm text-red-800">Linked geographies could not be loaded. Current selections are preserved.</p><button type="button" onClick={() => retryQuery(request, setRequest)} className={secondaryButtonClass}>Retry geographies</button></div> : null}
+    {!done ? <button type="button" onClick={() => setRequest({ purpose: "linked_scope", ...(activeQuery ? { query: activeQuery } : {}), paginationOpts: { numItems: 20, cursor } })} className={secondaryButtonClass}>Load more geographies</button> : null}
+  </fieldset>;
+}
+
+export function JurisdictionEditor({ organizations = [], organizationPage, geographicOptions = [], geographicPage }: JurisdictionEditorProps) {
   const router = useRouter();
-  const create = useMutation(api.admin.resources.createJurisdiction);
-  const update = useMutation(api.admin.resources.updateJurisdiction);
-  const enable = useMutation(api.admin.resources.enableJurisdiction);
-  const archive = useMutation(api.admin.resources.archiveJurisdiction);
+  const createGeographic = useMutation(api.admin.jurisdictions.createGeographicJurisdiction);
+  const createOrganizational = useMutation(api.admin.jurisdictions.createOrganizationalJurisdiction);
+  const createOrganization = useMutation(api.admin.organizations.createOrganization);
+  const [kind, setKind] = useState<"geographic" | "organizational" | null>(null);
+  const [selection, setSelection] = useState<GeographicPlaceSelection | null>(null);
+  const [level, setLevel] = useState<GeographicLevel>("country");
+  const [parentId, setParentId] = useState("");
+  const [organizationMode, setOrganizationMode] = useState<"choose" | "create">("choose");
+  const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">("global");
+  const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [inlineOrganization, setInlineOrganization] = useState<OrganizationOption | null>(null);
+  const [retryOrganizationId, setRetryOrganizationId] = useState("");
+
+  function switchKind(next: "geographic" | "organizational") {
+    setKind(next); setSelection(null); setLevel("country"); setParentId("");
+    setOrganizationMode("choose"); setScopeMode("global"); setLinkedIds([]);
+    setRetryOrganizationId(""); setError(""); setSuccess("");
+  }
+
+  function placeChanged(next: GeographicPlaceSelection | null) {
+    setSelection(next);
+    setParentId("");
+    if (!next) setError("");
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!kind) { setError("Choose a jurisdiction type first."); return; }
     const form = event.currentTarget;
     const data = new FormData(form);
-    const action = (event.nativeEvent as SubmitEvent).submitter instanceof HTMLButtonElement
-      ? ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement).value
-      : "save";
-    setPending(true);
-    setError("");
+    const reason = text(data, "reason").trim();
+    const stagingBucketId = optionalBucket(text(data, "stagingBucketId"));
+    const productionText = text(data, "productionBucketId").trim();
+    if (!safeReason(reason)) { setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms."); return; }
+    if (stagingBucketId && stagingBucketId.length > 300) { setError("Staging bucket ID must be 300 characters or fewer."); return; }
+    if (productionText && (!/^[1-9]\d*$/.test(productionText) || !Number.isSafeInteger(Number(productionText)))) { setError("Production bucket ID must be a positive safe integer."); return; }
+    const productionBucketId = productionText || undefined;
+    setPending(true); setError(""); setSuccess("");
     try {
-      const reason = text(data, "reason");
-      if (!jurisdiction) {
-        await create({
-          code: text(data, "code"), name: text(data, "name"), slug: text(data, "slug"),
-          stagingBucketId: optionalText(data, "stagingBucketId"),
-          productionBucketId: optionalText(data, "productionBucketId"),
-          isDefault: data.get("isDefault") === "on", reason,
+      if (kind === "geographic") {
+        if (!selection || selection.expiresAt <= Date.now()) throw new Error("EXPIRED_PLACE");
+        if (level !== "country" && !parentId) throw new Error("PARENT_REQUIRED");
+        if (level === "country" && parentId) throw new Error("ROOT_PARENT_FORBIDDEN");
+        await createGeographic({
+          verifiedPlaceClaim: selection.verifiedPlaceClaim,
+          level,
+          ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}),
+          ...(stagingBucketId ? { stagingBucketId } : {}),
+          ...(productionBucketId ? { productionBucketId } : {}),
+          reason,
         });
-        form.reset();
-      } else if (action === "enable") {
-        await enable({ id: jurisdiction.id as Id<"jurisdictions">, reason });
-      } else if (action === "archive") {
-        await archive({ id: jurisdiction.id as Id<"jurisdictions">, reason });
       } else {
-        await update({
-          id: jurisdiction.id as Id<"jurisdictions">,
-          name: text(data, "name"), slug: text(data, "slug"),
-          stagingBucketId: optionalText(data, "stagingBucketId"),
-          productionBucketId: optionalText(data, "productionBucketId"),
-          isDefault: data.get("isDefault") === "on", reason,
+        let organizationId = text(data, "organizationId").trim();
+        if (organizationMode === "create") {
+          const name = text(data, "organizationName").trim();
+          const slug = text(data, "organizationSlug").trim();
+          const website = text(data, "organizationWebsite").trim();
+          if (name.length < 1 || name.length > 300 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80 || !validWebsite(website)) {
+            throw new Error("INVALID_ORGANIZATION");
+          }
+          organizationId = await createOrganization({
+            name, slug, class: text(data, "organizationClass") as OrganizationClass,
+            ...(website ? { website } : {}), reason,
+          });
+          const created = { id: organizationId, name, slug, class: text(data, "organizationClass") as OrganizationClass };
+          setInlineOrganization(created);
+          setRetryOrganizationId(organizationId);
+          setOrganizationMode("choose");
+        }
+        if (!organizationId) throw new Error("ORGANIZATION_REQUIRED");
+        const distinctIds = [...new Set(linkedIds)];
+        if (scopeMode === "linked_geographies" && (distinctIds.length < 1 || distinctIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
+        await createOrganizational({
+          organizationId: organizationId as Id<"organizations">,
+          visibility: text(data, "visibility") as "public" | "members",
+          scopeMode,
+          geographicJurisdictionIds: (scopeMode === "global" ? [] : distinctIds) as Id<"jurisdictions">[],
+          ...(stagingBucketId ? { stagingBucketId } : {}),
+          ...(productionBucketId ? { productionBucketId } : {}),
+          reason,
         });
       }
-      router.refresh();
-    } catch {
-      setError("The jurisdiction change was not accepted. Review the lifecycle, uniqueness, and reason fields.");
+      form.reset(); switchKind(kind); setInlineOrganization(null); setRetryOrganizationId(""); setKind(null); setSuccess("Draft jurisdiction created. Provider synchronization is pending."); router.refresh();
+    } catch (cause) {
+      const code = cause instanceof Error ? cause.message : "";
+      setError(code === "PARENT_REQUIRED" ? "Select an eligible governed parent before creating this locality."
+        : code === "EXPIRED_PLACE" ? "The verified place expired. Search and select it again."
+          : code === "INVALID_ORGANIZATION" ? "Review the organization name, lowercase slug, class, and optional HTTPS website."
+            : "The draft jurisdiction was not created. Review the selections and your catalog permissions, then retry.");
     } finally { setPending(false); }
   }
 
   return (
-    <form onSubmit={submit} className="grid gap-4 border-y border-[oklch(73%_0.03_77)] bg-[oklch(94%_0.022_79)] px-4 py-5 sm:grid-cols-2 lg:grid-cols-4">
-      <label className={labelClass}>ISO country code<input aria-label="ISO country code" name="code" defaultValue={jurisdiction?.code} disabled={Boolean(jurisdiction)} maxLength={2} required className={fieldClass} /></label>
-      <label className={labelClass}>Display name<input name="name" defaultValue={jurisdiction?.name} required className={fieldClass} /></label>
-      <label className={labelClass}>URL slug<input name="slug" defaultValue={jurisdiction?.slug} required className={fieldClass} /></label>
-      <label className={labelClass}>Staging bucket ID<input name="stagingBucketId" defaultValue={jurisdiction?.stagingBucketId} className={fieldClass} /></label>
-      <label className={labelClass}>Production bucket ID<input name="productionBucketId" defaultValue={jurisdiction?.productionBucketId} className={fieldClass} /></label>
-      <label className="flex min-h-11 items-center gap-2 self-end text-sm font-semibold"><input type="checkbox" name="isDefault" defaultChecked={jurisdiction?.isDefault} />Default jurisdiction</label>
+    <form onSubmit={submit} className="grid gap-5 border-y border-[oklch(73%_0.03_77)] bg-[oklch(94%_0.022_79)] px-4 py-5 sm:grid-cols-2 lg:grid-cols-4">
+      <fieldset className="grid gap-3 sm:col-span-2 lg:col-span-4">
+        <legend className="text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]">Jurisdiction type</legend>
+        <div className="flex flex-wrap gap-5">
+          {(["geographic", "organizational"] as const).map((value) => <label key={value} className="flex min-h-11 items-center gap-2 font-semibold"><input type="radio" name="kind" checked={kind === value} onChange={() => switchKind(value)} className="size-5 accent-amber-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700" />{value === "geographic" ? "Geographic" : "Organizational"}</label>)}
+        </div>
+      </fieldset>
+      {kind === "geographic" ? <>
+        <Suspense fallback={<p role="status" aria-live="polite" className="sm:col-span-2 lg:col-span-4">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={placeChanged} disabled={pending} /></Suspense>
+        <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+        {level !== "country" ? <GeographicParentField key={level} level={level} selection={selection} value={parentId} onChange={setParentId} initial={geographicOptions} /> : null}
+      </> : null}
+      {kind === "organizational" ? <>
+        <fieldset className="grid gap-2 sm:col-span-2"><legend className="text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]">Organization source</legend><div className="flex flex-wrap gap-4">{(["choose", "create"] as const).map((mode) => <label key={mode} className="flex min-h-11 items-center gap-2 font-semibold"><input type="radio" name="organizationMode" checked={organizationMode === mode} onChange={() => setOrganizationMode(mode)} />{mode === "choose" ? "Choose organization" : "Create organization"}</label>)}</div></fieldset>
+        {organizationMode === "choose" ? <OrganizationSelect initial={inlineOrganization ? mergeById(organizations, [inlineOrganization]) : organizations} page={organizationPage} preferredId={retryOrganizationId} /> : <>
+          <label className={labelClass}>Organization name<input aria-label="Organization name" name="organizationName" minLength={1} maxLength={300} required className={fieldClass} /></label>
+          <label className={labelClass}>Organization slug<input aria-label="Organization slug" name="organizationSlug" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} required className={fieldClass} /></label>
+          <label className={labelClass}>Organization class<select name="organizationClass" className={fieldClass}>{ORGANIZATION_CLASSES.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+          <label className={labelClass}>Organization HTTPS website<input aria-label="Organization HTTPS website" name="organizationWebsite" type="url" maxLength={500} className={fieldClass} /></label>
+        </>}
+        <label className={labelClass}>Visibility<select aria-label="Visibility" name="visibility" className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
+        <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
+        {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
+      </> : null}
+      <label className={labelClass}>Staging bucket ID<input name="stagingBucketId" maxLength={300} className={fieldClass} /></label>
+      <label className={labelClass}>Production bucket ID<input name="productionBucketId" inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
       <label className={`${labelClass} sm:col-span-2`}>Audit reason<input aria-label="Audit reason" name="reason" required minLength={3} maxLength={500} className={fieldClass} /></label>
-      <div className="flex flex-wrap gap-3 sm:col-span-2 lg:col-span-4">
-        <button value="save" disabled={pending} className={buttonClass}>{jurisdiction ? "Save jurisdiction metadata" : "Create draft jurisdiction"}</button>
-        {jurisdiction?.status === "draft" ? <button value="enable" disabled={pending} className={secondaryButtonClass}>Enable jurisdiction</button> : null}
-        {jurisdiction && jurisdiction.status !== "archived" ? <button value="archive" disabled={pending} className={secondaryButtonClass}>Archive jurisdiction</button> : null}
-      </div>
+      <div className="flex flex-wrap gap-3 sm:col-span-2 lg:col-span-4"><button disabled={pending || !kind} className={buttonClass}>{pending ? "Creating draft…" : "Create draft jurisdiction"}</button></div>
+      {success ? <p role="status" aria-live="polite" className="text-sm sm:col-span-2 lg:col-span-4">{success}</p> : null}
       {error ? <p role="alert" className="text-sm text-red-800 sm:col-span-2 lg:col-span-4">{error}</p> : null}
     </form>
   );
 }
+
+export function JurisdictionLifecycleActions({
+  jurisdiction,
+  geographicOptions = [],
+  geographicPage,
+  editable = true,
+}: {
+  jurisdiction: {
+    id: string; name: string; status: "draft" | "enabled" | "archived"; kind: "geographic" | "organizational";
+    visibility: "public" | "members"; scopeMode: null | "global" | "linked_geographies";
+    provider: { stagingConfigured: boolean; productionConfigured: boolean };
+    geographic: null | { level: GeographicLevel; parent: null | { id: string; name: string; level: GeographicLevel } };
+  };
+  geographicOptions?: readonly GeographicOption[];
+  geographicPage?: OptionPage;
+  editable?: boolean;
+}) {
+  const router = useRouter();
+  const enable = useMutation(api.admin.jurisdictions.enableJurisdiction);
+  const archive = useMutation(api.admin.jurisdictions.archiveJurisdiction);
+  const updateGeographic = useMutation(api.admin.jurisdictions.updateGeographicJurisdiction);
+  const updateOrganizational = useMutation(api.admin.jurisdictions.updateOrganizationalJurisdiction);
+  const [reason, setReason] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [selection, setSelection] = useState<GeographicPlaceSelection | null>(null);
+  const [level, setLevel] = useState<GeographicLevel>(jurisdiction.geographic?.level ?? "country");
+  const [parentId, setParentId] = useState(jurisdiction.geographic?.parent?.id ?? "");
+  const [visibility, setVisibility] = useState(jurisdiction.visibility);
+  const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">(jurisdiction.scopeMode ?? "global");
+  const [linkedIds, setLinkedIds] = useState<string[]>([]);
+  const [stagingBucketId, setStagingBucketId] = useState("");
+  const [productionBucketId, setProductionBucketId] = useState("");
+
+  async function run(action: "enable" | "archive") {
+    const auditReason = reason.trim();
+    if (!safeReason(auditReason)) {
+      setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      if (action === "enable") {
+        await enable({ id: jurisdiction.id as Id<"jurisdictions">, reason: auditReason });
+      } else {
+        await archive({ id: jurisdiction.id as Id<"jurisdictions">, reason: auditReason });
+      }
+      router.refresh();
+    } catch {
+      setError("The lifecycle change was not accepted. Review readiness, linked records, and your catalog permissions.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function saveUpdate() {
+    const auditReason = reason.trim();
+    if (!safeReason(auditReason)) {
+      setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
+      return;
+    }
+    if ((jurisdiction.provider.stagingConfigured && !stagingBucketId.trim()) || (jurisdiction.provider.productionConfigured && !productionBucketId.trim())) {
+      setError("Re-enter each configured provider bucket ID before saving; stored provider identifiers are never displayed.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      const buckets = { ...(optionalBucket(stagingBucketId) ? { stagingBucketId: optionalBucket(stagingBucketId) } : {}), ...(optionalBucket(productionBucketId) ? { productionBucketId: optionalBucket(productionBucketId) } : {}) };
+      if (jurisdiction.kind === "geographic") {
+        if (!selection || selection.expiresAt <= Date.now()) throw new Error("EXPIRED_PLACE");
+        if (level !== "country" && !parentId) throw new Error("PARENT_REQUIRED");
+        await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), ...buckets, reason: auditReason });
+      } else {
+        const geographicJurisdictionIds = [...new Set(linkedIds)];
+        if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], ...buckets, reason: auditReason });
+      }
+      router.refresh();
+    } catch {
+      setError("The update was not accepted. Recheck the verified place, governed scope, provider readiness, and catalog permissions.");
+    } finally { setPending(false); }
+  }
+
+  if (jurisdiction.status === "archived") return null;
+
+  return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
+    <label className={labelClass}>Audit reason
+      <input aria-label={`Audit reason for ${jurisdiction.name}`} value={reason} onChange={(event) => setReason(event.target.value)} required minLength={3} maxLength={500} className={fieldClass} />
+    </label>
+    <div className="flex flex-wrap gap-2">
+      {editable ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
+      {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
+      <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button>
+    </div>
+    {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
+      <p className="text-sm">Stored provider IDs are never displayed. Re-enter configured IDs to preserve them; changing a linked organizational scope replaces its current links.</p>
+      {jurisdiction.kind === "geographic" ? <>
+        <Suspense fallback={<p role="status">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={(next) => { setSelection(next); setParentId(""); }} disabled={pending} /></Suspense>
+        <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
+        {level !== "country" ? <GeographicParentField key={level} level={level} selection={selection} value={parentId} onChange={setParentId} initial={geographicOptions} /> : null}
+      </> : <>
+        <label className={labelClass}>Visibility<select aria-label="Visibility" value={visibility} onChange={(event) => setVisibility(event.target.value as typeof visibility)} className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
+        <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
+        {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
+      </>}
+      <label className={labelClass}>Staging bucket ID<input value={stagingBucketId} onChange={(event) => setStagingBucketId(event.target.value)} maxLength={300} className={fieldClass} /></label>
+      <label className={labelClass}>Production bucket ID<input value={productionBucketId} onChange={(event) => setProductionBucketId(event.target.value)} inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
+      <button type="button" disabled={pending} onClick={saveUpdate} className={buttonClass}>Save {jurisdiction.kind} changes</button>
+    </div> : null}
+    {error ? <p role="alert" className="text-sm text-red-800">{error}</p> : null}
+  </div>;
+}
+
+function text(data: FormData, key: string) { return String(data.get(key) ?? ""); }
 
 type ResourceInput = {
   id: string;

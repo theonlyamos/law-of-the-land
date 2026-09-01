@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { components } from "./_generated/api";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
+import { productionLibraryResolutionResponse } from "./http";
+import { normalizeUniqueJurisdictionIds } from "./lib/jurisdictionDomain";
 
 const modules = import.meta.glob("./**/*.ts");
 const authModules = Object.fromEntries(
@@ -21,6 +23,9 @@ const listPublicEnabled = makeFunctionReference<"query">(
 );
 const getPublicByCode = makeFunctionReference<"query">(
   "jurisdictions:getPublicByCode",
+);
+const getProductionLibraryAvailability = makeFunctionReference<"query">(
+  "jurisdictions:getProductionLibraryAvailability",
 );
 const createJurisdiction = makeFunctionReference<"mutation">(
   "admin/resources:createJurisdiction",
@@ -417,5 +422,331 @@ describe("internal search jurisdiction HTTP boundary", () => {
       isDefault: true,
       productionBucketId: "11833",
     });
+  });
+});
+
+describe("internal multi-jurisdiction library availability boundary", () => {
+  const secret = "search-jurisdiction-test-secret-at-least-32-characters";
+
+  async function post(
+    t: Backend,
+    body: BodyInit | null,
+    suppliedSecret = secret,
+    headers: Record<string, string> = {},
+  ) {
+    const requestInit = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-search-jurisdiction-secret": suppliedSecret,
+        ...headers,
+      },
+      body,
+      ...(body instanceof ReadableStream ? { duplex: "half" as const } : {}),
+    } satisfies RequestInit & { duplex?: "half" };
+    return await t.fetch("/internal/search-jurisdictions", requestInit);
+  }
+
+  it("returns canonical ready libraries in selected and supplementary request order", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana",
+      status: "enabled",
+      productionBucketId: " 0011833 ",
+    });
+    const second = await insertJurisdiction(t, {
+      code: "NG",
+      name: "Nigeria",
+      slug: "nigeria",
+      status: "enabled",
+      productionBucketId: "22001",
+    });
+    const third = await insertJurisdiction(t, {
+      code: "KE",
+      name: "Kenya",
+      slug: "kenya",
+      status: "enabled",
+      productionBucketId: "33001",
+    });
+
+    await expect(t.query(getProductionLibraryAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [third, second],
+    })).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "0011833" },
+      supplementary: [
+        { jurisdictionId: third, status: "ready", productionBucketId: "33001" },
+        { jurisdictionId: second, status: "ready", productionBucketId: "22001" },
+      ],
+    });
+
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [third, second],
+    }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, private");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    await expect(response.json()).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "0011833" },
+      supplementary: [
+        { jurisdictionId: third, status: "ready", productionBucketId: "33001" },
+        { jurisdictionId: second, status: "ready", productionBucketId: "22001" },
+      ],
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["whitespace", "   "],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["decimal", "1.5"],
+    ["non-digit", "bucket-1"],
+    ["unsafe", "9007199254740992"],
+  ])("classifies a %s selected bucket as unconfigured without leaking its value", async (_label, productionBucketId) => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH",
+      name: "SECRET_NAME",
+      slug: "secret-slug",
+      status: "enabled",
+      productionBucketId,
+    });
+
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    }));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toEqual({
+      selected: { jurisdictionId: selected, status: "unconfigured" },
+      supplementary: [],
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/SECRET_NAME|secret-slug|bucket-|9007199254740992/);
+  });
+
+  it("keeps supplementary unconfigured entries in place while later entries retain order", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const unavailable = await insertJurisdiction(t, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", productionBucketId: "0",
+    });
+    const ready = await insertJurisdiction(t, {
+      code: "KE", name: "Kenya", slug: "kenya", status: "enabled", productionBucketId: "3",
+    });
+
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [unavailable, ready],
+    }));
+    await expect(response.json()).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "1" },
+      supplementary: [
+        { jurisdictionId: unavailable, status: "unconfigured" },
+        { jurisdictionId: ready, status: "ready", productionBucketId: "3" },
+      ],
+    });
+  });
+
+  it("accepts the maximum one selected plus three supplementary IDs", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const ids = [];
+    for (const [code, name, bucket] of [
+      ["GH", "Ghana", "1"],
+      ["NG", "Nigeria", "2"],
+      ["KE", "Kenya", "3"],
+      ["ZA", "South Africa", "4"],
+    ] as const) {
+      ids.push(await insertJurisdiction(t, {
+        code,
+        name,
+        slug: name.toLowerCase().replaceAll(" ", "-"),
+        status: "enabled",
+        productionBucketId: bucket,
+      }));
+    }
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: ids[0],
+      supplementaryJurisdictionIds: ids.slice(1),
+    }));
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.supplementary.map((item: { jurisdictionId: string }) => item.jurisdictionId))
+      .toEqual(ids.slice(1));
+  });
+
+  it.each([
+    ["empty body", ""],
+    ["malformed JSON", "{"],
+    ["unknown key", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], extra: true })],
+    ["empty selected", JSON.stringify({ selectedJurisdictionId: "", supplementaryJurisdictionIds: [] })],
+    ["non-array supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: "y" })],
+    ["too many supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: ["a", "b", "c", "d"] })],
+    ["raw duplicate", JSON.stringify({ selectedJurisdictionId: "same", supplementaryJurisdictionIds: ["same"] })],
+    ["overlong ID", JSON.stringify({ selectedJurisdictionId: "x".repeat(129), supplementaryJurisdictionIds: [] })],
+    ["oversized body", "x".repeat(1_025)],
+  ])("rejects %s as a bodyless bounded request error", async (_label, body) => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const response = await post(createBackend(), body);
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+  });
+
+  it("accepts a streamed request without content-length and rejects streamed overflow", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const validBody = JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    });
+    const valid = await post(t, new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(validBody));
+        controller.close();
+      },
+    }), secret, { "content-length": "not-a-number" });
+    expect(valid.status).toBe(200);
+
+    const oversized = await post(t, new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(1_025)));
+        controller.close();
+      },
+    }));
+    expect(oversized.status).toBe(400);
+  });
+
+  it("fails the whole request uniformly for malformed, missing, or disabled rows", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const disabled = await insertJurisdiction(t, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "draft", productionBucketId: "2",
+    });
+
+    for (const supplementaryJurisdictionIds of [
+      ["not-a-convex-id"],
+      [disabled],
+    ]) {
+      const response = await post(t, JSON.stringify({
+        selectedJurisdictionId: selected,
+        supplementaryJurisdictionIds,
+      }));
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.text()).toBe("");
+    }
+  });
+
+  it("fails closed for missing and incorrect transport secrets", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const body = JSON.stringify({
+      selectedJurisdictionId: "opaque",
+      supplementaryJurisdictionIds: [],
+    });
+    const t = createBackend();
+    const absent = await t.fetch("/internal/search-jurisdictions", { method: "POST", body });
+    const incorrect = await post(
+      t,
+      body,
+      "incorrect-search-jurisdiction-secret-at-least-32-characters",
+    );
+    expect(absent.status).toBe(404);
+    expect(incorrect.status).toBe(404);
+    expect(await absent.text()).toBe("");
+    expect(await incorrect.text()).toBe("");
+  });
+
+  it("maps an unexpected internal query failure to a sanitized bodyless 500", async () => {
+    const response = await productionLibraryResolutionResponse(
+      async () => {
+        throw new Error("database transport secret detail");
+      },
+      { selectedJurisdictionId: "opaque", supplementaryJurisdictionIds: [] },
+    );
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+  });
+
+  it("rejects raw-distinct IDs that normalize to the same jurisdiction", () => {
+    expect(() => normalizeUniqueJurisdictionIds(
+      ["canonical", "alternate-encoding"],
+      () => "canonical" as never,
+    )).toThrow("PRODUCTION_LIBRARY_REQUEST_INVALID");
+  });
+
+  it("uniformly rejects missing selected or supplementary rows and a disabled selected row", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+
+    const missingSelectedBackend = createBackend();
+    const missingSelected = await insertJurisdiction(missingSelectedBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    await missingSelectedBackend.run(async (ctx) => await ctx.db.delete(missingSelected));
+    const missingSelectedResponse = await post(missingSelectedBackend, JSON.stringify({
+      selectedJurisdictionId: missingSelected,
+      supplementaryJurisdictionIds: [],
+    }));
+    expect(missingSelectedResponse.status).toBe(404);
+    expect(await missingSelectedResponse.text()).toBe("");
+
+    const missingSupplementaryBackend = createBackend();
+    const selected = await insertJurisdiction(missingSupplementaryBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const missingSupplementary = await insertJurisdiction(missingSupplementaryBackend, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", productionBucketId: "2",
+    });
+    await missingSupplementaryBackend.run(async (ctx) => await ctx.db.delete(missingSupplementary));
+    const missingSupplementaryResponse = await post(missingSupplementaryBackend, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [missingSupplementary],
+    }));
+    expect(missingSupplementaryResponse.status).toBe(404);
+    expect(await missingSupplementaryResponse.text()).toBe("");
+
+    const disabledBackend = createBackend();
+    const disabled = await insertJurisdiction(disabledBackend, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "draft", productionBucketId: "1",
+    });
+    const disabledResponse = await post(disabledBackend, JSON.stringify({
+      selectedJurisdictionId: disabled,
+      supplementaryJurisdictionIds: [],
+    }));
+    expect(disabledResponse.status).toBe(404);
+    expect(await disabledResponse.text()).toBe("");
+  });
+
+  it("stream-counts a valid body when content-length is the literal false value", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+    });
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    }), secret, { "content-length": "false" });
+    expect(response.status).toBe(200);
   });
 });

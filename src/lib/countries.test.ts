@@ -4,6 +4,8 @@ import {
   findCountry,
   findJurisdiction,
   type PublicJurisdiction,
+  type ResearchJurisdiction,
+  legacyCountryCodeForSelection,
 } from "./countries";
 
 describe("governed country metadata", () => {
@@ -18,6 +20,23 @@ describe("governed country metadata", () => {
       name: "Nigeria",
     });
     expect(findCountry(countries, "CI")).toBeNull();
+  });
+});
+
+describe("unified jurisdiction compatibility navigation", () => {
+  it("returns only a validated uppercase legacy snapshot", () => {
+    const ghana: ResearchJurisdiction = {
+      id: "jurisdiction-ghana",
+      name: "Ghana",
+      slug: "ghana",
+      kind: "geographic",
+      isDefault: true,
+      legacyCountryCode: "GH",
+    };
+
+    expect(legacyCountryCodeForSelection(ghana)).toBe("GH");
+    expect(legacyCountryCodeForSelection({ ...ghana, legacyCountryCode: "gh" })).toBeNull();
+    expect(legacyCountryCodeForSelection({ ...ghana, legacyCountryCode: undefined })).toBeNull();
   });
 });
 

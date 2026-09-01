@@ -13,6 +13,7 @@ interface LandingSectionsProps {
   isAuthenticated: boolean;
   onResumeChat: (chatId: string) => void;
   plansHref: string;
+  searchFirstCoverage: boolean;
 }
 
 interface LedgerEntry {
@@ -104,6 +105,7 @@ export function LandingSections({
   isAuthenticated,
   onResumeChat,
   plansHref,
+  searchFirstCoverage,
 }: LandingSectionsProps) {
   return (
     <>
@@ -213,8 +215,13 @@ export function LandingSections({
           </div>
 
           <div className={styles.coverageRegister}>
-            <h3>Published jurisdiction register</h3>
-            {jurisdictions === undefined ? (
+            <h3>{searchFirstCoverage ? "Search governed coverage" : "Published jurisdiction register"}</h3>
+            {searchFirstCoverage ? (
+              <p className={styles.registerState}>
+                Search by place or organization to find enabled public coverage and organizations
+                available through your membership.
+              </p>
+            ) : jurisdictions === undefined ? (
               <p className={styles.registerState}>
                 {"Loading the published jurisdiction register\u2026"}
               </p>
@@ -238,8 +245,9 @@ export function LandingSections({
               </ul>
             )}
             <p className={styles.coverageNote}>
-              The public selector updates automatically as additional jurisdictions complete review
-              and publication.
+              {searchFirstCoverage
+                ? "Search results are bounded and reflect the access available to the current account."
+                : "The public selector updates automatically as additional jurisdictions complete review and publication."}
             </p>
           </div>
         </div>

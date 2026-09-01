@@ -3,11 +3,13 @@ import { ConvexError, v } from "convex/values";
 import { hashPassword } from "better-auth/crypto";
 import { components } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
-import type { MutationCtx } from "../_generated/server";
-import { internalAction, internalMutation } from "../_generated/server";
+import type { MutationCtx, QueryCtx } from "../_generated/server";
+import { internalAction, internalMutation, internalQuery } from "../_generated/server";
 import { hashCallbackToken } from "./jobs";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
+import { verifyVerifiedPlaceClaim } from "../lib/placeClaim";
+import { verifyTelemetryServiceProof } from "../lib/telemetryProof";
 
 const FIXTURE_MARKER = "isolated-admin-e2e";
 const TAG_RE = /^e2e_[a-z0-9]{12,48}$/;
@@ -19,6 +21,16 @@ const FIXED_ROLES = [
 // payload values; no provider call is made by this control plane.
 const FIXTURE_STAGING_BUCKET_ID = "910001";
 const FIXTURE_PRODUCTION_BUCKET_ID = "910002";
+const FIXTURE_COUNTRY_STAGING_BUCKET_ID = "910011";
+const FIXTURE_COUNTRY_PRODUCTION_BUCKET_ID = "910012";
+const FIXTURE_TOWN_STAGING_BUCKET_ID = "910021";
+const FIXTURE_TOWN_PRODUCTION_BUCKET_ID = "910022";
+const FIXTURE_PUBLIC_ORGANIZATION_STAGING_BUCKET_ID = "910031";
+const FIXTURE_PUBLIC_ORGANIZATION_PRODUCTION_BUCKET_ID = "910032";
+const FIXTURE_MEMBER_ORGANIZATION_STAGING_BUCKET_ID = "910041";
+const FIXTURE_MEMBER_ORGANIZATION_PRODUCTION_BUCKET_ID = "910042";
+const SHA_RE = /^[a-f0-9]{40}$/;
+const TELEMETRY_SECRET_PROOF_DOMAIN = "admin-e2e-telemetry-ingest-secret-v1";
 
 function requireFixtureEnvironment() {
   if (resolveE2EProviderIsolation() !== "stub") {
@@ -46,17 +58,66 @@ function requireTag(tag: string) {
   if (!TAG_RE.test(tag)) throw new ConvexError("E2E_FIXTURE_TAG_INVALID");
 }
 
-async function listFixtureUsers(ctx: MutationCtx, tag: string) {
+function fixtureCommitIdentity() {
+  const approvedCommitSha = process.env.ADMIN_E2E_APPROVED_COMMIT_SHA;
+  const deployedCommitSha = process.env.ADMIN_E2E_DEPLOYED_COMMIT_SHA;
+  if (!approvedCommitSha || !deployedCommitSha
+    || !SHA_RE.test(approvedCommitSha)
+    || !SHA_RE.test(deployedCommitSha)
+    || approvedCommitSha !== deployedCommitSha) {
+    throw new ConvexError("E2E_FIXTURE_COMMIT_MISMATCH");
+  }
+  if (process.env.ADMIN_ENVIRONMENT !== process.env.ADMIN_E2E_TARGET_ENV) {
+    throw new ConvexError("E2E_FIXTURE_ENVIRONMENT_MISMATCH");
+  }
+  if (process.env.BILLING_ENABLED !== "false") {
+    throw new ConvexError("E2E_FIXTURE_BILLING_MUST_BE_DISABLED");
+  }
+  return { approvedCommitSha, deployedCommitSha };
+}
+
+function fixtureSlug(tag: string, suffix: string) {
+  return suffix ? `${tag}-${suffix}` : tag;
+}
+
+async function exactTaggedJurisdiction(
+  ctx: MutationCtx,
+  tag: string,
+  suffix: string,
+) {
+  const rows = await ctx.db.query("jurisdictions")
+    .withIndex("by_slug", (q) => q.eq("slug", fixtureSlug(tag, suffix)))
+    .take(2);
+  if (rows.length > 1) throw new ConvexError("E2E_FIXTURE_STATE_INVALID");
+  const row = rows[0];
+  if (row && row.createdBy !== `fixture:${tag}`) {
+    throw new ConvexError("E2E_FIXTURE_OWNERSHIP_MISMATCH");
+  }
+  return row ?? null;
+}
+
+async function exactTaggedOrganization(
+  ctx: MutationCtx,
+  tag: string,
+  suffix: string,
+) {
+  const rows = await ctx.db.query("organizations")
+    .withIndex("by_slug", (q) => q.eq("slug", fixtureSlug(tag, suffix)))
+    .take(2);
+  if (rows.length > 1) throw new ConvexError("E2E_FIXTURE_STATE_INVALID");
+  const row = rows[0];
+  if (row && row.createdBy !== `fixture:${tag}`) {
+    throw new ConvexError("E2E_FIXTURE_OWNERSHIP_MISMATCH");
+  }
+  return row ?? null;
+}
+
+async function listFixtureUsers(ctx: MutationCtx | QueryCtx, tag: string) {
   const owned = await ctx.db.query("e2eFixtureOwnership")
     .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag).eq("kind", "better_auth_user"))
-    .take(500);
+    .take(501);
+  if (owned.length > 500) throw new ConvexError("E2E_FIXTURE_OWNERSHIP_BOUNDS_EXCEEDED");
   const ownedIds = new Set(owned.map((row) => row.targetId));
-  const exactEmails = new Set([
-    ...FIXED_ROLES.map((role) => `${role}.${tag}@e2e.invalid`),
-    `normal.${tag}@e2e.invalid`,
-    `no_two_factor.${tag}@e2e.invalid`,
-    `unassured.${tag}@e2e.invalid`,
-  ]);
   const matches = new Map<string, { userId: string; email: string }>();
   let cursor: string | null = null;
   for (let page = 0; page < 10; page += 1) {
@@ -66,7 +127,7 @@ async function listFixtureUsers(ctx: MutationCtx, tag: string) {
       paginationOpts: { numItems: 100, cursor },
     }) as { page: Array<{ _id: string; email?: string }>; isDone: boolean; continueCursor: string };
     for (const user of result.page) {
-      if (typeof user.email === "string" && (ownedIds.has(user._id) || exactEmails.has(user.email))) {
+      if (typeof user.email === "string" && ownedIds.has(user._id)) {
         matches.set(user._id, { userId: user._id, email: user.email });
       }
     }
@@ -76,13 +137,24 @@ async function listFixtureUsers(ctx: MutationCtx, tag: string) {
   return [...matches.values()];
 }
 
-async function cleanupFixture(ctx: MutationCtx, tag: string) {
+async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOwnership?: boolean } = {}) {
+  const maxOperationUnits = 20;
   let deleted = 0;
+  let operationUnits = 0;
+  const deleteOwned = async (id: Parameters<MutationCtx["db"]["delete"]>[0]) => {
+    await ctx.db.delete(id);
+    deleted += 1;
+    operationUnits += 1;
+    return operationUnits >= maxOperationUnits;
+  };
   const fixtureOwnership = await ctx.db.query("e2eFixtureOwnership")
     .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
-    .take(500);
+    .take(501);
+  if (fixtureOwnership.length > 500) throw new ConvexError("E2E_FIXTURE_OWNERSHIP_BOUNDS_EXCEEDED");
   const fixtureUsers = await listFixtureUsers(ctx, tag);
-  const fixtureUserIds = new Set(fixtureUsers.map((user) => user.userId));
+  const fixtureUserIds = new Set(
+    fixtureOwnership.filter((row) => row.kind === "better_auth_user").map((row) => row.targetId),
+  );
   const fixtureOwnerIds = new Set([`fixture:${tag}`, ...fixtureUserIds]);
   const registeredIncidentIds = new Set(
     fixtureOwnership.filter((row) => row.kind === "system_incident").map((row) => row.targetId),
@@ -95,34 +167,106 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
   );
   const fixtureVersionIds = new Set<string>();
   const fixtureOperationIds = new Set<Id<"adminOperations">>();
-  const fixtureStorageIds = new Set<Id<"_storage">>();
+
+  const [country, town, publicOrganizationJurisdiction, memberOrganizationJurisdiction] = await Promise.all([
+    exactTaggedJurisdiction(ctx, tag, "ghana"),
+    exactTaggedJurisdiction(ctx, tag, "accra"),
+    exactTaggedJurisdiction(ctx, tag, "public-organization"),
+    exactTaggedJurisdiction(ctx, tag, "member-organization"),
+  ]);
+  const [publicOrganization, memberOrganization] = await Promise.all([
+    exactTaggedOrganization(ctx, tag, "public-organization"),
+    exactTaggedOrganization(ctx, tag, "member-organization"),
+  ]);
+  if ((publicOrganizationJurisdiction?.organizationId ?? null) !== (publicOrganization?._id ?? null)
+    || (memberOrganizationJurisdiction?.organizationId ?? null) !== (memberOrganization?._id ?? null)) {
+    throw new ConvexError("E2E_FIXTURE_OWNERSHIP_MISMATCH");
+  }
+  const typedJurisdictions = [country, town, publicOrganizationJurisdiction, memberOrganizationJurisdiction]
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+  const geographicProfiles = (await Promise.all([country, town].map(async (row) => row
+    ? await ctx.db.query("geographicJurisdictions").withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id)).take(2)
+    : []))).flat();
+  const organizationalProfiles = (await Promise.all([publicOrganizationJurisdiction, memberOrganizationJurisdiction].map(async (row) => row
+    ? await ctx.db.query("organizationalJurisdictions").withIndex("by_jurisdictionId", (q) => q.eq("jurisdictionId", row._id)).take(2)
+    : []))).flat();
+  if (geographicProfiles.length > 2 || organizationalProfiles.length > 2) {
+    throw new ConvexError("E2E_FIXTURE_STATE_INVALID");
+  }
+  for (const profile of organizationalProfiles) {
+    const scopes = await ctx.db.query("organizationGeographicScopes")
+      .withIndex("by_organizationalJurisdictionId_and_geographicJurisdictionId", (q) =>
+        q.eq("organizationalJurisdictionId", profile._id))
+      .take(9);
+    for (const scope of scopes) { if (await deleteOwned(scope._id)) return deleted; }
+  }
+  for (const row of [country, town]) {
+    if (!row) continue;
+    const aliases = await ctx.db.query("geographicJurisdictionAliases")
+      .withIndex("by_jurisdictionId_and_normalizedAlias", (q) => q.eq("jurisdictionId", row._id))
+      .take(20);
+    for (const alias of aliases) { if (await deleteOwned(alias._id)) return deleted; }
+  }
+  for (const organization of [publicOrganization, memberOrganization]) {
+    if (!organization) continue;
+    for (const status of ["active", "inactive"] as const) {
+      const memberships = await ctx.db.query("organizationMemberships")
+        .withIndex("by_organizationId_and_status", (q) => q.eq("organizationId", organization._id).eq("status", status))
+        .take(101);
+      for (const membership of memberships) {
+        if (!fixtureUserIds.has(membership.userId)) throw new ConvexError("E2E_FIXTURE_OWNERSHIP_MISMATCH");
+        if (await deleteOwned(membership._id)) return deleted;
+      }
+    }
+  }
+  for (const profile of organizationalProfiles) { if (await deleteOwned(profile._id)) return deleted; }
+  for (const profile of geographicProfiles) { if (await deleteOwned(profile._id)) return deleted; }
+  for (const jurisdiction of typedJurisdictions) { if (await deleteOwned(jurisdiction._id)) return deleted; }
+  for (const organization of [publicOrganization, memberOrganization]) {
+    if (organization && await deleteOwned(organization._id)) return deleted;
+  }
+
   for (const user of fixtureUsers) {
-    const paginationOpts = { numItems: 100, cursor: null, maximumRowsRead: 100 };
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "session", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "account", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "twoFactor", where: [{ field: "userId", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: "user", where: [{ field: "_id", operator: "eq", value: user.userId }] }, paginationOpts,
-    });
-    deleted += 1;
+    let dependencyDeleted = false;
+    for (const model of ["session", "account", "twoFactor"] as const) {
+      const remainingUnits = maxOperationUnits - operationUnits;
+      if (remainingUnits === 0) return deleted;
+      const batchSize = Math.min(4, remainingUnits);
+      const result = await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+        input: { model, where: [{ field: "userId", operator: "eq", value: user.userId }] },
+        paginationOpts: { numItems: batchSize, cursor: null, maximumRowsRead: batchSize },
+      }) as { count: number };
+      if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > batchSize) {
+        throw new ConvexError("E2E_FIXTURE_AUTH_CLEANUP_INVALID");
+      }
+      deleted += result.count;
+      operationUnits += result.count;
+      if (result.count !== 0) { dependencyDeleted = true; break; }
+    }
+    if (!dependencyDeleted) {
+      const result = await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+        input: { model: "user", where: [{ field: "_id", operator: "eq", value: user.userId }] },
+        paginationOpts: { numItems: 1, cursor: null, maximumRowsRead: 1 },
+      }) as { count: number };
+      if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > 1) {
+        throw new ConvexError("E2E_FIXTURE_AUTH_CLEANUP_INVALID");
+      }
+      deleted += result.count;
+      operationUnits += result.count;
+    }
+    if (operationUnits >= maxOperationUnits) return deleted;
   }
 
   const fixtureChats = (await ctx.db.query("chatSessions").take(500)).filter((row) => row.userId === `fixture:${tag}`);
   const fixtureChatIds = new Set(fixtureChats.map((row) => row._id));
   for (const chat of fixtureChats) {
     for (const row of await ctx.db.query("messages").withIndex("by_session", (q) => q.eq("sessionId", chat._id)).take(200)) {
-      await ctx.db.delete(row._id); deleted += 1;
+      if (await deleteOwned(row._id)) return deleted;
     }
     for (const grant of await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt").take(500)) {
-      if (grant.chatSessionId === chat._id) { await ctx.db.delete(grant._id); deleted += 1; }
+      if (grant.chatSessionId === chat._id && await deleteOwned(grant._id)) return deleted;
     }
-    await ctx.db.delete(chat._id); deleted += 1;
+    if (await deleteOwned(chat._id)) return deleted;
   }
 
   const fixtureJurisdictions = (await ctx.db.query("jurisdictions").take(500)).filter(
@@ -140,19 +284,22 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
       for (const version of versions) {
         fixtureVersionIds.add(version._id);
         for (const decision of await ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).take(20)) {
-          await ctx.db.delete(decision._id); deleted += 1;
+          if (await deleteOwned(decision._id)) return deleted;
         }
-        fixtureStorageIds.add(version.originalStorageId);
-        await ctx.db.delete(version._id); deleted += 1;
+        if (operationUnits + 3 > maxOperationUnits) return deleted;
+        const originalStorage = await ctx.db.system.get("_storage", version.originalStorageId);
+        operationUnits += 1;
+        if (originalStorage) { await ctx.storage.delete(version.originalStorageId); operationUnits += 1; }
+        if (await deleteOwned(version._id)) return deleted;
       }
       for (const lock of await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).take(20)) {
-        await ctx.db.delete(lock._id); deleted += 1;
+        if (await deleteOwned(lock._id)) return deleted;
       }
       const counter = await ctx.db.query("resourceVersionCounters").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).unique();
-      if (counter) { await ctx.db.delete(counter._id); deleted += 1; }
-      await ctx.db.delete(resource._id); deleted += 1;
+      if (counter && await deleteOwned(counter._id)) return deleted;
+      if (await deleteOwned(resource._id)) return deleted;
     }
-    await ctx.db.delete(jurisdiction._id); deleted += 1;
+    if (await deleteOwned(jurisdiction._id)) return deleted;
   }
 
   const fixtureIncidentIds = new Set(registeredIncidentIds);
@@ -168,6 +315,7 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     }
   }
   for (const operationId of registeredOperationIds) {
+    fixtureOperationIds.add(operationId as Id<"adminOperations">);
     const operation = await ctx.db.get(operationId as Id<"adminOperations">);
     if (operation) rememberOperation(operation);
   }
@@ -182,43 +330,56 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     const incident = await ctx.db.get(incidentId as Id<"systemIncidents">);
     if (!incident) continue;
     for (const row of await ctx.db.query("incidentTimeline").withIndex("by_incidentId_and_createdAt", (q) => q.eq("incidentId", incident._id)).take(500)) {
-      await ctx.db.delete(row._id); deleted += 1;
+      if (await deleteOwned(row._id)) return deleted;
     }
-    await ctx.db.delete(incident._id); deleted += 1;
+    if (await deleteOwned(incident._id)) return deleted;
   }
   for (const row of await ctx.db.query("adminStepUpProofs").take(500)) {
-    if (fixtureUserIds.has(row.actorId) || fixtureVersionIds.has(row.targetId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureUserIds.has(row.actorId) || fixtureVersionIds.has(row.targetId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of await ctx.db.query("userDeletionRequests").take(500)) {
-    if (fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of await ctx.db.query("verificationEmailRequests").take(500)) {
-    if (fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if ((fixtureOperationIds.has(row.operationId) || fixtureUserIds.has(row.actorId) || fixtureUserIds.has(row.targetUserId)) && await deleteOwned(row._id)) return deleted;
   }
   for (const operationId of fixtureOperationIds) {
-    for (const row of await ctx.db.query("jobControlResults").withIndex("by_operationId", (q) => q.eq("operationId", operationId)).take(20)) {
-      await ctx.db.delete(row._id); deleted += 1;
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_grantOperationId", (q) => q.eq("grantOperationId", operationId)).take(500)) {
+      if (await deleteOwned(override._id)) return deleted;
     }
-    if (await ctx.db.get(operationId)) { await ctx.db.delete(operationId); deleted += 1; }
+    for (const override of await ctx.db.query("quotaOverrides")
+      .withIndex("by_revokeOperationId", (q) => q.eq("revokeOperationId", operationId)).take(500)) {
+      if (await deleteOwned(override._id)) return deleted;
+    }
+    for (const row of await ctx.db.query("jobControlResults").withIndex("by_operationId", (q) => q.eq("operationId", operationId)).take(20)) {
+      if (await deleteOwned(row._id)) return deleted;
+    }
+    if (await ctx.db.get(operationId) && await deleteOwned(operationId)) return deleted;
   }
   const fixtureExports = (await ctx.db.query("adminExports").take(500)).filter((row) => fixtureUserIds.has(row.requesterId) || fixtureChatIds.has(row.chatSessionId));
   const fixtureExportIds = new Set(fixtureExports.map((row) => row._id));
   for (const row of await ctx.db.query("exportDownloadReferences").take(500)) {
-    if (fixtureExportIds.has(row.exportId)) { await ctx.db.delete(row._id); deleted += 1; }
+    if (fixtureExportIds.has(row.exportId) && await deleteOwned(row._id)) return deleted;
   }
   for (const row of fixtureExports) {
-    if (row.storageId) fixtureStorageIds.add(row.storageId);
-    await ctx.db.delete(row._id); deleted += 1;
+    if (operationUnits + (row.storageId ? 3 : 1) > maxOperationUnits) return deleted;
+    if (row.storageId) {
+      const exportStorage = await ctx.db.system.get("_storage", row.storageId);
+      operationUnits += 1;
+      if (exportStorage) { await ctx.storage.delete(row.storageId); operationUnits += 1; }
+    }
+    if (await deleteOwned(row._id)) return deleted;
   }
 
   for (const job of await ctx.db.query("integrationJobs").take(500)) {
     const taggedJob = job.targetType === "e2e_fixture" && (job.targetId === tag || job.targetId.startsWith(`${tag}-`) || job.targetId.startsWith(`${tag}:`));
     if (!taggedJob && job.targetId !== tag && !fixtureVersionIds.has(job.targetId) && !fixtureUserIds.has(job.actorId)) continue;
-    await ctx.db.delete(job._id); deleted += 1;
+    if (await deleteOwned(job._id)) return deleted;
   }
   for (const userId of fixtureOwnerIds) {
     for (const usage of await ctx.db.query("dailyUsage").withIndex("by_user_day", (q) => q.eq("userId", userId)).take(500)) {
-      await ctx.db.delete(usage._id); deleted += 1;
+      if (await deleteOwned(usage._id)) return deleted;
     }
   }
   const fixtureOverrideIds = new Set<Id<"quotaOverrides">>();
@@ -243,29 +404,45 @@ async function cleanupFixture(ctx: MutationCtx, tag: string) {
     }
   }
   for (const overrideId of fixtureOverrideIds) {
-    await ctx.db.delete(overrideId); deleted += 1;
+    if (await deleteOwned(overrideId)) return deleted;
   }
   for (const userId of fixtureUserIds) {
     for (const event of await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", userId)).take(200)) {
-      await ctx.db.delete(event._id); deleted += 1;
+      if (await deleteOwned(event._id)) return deleted;
     }
   }
   for (const outcome of await ctx.db.query("e2eProviderStubOutcomes").withIndex("by_tag", (q) => q.eq("tag", tag)).take(500)) {
-    await ctx.db.delete(outcome._id); deleted += 1;
+    if (await deleteOwned(outcome._id)) return deleted;
   }
-  for (const ownership of fixtureOwnership) {
-    await ctx.db.delete(ownership._id); deleted += 1;
-  }
-  for (const storageId of fixtureStorageIds) {
-    if (await ctx.db.system.get("_storage", storageId)) await ctx.storage.delete(storageId);
+  if (options.deleteOwnership !== false) {
+    for (const ownership of fixtureOwnership) {
+      if (await deleteOwned(ownership._id)) return deleted;
+    }
   }
   return deleted;
+}
+
+async function globalCleanupBoundsExceeded(ctx: MutationCtx) {
+  const scans = await Promise.all([
+    ctx.db.query("chatSessions").take(501),
+    ctx.db.query("adminAccessGrants").withIndex("by_expiresAt").take(501),
+    ctx.db.query("jurisdictions").take(501),
+    ctx.db.query("adminStepUpProofs").take(501),
+    ctx.db.query("userDeletionRequests").take(501),
+    ctx.db.query("verificationEmailRequests").take(501),
+    ctx.db.query("adminExports").take(501),
+    ctx.db.query("exportDownloadReferences").take(501),
+    ctx.db.query("integrationJobs").take(501),
+  ]);
+  return scans.some((rows) => rows.length > 500);
 }
 
 const sessionManifestValidator = v.object({ userId: v.string(), sessionToken: v.string() });
 const bootstrapResultValidator = v.object({
   tag: v.string(),
   providerTransport: v.literal("stub"),
+  deployedCommitSha: v.string(),
+  billingDisabled: v.literal(true),
   sessions: v.object({
     super_admin: sessionManifestValidator,
     content_manager: sessionManifestValidator,
@@ -279,12 +456,19 @@ const bootstrapResultValidator = v.object({
     noTwoFactor: sessionManifestValidator,
     unassured: sessionManifestValidator,
   }),
+  jurisdictionUsers: v.object({
+    member: sessionManifestValidator,
+    formerMember: sessionManifestValidator,
+  }),
   records: v.object({
     chatId: v.id("chatSessions"), resourceId: v.id("legalResources"), publishedVersionId: v.id("documentVersions"),
     reviewVersionId: v.id("documentVersions"), conversationGrantId: v.id("adminAccessGrants"), jurisdictionId: v.id("jurisdictions"),
     separationVersionId: v.id("documentVersions"),
     userId: v.string(), stagingBucketId: v.string(), productionBucketId: v.string(),
     callbackToken: v.string(), callbackJobId: v.id("integrationJobs"), usageUserId: v.string(),
+    jurisdictionCountryId: v.id("jurisdictions"), jurisdictionTownId: v.id("jurisdictions"),
+    publicOrganizationJurisdictionId: v.id("jurisdictions"), jurisdictionMemberOnlyId: v.id("jurisdictions"),
+    jurisdictionMemberId: v.id("organizationMemberships"), jurisdictionFormerMemberId: v.id("organizationMemberships"),
   }),
 });
 
@@ -294,12 +478,56 @@ export const bootstrapRecords = internalMutation({
   handler: async (ctx, { tag, passwordHash, publishedStorageId, reviewStorageId, separationStorageId }) => {
     requireFixtureEnvironment(); requireTag(tag);
     const environment = process.env.ADMIN_E2E_TARGET_ENV!;
-    const panel = await ctx.db.query("featureFlags")
-      .withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", environment)).unique();
-    if (!panel?.enabled) throw new ConvexError("E2E_ADMIN_PANEL_FLAG_REQUIRED");
+    const { approvedCommitSha, deployedCommitSha } = fixtureCommitIdentity();
+    const panelRows = await ctx.db.query("featureFlags")
+      .withIndex("by_key_and_environment", (q) => q.eq("key", "admin_panel").eq("environment", environment)).take(2);
+    if (panelRows.length !== 1 || !panelRows[0].enabled) throw new ConvexError("E2E_ADMIN_PANEL_FLAG_REQUIRED");
+    const [tagRuns, environmentRuns] = await Promise.all([
+      ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(2),
+      ctx.db.query("e2eFixtureRuns").withIndex("by_environment", (q) => q.eq("environment", environment as "test" | "preview")).take(2),
+    ]);
+    if (tagRuns.length !== 0 || environmentRuns.length !== 0) {
+      throw new ConvexError("E2E_FIXTURE_RUN_ACTIVE");
+    }
     await cleanupFixture(ctx, tag);
+    const conflictingGhana = await ctx.db.query("jurisdictions")
+      .withIndex("by_code", (q) => q.eq("code", "GH")).take(2);
+    if (conflictingGhana.length !== 0) throw new ConvexError("E2E_FIXTURE_SHARED_TARGET");
 
     const now = Date.now();
+    const flagRows = await ctx.db.query("featureFlags")
+      .withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", environment)).take(2);
+    if (flagRows.length > 1) throw new ConvexError("E2E_FIXTURE_SHARED_TARGET");
+    const existingFlag = flagRows[0];
+    const priorFlag = existingFlag ? {
+      kind: "present" as const,
+      rowId: existingFlag._id,
+      enabled: existingFlag.enabled,
+      updatedAt: existingFlag.updatedAt,
+      ...(existingFlag.updatedBy !== undefined ? { updatedBy: existingFlag.updatedBy } : {}),
+    } : { kind: "absent" as const };
+    const fixtureFlagWrite = {
+      enabled: true,
+      updatedAt: Math.max(now, (existingFlag?.updatedAt ?? 0) + 1),
+      updatedBy: `fixture:${tag}`,
+    };
+    const flagId = existingFlag?._id ?? await ctx.db.insert("featureFlags", {
+      key: "unified_jurisdictions",
+      environment,
+      ...fixtureFlagWrite,
+    });
+    if (existingFlag) await ctx.db.patch(existingFlag._id, fixtureFlagWrite);
+    const runId = await ctx.db.insert("e2eFixtureRuns", {
+      tag,
+      environment: environment as "test" | "preview",
+      state: "bootstrapping",
+      priorFlag,
+      fixtureFlagWrite: { rowId: flagId, ...fixtureFlagWrite },
+      approvedCommitSha,
+      deployedCommitSha,
+      createdAt: now,
+      updatedAt: now,
+    });
     const sessions = {} as Record<(typeof FIXED_ROLES)[number], { userId: string; sessionToken: string }>;
     const createUser = async (key: string, role: string, twoFactorEnabled: boolean, assured: boolean) => {
       const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: {
@@ -321,6 +549,73 @@ export const bootstrapRecords = internalMutation({
     const normal = await createUser("normal", "user", false, false);
     const noTwoFactor = await createUser("no_two_factor", "super_admin", false, false);
     const unassured = await createUser("unassured", "super_admin", true, false);
+    const member = await createUser("member", "user", false, false);
+    const formerMember = await createUser("former_member", "user", false, false);
+
+    const jurisdictionCountryId = await ctx.db.insert("jurisdictions", {
+      code: "GH", name: `${tag} Ghana`, slug: fixtureSlug(tag, "ghana"), status: "enabled", isDefault: true,
+      stagingBucketId: FIXTURE_COUNTRY_STAGING_BUCKET_ID, productionBucketId: FIXTURE_COUNTRY_PRODUCTION_BUCKET_ID,
+      providerSyncState: "synced", kind: "geographic", visibility: "public", legacyCountryCode: "GH",
+      createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const countryProfileId = await ctx.db.insert("geographicJurisdictions", {
+      jurisdictionId: jurisdictionCountryId, googlePlaceId: `fixture-${tag}-ghana`, level: "country", countryCode: "GH",
+      latitude: 7.9465, longitude: -1.0232, formattedAddress: "Ghana", createdAt: now, updatedAt: now,
+    });
+    const jurisdictionTownId = await ctx.db.insert("jurisdictions", {
+      name: `${tag} Accra`, slug: fixtureSlug(tag, "accra"), status: "enabled", isDefault: false,
+      stagingBucketId: FIXTURE_TOWN_STAGING_BUCKET_ID, productionBucketId: FIXTURE_TOWN_PRODUCTION_BUCKET_ID,
+      providerSyncState: "synced", kind: "geographic", visibility: "public",
+      createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const townProfileId = await ctx.db.insert("geographicJurisdictions", {
+      jurisdictionId: jurisdictionTownId, googlePlaceId: `fixture-${tag}-accra`, level: "town", countryCode: "GH",
+      latitude: 5.6037, longitude: -0.187, formattedAddress: "Accra, Ghana", parentJurisdictionId: jurisdictionCountryId,
+      createdAt: now, updatedAt: now,
+    });
+    await ctx.db.insert("geographicJurisdictionAliases", {
+      jurisdictionId: jurisdictionTownId, normalizedAlias: "accra", source: `fixture:${tag}`, createdAt: now,
+    });
+
+    const publicOrganizationId = await ctx.db.insert("organizations", {
+      name: `${tag} Public Organization`, slug: fixtureSlug(tag, "public-organization"), class: "professional_association",
+      status: "active", createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const publicOrganizationJurisdictionId = await ctx.db.insert("jurisdictions", {
+      name: `${tag} Public Organization`, slug: fixtureSlug(tag, "public-organization"), status: "enabled", isDefault: false,
+      stagingBucketId: FIXTURE_PUBLIC_ORGANIZATION_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PUBLIC_ORGANIZATION_PRODUCTION_BUCKET_ID,
+      providerSyncState: "synced", kind: "organizational", visibility: "public", organizationId: publicOrganizationId,
+      createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const publicOrganizationProfileId = await ctx.db.insert("organizationalJurisdictions", {
+      jurisdictionId: publicOrganizationJurisdictionId, scopeMode: "linked_geographies", createdAt: now, updatedAt: now,
+    });
+    await ctx.db.insert("organizationGeographicScopes", {
+      organizationalJurisdictionId: publicOrganizationProfileId, geographicJurisdictionId: countryProfileId, createdAt: now,
+    });
+
+    const memberOrganizationId = await ctx.db.insert("organizations", {
+      name: `${tag} Member Organization`, slug: fixtureSlug(tag, "member-organization"), class: "university",
+      status: "active", createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const jurisdictionMemberOnlyId = await ctx.db.insert("jurisdictions", {
+      name: `${tag} Member Organization`, slug: fixtureSlug(tag, "member-organization"), status: "enabled", isDefault: false,
+      stagingBucketId: FIXTURE_MEMBER_ORGANIZATION_STAGING_BUCKET_ID, productionBucketId: FIXTURE_MEMBER_ORGANIZATION_PRODUCTION_BUCKET_ID,
+      providerSyncState: "synced", kind: "organizational", visibility: "members", organizationId: memberOrganizationId,
+      createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
+    });
+    const memberOrganizationProfileId = await ctx.db.insert("organizationalJurisdictions", {
+      jurisdictionId: jurisdictionMemberOnlyId, scopeMode: "linked_geographies", createdAt: now, updatedAt: now,
+    });
+    await ctx.db.insert("organizationGeographicScopes", {
+      organizationalJurisdictionId: memberOrganizationProfileId, geographicJurisdictionId: townProfileId, createdAt: now,
+    });
+    const jurisdictionMemberId = await ctx.db.insert("organizationMemberships", {
+      organizationId: memberOrganizationId, userId: member.userId, status: "active", createdAt: now, updatedAt: now,
+    });
+    const jurisdictionFormerMemberId = await ctx.db.insert("organizationMemberships", {
+      organizationId: memberOrganizationId, userId: formerMember.userId, status: "inactive", createdAt: now, updatedAt: now,
+    });
 
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
       code: "ZZ", name: `${tag} jurisdiction`, slug: tag, status: "enabled", isDefault: false,
@@ -374,13 +669,17 @@ export const bootstrapRecords = internalMutation({
       attemptCount: 1, createdAt: now - 100 * 24 * 60 * 60_000, updatedAt: now,
     });
 
+    await ctx.db.patch(runId, { state: "ready", updatedAt: Date.now() });
     return {
-      tag, providerTransport: "stub" as const, sessions,
+      tag, providerTransport: "stub" as const, deployedCommitSha, billingDisabled: true as const, sessions,
       variants: { normal, noTwoFactor, unassured },
+      jurisdictionUsers: { member, formerMember },
       records: {
         chatId, resourceId, publishedVersionId, reviewVersionId, separationVersionId, conversationGrantId, jurisdictionId, userId: normal.userId,
         stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, callbackToken, callbackJobId,
         usageUserId: `fixture:${tag}`,
+        jurisdictionCountryId, jurisdictionTownId, publicOrganizationJurisdictionId, jurisdictionMemberOnlyId,
+        jurisdictionMemberId, jurisdictionFormerMemberId,
       },
     };
   },
@@ -403,13 +702,19 @@ export const bootstrap = internalAction({
       return await ctx.runMutation(bootstrapRecordsRef, { tag, passwordHash, publishedStorageId, reviewStorageId, separationStorageId }) as {
         tag: string;
         providerTransport: "stub";
+        deployedCommitSha: string;
+        billingDisabled: true;
         sessions: Record<(typeof FIXED_ROLES)[number], { userId: string; sessionToken: string }>;
         variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
+        jurisdictionUsers: Record<"member" | "formerMember", { userId: string; sessionToken: string }>;
         records: {
           chatId: Id<"chatSessions">; resourceId: Id<"legalResources">; publishedVersionId: Id<"documentVersions">;
           reviewVersionId: Id<"documentVersions">; separationVersionId: Id<"documentVersions">; conversationGrantId: Id<"adminAccessGrants">; jurisdictionId: Id<"jurisdictions">;
           userId: string; stagingBucketId: string; productionBucketId: string;
           callbackToken: string; callbackJobId: Id<"integrationJobs">; usageUserId: string;
+          jurisdictionCountryId: Id<"jurisdictions">; jurisdictionTownId: Id<"jurisdictions">;
+          publicOrganizationJurisdictionId: Id<"jurisdictions">; jurisdictionMemberOnlyId: Id<"jurisdictions">;
+          jurisdictionMemberId: Id<"organizationMemberships">; jurisdictionFormerMemberId: Id<"organizationMemberships">;
         };
       };
     } catch (error) {
@@ -423,22 +728,139 @@ export const bootstrap = internalAction({
 
 export const cleanup = internalMutation({
   args: { tag: v.string() },
-  returns: v.object({ tag: v.string(), deleted: v.number() }),
+  returns: v.object({
+    tag: v.string(),
+    deleted: v.number(),
+    cleanupConflict: v.boolean(),
+    cleanupPending: v.boolean(),
+  }),
   handler: async (ctx, { tag }) => {
     requireFixtureEnvironment(); requireTag(tag);
-    return { tag, deleted: await cleanupFixture(ctx, tag) };
+    const environment = process.env.ADMIN_E2E_TARGET_ENV as "test" | "preview";
+    const [tagRuns, environmentRuns] = await Promise.all([
+      ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(2),
+      ctx.db.query("e2eFixtureRuns").withIndex("by_environment", (q) => q.eq("environment", environment)).take(2),
+    ]);
+    if (tagRuns.length > 1 || environmentRuns.length > 1) throw new ConvexError("E2E_FIXTURE_RUN_STATE_INVALID");
+    const run = tagRuns[0];
+    if (!run) {
+      const deleted = await cleanupFixture(ctx, tag);
+      return { tag, deleted, cleanupConflict: false, cleanupPending: deleted !== 0 };
+    }
+    if (run.environment !== environment || environmentRuns[0]?._id !== run._id) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
+    }
+    const currentFlag = await ctx.db.get(run.fixtureFlagWrite.rowId);
+    const expected = run.fixtureFlagWrite;
+    if (!currentFlag
+      || currentFlag.key !== "unified_jurisdictions"
+      || currentFlag.environment !== environment
+      || currentFlag.enabled !== expected.enabled
+      || currentFlag.updatedAt !== expected.updatedAt
+      || currentFlag.updatedBy !== expected.updatedBy) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
+    }
+    const ownership = await ctx.db.query("e2eFixtureOwnership")
+      .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
+      .take(501);
+    if (ownership.length > 500) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted: 0, cleanupConflict: true, cleanupPending: false };
+    }
+    const ownedUserIds = ownership.filter((row) => row.kind === "better_auth_user").map((row) => row.targetId);
+    await ctx.db.patch(run._id, { state: "cleaning", updatedAt: Date.now() });
+    let deleted = await cleanupFixture(ctx, tag, { deleteOwnership: false });
+    if (deleted !== 0) {
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
+    }
+    let fixtureUserDependencyStillExists = false;
+    for (const userId of ownedUserIds) {
+      for (const model of ["session", "account", "twoFactor", "user"] as const) {
+        const result = await ctx.runQuery(components.betterAuth.adapter.findMany, {
+          model,
+          where: [{ field: model === "user" ? "_id" : "userId", operator: "eq", value: userId }],
+          select: ["id"],
+          paginationOpts: { numItems: 1, cursor: null },
+        }) as { page: Array<{ _id: string }> };
+        if (result.page.length !== 0) fixtureUserDependencyStillExists = true;
+      }
+    }
+    if (await globalCleanupBoundsExceeded(ctx)) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
+    }
+    if (fixtureUserDependencyStillExists) {
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
+    }
+    if (ownership.length !== 0) {
+      const ownershipBatch = ownership.slice(0, 20);
+      for (const row of ownershipBatch) { await ctx.db.delete(row._id); deleted += 1; }
+      return { tag, deleted, cleanupConflict: false, cleanupPending: true };
+    }
+    if (run.priorFlag.kind === "absent") {
+      await ctx.db.delete(currentFlag._id);
+    } else {
+      if (run.priorFlag.rowId !== currentFlag._id) throw new ConvexError("E2E_FIXTURE_FLAG_STATE_INVALID");
+      await ctx.db.replace(currentFlag._id, {
+        key: "unified_jurisdictions",
+        environment,
+        enabled: run.priorFlag.enabled,
+        updatedAt: run.priorFlag.updatedAt,
+        ...(run.priorFlag.updatedBy !== undefined ? { updatedBy: run.priorFlag.updatedBy } : {}),
+      });
+    }
+    const restoredFlags = await ctx.db.query("featureFlags")
+      .withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", environment))
+      .take(2);
+    const exactFlagRestored = run.priorFlag.kind === "absent"
+      ? restoredFlags.length === 0
+      : restoredFlags.length === 1
+        && restoredFlags[0]._id === run.priorFlag.rowId
+        && restoredFlags[0].enabled === run.priorFlag.enabled
+        && restoredFlags[0].updatedAt === run.priorFlag.updatedAt
+        && restoredFlags[0].updatedBy === run.priorFlag.updatedBy;
+    if (!exactFlagRestored) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
+    }
+    const residualOwnership = await ctx.db.query("e2eFixtureOwnership")
+      .withIndex("by_tag_and_kind", (q) => q.eq("tag", tag))
+      .take(1);
+    if (residualOwnership.length !== 0) {
+      await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+      return { tag, deleted, cleanupConflict: true, cleanupPending: false };
+    }
+    await ctx.db.delete(run._id);
+    return { tag, deleted, cleanupConflict: false, cleanupPending: false };
   },
 });
 
 const matrixRoleValidator = v.union(...FIXED_ROLES.map((role) => v.literal(role)));
 const MATRIX_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
-function matrixJurisdictionCode(path: string, role: (typeof FIXED_ROLES)[number]) {
+function matrixJurisdictionCode(path: string, role: (typeof FIXED_ROLES)[number], offset = 0) {
   const pathIndex = E2E_PRIVILEGED_FUNCTIONS.findIndex((entry) => entry.path === path);
   const roleIndex = FIXED_ROLES.indexOf(role);
   if (pathIndex < 0 || roleIndex < 0) throw new ConvexError("E2E_MATRIX_ENTRY_NOT_FOUND");
-  const ordinal = pathIndex * FIXED_ROLES.length + roleIndex;
+  const ordinal = (pathIndex * FIXED_ROLES.length + roleIndex + offset) % (26 * 26);
   return `${String.fromCharCode(65 + Math.floor(ordinal / 26))}${String.fromCharCode(65 + (ordinal % 26))}`;
+}
+
+async function allocateMatrixJurisdictionCode(
+  ctx: MutationCtx,
+  path: string,
+  role: (typeof FIXED_ROLES)[number],
+) {
+  for (let offset = 0; offset < 26 * 26; offset += 1) {
+    const code = matrixJurisdictionCode(path, role, offset);
+    const occupied = await ctx.db.query("jurisdictions")
+      .withIndex("by_code", (q) => q.eq("code", code))
+      .take(1);
+    if (occupied.length === 0) return code;
+  }
+  throw new ConvexError("E2E_MATRIX_JURISDICTION_CODES_EXHAUSTED");
 }
 
 async function fixtureActor(ctx: MutationCtx, tag: string, role: (typeof FIXED_ROLES)[number]) {
@@ -500,9 +922,10 @@ async function recordFixtureOwnership(
 async function mainFixtureRecords(ctx: MutationCtx, tag: string) {
   const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", tag)).unique();
   if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-  const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(500);
-  const resource = resources.find((row) => row.createdBy === `fixture:${tag}`);
-  if (!resource) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
+  const resource = await ctx.db.query("legalResources")
+    .withIndex("by_jurisdictionId_and_officialCitationKey", (q) => q.eq("jurisdictionId", jurisdiction._id).eq("officialCitationKey", tag))
+    .unique();
+  if (!resource || resource.createdBy !== `fixture:${tag}`) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
   const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", resource._id)).take(20);
   const storageId = versions.find((row) => row.versionNumber === 3)?.originalStorageId;
   if (!storageId) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
@@ -526,12 +949,15 @@ function publicationOperationFromPayload(payload: string): StubPublicationOperat
 }
 
 async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id<"documentVersions">) {
+  await ownedReadyRun(ctx, tag);
   const version = await ctx.db.get(versionId);
   if (!version) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   const resource = await ctx.db.get(version.resourceId);
-  if (!resource) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  if (!resource || resource.createdBy !== `fixture:${tag}`) {
+    throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
+  }
   const jurisdiction = await ctx.db.get(resource.jurisdictionId);
-  if (!jurisdiction || (jurisdiction.slug !== tag && jurisdiction.createdBy !== `fixture:${tag}`)) {
+  if (!jurisdiction || jurisdiction.slug !== tag || jurisdiction.createdBy !== `fixture:${tag}`) {
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   return { version, resource };
@@ -663,11 +1089,12 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
 
   switch (input.path) {
     case "admin/featureFlags:setAdminPanel": {
-      await insertStepUp(ctx, actor, "admin_panel_set", "admin_panel:test", input.key);
+      const environment = process.env.ADMIN_E2E_TARGET_ENV!;
+      await insertStepUp(ctx, actor, "admin_panel_set", `admin_panel:${environment}`, input.key);
       Object.assign(args, {
-        environment: "test",
+        environment,
         enabled: true,
-        confirmation: "ADMIN_PANEL test ENABLE",
+        confirmation: `ADMIN_PANEL ${environment} ENABLE`,
         reason,
         idempotencyKey: input.key,
       });
@@ -687,10 +1114,10 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/exports:issueConversationExportReference": { const { chatId, grantId } = await chatAndGrant(); const { storageId } = await mainFixtureRecords(ctx, input.tag); const correlationId = `${marker}-export`; await ctx.db.insert("adminExports", { correlationId, requesterId: actor.userId, requesterSessionId: actor.sessionId, chatSessionId: chatId, accessGrantId: grantId, status: "ready", storageId, expiresAt: Date.now() + 10 * 60_000, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { correlationId, grantId }); break; }
     case "admin/documents:generateUploadUrl": break;
     case "admin/documents:createDocumentVersion": { const resourceId = await createMatrixResource(ctx, input.tag, input.key, "create-version"); const stored = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { resourceId, storageId: stored.storageId, filename: `${marker}.pdf`, mimeType: "application/pdf", byteSize: stored.byteSize, sha256: stored.sha256Hex, sourceUrl: "https://example.invalid/matrix", effectiveAt: "2026-02-01" }); break; }
-    case "admin/resources:createJurisdiction": Object.assign(args, { code: matrixJurisdictionCode(input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
+    case "admin/resources:createJurisdiction": Object.assign(args, { code: await allocateMatrixJurisdictionCode(ctx, input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
     case "admin/resources:updateJurisdiction":
     case "admin/resources:enableJurisdiction":
-    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const id = await ctx.db.insert("jurisdictions", { code: `M${crypto.randomUUID().slice(0, 8).toUpperCase()}`, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
+    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const code = await allocateMatrixJurisdictionCode(ctx, input.path, input.role); const id = await ctx.db.insert("jurisdictions", { code, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
     case "admin/resources:createResource": { const { jurisdiction } = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { jurisdictionId: jurisdiction._id, type: "act", title: `${marker} resource`, issuer: "E2E fixture", officialCitation: `${marker}-create`, sourceUrl: "https://example.invalid/matrix", topics: ["fixture"], effectiveDate: "2026-01-01", reason }); break; }
     case "admin/resources:updateResource":
     case "admin/resources:archiveResource":
@@ -841,25 +1268,142 @@ async function readMatrixOperation(ctx: MutationCtx, input: { tag: string; path:
   return { path: input.path, success: entry.success, terminal, state };
 }
 
-const controlOperationValidator = v.union(
+const mutationControlOperationValidator = v.union(
   v.literal("arm_provider_outcome"),
   v.literal("expire_conversation_grant"),
   v.literal("read_state"),
   v.literal("run_retention"),
   v.literal("prepare_matrix_operation"),
   v.literal("read_matrix_operation"),
+  v.literal("deactivate_jurisdiction_member"),
+  v.literal("set_unified_jurisdictions_flag"),
 );
+const controlOperationValidator = v.union(
+  mutationControlOperationValidator,
+  v.literal("verify_place_claim"),
+  v.literal("verify_telemetry_ingest_secret"),
+);
+
+async function ownedReadyRun(ctx: MutationCtx | QueryCtx, tag: string) {
+  const environment = process.env.ADMIN_E2E_TARGET_ENV as "test" | "preview";
+  const [tagRuns, environmentRuns] = await Promise.all([
+    ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", tag)).take(2),
+    ctx.db.query("e2eFixtureRuns").withIndex("by_environment", (q) => q.eq("environment", environment)).take(2),
+  ]);
+  if (tagRuns.length !== 1 || environmentRuns.length !== 1
+    || tagRuns[0]._id !== environmentRuns[0]._id
+    || tagRuns[0].state !== "ready") {
+    throw new ConvexError("E2E_FIXTURE_RUN_NOT_READY");
+  }
+  return tagRuns[0];
+}
+
+async function ownedSuperAdminActorId(ctx: MutationCtx | QueryCtx, tag: string) {
+  await ownedReadyRun(ctx, tag);
+  const actor = (await listFixtureUsers(ctx, tag))
+    .find((user) => user.email === `super_admin.${tag}@e2e.invalid`);
+  if (!actor) throw new ConvexError("E2E_FIXTURE_ACTOR_NOT_FOUND");
+  return actor.userId;
+}
+
+export const verifyPlaceClaim = internalQuery({
+  args: { tag: v.string(), claim: v.string() },
+  returns: v.object({
+    ok: v.literal(true),
+    place: v.object({
+      googlePlaceId: v.string(),
+      name: v.string(),
+      formattedAddress: v.string(),
+      latitude: v.number(),
+      longitude: v.number(),
+      countryCode: v.optional(v.string()),
+      aliases: v.array(v.string()),
+    }),
+  }),
+  handler: async (ctx, args) => {
+    requireFixtureEnvironment(); requireTag(args.tag);
+    const actorId = await ownedSuperAdminActorId(ctx, args.tag);
+    return { ok: true as const, place: await verifyVerifiedPlaceClaim(args.claim, actorId) };
+  },
+});
+
+export const verifyTelemetryIngestSecret = internalQuery({
+  args: { tag: v.string(), proof: v.string() },
+  returns: v.object({ ok: v.literal(true) }),
+  handler: async (ctx, args) => {
+    requireFixtureEnvironment(); requireTag(args.tag);
+    await ownedReadyRun(ctx, args.tag);
+    if (!(await verifyTelemetryServiceProof(args.proof, [TELEMETRY_SECRET_PROOF_DOMAIN, args.tag]))) {
+      throw new ConvexError("E2E_TELEMETRY_INGEST_SECRET_MISMATCH");
+    }
+    return { ok: true as const };
+  },
+});
 
 export const applyControl = internalMutation({
   args: {
-    tag: v.string(), operation: controlOperationValidator, versionId: v.optional(v.id("documentVersions")),
+    tag: v.string(), operation: mutationControlOperationValidator, versionId: v.optional(v.id("documentVersions")),
     publicationOperation: v.optional(v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish"))),
     providerOutcome: v.optional(v.union(v.literal("succeeded"), v.literal("failed"))),
+    membershipId: v.optional(v.id("organizationMemberships")),
+    enabled: v.optional(v.boolean()),
     path: v.optional(v.string()), role: v.optional(matrixRoleValidator), key: v.optional(v.string()), payload: v.optional(v.any()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     requireFixtureEnvironment(); requireTag(args.tag);
+    if (args.operation === "deactivate_jurisdiction_member") {
+      if (!args.membershipId) throw new ConvexError("E2E_MEMBERSHIP_ARGUMENT_REQUIRED");
+      await ownedReadyRun(ctx, args.tag);
+      const membership = await ctx.db.get(args.membershipId);
+      if (!membership || membership.status !== "active") throw new ConvexError("E2E_FIXTURE_MEMBERSHIP_MISMATCH");
+      const [organization, users] = await Promise.all([
+        ctx.db.get(membership.organizationId),
+        listFixtureUsers(ctx, args.tag),
+      ]);
+      const member = users.find((user) => user.email === `member.${args.tag}@e2e.invalid`);
+      const jurisdictions = organization
+        ? await ctx.db.query("jurisdictions").withIndex("by_organizationId", (q) => q.eq("organizationId", organization._id)).take(2)
+        : [];
+      if (!organization
+        || organization.createdBy !== `fixture:${args.tag}`
+        || membership.userId !== member?.userId
+        || jurisdictions.length !== 1
+        || jurisdictions[0].visibility !== "members"
+        || jurisdictions[0].createdBy !== `fixture:${args.tag}`) {
+        throw new ConvexError("E2E_FIXTURE_MEMBERSHIP_MISMATCH");
+      }
+      await ctx.db.patch(membership._id, { status: "inactive", updatedAt: Date.now() });
+      return { membershipId: membership._id, active: false as const };
+    }
+    if (args.operation === "set_unified_jurisdictions_flag") {
+      if (args.enabled === undefined) throw new ConvexError("E2E_FLAG_ARGUMENT_REQUIRED");
+      const run = await ownedReadyRun(ctx, args.tag);
+      const flag = await ctx.db.get(run.fixtureFlagWrite.rowId);
+      const expected = run.fixtureFlagWrite;
+      if (!flag
+        || flag.key !== "unified_jurisdictions"
+        || flag.environment !== run.environment
+        || flag.enabled !== expected.enabled
+        || flag.updatedAt !== expected.updatedAt
+        || flag.updatedBy !== expected.updatedBy) {
+        await ctx.db.patch(run._id, { state: "cleanup_conflict", updatedAt: Date.now() });
+        return { enabled: expected.enabled, cleanupConflict: true as const };
+      }
+      const fixtureFlagWrite = {
+        rowId: flag._id,
+        enabled: args.enabled,
+        updatedAt: Math.max(Date.now(), flag.updatedAt + 1),
+        updatedBy: `fixture:${args.tag}`,
+      };
+      await ctx.db.patch(flag._id, {
+        enabled: fixtureFlagWrite.enabled,
+        updatedAt: fixtureFlagWrite.updatedAt,
+        updatedBy: fixtureFlagWrite.updatedBy,
+      });
+      await ctx.db.patch(run._id, { fixtureFlagWrite, updatedAt: fixtureFlagWrite.updatedAt });
+      return { enabled: args.enabled, cleanupConflict: false as const };
+    }
     if (args.operation === "prepare_matrix_operation") {
       if (!args.path || !args.role || !args.key) throw new ConvexError("E2E_MATRIX_ARGUMENTS_REQUIRED");
       return await prepareMatrixOperation(ctx, { tag: args.tag, path: args.path, role: args.role, key: args.key });
@@ -879,12 +1423,12 @@ export const applyControl = internalMutation({
         outcome: args.providerOutcome,
       });
     }
-    const jurisdiction = await ctx.db.query("jurisdictions").withIndex("by_slug", (q) => q.eq("slug", args.tag)).unique();
-    if (!jurisdiction) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-    const resources = await ctx.db.query("legalResources")
-      .withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(10);
-    const resource = resources.find((row) => row.createdBy === `fixture:${args.tag}`);
-    if (!resource) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
+    if (args.operation === "read_state" && !args.versionId) {
+      throw new ConvexError("E2E_VERSION_ARGUMENT_REQUIRED");
+    }
+    const { resource } = args.operation === "read_state"
+      ? await requireTaggedVersion(ctx, args.tag, args.versionId!)
+      : await mainFixtureRecords(ctx, args.tag);
 
     if (args.operation === "run_retention") {
       // Never call the global retention engine from fixtures. This boundary
@@ -930,6 +1474,8 @@ export const applyControl = internalMutation({
 });
 
 const applyControlRef = makeFunctionReference<"mutation">("admin/e2eFixtures:applyControl");
+const verifyPlaceClaimRef = makeFunctionReference<"query">("admin/e2eFixtures:verifyPlaceClaim");
+const verifyTelemetryIngestSecretRef = makeFunctionReference<"query">("admin/e2eFixtures:verifyTelemetryIngestSecret");
 export const control = internalAction({
   args: {
     tag: v.string(),
@@ -937,14 +1483,26 @@ export const control = internalAction({
     versionId: v.optional(v.id("documentVersions")),
     publicationOperation: v.optional(v.union(v.literal("publish"), v.literal("rollback"), v.literal("unpublish"))),
     providerOutcome: v.optional(v.union(v.literal("succeeded"), v.literal("failed"))),
+    membershipId: v.optional(v.id("organizationMemberships")),
+    enabled: v.optional(v.boolean()),
     path: v.optional(v.string()),
     role: v.optional(matrixRoleValidator),
     key: v.optional(v.string()),
     payload: v.optional(v.any()),
+    claim: v.optional(v.string()),
+    proof: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     requireFixtureEnvironment(); requireTag(args.tag);
+    if (args.operation === "verify_place_claim") {
+      if (!args.claim) throw new ConvexError("E2E_PLACE_CLAIM_ARGUMENT_REQUIRED");
+      return await ctx.runQuery(verifyPlaceClaimRef, { tag: args.tag, claim: args.claim });
+    }
+    if (args.operation === "verify_telemetry_ingest_secret") {
+      if (!args.proof) throw new ConvexError("E2E_TELEMETRY_INGEST_PROOF_REQUIRED");
+      return await ctx.runQuery(verifyTelemetryIngestSecretRef, { tag: args.tag, proof: args.proof });
+    }
     return await ctx.runMutation(applyControlRef, args);
   },
 });

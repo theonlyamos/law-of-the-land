@@ -37,6 +37,18 @@ type AuthFixture = {
 const setAdminPanel = makeFunctionReference<"mutation">(
   "admin/featureFlags:setAdminPanel",
 );
+const setUnifiedJurisdictions = makeFunctionReference<"mutation">(
+  "admin/featureFlags:setUnifiedJurisdictions",
+);
+const getUnifiedJurisdictionRolloutState = makeFunctionReference<"query">(
+  "admin/featureFlags:getUnifiedJurisdictionRolloutState",
+);
+const seedGhanaJurisdictionV2 = makeFunctionReference<"mutation">(
+  "admin/migrations:seedGhanaJurisdictionV2",
+);
+const backfillJurisdictionReferences = makeFunctionReference<"mutation">(
+  "admin/migrations:backfillJurisdictionReferences",
+);
 
 async function createAuthFixture(
   t: TestConvex<typeof schema>,
@@ -216,6 +228,242 @@ describe("admin permission registry", () => {
       operations: await ctx.db.query("adminOperations").withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actor.userId).eq("idempotencyKey", "flag-enable-1")).take(2),
       audits: (await ctx.db.query("auditEvents").withIndex("by_actorId_and_createdAt", (q) => q.eq("actorId", actor.userId)).take(10)).filter((row) => row.action === "admin.panel_flag_set" && row.correlationId === replay.correlationId),
     }))).resolves.toMatchObject({ operations: [expect.any(Object)], audits: [expect.any(Object)] });
+  });
+
+  it("enables unified jurisdictions only after Ghana and every second clean execute pass are ready", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "enabled",
+        isDefault: true,
+        productionBucketId: "11833",
+        providerSyncState: "synced",
+        createdBy: "bootstrap",
+        updatedBy: "bootstrap",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+    });
+    await t.mutation(seedGhanaJurisdictionV2, {
+      environment: "test",
+      place: {
+        googlePlaceId: "approved-ghana-place",
+        formattedAddress: "Ghana",
+        latitude: 7.9465,
+        longitude: -1.0232,
+      },
+      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
+      reason: "Adopt the reviewed Ghana country projection",
+      idempotencyKey: "permission-ghana-seed",
+    });
+    for (const target of [
+      "chatSessions",
+      "telemetryCorrelations",
+      "queryRuns",
+      "dailyMetrics",
+    ] as const) {
+      for (const pass of [1, 2]) {
+        await t.mutation(backfillJurisdictionReferences, {
+          environment: "test",
+          target,
+          cursor: null,
+          batchSize: 100,
+          dryRun: false,
+          confirmation: `UNIFIED_JURISDICTIONS BACKFILL test ${target} EXECUTE`,
+          reason: "Verify stable jurisdiction references",
+          idempotencyKey: `ready-${target}-${pass}`,
+        });
+      }
+    }
+    await t.run((ctx) =>
+      ctx.db.insert("adminStepUpProofs", {
+        actorId: actor.userId,
+        sessionId: actor.sessionId,
+        action: "unified_jurisdictions_set",
+        targetId: "unified_jurisdictions:test",
+        idempotencyKey: "unified-enable-1",
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    process.env.ADMIN_PANEL_ENABLED = "false";
+    const client = t.withIdentity({
+      subject: actor.userId,
+      sessionId: actor.sessionId,
+    });
+    await expect(
+      client.mutation(setUnifiedJurisdictions, {
+        environment: "test",
+        enabled: true,
+        confirmation: "UNIFIED_JURISDICTIONS test ENABLE",
+        reason: "Enable the verified stable jurisdiction rollout",
+        idempotencyKey: "unified-enable-1",
+      }),
+    ).resolves.toMatchObject({ environment: "test", enabled: true });
+    await expect(
+      client.query(getUnifiedJurisdictionRolloutState, {}),
+    ).resolves.toMatchObject({
+      environment: "test",
+      flagEnabled: true,
+      canEnable: true,
+      blockers: [],
+      legacyObservation: {
+        active: true,
+        generation: 1,
+        acceptedSinceStart: 0,
+      },
+    });
+
+    for (const [enabled, key] of [[false, "unified-disable-cycle"], [true, "unified-reenable-cycle"]] as const) {
+      await t.run((ctx) => ctx.db.insert("adminStepUpProofs", {
+        actorId: actor.userId,
+        sessionId: actor.sessionId,
+        action: "unified_jurisdictions_set",
+        targetId: "unified_jurisdictions:test",
+        idempotencyKey: key,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }));
+      await client.mutation(setUnifiedJurisdictions, {
+        environment: "test", enabled,
+        confirmation: `UNIFIED_JURISDICTIONS test ${enabled ? "ENABLE" : "DISABLE"}`,
+        reason: enabled ? "Restart the verified observation generation" : "End the current observation generation",
+        idempotencyKey: key,
+      });
+    }
+    await expect(client.query(getUnifiedJurisdictionRolloutState, {})).resolves.toMatchObject({
+      flagEnabled: true,
+      legacyObservation: { active: true, generation: 2, acceptedSinceStart: 0,
+        lastAcceptedAt: null },
+    });
+  });
+
+  it("keeps unified-jurisdiction rollback available while not ready and replays without a second audit", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin",
+      twoFactorEnabled: true,
+    });
+    const key = "unified-disable-1";
+    await t.run((ctx) =>
+      ctx.db.insert("adminStepUpProofs", {
+        actorId: actor.userId,
+        sessionId: actor.sessionId,
+        action: "unified_jurisdictions_set",
+        targetId: "unified_jurisdictions:wrong",
+        idempotencyKey: key,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    const client = t.withIdentity({
+      subject: actor.userId,
+      sessionId: actor.sessionId,
+    });
+    const args = {
+      environment: "test",
+      enabled: false,
+      confirmation: "UNIFIED_JURISDICTIONS test DISABLE",
+      reason: "Roll back while migration readiness is blocked",
+      idempotencyKey: key,
+    };
+    await expect(client.mutation(setUnifiedJurisdictions, args)).rejects.toThrow(
+      "ADMIN_STEP_UP_REQUIRED",
+    );
+    await t.run((ctx) =>
+      ctx.db.insert("adminStepUpProofs", {
+        actorId: actor.userId,
+        sessionId: actor.sessionId,
+        action: "unified_jurisdictions_set",
+        targetId: "unified_jurisdictions:test",
+        idempotencyKey: key,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    const first = await client.mutation(setUnifiedJurisdictions, args);
+    const replay = await client.mutation(setUnifiedJurisdictions, args);
+    expect(replay).toEqual(first);
+    await expect(client.mutation(setUnifiedJurisdictions, {
+      ...args, reason: "Conflicting rollback reason",
+    })).rejects.toThrow("ADMIN_IDEMPOTENCY_CONFLICT");
+    await expect(
+      t.run(async (ctx) => {
+        const audits = await ctx.db
+          .query("auditEvents")
+          .withIndex("by_action_and_createdAt", (q) =>
+            q.eq("action", "admin.unified_jurisdictions_flag_set"),
+          )
+          .take(2);
+        return { audits, flags: await ctx.db.query("featureFlags").take(10) };
+      }),
+    ).resolves.toMatchObject({
+      audits: [expect.any(Object)],
+      flags: expect.arrayContaining([
+        expect.objectContaining({
+          key: "unified_jurisdictions",
+          environment: "test",
+          enabled: false,
+        }),
+      ]),
+    });
+  });
+
+  it("rejects invalid unified flag environment, key, confirmation, and proof bindings", async () => {
+    const t = createTestBackend();
+    const actor = await createAuthFixture(t, {
+      role: "super_admin", twoFactorEnabled: true,
+    });
+    const client = t.withIdentity({ subject: actor.userId, sessionId: actor.sessionId });
+    const base = {
+      environment: "test", enabled: false,
+      confirmation: "UNIFIED_JURISDICTIONS test DISABLE",
+      reason: "Validate recovery control bindings",
+      idempotencyKey: "unified-validation-key",
+    };
+    await expect(client.mutation(setUnifiedJurisdictions, {
+      ...base, environment: "wrong",
+    })).rejects.toThrow("ADMIN_FLAG_ENVIRONMENT_INVALID");
+    await expect(client.mutation(setUnifiedJurisdictions, {
+      ...base, idempotencyKey: "bad",
+    })).rejects.toThrow("ADMIN_INVALID_IDEMPOTENCY_KEY");
+    await expect(client.mutation(setUnifiedJurisdictions, {
+      ...base, confirmation: "UNIFIED_JURISDICTIONS test ENABLE",
+    })).rejects.toThrow("ADMIN_CONFIRMATION_MISMATCH");
+
+    const invalidProofs = [
+      { name: "wrong actor", actorId: "another-actor" },
+      { name: "wrong session", sessionId: "another-session" },
+      { name: "wrong action", action: "admin_panel_set" },
+      { name: "wrong target", targetId: "unified_jurisdictions:wrong" },
+      { name: "wrong key", idempotencyKey: "another-proof-key" },
+      { name: "expired", expiresAt: Date.now() - 1 },
+      { name: "consumed", consumedAt: Date.now() },
+    ] as const;
+    for (const [index, invalid] of invalidProofs.entries()) {
+      const { name, ...proofOverride } = invalid;
+      const idempotencyKey = `unified-invalid-proof-${index}`;
+      await t.run((ctx) => ctx.db.insert("adminStepUpProofs", {
+        actorId: actor.userId,
+        sessionId: actor.sessionId,
+        action: "unified_jurisdictions_set",
+        targetId: "unified_jurisdictions:test",
+        idempotencyKey,
+        issuedAt: Date.now() - 1_000,
+        expiresAt: Date.now() + 60_000,
+        ...proofOverride,
+      }));
+      await expect(client.mutation(setUnifiedJurisdictions, {
+        ...base, idempotencyKey,
+      }), name).rejects.toThrow("ADMIN_STEP_UP_REQUIRED");
+    }
   });
   it("grants only the fixed role permissions", () => {
     expect(

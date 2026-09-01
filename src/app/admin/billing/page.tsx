@@ -16,13 +16,14 @@ export default async function AdminBillingPage({ searchParams }: { searchParams:
   if (access.status === "denied" || !hasRolePermission(access.currentAdmin.roles, "billing", "read")) redirect("/admin/forbidden");
   const canWrite = hasRolePermission(access.currentAdmin.roles, "billing", "write");
   const parameters = await searchParams;
+  const observedAt = Date.now();
   let failed = false;
   let subscriptions: { page: Subscription[]; isDone: boolean; continueCursor: string } = { page: [], isDone: true, continueCursor: "" };
   let usage: { page: Usage[]; isDone: boolean; continueCursor: string } = { page: [], isDone: true, continueCursor: "" };
   try {
     [subscriptions, usage] = await Promise.all([
-      fetchAuthQuery(api.admin.billing.listSubscriptions, { paginationOpts: { numItems: 25, cursor: parameters.subscriptionsCursor ?? null } }),
-      fetchAuthQuery(api.admin.billing.listUsage, { paginationOpts: { numItems: 25, cursor: parameters.usageCursor ?? null } }),
+      fetchAuthQuery(api.admin.billing.listSubscriptions, { paginationOpts: { numItems: 25, cursor: parameters.subscriptionsCursor ?? null }, now: observedAt }),
+      fetchAuthQuery(api.admin.billing.listUsage, { paginationOpts: { numItems: 25, cursor: parameters.usageCursor ?? null }, now: observedAt }),
     ]);
   } catch { failed = true; }
 

@@ -259,6 +259,8 @@ export function UserActions({
                 Resend verification email
               </button>
             ) : null}
+          </PermissionBoundary>
+          <PermissionBoundary resource="user" action="ban">
             <button className={actionButton} type="button" onClick={() => openAction("delete")}>
               Queue user deletion
             </button>

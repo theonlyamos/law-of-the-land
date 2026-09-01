@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PublicJurisdiction } from "@/lib/countries";
+import { getFunctionName, type FunctionReference } from "convex/server";
 
 const publicJurisdictions: PublicJurisdiction[] = [
   {
@@ -31,6 +32,7 @@ const mocks = vi.hoisted(() => ({
     messageCount: number;
   }>,
   sessionsStatus: "Exhausted",
+  unifiedEnabled: false as boolean | undefined,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -43,6 +45,19 @@ vi.mock("convex/react", () => ({
   useQuery: mocks.useQuery,
 }));
 
+vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
+  ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
+    <>
+      <button type="button" onClick={() => onChange({ id: "ghana-id", name: "Ghana", slug: "ghana", kind: "geographic", isDefault: true, legacyCountryCode: "GH" })}>
+        Choose Ghana unified
+      </button>
+      <button type="button" onClick={() => onChange({ id: "university-id", name: "Private University", slug: "private-university", kind: "organizational", isDefault: false })}>
+        Choose organization unified
+      </button>
+    </>
+  ),
+}));
+
 import Home from "./page";
 
 beforeEach(() => {
@@ -52,8 +67,16 @@ beforeEach(() => {
   mocks.auth = { isAuthenticated: false, isLoading: false };
   mocks.sessions = [];
   mocks.sessionsStatus = "Exhausted";
+  mocks.unifiedEnabled = false;
   vi.stubGlobal("crypto", { randomUUID: () => "new-chat" });
-  mocks.useQuery.mockReturnValue(publicJurisdictions);
+  mocks.useQuery.mockImplementation((reference: FunctionReference<"query">, args?: unknown) => {
+    const name = getFunctionName(reference);
+    if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return mocks.unifiedEnabled;
+    if (name === "jurisdictions:listPublicEnabled") {
+      return args === "skip" ? undefined : publicJurisdictions;
+    }
+    return undefined;
+  });
 });
 
 afterEach(() => {
@@ -78,7 +101,11 @@ describe("public home jurisdiction catalog", () => {
   });
 
   it("explains when the governed catalog loaded without any jurisdictions", () => {
-    mocks.useQuery.mockReturnValue([]);
+    mocks.useQuery.mockImplementation((reference: FunctionReference<"query">, args?: unknown) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return false;
+      return args === "skip" ? undefined : [];
+    });
 
     render(<Home />);
 
@@ -116,12 +143,12 @@ describe("public home jurisdiction catalog", () => {
   });
 
   it("disables research while the jurisdiction catalog is loading", () => {
-    mocks.useQuery.mockReturnValue(undefined);
+    mocks.unifiedEnabled = undefined;
 
     render(<Home />);
 
     expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading jurisdiction access…");
   });
 
   it("returns a stale country selection to the configured default", () => {
@@ -131,7 +158,7 @@ describe("public home jurisdiction catalog", () => {
     });
     expect(screen.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("NG");
 
-    mocks.useQuery.mockReturnValue([
+    const updated = [
       {
         code: "GH",
         name: "Ghana",
@@ -144,7 +171,12 @@ describe("public home jurisdiction catalog", () => {
         slug: "south-africa",
         isDefault: false,
       },
-    ]);
+    ];
+    mocks.useQuery.mockImplementation((reference: FunctionReference<"query">, args?: unknown) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return false;
+      return args === "skip" ? undefined : updated;
+    });
     rerender(<Home />);
 
     expect(screen.getByRole("combobox", { name: "Research jurisdiction" })).toHaveValue("GH");
@@ -179,5 +211,38 @@ describe("public home jurisdiction catalog", () => {
 
     fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
     expect(mocks.push).toHaveBeenCalledOnce();
+  });
+
+  it("skips the legacy full catalog and emits a canonical stable-ID link when unified selection is on", () => {
+    mocks.unifiedEnabled = true;
+    render(<Home />);
+
+    expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Choose Ghana unified" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26jurisdiction%3Dghana-id%26country%3DGH",
+    );
+    expect(
+      mocks.useQuery.mock.calls.some(
+        ([reference, args]) =>
+          getFunctionName(reference as FunctionReference<"query">) ===
+            "jurisdictions:listPublicEnabled" && args === "skip",
+      ),
+    ).toBe(true);
+  });
+
+  it("starts a code-less organization chat with only its canonical stable ID", () => {
+    mocks.unifiedEnabled = true;
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose organization unified" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Employment policy?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/new-chat?q=Employment%20policy%3F&jurisdiction=university-id",
+    );
   });
 });

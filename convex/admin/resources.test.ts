@@ -281,6 +281,108 @@ describe("jurisdiction governance", () => {
     );
   });
 
+  it("projects typed countries through the exact legacy admin contract", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const auditor = await asAdmin(t, "auditor");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("jurisdictions", {
+        legacyCountryCode: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "enabled",
+        isDefault: true,
+        stagingBucketId: "staging-gh",
+        productionBucketId: "11833",
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const result = await auditor.client.query(listJurisdictions, page);
+    expect(result.page).toEqual([expect.objectContaining({ code: "GH", name: "Ghana" })]);
+    expect(Object.keys(result.page[0]).sort()).toEqual([
+      "_creationTime", "_id", "code", "createdAt", "createdBy", "isDefault",
+      "name", "productionBucketId", "providerSyncState", "slug", "stagingBucketId",
+      "status", "updatedAt", "updatedBy",
+    ].sort());
+    await expect(auditor.client.query(listJurisdictions, {
+      code: "gh",
+      paginationOpts: { numItems: 25, cursor: null },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({ code: "GH", name: "Ghana" })],
+      isDone: true,
+    });
+  });
+
+  it("returns a code-less organizational jurisdiction's real ID for resource creation", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const organizationJurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Accra Bar Association",
+        slug: "accra-bar-association",
+        class: "professional_association",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Accra Bar Association",
+        slug: "accra-bar-association",
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "organizational",
+        visibility: "members",
+        organizationId,
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("organizationalJurisdictions", {
+        jurisdictionId,
+        scopeMode: "global",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return jurisdictionId;
+    });
+
+    const jurisdictions = await manager.client.query(listJurisdictions, page);
+    const selected = jurisdictions.page.find(
+      (jurisdiction: { _id: string }) => jurisdiction._id === organizationJurisdictionId,
+    );
+    expect(selected).toMatchObject({
+      _id: organizationJurisdictionId,
+      code: "accra-bar-association",
+      name: "Accra Bar Association",
+    });
+
+    await expect(manager.client.mutation(createResource, {
+      jurisdictionId: selected!._id,
+      type: "policy",
+      title: "Professional conduct policy",
+      issuer: "Accra Bar Association",
+      officialCitation: "ABA Policy 1",
+      sourceUrl: "https://example.gov.gh/aba-policy-1",
+      topics: [],
+      effectiveDate: "2026-01-01",
+      reason: "Add organizational authority policy",
+    })).resolves.toBeDefined();
+  });
+
   it("enforces authority, validation, uniqueness, named transitions, and audit", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -382,9 +484,101 @@ describe("jurisdiction governance", () => {
       "ADMIN_DISABLED",
     );
   });
+
+  it("rejects legacy updates for typed geographic rows that retain a two-letter code", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: id,
+        googlePlaceId: "place-gh",
+        level: "country",
+        countryCode: "GH",
+        latitude: 5.6037,
+        longitude: -0.187,
+        formattedAddress: "Ghana",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return id;
+    });
+
+    await expect(
+      manager.client.mutation(updateJurisdiction, {
+        id: jurisdictionId,
+        name: "Republic of Ghana",
+        slug: "republic-of-ghana",
+        isDefault: true,
+        reason: "Attempt legacy update for typed geography",
+      }),
+    ).rejects.toThrow("JURISDICTION_NOT_FOUND");
+
+    await expect(t.run((ctx) => ctx.db.get("jurisdictions", jurisdictionId))).resolves.toMatchObject({
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana",
+      isDefault: false,
+      providerSyncState: "synced",
+      kind: "geographic",
+    });
+  });
 });
 
 describe("legal resource governance", () => {
+  it("accepts typed jurisdiction IDs without requiring a legacy country code", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("jurisdictions", {
+        name: "Accra",
+        slug: "accra",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "pending",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    const resourceId = await manager.client.mutation(createResource, {
+      jurisdictionId,
+      type: "ordinance",
+      title: "Accra local instrument",
+      issuer: "Accra authority",
+      officialCitation: "LI 1",
+      sourceUrl: "https://example.gov.gh/li-1",
+      topics: ["local government"],
+      effectiveDate: "2026-01-01",
+      reason: "Add typed jurisdiction resource",
+    });
+
+    await expect(manager.client.query(getResource, { id: resourceId })).resolves.toMatchObject({
+      jurisdiction: { name: "Accra", status: "draft" },
+    });
+  });
+
   it("rejects invalid metadata and duplicate official citations", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -591,7 +785,7 @@ describe("legal resource governance", () => {
         id: jurisdictionId,
         reason: "Retire catalog",
       }),
-    ).rejects.toThrow("active resources");
+    ).rejects.toThrow("JURISDICTION_HAS_ACTIVE_RESOURCES");
     await expect(
       manager.client.mutation(archiveResource, {
         id: resourceId,
@@ -670,5 +864,53 @@ describe("legal resource governance", () => {
         paginationOpts: { numItems: 20, cursor: null },
       }),
     ).resolves.toMatchObject({ page: [] });
+  });
+
+  it("paginates unified picker rows, including code-less jurisdictions", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const auditor = await asAdmin(t, "auditor");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const [code, name] of [
+        [undefined, "A Organization"],
+        ["GH", "Ghana"],
+        ["GH", "Duplicate Ghana"],
+        ["KE", "Kenya"],
+        ["NG", "Nigeria"],
+      ] as const) {
+        await ctx.db.insert("jurisdictions", {
+          code,
+          name,
+          slug: `${name.toLowerCase().replaceAll(" ", "-")}-${crypto.randomUUID()}`,
+          status: "enabled",
+          isDefault: false,
+          providerSyncState: "synced",
+          createdBy: "system",
+          updatedBy: "system",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const first = await auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: null },
+    });
+    expect(first.page).toMatchObject([{ name: "A Organization" }]);
+    expect(first.isDone).toBe(false);
+
+    const second = await auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: first.continueCursor },
+    });
+    expect(second.page).toMatchObject([{ code: "GH", name: "Ghana" }]);
+    expect(second.isDone).toBe(false);
+
+    await expect(auditor.client.query(listJurisdictions, {
+      paginationOpts: { numItems: 1, cursor: "legacy-country-code:KE" },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({ code: "NG", name: "Nigeria" })],
+      isDone: true,
+    });
   });
 });

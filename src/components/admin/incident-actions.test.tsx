@@ -3,7 +3,7 @@ import { getFunctionName } from "convex/server";
 import type { ComponentType } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ update: vi.fn(), addNote: vi.fn(), create: vi.fn(), useMutation: vi.fn(), loadMore: vi.fn() }));
+const mocks = vi.hoisted(() => ({ update: vi.fn(), addNote: vi.fn(), create: vi.fn(), useMutation: vi.fn(), loadMore: vi.fn(), refresh: vi.fn() }));
 vi.mock("convex/react", () => ({
   useMutation: mocks.useMutation,
   usePaginatedQuery: () => ({
@@ -12,6 +12,7 @@ vi.mock("convex/react", () => ({
     loadMore: mocks.loadMore,
   }),
 }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 
 import { IncidentActions, IncidentCreateForm } from "./incident-actions";
 
@@ -20,6 +21,7 @@ beforeEach(() => {
   mocks.addNote.mockReset().mockResolvedValue({});
   mocks.create.mockReset().mockResolvedValue({});
   mocks.loadMore.mockReset();
+  mocks.refresh.mockReset();
   mocks.useMutation.mockReset().mockImplementation((reference: never) => getFunctionName(reference).endsWith(":updateIncident") ? mocks.update : getFunctionName(reference).endsWith(":addIncidentNote") ? mocks.addNote : mocks.create);
 });
 afterEach(cleanup);
@@ -32,12 +34,13 @@ describe("incident administration controls", () => {
     fireEvent.change(screen.getByLabelText("Reason for opening incident"), { target: { value: "Callbacks exceeded the operational threshold" } });
     fireEvent.click(screen.getByRole("button", { name: "Open incident" }));
 
-    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+    expect(mocks.create).toHaveBeenCalledWith({
       title: "GroundX callback backlog",
       severity: "high",
       reason: "Callbacks exceeded the operational threshold",
       idempotencyKey: expect.stringMatching(/^incident_create_/),
-    }));
+    });
   });
 
   it("starts from the current incident values and preserves status and severity while assigning an owner", async () => {

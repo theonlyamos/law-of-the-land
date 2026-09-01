@@ -287,6 +287,30 @@ describe("governed document publication", () => {
     expect(JSON.stringify(docket.page[0])).not.toContain("extractedBody");
   });
 
+  it("lists the newest actionable review version on the first bounded page", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const statuses = Array.from({ length: 13 }, () => "published" as const);
+    const { ids } = await seedCatalog(t, "manager-1", statuses);
+
+    const firstPage = await reviewer.client.query(listReviewQueue, {
+      status: "published",
+      paginationOpts: { numItems: 12, cursor: null },
+    });
+
+    expect(firstPage.page).toHaveLength(12);
+    expect(firstPage.page[0].id).toBe(ids[12]);
+    expect(firstPage.page.map((row: { id: Id<"documentVersions"> }) => row.id)).not.toContain(ids[0]);
+
+    const secondPage = await reviewer.client.query(listReviewQueue, {
+      status: "published",
+      paginationOpts: { numItems: 12, cursor: firstPage.continueCursor },
+    });
+    expect(secondPage.page.map((row: { id: Id<"documentVersions"> }) => row.id)).toEqual([ids[0]]);
+    expect(secondPage.isDone).toBe(true);
+  });
+
   it("bounds checklist/evaluation fields and permits a reasoned rejection only from review", async () => {
     const t = createBackend();
     await enablePanel(t);

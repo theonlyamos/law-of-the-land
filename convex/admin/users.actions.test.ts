@@ -477,6 +477,47 @@ describe("audited administrative user actions", () => {
     ).rejects.toThrow("ADMIN_SELF_ACTION_FORBIDDEN");
   });
 
+  it("denies support agents before queueing deletion or consuming step-up proof", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const support = await asAdmin(t, "support_agent");
+    const target = await createUser(t);
+    const idempotencyKey = crypto.randomUUID();
+    const proofId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("adminStepUpProofs", {
+        actorId: support.user._id,
+        sessionId: support.session._id,
+        action: "user_deletion_queue",
+        targetId: target._id,
+        idempotencyKey,
+        issuedAt: now,
+        expiresAt: now + 60_000,
+      });
+    });
+
+    await expect(
+      support.client.mutation(queueUserDeletion, {
+        userId: target._id,
+        reason: "Validated privacy request",
+        confirmation: `DELETE ${target._id}`,
+        idempotencyKey,
+      }),
+    ).rejects.toThrow("Admin permission required");
+
+    const proof = await t.run((ctx) => ctx.db.get(proofId));
+    expect(proof).not.toHaveProperty("consumedAt");
+    await expect(
+      t.run((ctx) => ctx.db.query("userDeletionRequests").take(1)),
+    ).resolves.toEqual([]);
+    await expect(
+      t.run((ctx) => ctx.db.query("adminOperations").take(1)),
+    ).resolves.toEqual([]);
+    await expect(
+      t.run((ctx) => ctx.db.query("auditEvents").take(1)),
+    ).resolves.toEqual([]);
+  });
+
   it("replays a queued deletion after the finalized request removed its user", async () => {
     const t = createBackend();
     await enablePanel(t);

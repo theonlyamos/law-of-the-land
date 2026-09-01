@@ -1,12 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BillingActions, BillingAllowanceSummary } from "./billing-actions";
 
 const mutate = vi.fn();
+const refresh = vi.fn();
 vi.mock("convex/react", () => ({ useMutation: () => mutate }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh }) }));
 
 describe("BillingActions", () => {
-  beforeEach(() => mutate.mockReset().mockResolvedValue({ status: "succeeded" }));
+  beforeEach(() => {
+    mutate.mockReset().mockResolvedValue({ status: "succeeded" });
+    refresh.mockReset();
+  });
+  afterEach(cleanup);
 
   it("reveals and enforces the exceptional-override confirmation before submission", async () => {
     render(<BillingActions userId="user-7" />);
@@ -21,6 +27,18 @@ describe("BillingActions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Grant temporary override" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
     expect(mutate.mock.calls[0][0]).toMatchObject({ userId: "user-7", limit: 1001, confirmation: "CONFIRM_QUOTA_OVERRIDE user-7", reason: "Temporary account remediation" });
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  });
+
+  it("refreshes the server allowance projection after revocation", async () => {
+    render(<BillingActions userId="user-7" activeOverrideId={"override-7" as never} />);
+    fireEvent.click(screen.getByText("Adjust temporary allowance"));
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Temporary remediation complete" } });
+    fireEvent.click(screen.getByRole("button", { name: "Revoke active override" }));
+
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
+    expect(mutate).toHaveBeenCalledWith(expect.objectContaining({ overrideId: "override-7", reason: "Temporary remediation complete" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
   });
 
   it("renders the effective decision and complete active override provenance", () => {

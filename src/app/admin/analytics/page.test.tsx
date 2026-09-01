@@ -26,20 +26,21 @@ afterEach(cleanup);
 
 describe("admin analytics page", () => {
   it("requests only the bounded daily aggregate register and preserves filters in pagination", async () => {
-    render(await AnalyticsPage({ searchParams: Promise.resolve({ cursor: "current", jurisdiction: "GH", from: "2026-07-01", to: "2026-07-28" }) }));
+    render(await AnalyticsPage({ searchParams: Promise.resolve({ cursor: "current", jurisdiction: "jurisdiction-ghana", from: "2026-07-01", to: "2026-07-28" }) }));
     expect(getFunctionName(mocks.fetchAuthQuery.mock.calls[0][0])).toBe("admin/analytics:listDailyMetrics");
     expect(mocks.fetchAuthQuery.mock.calls[0][1]).toEqual({
       paginationOpts: { numItems: 30, cursor: "current" },
-      jurisdictionCode: "GH",
+      jurisdictionId: "jurisdiction-ghana",
+      jurisdictionCode: null,
       fromDay: "2026-07-01",
       toDay: "2026-07-28",
     });
     expect(screen.getByRole("heading", { name: "Operational analytics" })).toBeVisible();
     expect(screen.getByRole("region", { name: "Lazy analytics charts" })).toBeVisible();
-    expect(screen.getByRole("region", { name: "Lazy analytics charts" })).toHaveAttribute("data-props", JSON.stringify({ jurisdictionCode: "GH", fromDay: "2026-07-01", toDay: "2026-07-28" }));
+    expect(screen.getByRole("region", { name: "Lazy analytics charts" })).toHaveAttribute("data-props", JSON.stringify({ jurisdictionId: "jurisdiction-ghana", jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-28" }));
     expect(screen.getByText("Questions on this page")).toBeVisible();
     expect(screen.getByRole("columnheader", { name: "Provider failures" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Next metrics page" })).toHaveAttribute("href", expect.stringContaining("jurisdiction=GH"));
+    expect(screen.getByRole("link", { name: "Next metrics page" })).toHaveAttribute("href", expect.stringContaining("jurisdiction=jurisdiction-ghana"));
     expect(screen.getByRole("link", { name: "Next metrics page" })).toHaveAttribute("href", expect.stringContaining("cursor=next-metrics"));
   });
 

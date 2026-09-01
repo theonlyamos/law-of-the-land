@@ -3,7 +3,10 @@
 import { LandingPage } from "@/components/landing-page";
 import { PageLoader } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { chooseJurisdictionCode } from "@/lib/countries";
+import {
+  chooseJurisdictionCode,
+  type ResearchJurisdiction,
+} from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import { useConvexAuth, usePaginatedQuery, useQuery } from "convex/react";
 import { useRouter } from "next/navigation";
@@ -13,8 +16,16 @@ function LandingShell() {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [country, setCountry] = useState("");
+  const [researchJurisdiction, setResearchJurisdiction] =
+    useState<ResearchJurisdiction | null>(null);
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const publicJurisdictions = useQuery(api.jurisdictions.listPublicEnabled);
+  const unifiedJurisdictionsEnabled = useQuery(
+    api.jurisdictions.isUnifiedJurisdictionsEnabled,
+  );
+  const publicJurisdictions = useQuery(
+    api.jurisdictions.listPublicEnabled,
+    unifiedJurisdictionsEnabled === false ? {} : "skip",
+  );
   const { results: sessionsData } = usePaginatedQuery(
     api.chats.list,
     isAuthenticated ? {} : "skip",
@@ -22,15 +33,20 @@ function LandingShell() {
   );
 
   useEffect(() => {
-    if (publicJurisdictions === undefined) return;
+    if (unifiedJurisdictionsEnabled !== false || publicJurisdictions === undefined) return;
     setCountry((current) => chooseJurisdictionCode(publicJurisdictions, current));
-  }, [publicJurisdictions]);
+  }, [publicJurisdictions, unifiedJurisdictionsEnabled]);
+
+  const compatibilityCode = unifiedJurisdictionsEnabled === true
+    ? researchJurisdiction?.legacyCountryCode ?? null
+    : country || null;
 
   const researchUnavailable =
     authLoading ||
-    publicJurisdictions === undefined ||
-    publicJurisdictions.length === 0 ||
-    !country;
+    unifiedJurisdictionsEnabled === undefined ||
+    (unifiedJurisdictionsEnabled === false &&
+      (publicJurisdictions === undefined || publicJurisdictions.length === 0)) ||
+    (unifiedJurisdictionsEnabled === true ? !researchJurisdiction?.id : !compatibilityCode);
 
   const savedChats = useMemo<ChatSession[]>(() => {
     return sessionsData.map((session) => ({
@@ -56,11 +72,14 @@ function LandingShell() {
       const trimmed = text.trim();
       if (!trimmed || researchUnavailable) return;
 
-      const normalizedCountry = country.trim().toUpperCase();
-      const chatUrl = `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&country=${encodeURIComponent(normalizedCountry)}`;
+      const normalizedCountry = compatibilityCode?.trim().toUpperCase() || null;
+      const selection = unifiedJurisdictionsEnabled === true
+        ? `&jurisdiction=${encodeURIComponent(researchJurisdiction!.id)}${normalizedCountry ? `&country=${encodeURIComponent(normalizedCountry)}` : ""}`
+        : `&country=${encodeURIComponent(normalizedCountry!)}`;
+      const chatUrl = `/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}${selection}`;
       router.push(isAuthenticated ? chatUrl : `/signin?redirect=${encodeURIComponent(chatUrl)}`);
     },
-    [country, isAuthenticated, researchUnavailable, router]
+    [compatibilityCode, isAuthenticated, researchJurisdiction, researchUnavailable, router, unifiedJurisdictionsEnabled]
   );
 
   const handleKeyDown = useCallback(
@@ -87,6 +106,9 @@ function LandingShell() {
       country={country}
       onCountryChange={setCountry}
       jurisdictions={publicJurisdictions}
+      unifiedJurisdictionsEnabled={unifiedJurisdictionsEnabled}
+      researchJurisdiction={researchJurisdiction}
+      onResearchJurisdictionChange={setResearchJurisdiction}
     />
   );
 }
