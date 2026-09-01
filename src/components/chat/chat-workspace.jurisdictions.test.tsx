@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { getFunctionName } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -110,6 +110,96 @@ afterEach(() => {
 });
 
 describe("new-chat jurisdiction selector", () => {
+  it("normalizes escaped paragraph breaks before rendering persisted assistant Markdown", async () => {
+    mocks.session = { country: "GH", title: "Formatted answer" };
+    mocks.messages = [{
+      storageId: "assistant-message",
+      clientId: "assistant-client",
+      role: "assistant",
+      content: "Tenant rights:\\n\\n1. **First right**\\n\\n2. Second right",
+      createdAt: 1,
+      creationTime: 1,
+    }];
+
+    render(<ChatWorkspace chatId="markdown-chat" initialQuery={null} />);
+
+    const firstRight = await screen.findByText("First right");
+    const list = firstRight.closest("ol");
+    expect(list).not.toBeNull();
+    expect(within(list!).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("batches streamed text into the next animation frame", async () => {
+    let frame!: FrameRequestCallback;
+    const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      frame = callback;
+      return 1;
+    });
+    vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    let finishStream!: () => void;
+    const encoder = new TextEncoder();
+    const streamedChatResponse = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
+        controller.enqueue(encoder.encode('{"type":"delta","text":"answer."}\n'));
+        finishStream = () => {
+          controller.enqueue(encoder.encode('{"type":"done","result":"The streamed answer."}\n'));
+          controller.close();
+        };
+      },
+    }), { headers: { "content-type": "application/x-ndjson" } });
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: "context",
+        correlationToken: "token",
+        jurisdictionCode: "GH",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(streamedChatResponse));
+
+    render(<ChatWorkspace chatId="batched-stream" initialQuery="What is the rule?" />);
+
+    await waitFor(() => expect(requestAnimationFrame).toHaveBeenCalledTimes(1));
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+
+    await act(async () => frame(performance.now()));
+    expect(await screen.findByText("The streamed answer.")).toBeVisible();
+
+    finishStream();
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+  });
+
+  it("renders streamed answer text before persisting the terminal response", async () => {
+    let finishStream!: () => void;
+    const encoder = new TextEncoder();
+    const streamedChatResponse = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
+        finishStream = () => {
+          controller.enqueue(encoder.encode('{"type":"done","result":"The streamed answer."}\n'));
+          controller.close();
+        };
+      },
+    }), { headers: { "content-type": "application/x-ndjson" } });
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        result: "context",
+        correlationToken: "token",
+        jurisdictionCode: "GH",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(streamedChatResponse));
+
+    render(<ChatWorkspace chatId="streamed-chat" initialQuery="What is the rule?" />);
+
+    expect(await screen.findByText("The streamed")).toBeVisible();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+
+    finishStream();
+
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    expect(mocks.appendMessages.mock.calls[0][0].messages[1].content).toBe("The streamed answer.");
+  });
+
   it("renders the governed catalog and selects its configured default", async () => {
     render(<ChatWorkspace chatId={null} initialQuery={null} />);
 

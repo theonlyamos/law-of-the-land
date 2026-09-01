@@ -346,6 +346,62 @@ describe("normal jurisdiction provider adapters", () => {
     expect(details).toHaveBeenCalledWith("normal-place", SESSION_TOKEN);
   });
 
+  it("asks Gemini to format governed answer values as Markdown with real line breaks", async () => {
+    const sendMessage = vi.fn().mockResolvedValue({
+      text: JSON.stringify({ answer: "Formatted answer", citations: [] }),
+    });
+    const create = vi.fn().mockReturnValue({ sendMessage });
+    const createGoogleClient = vi.fn().mockResolvedValue({ chats: { create } });
+    const chat = createChatProvider(
+      { GOOGLE_AI_API_KEY: "google-key" },
+      { createGoogleClient },
+    );
+
+    await chat.generate({
+      mode: "governed",
+      scenarioQuestion: "normal question",
+      query: "normal question",
+      context: "governed context",
+      history: [],
+    });
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        systemInstruction: expect.stringMatching(/Markdown[\s\S]*real line breaks/u),
+      }),
+    }));
+  });
+
+  it("passes cancellation through to a streamed chat request", async () => {
+    const sendMessageStream = vi.fn().mockResolvedValue((async function* () {
+      yield { text: "streamed answer" };
+    })());
+    const create = vi.fn().mockReturnValue({ sendMessageStream });
+    const createGoogleClient = vi.fn().mockResolvedValue({ chats: { create } });
+    const chat = createChatProvider(
+      { GOOGLE_AI_API_KEY: "google-key" },
+      { createGoogleClient },
+    );
+    const controller = new AbortController();
+    const chunks: string[] = [];
+
+    for await (const chunk of chat.stream({
+      mode: "legacy",
+      scenarioQuestion: "normal question",
+      query: "normal question",
+      instruction: "normal instruction",
+      history: [],
+    }, controller.signal)) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["streamed answer"]);
+    expect(sendMessageStream).toHaveBeenCalledWith(expect.objectContaining({
+      message: "normal question",
+      config: expect.objectContaining({ abortSignal: controller.signal }),
+    }));
+  });
+
   it("uses the configured chat model for provider requests", async () => {
     const sendMessage = vi.fn().mockResolvedValue({ text: "normal chat answer" });
     const create = vi.fn().mockReturnValue({ sendMessage });

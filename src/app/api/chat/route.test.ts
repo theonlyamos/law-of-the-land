@@ -6,7 +6,7 @@ const authMocks = vi.hoisted(() => ({
   fetchAuthQuery: vi.fn(),
   isAuthenticated: vi.fn(),
 }));
-const aiMocks = vi.hoisted(() => ({ sendMessage: vi.fn(), create: vi.fn() }));
+const aiMocks = vi.hoisted(() => ({ sendMessage: vi.fn(), sendMessageStream: vi.fn(), create: vi.fn() }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
 vi.mock("server-only", () => ({}));
@@ -66,10 +66,14 @@ function enableStubBoundary() {
   });
 }
 
-function request(overrides: Record<string, unknown> = {}) {
+function request(overrides: Record<string, unknown> = {}, accept?: string, signal?: AbortSignal) {
   return new Request("http://localhost/api/chat", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": crypto.randomUUID() },
+    headers: {
+      "content-type": "application/json",
+      "x-forwarded-for": crypto.randomUUID(),
+      ...(accept ? { accept } : {}),
+    },
     body: JSON.stringify({
       query: "What is the rule?",
       messages: [],
@@ -78,6 +82,7 @@ function request(overrides: Record<string, unknown> = {}) {
       country: "GH",
       ...overrides,
     }),
+    signal,
   });
 }
 
@@ -100,11 +105,97 @@ beforeEach(() => {
     }
     return { status: "finalized", correlationId: "safe-hash" };
   });
-  aiMocks.create.mockReturnValue({ sendMessage: aiMocks.sendMessage });
+  aiMocks.create.mockReturnValue({
+    sendMessage: aiMocks.sendMessage,
+    sendMessageStream: aiMocks.sendMessageStream,
+  });
   aiMocks.sendMessage.mockResolvedValue({ text: "The generated answer." });
 });
 
 describe("POST /api/chat telemetry correlation", () => {
+  it("streams model text before the terminal result metadata", async () => {
+    aiMocks.sendMessageStream.mockResolvedValue((async function* () {
+      yield { text: "The generated " };
+      yield { text: "answer." };
+    })());
+
+    const response = await POST(request({}, "application/x-ndjson"));
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+    expect(events).toEqual([
+      { type: "delta", text: "The generated " },
+      { type: "delta", text: "answer." },
+      { type: "done", result: "The generated answer." },
+    ]);
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+    expect(authMocks.fetchAuthMutation.mock.calls.map(([reference]) => getFunctionName(reference))).toEqual([
+      "telemetry:claimChatPhase",
+      "telemetry:finalizeChatPhase",
+    ]);
+  });
+
+  it("passes request cancellation into the model stream", async () => {
+    const controller = new AbortController();
+    aiMocks.sendMessageStream.mockResolvedValue((async function* () {
+      yield { text: "The generated answer." };
+    })());
+
+    const streamingRequest = request({}, "application/x-ndjson", controller.signal);
+    const response = await POST(streamingRequest);
+    await response.text();
+
+    const [{ config }] = aiMocks.sendMessageStream.mock.calls[0];
+    expect(config.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("stops a streamed response and finalizes failure after cancellation", async () => {
+    const controller = new AbortController();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let signalListenerReady!: () => void;
+    const listeningForAbort = new Promise<void>((resolve) => { signalListenerReady = resolve; });
+    aiMocks.sendMessageStream.mockImplementation(({ config }) => (async function* () {
+      yield { text: "The generated " };
+      await new Promise<never>((_, reject) => {
+        config.abortSignal.addEventListener("abort", () => reject(new Error("stream aborted")), { once: true });
+        signalListenerReady();
+      });
+    })());
+
+    const response = await POST(request({}, "application/x-ndjson", controller.signal));
+    const reader = response.body!.getReader();
+    expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toEqual({
+      type: "delta",
+      text: "The generated ",
+    });
+    await listeningForAbort;
+    controller.abort();
+
+    await expect(Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream did not close")), 50)),
+    ])).resolves.toMatchObject({ done: true });
+    expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({ providerStatus: "failure" });
+    expect(errorLog).not.toHaveBeenCalledWith("Chat provider request failed");
+    errorLog.mockRestore();
+  });
+
+  it("ends a streamed response when the provider fails", async () => {
+    aiMocks.sendMessageStream.mockRejectedValue(new Error("provider unavailable"));
+    const response = await POST(request({}, "application/x-ndjson"));
+    const body = await Promise.race([
+      response.text(),
+      new Promise<string>((_, reject) => {
+        setTimeout(() => reject(new Error("stream did not close")), 50);
+      }),
+    ]);
+
+    expect(JSON.parse(body.trim())).toEqual({ type: "error", error: "We couldn't process your request. Please try again." });
+  });
+
   it("claims the bound search exactly once and finalizes only compact provider timing", async () => {
     const response = await POST(request());
     expect(response.status).toBe(200);
@@ -203,12 +294,62 @@ describe("POST /api/chat governed citations", () => {
     });
   });
 
-  const governedRequest = (overrides: Record<string, unknown> = {}) => request({
+  const governedRequest = (overrides: Record<string, unknown> = {}, accept?: string) => request({
     context,
     jurisdictionId,
     externalId: "claim-chat",
     assistantClientId: "assistant-client-1",
     ...overrides,
+  }, accept);
+
+  it("streams only governed answer text before verified citations arrive", async () => {
+    aiMocks.sendMessageStream.mockResolvedValue((async function* () {
+      yield { text: '{"answer":"The governed ' };
+      yield { text: 'answer.","citations":[{"sourceRef":"J1","label":"Section 1"}]}' };
+    })());
+
+    const response = await POST(governedRequest({}, "application/x-ndjson"));
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(events).toEqual([
+      { type: "delta", text: "The governed " },
+      { type: "delta", text: "answer." },
+      {
+        type: "done",
+        result: "The governed answer.",
+        citations: [{
+          label: "Section 1",
+          jurisdictionId,
+          jurisdictionName: "Ghana",
+          jurisdictionKind: "geographic",
+          relation: "selected",
+        }],
+        citationClaim,
+      },
+    ]);
+    expect(aiMocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("streams a governed answer when citations precede the answer property", async () => {
+    aiMocks.sendMessageStream.mockResolvedValue((async function* () {
+      yield { text: '{"citations":[{"sourceRef":"J1","label":"Section 1"}],"answer":"The governed ' };
+      yield { text: 'answer."}' };
+    })());
+
+    const response = await POST(governedRequest({}, "application/x-ndjson"));
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(events).toEqual([
+      { type: "delta", text: "The governed " },
+      { type: "delta", text: "answer." },
+      expect.objectContaining({ type: "done", result: "The governed answer." }),
+    ]);
   });
 
   it("claims the exact context digest before Gemini and resolves model refs through governed metadata", async () => {
