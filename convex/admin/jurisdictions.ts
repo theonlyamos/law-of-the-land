@@ -587,7 +587,7 @@ export async function updateLegacyJurisdictionForActor(
   reason: string,
 ): Promise<Doc<"jurisdictions">> {
   const row = await ctx.db.get("jurisdictions", args.id);
-  if (!row || !row.code || !/^[A-Z]{2}$/.test(row.code)) {
+  if (!row || row.kind !== undefined || !row.code || !/^[A-Z]{2}$/.test(row.code)) {
     throw new ConvexError("JURISDICTION_NOT_FOUND");
   }
   if (row.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");

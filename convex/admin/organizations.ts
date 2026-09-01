@@ -117,6 +117,20 @@ async function assertUniqueOrganizationSlug(
   }
 }
 
+async function assertUniqueJurisdictionSlug(
+  ctx: MutationCtx,
+  slug: string,
+  exceptId?: Id<"jurisdictions">,
+): Promise<void> {
+  const rows = await ctx.db
+    .query("jurisdictions")
+    .withIndex("by_slug", (q) => q.eq("slug", slug))
+    .take(2);
+  if (rows.some((row) => row._id !== exceptId)) {
+    throw new ConvexError("JURISDICTION_SLUG_EXISTS");
+  }
+}
+
 async function requireSingleOrganizationJurisdiction(
   ctx: MutationCtx,
   organizationId: Id<"organizations">,
@@ -251,6 +265,12 @@ export const updateOrganization = mutation({
     if (jurisdiction?.status === "enabled") {
       throw new ConvexError("ORGANIZATION_JURISDICTION_ENABLED");
     }
+    if (jurisdiction?.status === "archived") {
+      throw new ConvexError("ORGANIZATION_JURISDICTION_ARCHIVED");
+    }
+    if (jurisdiction) {
+      await assertUniqueJurisdictionSlug(ctx, slug, jurisdiction._id);
+    }
     const now = Date.now();
     const patch = {
       name,
@@ -262,7 +282,12 @@ export const updateOrganization = mutation({
     };
     await ctx.db.patch(organization._id, patch);
     if (jurisdiction) {
-      await ctx.db.patch(jurisdiction._id, { name, updatedBy: actor.userId, updatedAt: now });
+      await ctx.db.patch(jurisdiction._id, {
+        name,
+        slug,
+        updatedBy: actor.userId,
+        updatedAt: now,
+      });
     }
     await auditOrganizationChange(ctx, actor, {
       action: "organization.updated",

@@ -484,6 +484,60 @@ describe("jurisdiction governance", () => {
       "ADMIN_DISABLED",
     );
   });
+
+  it("rejects legacy updates for typed geographic rows that retain a two-letter code", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await ctx.db.insert("jurisdictions", {
+        code: "GH",
+        name: "Ghana",
+        slug: "ghana",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert("geographicJurisdictions", {
+        jurisdictionId: id,
+        googlePlaceId: "place-gh",
+        level: "country",
+        countryCode: "GH",
+        latitude: 5.6037,
+        longitude: -0.187,
+        formattedAddress: "Ghana",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return id;
+    });
+
+    await expect(
+      manager.client.mutation(updateJurisdiction, {
+        id: jurisdictionId,
+        name: "Republic of Ghana",
+        slug: "republic-of-ghana",
+        isDefault: true,
+        reason: "Attempt legacy update for typed geography",
+      }),
+    ).rejects.toThrow("JURISDICTION_NOT_FOUND");
+
+    await expect(t.run((ctx) => ctx.db.get("jurisdictions", jurisdictionId))).resolves.toMatchObject({
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana",
+      isDefault: false,
+      providerSyncState: "synced",
+      kind: "geographic",
+    });
+  });
 });
 
 describe("legal resource governance", () => {
