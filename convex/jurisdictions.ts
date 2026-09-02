@@ -618,7 +618,8 @@ export const resolveResearchScope = query({
     ),
 });
 
-const MAX_RESEARCH_DOCUMENTS_PER_JURISDICTION = 64;
+// This bounds the trusted citation manifest, not the jurisdiction's store health.
+const MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION = 64;
 
 async function researchAvailability(
   ctx: QueryCtx,
@@ -649,10 +650,7 @@ async function researchAvailability(
     .query("legalResources")
     .withIndex("by_jurisdictionId_and_activeVersionId", (q) =>
       q.eq("jurisdictionId", row._id).gt("activeVersionId", undefined))
-    .take(MAX_RESEARCH_DOCUMENTS_PER_JURISDICTION + 1);
-  if (resources.length > MAX_RESEARCH_DOCUMENTS_PER_JURISDICTION) {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
+    .take(MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION);
   const lifecycleLocks = await Promise.all(resources.map(async (resource) =>
     await ctx.db.query("documentLifecycleLocks")
       .withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id))

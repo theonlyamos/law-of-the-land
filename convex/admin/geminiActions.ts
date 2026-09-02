@@ -139,7 +139,11 @@ export async function executeGeminiJob(
     return { kind: "document_deleted" };
   }
   if (job.type === "gemini_delete_store" && target.kind === "delete_store") {
-    await adapter.deleteStore(target.storeName);
+    try {
+      await adapter.deleteStore(target.storeName);
+    } catch (error) {
+      if (!(error instanceof ProviderError) || error.kind !== "not_found") throw error;
+    }
     return { kind: "store_deleted", storeName: target.storeName };
   }
   if (job.type !== "gemini_index_document" || target.kind !== "index_document") {

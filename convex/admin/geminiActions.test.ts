@@ -181,6 +181,17 @@ describe("Gemini durable job executor", () => {
     }, {})).resolves.toEqual({ kind: "document_deleted" });
   });
 
+  it("treats an exact-target store delete not-found response as idempotent success", async () => {
+    const provider = adapter();
+    provider.deleteStore.mockRejectedValueOnce(new ProviderError("not_found", false, 404, "missing"));
+    await expect(executeGeminiJob(provider, { type: "gemini_delete_store" }, {
+      kind: "delete_store", storeName: "fileSearchStores/ghana-test",
+    }, {})).resolves.toEqual({
+      kind: "store_deleted",
+      storeName: "fileSearchStores/ghana-test",
+    });
+  });
+
   it("quarantines a provider success whose durable result cannot be persisted", async () => {
     const provider = adapter();
     const result = await executeGeminiJob(provider, { type: "gemini_index_document" }, {

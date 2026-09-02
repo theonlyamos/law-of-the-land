@@ -3,6 +3,7 @@
 import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { researchManifestResolutionResponse } from "./http";
 import { normalizeUniqueJurisdictionIds } from "./lib/jurisdictionDomain";
@@ -181,6 +182,60 @@ async function insertPublishedDocument(
     });
     await ctx.db.patch(resourceId, { activeVersionId: versionId });
     return { resourceId, versionId };
+  });
+}
+
+async function insertPublishedDocuments(
+  t: Backend,
+  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
+  storeName: string,
+  count: number,
+) {
+  return await t.run(async (ctx) => {
+    const originalStorageId = await ctx.storage.store(new Blob(["law"]));
+    const documents: Array<{
+      resourceId: Id<"legalResources">;
+      versionId: Id<"documentVersions">;
+    }> = [];
+    for (let index = 1; index <= count; index += 1) {
+      const now = Date.now();
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId,
+        type: "act",
+        title: `Trusted Act ${index}`,
+        issuer: "Parliament",
+        officialCitation: `Act ${index} of 2026`,
+        officialCitationKey: `act ${index} of 2026`,
+        sourceUrl: `https://official.example/act-${index}`,
+        topics: ["employment"],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const versionId = await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId,
+        filename: `act-${index}.pdf`,
+        mimeType: "application/pdf",
+        byteSize: 3,
+        sha256: index.toString(16).padStart(64, "0"),
+        sourceUrl: `https://upload.example/act-${index}`,
+        status: "published",
+        geminiDocumentName: `${storeName}/documents/trusted-act-${index}`,
+        geminiIndexedAt: now,
+        submittedBy: "fixture",
+        publishedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      documents.push({ resourceId, versionId });
+    }
+    return documents;
   });
 }
 
@@ -594,6 +649,32 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       selected: { jurisdictionId: selected, status: "needs_review" },
       supplementary: [],
     });
+  });
+
+  it("keeps research ready with a bounded trusted manifest above 64 published documents", async () => {
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const published = await insertPublishedDocuments(t, selected, storeName, 65);
+
+    const result = await t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    });
+
+    expect(result.selected.status).toBe("ready");
+    if (result.selected.status !== "ready") throw new Error("expected ready research manifest");
+    expect(result.selected.documents).toHaveLength(64);
+    const publishedKeys = new Set(published.map(({ resourceId, versionId }) =>
+      `${resourceId}:${versionId}`));
+    const manifestKeys: string[] = result.selected.documents.map((document: {
+      resourceId: string;
+      versionId: string;
+    }) => `${document.resourceId}:${document.versionId}`);
+    expect(new Set(manifestKeys).size).toBe(64);
+    expect(manifestKeys.every((key) => publishedKeys.has(key))).toBe(true);
   });
 
   it("pauses research while a document lifecycle operation can change store contents", async () => {
