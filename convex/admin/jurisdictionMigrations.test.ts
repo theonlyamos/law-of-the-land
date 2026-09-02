@@ -187,6 +187,36 @@ describe("safe unified-jurisdiction migration", () => {
     fetchSpy.mockRestore();
   });
 
+  it("projects a legacy stored Ghana seed result during idempotent replay", async () => {
+    const t = convexTest(schema, modules);
+    await insertGhana(t);
+    const args = {
+      environment: "test",
+      place,
+      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
+      reason: "Adopt the reviewed Ghana country projection",
+      idempotencyKey: "ghana-seed-legacy-result-replay",
+    };
+    const first = await t.mutation(seedGhanaJurisdictionV2, args);
+    await t.run(async (ctx) => {
+      const rollout = await ctx.db
+        .query("unifiedJurisdictionRolloutStates")
+        .withIndex("by_environment_and_migrationVersion", (q) =>
+          q.eq("environment", "test").eq("migrationVersion", "jurisdiction_ids_v1"),
+        )
+        .unique();
+      if (!rollout?.ghanaSeedLastResult) throw new Error("missing rollout fixture");
+      await ctx.db.patch(rollout._id, {
+        ghanaSeedLastResult: {
+          ...rollout.ghanaSeedLastResult,
+          preservedProductionBucket: "11833",
+        },
+      });
+    });
+
+    await expect(t.mutation(seedGhanaJurisdictionV2, args)).resolves.toEqual(first);
+  });
+
   it.each([[-90, -180], [90, 180]])(
     "accepts inclusive Ghana coordinate boundary %s,%s",
     async (latitude, longitude) => {

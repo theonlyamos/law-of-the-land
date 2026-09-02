@@ -109,8 +109,19 @@ const claimResultValidator = v.union(
   }),
 );
 
-type GeminiJobType = "gemini_create_store" | "gemini_index_document" | "gemini_delete_document" | "gemini_delete_store";
+const GEMINI_JOB_TYPES = [
+  "gemini_create_store",
+  "gemini_index_document",
+  "gemini_delete_document",
+  "gemini_delete_store",
+] as const;
+type GeminiJobType = (typeof GEMINI_JOB_TYPES)[number];
 type JobType = GeminiJobType;
+type GeminiJobStatus = "queued" | "running" | "waiting_provider" | "succeeded" | "failed" | "cancelled" | "manual_review";
+type GeminiIntegrationJob = Omit<Doc<"integrationJobs">, "type" | "status"> & {
+  type: GeminiJobType;
+  status: GeminiJobStatus;
+};
 type ProviderErrorKind = "invalid_request" | "validation" | "authentication" | "not_found" | "rate_limit" | "timeout" | "network" | "invalid_response" | "provider";
 type SafeJson = null | boolean | number | string | SafeJson[] | { [key: string]: SafeJson };
 
@@ -119,8 +130,28 @@ const reconcileStaleJobsRef = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileStaleJobs",
 );
 
-function jobRunner(_type: JobType) {
+function isGeminiJobType(type: Doc<"integrationJobs">["type"]): type is GeminiJobType {
+  return type === "gemini_create_store" ||
+    type === "gemini_index_document" ||
+    type === "gemini_delete_document" ||
+    type === "gemini_delete_store";
+}
+
+function jobRunner(type: Doc<"integrationJobs">["type"]) {
+  if (!isGeminiJobType(type)) throw new ConvexError("INTEGRATION_JOB_NOT_SUPPORTED");
   return runGeminiJobRef;
+}
+
+function isGeminiJobDocument(job: Doc<"integrationJobs">): job is GeminiIntegrationJob {
+  const currentStatus =
+    job.status === "queued" ||
+    job.status === "running" ||
+    job.status === "waiting_provider" ||
+    job.status === "succeeded" ||
+    job.status === "failed" ||
+    job.status === "cancelled" ||
+    job.status === "manual_review";
+  return isGeminiJobType(job.type) && currentStatus;
 }
 
 function assertIdentifier(value: string, error: string): string {
@@ -326,6 +357,18 @@ async function activeGeminiStoreJob(
   return jobs.flat()[0];
 }
 
+async function resourceWithActiveVersion(
+  ctx: MutationCtx | QueryCtx,
+  jurisdictionId: Id<"jurisdictions">,
+) {
+  return await ctx.db
+    .query("legalResources")
+    .withIndex("by_jurisdictionId_and_activeVersionId", (q) =>
+      q.eq("jurisdictionId", jurisdictionId).gt("activeVersionId", undefined),
+    )
+    .first();
+}
+
 export const provisionJurisdictionGeminiStore = mutation({
   args: {
     jurisdictionId: v.id("jurisdictions"),
@@ -430,11 +473,7 @@ export const deleteJurisdictionGeminiStore = mutation({
     if (!storeName || !isGeminiFileSearchStoreName(storeName)) {
       throw new ConvexError("GEMINI_STORE_NOT_CONFIGURED");
     }
-    const activeResource = await ctx.db
-      .query("legalResources")
-      .withIndex("by_jurisdictionId_and_status", (q) =>
-        q.eq("jurisdictionId", jurisdiction._id).eq("status", "active"))
-      .first();
+    const activeResource = await resourceWithActiveVersion(ctx, jurisdiction._id);
     if (activeResource) throw new ConvexError("JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE");
     const references = await ctx.db
       .query("jurisdictions")
@@ -557,9 +596,9 @@ export const getGeminiJobTarget = internalQuery({
       let payload: { storeName?: unknown };
       try { payload = JSON.parse(job.payload) as typeof payload; } catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
       const boundStore = typeof payload.storeName === "string" ? payload.storeName : undefined;
-      const activeResource = jurisdiction && await ctx.db.query("legalResources")
-        .withIndex("by_jurisdictionId_and_status", (q) => q.eq("jurisdictionId", jurisdiction._id).eq("status", "active"))
-        .first();
+      const activeResource = jurisdiction
+        ? await resourceWithActiveVersion(ctx, jurisdiction._id)
+        : null;
       const references = boundStore && isGeminiFileSearchStoreName(boundStore)
         ? await ctx.db.query("jurisdictions").withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", boundStore)).take(2)
         : [];
@@ -817,6 +856,7 @@ export const getJobForRun = internalQuery({
     const job = await ctx.db.get(args.jobId);
     if (
       !job ||
+      !isGeminiJobDocument(job) ||
       job.status !== "running" ||
       job.leaseToken === undefined ||
       job.leaseExpiresAt === undefined ||
@@ -835,7 +875,8 @@ async function claimJobDocument(
   allowStaleRunning = false,
   allowUncertainManualReview = false,
 ) {
-    if (
+  if (!isGeminiJobDocument(job)) return null;
+  if (
       job.status !== "queued" &&
       job.status !== "waiting_provider" &&
       !(allowStaleRunning && job.status === "running") &&
@@ -849,7 +890,7 @@ async function claimJobDocument(
     const now = Date.now();
     const leaseToken = `lease_${crypto.randomUUID().replaceAll("-", "")}`;
     const leaseExpiresAt = now + JOB_LEASE_MS;
-    const claimedJob: Doc<"integrationJobs"> = {
+    const claimedJob: GeminiIntegrationJob = {
       ...job,
       status: "running",
       leaseToken,
@@ -940,7 +981,7 @@ export const recordProviderFailure = internalMutation({
   returns: failureResultValidator,
   handler: async (ctx, args) => {
     let job = await ctx.db.get(args.jobId);
-    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    if (!job || !isGeminiJobDocument(job)) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     const now = Date.now();
     assertCurrentLease(job, args.leaseToken, now);
     if (args.providerOperationName !== undefined) {
@@ -1022,18 +1063,20 @@ export const reconcileStaleJobs = internalMutation({
   returns: v.object({ scheduled: v.number(), hasMore: v.boolean() }),
   handler: async (ctx) => {
     const now = Date.now();
-    const candidatesByStatus = await Promise.all(
-      (["queued", "running", "waiting_provider"] as const).map(
-        async (status) =>
+    const candidatesByStatusAndType = await Promise.all(
+      (["queued", "running", "waiting_provider"] as const).flatMap((status) =>
+        GEMINI_JOB_TYPES.map(
+          async (type) =>
           await ctx.db
             .query("integrationJobs")
-            .withIndex("by_status_and_nextAttemptAt", (q) =>
-              q.eq("status", status).lte("nextAttemptAt", now),
+            .withIndex("by_status_and_type_and_nextAttemptAt", (q) =>
+              q.eq("status", status).eq("type", type).lte("nextAttemptAt", now),
             )
             .take(MAX_RECONCILE_BATCH + 1),
+        ),
       ),
     );
-    const candidates = candidatesByStatus
+    const candidates = candidatesByStatusAndType
       .flat()
       .sort((left, right) =>
         (left.nextAttemptAt ?? 0) - (right.nextAttemptAt ?? 0) ||
@@ -1042,9 +1085,10 @@ export const reconcileStaleJobs = internalMutation({
       );
     const hasMore =
       candidates.length > MAX_RECONCILE_BATCH ||
-      candidatesByStatus.some((rows) => rows.length > MAX_RECONCILE_BATCH);
+      candidatesByStatusAndType.some((rows) => rows.length > MAX_RECONCILE_BATCH);
     let scheduled = 0;
     for (const job of candidates.slice(0, MAX_RECONCILE_BATCH)) {
+      if (!isGeminiJobDocument(job)) continue;
       if (
         (job.type === "gemini_index_document" || job.type === "gemini_delete_document") &&
         job.status === "running"
@@ -1194,7 +1238,7 @@ export const retryJob = mutation({
     const replay = await existingJobControl(ctx, actor.userId, idempotencyKey, "job_retry", args.jobId, fingerprint);
     if (replay) return replay;
     const job = await ctx.db.get(args.jobId);
-    if (!job) throw new ConvexError("Integration job was not found");
+    if (!job || !isGeminiJobDocument(job)) throw new ConvexError("Integration job was not found");
 
     let status: Doc<"integrationJobs">["status"];
     if (job.status === "manual_review") {
@@ -1246,7 +1290,7 @@ export const cancelJob = mutation({
     const replay = await existingJobControl(ctx, actor.userId, idempotencyKey, "job_cancel", args.jobId, fingerprint);
     if (replay) return replay;
     const job = await ctx.db.get(args.jobId);
-    if (!job) throw new ConvexError("Integration job was not found");
+    if (!job || !isGeminiJobDocument(job)) throw new ConvexError("Integration job was not found");
     if (job.providerOperationName || job.status === "manual_review" || job.status === "running" || job.status === "waiting_provider") {
       throw new ConvexError("Integration job provider outcome is uncertain");
     }
@@ -1279,6 +1323,6 @@ export const listJobs = query({
           ? ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", args.type!))
           : ctx.db.query("integrationJobs").withIndex("by_createdAt");
     const result = await base.order("desc").paginate(opts);
-    return { page: result.page.map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, nextAttemptAt: job.nextAttemptAt, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+    return { page: result.page.filter(isGeminiJobDocument).map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, nextAttemptAt: job.nextAttemptAt, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
   },
 });

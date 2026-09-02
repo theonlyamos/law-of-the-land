@@ -22,6 +22,10 @@ export default defineSchema({
       v.literal("archived"),
     ),
     isDefault: v.boolean(),
+    // Inert compatibility fields for GroundX-era rows. New code never writes
+    // or reads these values; keep them optional until legacy data is purged.
+    stagingBucketId: v.optional(v.string()),
+    productionBucketId: v.optional(v.string()),
     geminiFileSearchStoreName: v.optional(v.string()),
     geminiEmbeddingModel: v.optional(v.string()),
     providerSyncState: v.union(
@@ -175,7 +179,11 @@ export default defineSchema({
       "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
-    .index("by_activeVersionId", ["activeVersionId"]),
+    .index("by_activeVersionId", ["activeVersionId"])
+    .index("by_jurisdictionId_and_activeVersionId", [
+      "jurisdictionId",
+      "activeVersionId",
+    ]),
   documentVersions: defineTable({
     resourceId: v.id("legalResources"),
     versionNumber: v.number(),
@@ -189,15 +197,44 @@ export default defineSchema({
     repealDate: v.optional(v.string()),
     status: v.union(
       v.literal("draft"),
+      v.literal("uploading"),
+      v.literal("staging_processing"),
       v.literal("ready_for_review"),
       v.literal("approved"),
       v.literal("publishing"),
       v.literal("published"),
       v.literal("rejected"),
+      v.literal("failed"),
       v.literal("superseded"),
       v.literal("unpublished"),
       v.literal("archived"),
     ),
+    // Inert compatibility fields for immutable versions created before the
+    // Gemini cutover. GroundX execution paths remain removed.
+    groundxStagingDocumentId: v.optional(v.string()),
+    groundxStagingProcessId: v.optional(v.string()),
+    xrayEvidence: v.optional(v.object({
+      status: v.union(
+        v.literal("queued"),
+        v.literal("training"),
+        v.literal("processing"),
+        v.literal("complete"),
+        v.literal("error"),
+        v.literal("cancelled"),
+      ),
+      documentId: v.string(),
+      processId: v.string(),
+      fileType: v.optional(v.union(
+        v.literal("txt"), v.literal("docx"), v.literal("pptx"),
+        v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
+        v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
+        v.literal("json"),
+      )),
+      fileSize: v.optional(v.number()),
+      observedAt: v.number(),
+    })),
+    groundxProductionDocumentId: v.optional(v.string()),
+    groundxProductionProcessId: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
     geminiIndexedAt: v.optional(v.number()),
     submittedBy: v.string(),
@@ -386,6 +423,11 @@ export default defineSchema({
     .index("by_targetUserId_and_createdAt", ["targetUserId", "createdAt"]),
   integrationJobs: defineTable({
     type: v.union(
+      v.literal("create_bucket"),
+      v.literal("ingest_remote"),
+      v.literal("copy_documents"),
+      v.literal("delete_documents"),
+      v.literal("poll_process"),
       v.literal("gemini_create_store"),
       v.literal("gemini_index_document"),
       v.literal("gemini_delete_document"),
@@ -408,6 +450,9 @@ export default defineSchema({
     idempotencyKey: v.string(),
     requestFingerprint: v.string(),
     correlationId: v.string(),
+    // Optional only for GroundX-era jobs retained as operational history.
+    callbackTokenHash: v.optional(v.string()),
+    processId: v.optional(v.string()),
     providerOperationName: v.optional(v.string()),
     providerPollCount: v.optional(v.number()),
     recoveryKind: v.optional(v.union(v.literal("poll_operation"), v.literal("delete_document"))),
@@ -416,6 +461,7 @@ export default defineSchema({
     status: v.union(
       v.literal("queued"),
       v.literal("running"),
+      v.literal("waiting_callback"),
       v.literal("waiting_provider"),
       v.literal("succeeded"),
       v.literal("failed"),
@@ -445,6 +491,7 @@ export default defineSchema({
     .index("by_actorId_and_idempotencyKey", ["actorId", "idempotencyKey"])
     .index("by_providerOperationName", ["providerOperationName"])
     .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
+    .index("by_status_and_type_and_nextAttemptAt", ["status", "type", "nextAttemptAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
@@ -646,6 +693,7 @@ export default defineSchema({
       v.object({
         jurisdictionId: v.id("jurisdictions"),
         changed: v.boolean(),
+        preservedProductionBucket: v.optional(v.literal("11833")),
       }),
     ),
     legacyObservationGeneration: v.number(),

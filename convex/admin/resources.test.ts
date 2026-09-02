@@ -838,6 +838,92 @@ describe("legal resource governance", () => {
     ).resolves.toMatchObject({ status: "archived" });
   });
 
+  it("requires unpublish before repealing or archiving a resource", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await manager.client.mutation(createJurisdiction, {
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana",
+      isDefault: false,
+      reason: "Catalog setup",
+    });
+    const resourceId = await manager.client.mutation(createResource, {
+      jurisdictionId,
+      type: "act",
+      title: "Published Act",
+      issuer: "Parliament of Ghana",
+      officialCitation: "Act 1",
+      sourceUrl: "https://example.gov.gh/act-1",
+      topics: [],
+      effectiveDate: "2026-01-01",
+      reason: "Catalog authoritative act",
+    });
+    const versionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const storageId = await ctx.storage.store(new Blob(["act"]));
+      const versionId = await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: storageId,
+        filename: "act.pdf",
+        mimeType: "application/pdf",
+        byteSize: 3,
+        sha256: "a".repeat(64),
+        sourceUrl: "https://example.gov.gh/act-1",
+        status: "published",
+        submittedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      return versionId;
+    });
+
+    await expect(manager.client.mutation(markResourceRepealed, {
+      id: resourceId,
+      repealDate: "2026-02-01",
+      reason: "Repeal published act",
+    })).rejects.toThrow("RESOURCE_MUST_BE_UNPUBLISHED");
+    await expect(manager.client.mutation(archiveResource, {
+      id: resourceId,
+      reason: "Archive published act",
+    })).rejects.toThrow("RESOURCE_MUST_BE_UNPUBLISHED");
+
+    const lockId = await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.patch(resourceId, { activeVersionId: undefined });
+      await ctx.db.patch(versionId, { status: "publishing" });
+      return await ctx.db.insert("documentLifecycleLocks", {
+        resourceId,
+        versionId,
+        operation: "publish",
+        actorId: "fixture",
+        idempotencyKey: "first-publish-in-flight",
+        expiresAt: now + 60_000,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await expect(manager.client.mutation(markResourceRepealed, {
+      id: resourceId,
+      repealDate: "2026-02-01",
+      reason: "Repeal while publication is running",
+    })).rejects.toThrow("DOCUMENT_LIFECYCLE_BUSY");
+    await expect(manager.client.mutation(archiveResource, {
+      id: resourceId,
+      reason: "Archive while publication is running",
+    })).rejects.toThrow("DOCUMENT_LIFECYCLE_BUSY");
+
+    await t.run((ctx) => ctx.db.delete(lockId));
+    await expect(manager.client.mutation(markResourceRepealed, {
+      id: resourceId,
+      repealDate: "2026-02-01",
+      reason: "Repeal unpublished act",
+    })).resolves.toMatchObject({ status: "repealed" });
+  });
+
   it("paginates bounded jurisdiction, resource, and version history reads", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -889,6 +975,60 @@ describe("legal resource governance", () => {
         paginationOpts: { numItems: 20, cursor: null },
       }),
     ).resolves.toMatchObject({ page: [] });
+  });
+
+  it("reads legacy GroundX document-version statuses as inert history", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const auditor = await asAdmin(t, "auditor");
+    const jurisdictionId = await manager.client.mutation(createJurisdiction, {
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana-legacy-versions",
+      isDefault: false,
+      reason: "Legacy history fixture",
+    });
+    const resourceId = await manager.client.mutation(createResource, {
+      jurisdictionId,
+      type: "act",
+      title: "Legacy status act",
+      issuer: "Parliament",
+      officialCitation: "Legacy Status 1",
+      sourceUrl: "https://example.gov.gh/legacy-status",
+      topics: [],
+      effectiveDate: "2020-01-01",
+      reason: "Legacy history fixture",
+    });
+    await t.run(async (ctx) => {
+      const storageId = await ctx.storage.store(new Blob(["legacy"]));
+      for (const [index, status] of (["uploading", "staging_processing", "failed"] as const).entries()) {
+        await ctx.db.insert("documentVersions", {
+          resourceId,
+          versionNumber: index + 1,
+          originalStorageId: storageId,
+          filename: `legacy-${index + 1}.pdf`,
+          mimeType: "application/pdf",
+          byteSize: 6,
+          sha256: "a".repeat(64),
+          sourceUrl: "https://example.gov.gh/legacy-status",
+          status,
+          submittedBy: "legacy",
+          createdAt: Date.now() + index,
+          updatedAt: Date.now() + index,
+        });
+      }
+    });
+
+    const result = await auditor.client.query(listVersions, {
+      resourceId,
+      paginationOpts: { numItems: 20, cursor: null },
+    });
+    expect(result.page.map((version: { status: string }) => version.status)).toEqual([
+      "failed",
+      "staging_processing",
+      "uploading",
+    ]);
   });
 
   it("paginates unified picker rows, including code-less jurisdictions", async () => {

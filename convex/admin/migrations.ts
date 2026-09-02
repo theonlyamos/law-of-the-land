@@ -379,7 +379,10 @@ export const seedGhanaJurisdictionV2 = internalMutation({
           rollout.ghanaProjectionFingerprint !== fingerprint) {
         throw new ConvexError("JURISDICTION_MIGRATION_STATE_INVALID");
       }
-      return rollout.ghanaSeedLastResult;
+      return {
+        jurisdictionId: rollout.ghanaSeedLastResult.jurisdictionId,
+        changed: rollout.ghanaSeedLastResult.changed,
+      };
     }
 
     const ghanaRows = await ctx.db

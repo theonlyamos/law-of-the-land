@@ -38,6 +38,7 @@ const applyGeminiProviderResult = makeFunctionReference<"mutation">(
 const getGeminiJobTarget = makeFunctionReference<"query">("admin/jobs:getGeminiJobTarget");
 const retryJob = makeFunctionReference<"mutation">("admin/jobs:retryJob");
 const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGeminiJob");
+const reconcileStaleJobs = makeFunctionReference<"mutation">("admin/jobs:reconcileStaleJobs");
 const listJobs = makeFunctionReference<"query">("admin/jobs:listJobs");
 const listIntegrationHealth = makeFunctionReference<"query">("admin/operations:listIntegrationHealth");
 
@@ -233,6 +234,42 @@ describe("durable Gemini jobs", () => {
     });
     expect(result.page[0]).not.toHaveProperty("providerOperationName");
     expect(result.page[0]).not.toHaveProperty("payload");
+  });
+
+  it("keeps legacy GroundX jobs out of Gemini reads and execution", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const legacyJobIds = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await Promise.all(Array.from({ length: 26 }, async (_, index) =>
+        await ctx.db.insert("integrationJobs", {
+          type: "ingest_remote",
+          targetType: "documentVersion",
+          targetId: `legacy-version-${index}`,
+          payload: "{}",
+          actorId: "legacy",
+          actorRoles: [],
+          idempotencyKey: `legacy-groundx-job-${index}`,
+          requestFingerprint: "{}",
+          correlationId: `legacy-groundx-correlation-${index}`,
+          callbackTokenHash: `legacy-callback-hash-${index}`,
+          status: "queued",
+          attemptCount: 0,
+          nextAttemptAt: now - 1,
+          createdAt: now + index,
+          updatedAt: now + index,
+        })));
+    });
+
+    await expect(admin.client.query(listJobs, {
+      paginationOpts: { numItems: 10, cursor: null },
+    })).resolves.toMatchObject({ page: [] });
+    await expect(t.mutation(claimJob, { jobId: legacyJobIds[0] })).resolves.toBeNull();
+    await expect(t.mutation(reconcileStaleJobs, {})).resolves.toEqual({
+      scheduled: 0,
+      hasMore: false,
+    });
   });
 
   it("terminalizes a stubbed Gemini job before API-key or client construction", async () => {
@@ -503,7 +540,7 @@ describe("durable Gemini jobs", () => {
         updatedAt: now,
       });
       await ctx.db.patch(resourceId, { activeVersionId: versionId });
-      return { jurisdictionId, resourceId };
+      return { jurisdictionId, resourceId, versionId };
     });
     const idempotencyKey = "delete-gemini-store-ghana";
     const input = {
@@ -516,7 +553,11 @@ describe("durable Gemini jobs", () => {
     await expect(admin.client.mutation(deleteJurisdictionGeminiStore, input)).rejects.toThrow(
       "JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE",
     );
-    await t.run((ctx) => ctx.db.patch(fixture.resourceId, { activeVersionId: undefined, status: "repealed" }));
+    await t.run((ctx) => ctx.db.patch(fixture.resourceId, { status: "archived" }));
+    await expect(admin.client.mutation(deleteJurisdictionGeminiStore, input)).rejects.toThrow(
+      "JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE",
+    );
+    await t.run((ctx) => ctx.db.patch(fixture.resourceId, { activeVersionId: undefined, status: "active" }));
     await expect(admin.client.mutation(deleteJurisdictionGeminiStore, {
       ...input,
       confirmation: "DELETE GEMINI STORE wrong",
@@ -543,6 +584,14 @@ describe("durable Gemini jobs", () => {
     await expect(t.run((ctx) => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
 
     const leaseToken = await claimLease(t, queued.jobId);
+    await t.run((ctx) => ctx.db.patch(fixture.resourceId, {
+      activeVersionId: fixture.versionId,
+      status: "archived",
+    }));
+    await expect(t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken })).rejects.toThrow(
+      "GEMINI_STORE_DELETE_PRECONDITION_FAILED",
+    );
+    await t.run((ctx) => ctx.db.patch(fixture.resourceId, { activeVersionId: undefined, status: "active" }));
     await t.run((ctx) => ctx.db.patch(fixture.jurisdictionId, { status: "enabled" }));
     await expect(t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken })).rejects.toThrow(
       "GEMINI_STORE_DELETE_PRECONDITION_FAILED",

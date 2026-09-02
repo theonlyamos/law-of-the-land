@@ -57,8 +57,9 @@ const resourceDocValidator = v.object({
   createdAt: v.number(), updatedAt: v.number(),
 });
 const versionStatusValidator = v.union(
-  v.literal("draft"), v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"),
-  v.literal("published"), v.literal("rejected"),
+  v.literal("draft"), v.literal("uploading"), v.literal("staging_processing"),
+  v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"),
+  v.literal("published"), v.literal("rejected"), v.literal("failed"),
   v.literal("superseded"), v.literal("unpublished"), v.literal("archived"),
 );
 const versionDocValidator = v.object({
@@ -635,6 +636,17 @@ export const updateResource = mutation({
   },
 });
 
+async function requireResourceLifecycleIdle(
+  ctx: MutationCtx,
+  resourceId: Id<"legalResources">,
+) {
+  const lock = await ctx.db
+    .query("documentLifecycleLocks")
+    .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+    .first();
+  if (lock) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
+}
+
 export const archiveResource = mutation({
   args: { id: v.id("legalResources"), reason: v.string() },
   returns: resourceDocValidator,
@@ -644,6 +656,8 @@ export const archiveResource = mutation({
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
     if (row.status === "archived") throw new ConvexError("INVALID_RESOURCE_TRANSITION");
+    if (row.activeVersionId !== undefined) throw new ConvexError("RESOURCE_MUST_BE_UNPUBLISHED");
+    await requireResourceLifecycleIdle(ctx, row._id);
     const patch = { status: "archived" as const, updatedBy: actor.userId, updatedAt: Date.now() };
     await ctx.db.patch(row._id, patch);
     await auditChange(ctx, actor, {
@@ -672,6 +686,8 @@ export const markResourceRepealed = mutation({
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
     if (row.status !== "active") throw new ConvexError("INVALID_RESOURCE_TRANSITION");
     if (row.repealDate !== undefined) throw new ConvexError("RESOURCE_STATUS_DATE_MISMATCH");
+    if (row.activeVersionId !== undefined) throw new ConvexError("RESOURCE_MUST_BE_UNPUBLISHED");
+    await requireResourceLifecycleIdle(ctx, row._id);
     const repealDate = validateDate(args.repealDate, "REPEAL_DATE");
     if (repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
     const patch = {
