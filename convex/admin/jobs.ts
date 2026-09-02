@@ -1060,10 +1060,10 @@ export const recordProviderFailure = internalMutation({
       await ctx.db.patch(job._id, { recoveryKind: "delete_document", updatedAt: now });
       job = { ...job, recoveryKind: "delete_document" };
     }
-    let replacementDeleteRecovery = false;
+    let replacementDeleteWorkflow = false;
     if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
       const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
-      replacementDeleteRecovery = workflow.kind === "delete" && workflow.payload.operation === "replace_delete" && job.recoveryKind === "delete_document";
+      replacementDeleteWorkflow = workflow.kind === "delete" && workflow.payload.operation === "replace_delete";
     }
     const retryable = args.retryable ?? ["rate_limit", "timeout", "network"].includes(args.kind);
     const ambiguousSideEffect = args.sideEffectUncertain === true || (
@@ -1087,7 +1087,7 @@ export const recordProviderFailure = internalMutation({
       return { status: "queued" as const, nextAttemptAt };
     }
     const pollObservationUncertain = job.type === "gemini_index_document" && job.recoveryKind === "poll_operation";
-    const status: "manual_review" | "failed" = (pollObservationUncertain || replacementDeleteRecovery || retryable || ambiguousSideEffect) ? "manual_review" : "failed";
+    const status: "manual_review" | "failed" = (pollObservationUncertain || replacementDeleteWorkflow || retryable || ambiguousSideEffect) ? "manual_review" : "failed";
     await ctx.db.patch(job._id, {
       status,
       attemptCount,
@@ -1095,7 +1095,7 @@ export const recordProviderFailure = internalMutation({
       leaseToken: undefined,
       leaseExpiresAt: undefined,
       lastErrorKind: args.kind,
-      recoveryKind: status === "failed" ? undefined : job.recoveryKind,
+      recoveryKind: status === "failed" ? undefined : replacementDeleteWorkflow ? "delete_document" : job.recoveryKind,
       knownStoreResult: status === "failed" ? undefined : job.knownStoreResult,
       updatedAt: now,
       retentionPending: status === "failed" ? true : undefined,

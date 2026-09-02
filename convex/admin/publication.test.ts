@@ -1237,6 +1237,63 @@ describe("governed document publication", () => {
     expect(final.locks).toHaveLength(0);
   });
 
+  it("quarantines a replacement delete when the action has no API key", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const operator = await asAdmin(t, "super_admin");
+    const { jurisdictionId, resourceId, ids } = await seedCatalog(t, "manager", ["published", "approved"]);
+    await addStepUp(t, publisher, "document_publish", ids[1], "replacement-missing-key-1");
+    const queued = await publisher.client.mutation(publishVersion, {
+      versionId: ids[1], confirmation: `PUBLISH ${ids[1]}`, reason: "Publish replacement", idempotencyKey: "replacement-missing-key-1",
+    });
+    await completeIndex(t, queued.jobId, "replacement-missing-key");
+    const deletion = await t.run(async (ctx) => (await ctx.db.query("integrationJobs").take(5)).find((job) => job.type === "gemini_delete_document"));
+    if (!deletion) throw new Error("expected replacement deletion");
+    delete process.env.GOOGLE_AI_API_KEY;
+
+    await expect(t.action(runGeminiJob, { jobId: deletion._id })).resolves.toBeNull();
+
+    const quarantined = await t.run(async (ctx) => ({
+      job: await ctx.db.get(deletion._id), jurisdiction: await ctx.db.get(jurisdictionId),
+      resource: await ctx.db.get(resourceId), previous: await ctx.db.get(ids[0]), candidate: await ctx.db.get(ids[1]),
+      locks: await ctx.db.query("documentLifecycleLocks").take(2),
+    }));
+    expect(quarantined.job).toMatchObject({ status: "manual_review", recoveryKind: "delete_document", lastErrorKind: "authentication" });
+    expect(quarantined.jurisdiction?.providerSyncState).toBe("drifted");
+    expect(quarantined.resource?.activeVersionId).toBe(ids[0]);
+    expect(quarantined.previous?.status).toBe("published");
+    expect(quarantined.candidate).toMatchObject({
+      status: "publishing",
+      failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.",
+    });
+    expect(quarantined.locks).toHaveLength(1);
+
+    await operator.client.mutation(retryJob, {
+      jobId: deletion._id, reason: "Retry replacement cleanup", idempotencyKey: "retry-replacement-missing-key",
+    });
+    const recovery = await t.run(async (ctx) => ctx.db.get(deletion._id as Id<"integrationJobs">));
+    if (!recovery?.leaseToken) throw new Error("expected replacement recovery lease");
+    await expect(t.query(getGeminiJobTarget, { jobId: deletion._id, leaseToken: recovery.leaseToken })).resolves.toMatchObject({
+      kind: "delete_document", documentName: "fileSearchStores/ghana-test/documents/version-1",
+    });
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: deletion._id, leaseToken: recovery.leaseToken, result: { kind: "document_deleted" },
+    });
+    const recovered = await t.run(async (ctx) => ({
+      job: await ctx.db.get(deletion._id), jurisdiction: await ctx.db.get(jurisdictionId),
+      resource: await ctx.db.get(resourceId), previous: await ctx.db.get(ids[0]), candidate: await ctx.db.get(ids[1]),
+      locks: await ctx.db.query("documentLifecycleLocks").take(2),
+    }));
+    expect(recovered.job?.status).toBe("succeeded");
+    expect(recovered.jurisdiction?.providerSyncState).toBe("synced");
+    expect(recovered.resource?.activeVersionId).toBe(ids[1]);
+    expect(recovered.previous?.status).toBe("superseded");
+    expect(recovered.candidate).toMatchObject({ status: "published" });
+    expect(recovered.candidate?.failureSummary).toBeUndefined();
+    expect(recovered.locks).toHaveLength(0);
+  });
+
   it("shows manual-review copy on the replacement candidate and completes its exact delete recovery", async () => {
     const t = createBackend();
     await enablePanel(t);
