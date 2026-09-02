@@ -149,6 +149,12 @@ export const researchDocumentManifestValidator = v.object({
   sourceUrl: v.string(),
 });
 
+export const researchCitationKeyValidator = v.object({
+  jurisdictionId: v.string(),
+  resourceId: v.string(),
+  versionId: v.string(),
+});
+
 export const researchLibraryAvailabilityValidator = v.union(
   v.object({
     jurisdictionId: v.id("jurisdictions"),
@@ -173,6 +179,7 @@ export const researchLibraryAvailabilityValidator = v.union(
 export const researchLibraryRequestValidator = v.object({
   selectedJurisdictionId: v.string(),
   supplementaryJurisdictionIds: v.array(v.string()),
+  citationKeys: v.optional(v.array(researchCitationKeyValidator)),
 });
 
 export const researchLibraryResolutionValidator = v.object({
@@ -211,6 +218,12 @@ export type ResearchDocumentManifest = {
   title: string;
   officialCitation: string;
   sourceUrl: string;
+};
+
+export type ResearchCitationKey = {
+  jurisdictionId: string;
+  resourceId: string;
+  versionId: string;
 };
 
 export type ResearchLibraryAvailability =

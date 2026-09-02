@@ -17,11 +17,6 @@ const stores: ResearchStore[] = [
     kind: "geographic",
     relation: "selected",
     storeName: "fileSearchStores/ghana-law",
-    documents: [{
-      resourceId: "resource-1",
-      versionId: "version-1",
-      documentName: "fileSearchStores/ghana-law/documents/document-1",
-    }],
   },
   {
     jurisdictionId: "accra",
@@ -29,7 +24,6 @@ const stores: ResearchStore[] = [
     kind: "geographic",
     relation: "geographic_ancestor",
     storeName: "fileSearchStores/accra-law",
-    documents: [],
   },
 ];
 
@@ -109,7 +103,6 @@ describe("GeminiFileSearchResearch", () => {
           citation: {
             resourceId: "resource-1",
             versionId: "version-1",
-            documentName: "fileSearchStores/ghana-law/documents/document-1",
             pageNumber: 4,
           },
         }],
@@ -122,7 +115,7 @@ describe("GeminiFileSearchResearch", () => {
       input: {
         type: "text",
         text: JSON.stringify({
-          trustedScope: stores.map(({ storeName: _storeName, documents: _documents, ...store }) => store),
+          trustedScope: stores.map(({ storeName: _storeName, ...store }) => store),
           untrustedQuestion: "Which constitution applies?",
           instruction: "Answer only from File Search evidence. Keep every factual span directly cited.",
         }),
@@ -164,7 +157,6 @@ describe("GeminiFileSearchResearch", () => {
           citation: {
             resourceId: "resource-1",
             versionId: "version-1",
-            documentName: "fileSearchStores/ghana-law/documents/document-1",
             pageNumber: 4,
           },
         }],
@@ -172,8 +164,8 @@ describe("GeminiFileSearchResearch", () => {
     });
   });
 
-  it("resolves provider citation URIs through the authorized document manifest", async () => {
-    const authorized = new GeminiFileSearchResearch({
+  it("emits bounded lookup claims while ignoring provider provenance fields", async () => {
+    const ordinary = new GeminiFileSearchResearch({
       model: "server-retrieval-model",
       client: client(textResponse(
         "evidence",
@@ -184,7 +176,7 @@ describe("GeminiFileSearchResearch", () => {
           })],
       )),
     });
-    const unknownDocument = new GeminiFileSearchResearch({
+    const overflowDocument = new GeminiFileSearchResearch({
       model: "server-retrieval-model",
       client: client(textResponse(
         "evidence",
@@ -198,23 +190,36 @@ describe("GeminiFileSearchResearch", () => {
       )),
     });
 
-    await expect(authorized.search({ query: "question", stores }, {
+    const ordinaryResult = await ordinary.search({ query: "question", stores }, {
+      signal: new AbortController().signal,
+      timeoutMs: 10_000,
+    });
+    expect(ordinaryResult).toMatchObject({
+      sources: [{
+        jurisdictionId: "ghana",
+        spans: [{ citation: {
+            resourceId: "resource-1",
+            versionId: "version-1",
+          } }],
+      }],
+    });
+    expect(ordinaryResult.sources[0].spans[0].citation).toEqual({
+      resourceId: "resource-1",
+      versionId: "version-1",
+    });
+    expect(JSON.stringify(ordinaryResult)).not.toMatch(/provider-document|source-attribution|FORGED TITLE/);
+    await expect(overflowDocument.search({ query: "question", stores }, {
       signal: new AbortController().signal,
       timeoutMs: 10_000,
     })).resolves.toMatchObject({
       sources: [{
         jurisdictionId: "ghana",
         spans: [{ citation: {
-            resourceId: "resource-1",
-            versionId: "version-1",
-            documentName: "fileSearchStores/ghana-law/documents/document-1",
-          } }],
+          resourceId: "resource-forged",
+          versionId: "version-1",
+        } }],
       }],
     });
-    await expect(unknownDocument.search({ query: "question", stores }, {
-      signal: new AbortController().signal,
-      timeoutMs: 10_000,
-    })).resolves.toMatchObject({ sources: [] });
   });
 
   it("rejects aborts and ignores unknown or duplicate cited spans", async () => {
@@ -337,7 +342,7 @@ describe("GeminiFileSearchResearch", () => {
       client: client(textResponse(
         "evidence",
         [fileCitation("evidence", "ghana", {
-            custom_metadata: { jurisdiction_id: "ghana", resource_id: "r".repeat(201), version_id: "version-1" },
+            custom_metadata: { jurisdiction_id: "ghana", resource_id: "r".repeat(129), version_id: "version-1" },
           })],
       )),
     });

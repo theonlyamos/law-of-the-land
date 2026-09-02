@@ -66,12 +66,30 @@ function responseJson(value: unknown) {
 function providerSource(
   jurisdictionId: string,
   content: string,
-  citations: Array<{ resourceId: string; versionId: string; documentName: string; pageNumber?: number }>,
+  citations: Array<{ resourceId: string; versionId: string; pageNumber?: number }>,
 ) {
   return {
     jurisdictionId,
     spans: citations.map((citation) => ({ content, citation })),
   };
+}
+
+function citationClaim(
+  document: { resourceId: string; versionId: string },
+  pageNumber?: number,
+) {
+  return {
+    resourceId: document.resourceId,
+    versionId: document.versionId,
+    ...(pageNumber === undefined ? {} : { pageNumber }),
+  };
+}
+
+function transportBody(callIndex: number) {
+  const requestBody = (transport.fetch.mock.calls[callIndex][1] as RequestInit).body;
+  return JSON.parse(ArrayBuffer.isView(requestBody)
+    ? new TextDecoder().decode(requestBody as ArrayBufferView<ArrayBuffer>)
+    : String(requestBody));
 }
 
 function enableObservation() {
@@ -124,12 +142,12 @@ describe("POST /api/search Gemini File Search boundary", () => {
       latencyMs: 23,
       sources: [
         providerSource("ghana-id", "National evidence", [
-          { ...documents.ghana, pageNumber: 2 },
-          { resourceId: "forged", versionId: "forged", documentName: documents.ghana.documentName, pageNumber: 9 },
+          citationClaim(documents.ghana, 2),
+          { resourceId: "forged", versionId: "forged", pageNumber: 9 },
         ]),
         providerSource("selected-id", "Local evidence", [
-          { resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName, pageNumber: 1 },
-          { resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName, pageNumber: 1 },
+          citationClaim(documents.selected, 1),
+          citationClaim(documents.selected, 1),
         ]),
       ],
     });
@@ -163,7 +181,81 @@ describe("POST /api/search Gemini File Search boundary", () => {
     expect(telemetry).toMatchObject({ fileSearchCallCount: 1, fileSearchStoreCount: 3, fileSearchLatencyMs: 23, citationCount: 2, partialCoverage: true });
     expect(JSON.stringify(telemetry)).not.toMatch(/fileSearchStores|What rules|Local evidence|Accra Bylaw/);
     expect(transport.fetch).toHaveBeenCalledTimes(3);
+    expect(transportBody(2)).toEqual({
+      selectedJurisdictionId: selected.id,
+      supplementaryJurisdictionIds: ["ghana-id", "west-africa-id"],
+      citationKeys: [
+        { jurisdictionId: "ghana-id", resourceId: documents.ghana.resourceId, versionId: documents.ghana.versionId },
+        { jurisdictionId: "ghana-id", resourceId: "forged", versionId: "forged" },
+        { jurisdictionId: selected.id, resourceId: documents.selected.resourceId, versionId: documents.selected.versionId },
+      ],
+    });
     expect(transport.fetch.mock.calls.every(([, init]) => (init as RequestInit).signal instanceof AbortSignal)).toBe(true);
+  });
+
+  it("authorizes a cited document omitted from the bounded preflight manifest only through postflight", async () => {
+    const overflow = {
+      resourceId: "resource-overflow",
+      versionId: "version-overflow",
+      documentName: "fileSearchStores/accra/documents/overflow-v1",
+      title: "Overflow Act",
+      officialCitation: "OA 65",
+      sourceUrl: "https://official.example/overflow",
+    };
+    transport.fetch
+      .mockResolvedValueOnce(responseJson({ selected: readyResolution.selected, supplementary: [] }))
+      .mockResolvedValueOnce(responseJson(readyResolution))
+      .mockResolvedValueOnce(responseJson({
+        selected: { ...readyResolution.selected, documents: [overflow] },
+        supplementary: readyResolution.supplementary.map((row) => ({ ...row, documents: [] })),
+      }));
+    providers.search.mockResolvedValue({
+      latencyMs: 2,
+      sources: [providerSource(selected.id, "Overflow law applies.", [
+        citationClaim(overflow),
+        { resourceId: "r".repeat(129), versionId: "version-oversized" },
+      ])],
+    });
+
+    const response = await POST(request({ query: "Question", jurisdictionId: selected.id }));
+
+    expect(response.status).toBe(200);
+    expect(providers.search.mock.calls[0][0].stores).toEqual(plan.map((item, index) => ({
+      ...item,
+      storeName: ["fileSearchStores/accra", "fileSearchStores/ghana", "fileSearchStores/west-africa"][index],
+    })));
+    const context = JSON.parse((await response.json()).result);
+    expect(context.sources[0]).toMatchObject({
+      jurisdictionId: selected.id,
+      content: "Overflow law applies.",
+      citations: [{ title: "Overflow Act", officialCitation: "OA 65", sourceUrl: overflow.sourceUrl }],
+    });
+    expect(transportBody(2).citationKeys).toEqual([{
+      jurisdictionId: selected.id,
+      resourceId: overflow.resourceId,
+      versionId: overflow.versionId,
+    }]);
+  });
+
+  it("fails closed before postflight when the provider returns more than 64 unique citation keys", async () => {
+    providers.search.mockResolvedValue({
+      latencyMs: 2,
+      sources: [{
+        jurisdictionId: selected.id,
+        spans: Array.from({ length: 65 }, (_, index) => ({
+          content: `claim-${index}`,
+          citation: { resourceId: `resource-${index}`, versionId: `version-${index}` },
+        })),
+      }],
+    });
+
+    const response = await POST(request({ query: "Question", jurisdictionId: selected.id }));
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: "We couldn't find relevant legal information for your question.",
+    });
+    expect(transport.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("derives evidence metrics and partial coverage only from normalized governed sources", async () => {
@@ -185,8 +277,8 @@ describe("POST /api/search Gemini File Search boundary", () => {
     });
     const duplicate = "Duplicated governed paragraph.";
     providers.search.mockResolvedValue({ latencyMs: 9, sources: [
-      providerSource(selected.id, duplicate, [{ resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName }]),
-      providerSource("ghana-id", duplicate, [{ resourceId: documents.ghana.resourceId, versionId: documents.ghana.versionId, documentName: documents.ghana.documentName }]),
+      providerSource(selected.id, duplicate, [citationClaim(documents.selected)]),
+      providerSource("ghana-id", duplicate, [citationClaim(documents.ghana)]),
     ] });
     const response = await POST(request({ query: "Question", jurisdictionId: selected.id }, true));
     expect(response.status).toBe(200);
@@ -267,10 +359,10 @@ describe("POST /api/search Gemini File Search boundary", () => {
       .mockResolvedValueOnce(responseJson({
         selected: readyResolution.selected,
         supplementary: [{ jurisdictionId: "ghana-id", status: "needs_review" }, readyResolution.supplementary[1]],
-      }));
+    }));
     providers.search.mockResolvedValue({ latencyMs: 5, sources: [
-      providerSource("selected-id", "Local", [{ resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName }]),
-      providerSource("west-africa-id", "Regional", [{ resourceId: documents.westAfrica.resourceId, versionId: documents.westAfrica.versionId, documentName: documents.westAfrica.documentName }]),
+      providerSource("selected-id", "Local", [citationClaim(documents.selected)]),
+      providerSource("west-africa-id", "Regional", [citationClaim(documents.westAfrica)]),
     ] });
     const response = await POST(request({ query: "Question", jurisdictionId: selected.id }, true));
     expect(response.status).toBe(200);
@@ -346,11 +438,11 @@ describe("POST /api/search Gemini File Search boundary", () => {
       .mockResolvedValueOnce(responseJson({
         selected: readyResolution.selected,
         supplementary: [{ jurisdictionId: "ghana-id", status: "needs_review" }, readyResolution.supplementary[1]],
-      }));
+    }));
     providers.search.mockResolvedValue({ latencyMs: 4, sources: [
-      providerSource(selected.id, "Local", [{ resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName }]),
-      providerSource("ghana-id", "Stale national", [{ resourceId: documents.ghana.resourceId, versionId: documents.ghana.versionId, documentName: documents.ghana.documentName }]),
-      providerSource("west-africa-id", "Regional", [{ resourceId: documents.westAfrica.resourceId, versionId: documents.westAfrica.versionId, documentName: documents.westAfrica.documentName }]),
+      providerSource(selected.id, "Local", [citationClaim(documents.selected)]),
+      providerSource("ghana-id", "Stale national", [citationClaim(documents.ghana)]),
+      providerSource("west-africa-id", "Regional", [citationClaim(documents.westAfrica)]),
     ] });
     const response = await POST(request({ query: "Question", jurisdictionId: selected.id }, true));
     expect(response.status).toBe(200);
@@ -374,7 +466,7 @@ describe("POST /api/search Gemini File Search boundary", () => {
     providers.search.mockResolvedValue({ latencyMs: 2, sources: [providerSource(
       selected.id,
       "Current law",
-      [{ resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName }],
+      [citationClaim(documents.selected)],
     )] });
     const response = await POST(request({ query: "Question", jurisdictionId: selected.id }));
     expect(response.status).toBe(500);
@@ -395,8 +487,8 @@ describe("POST /api/search Gemini File Search boundary", () => {
     providers.search.mockResolvedValue({ latencyMs: 2, sources: [{
       jurisdictionId: selected.id,
       spans: [
-        { content: "Old unpublished candidate text", citation: { resourceId: documents.selected.resourceId, versionId: documents.selected.versionId, documentName: documents.selected.documentName } },
-        { content: "Current active law", citation: { resourceId: replacement.resourceId, versionId: replacement.versionId, documentName: replacement.documentName } },
+        { content: "Old unpublished candidate text", citation: citationClaim(documents.selected) },
+        { content: "Current active law", citation: citationClaim(replacement) },
       ],
     }] });
 

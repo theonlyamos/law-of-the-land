@@ -13,7 +13,8 @@ const MAX_INTERACTION_STEPS = 128;
 const MAX_MODEL_OUTPUT_BLOCKS = 32;
 const MAX_ANNOTATIONS = 64;
 const MAX_CITATIONS_PER_SOURCE = 16;
-const MAX_CITATION_IDENTIFIER_LENGTH = 200;
+const MAX_CITATION_IDENTIFIER_LENGTH = 128;
+const MAX_METADATA_STRING_LENGTH = 200;
 
 export type ResearchStore = {
   jurisdictionId: string;
@@ -21,6 +22,7 @@ export type ResearchStore = {
   kind: "geographic" | "organizational";
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
   storeName: string;
+  // Fixture-only hints for the isolated provider stub. Real Gemini calls omit these.
   documents?: Array<{
     resourceId: string;
     versionId: string;
@@ -36,7 +38,6 @@ export type ResearchResult = {
       citation: {
         resourceId: string;
         versionId: string;
-        documentName: string;
         pageNumber?: number;
       };
     }>;
@@ -61,8 +62,6 @@ export function resolveFileSearchModel(environment: Record<string, string | unde
 function invalidResponse(): never {
   throw new Error("FILE_SEARCH_RESPONSE_INVALID");
 }
-
-const DOCUMENT_NAME_PATTERN = /^fileSearchStores\/[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?\/documents\/[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/u;
 
 function interactionEvidence(
   response: unknown,
@@ -115,7 +114,7 @@ function interactionEvidence(
     const metadata = value.custom_metadata as Record<string, unknown>;
     if (
       Object.keys(metadata).length > 6
-      || Object.values(metadata).some((item) => typeof item === "string" && item.length > MAX_CITATION_IDENTIFIER_LENGTH)
+      || Object.values(metadata).some((item) => typeof item === "string" && item.length > MAX_METADATA_STRING_LENGTH)
     ) continue;
     const jurisdictionId = metadata.jurisdiction_id;
     const resourceId = metadata.resource_id;
@@ -125,15 +124,6 @@ function interactionEvidence(
       || typeof resourceId !== "string" || !resourceId || resourceId.length > MAX_CITATION_IDENTIFIER_LENGTH
       || typeof versionId !== "string" || !versionId || versionId.length > MAX_CITATION_IDENTIFIER_LENGTH
     ) continue;
-    const expectedStore = storesById.get(jurisdictionId)!;
-    const authorizedDocuments = (expectedStore.documents ?? []).filter((document) =>
-      document.resourceId === resourceId
-      && document.versionId === versionId
-      && DOCUMENT_NAME_PATTERN.test(document.documentName)
-      && document.documentName.startsWith(`${expectedStore.storeName}/documents/`)
-    );
-    if (authorizedDocuments.length !== 1) continue;
-    const documentName = authorizedDocuments[0].documentName;
     const start = value.start_index;
     const end = value.end_index;
     if (
@@ -154,7 +144,6 @@ function interactionEvidence(
     const citation = {
       resourceId,
       versionId,
-      documentName,
       ...(pageNumber === undefined ? {} : { pageNumber }),
     };
     const current = evidence.get(jurisdictionId) ?? { contentLength: 0, spans: [] };
@@ -166,7 +155,6 @@ function interactionEvidence(
       span.content === boundedContent
       && span.citation.resourceId === citation.resourceId
       && span.citation.versionId === citation.versionId
-      && span.citation.documentName === citation.documentName
       && span.citation.pageNumber === citation.pageNumber
     )) continue;
     current.spans.push({ content: boundedContent, citation });

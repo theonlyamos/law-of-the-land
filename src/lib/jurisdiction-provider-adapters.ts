@@ -148,14 +148,14 @@ export function createResearchProvider(
         const selectedScenario = resolvedMode.scenarioForQuestion(input.query);
         if (selectedScenario === "selected_failure") throw new Error("E2E_JURISDICTION_STUB_SELECTED_FAILURE");
         const sources = input.stores.flatMap((store, index) => {
-          const citation = store.documents?.[0];
-          return selectedScenario === "supplementary_failure" && index === 1 || !citation ? [] : [{
+          const hint = store.documents?.[0];
+          return selectedScenario === "supplementary_failure" && index === 1 || !hint ? [] : [{
             jurisdictionId: store.jurisdictionId,
             spans: [{
               content: index === 0
               ? `Isolated ${E2E_FIXTURE_TOWN_ALIAS} selected legal research evidence.`
               : `Isolated ${E2E_FIXTURE_TOWN_ALIAS} supplementary legal research evidence ${index}.`,
-              citation,
+              citation: { resourceId: hint.resourceId, versionId: hint.versionId },
             }],
           }];
         });

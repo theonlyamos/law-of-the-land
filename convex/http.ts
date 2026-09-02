@@ -6,6 +6,7 @@ import { authComponent, createAuth } from "./auth";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
 import {
+  MAX_RESEARCH_MANIFEST_REQUEST_BYTES,
   RESEARCH_MANIFEST_HEADERS,
   verifyResearchManifestProof,
 } from "./lib/researchManifestProof";
@@ -19,8 +20,8 @@ polar.registerRoutes(http);
 
 const MAX_EXPORT_REFERENCE_BYTES = 256;
 const MAX_SEARCH_JURISDICTION_BYTES = 64;
-const MAX_SEARCH_JURISDICTIONS_BYTES = 1_024;
 const MAX_JURISDICTION_ID_LENGTH = 128;
+const MAX_RESEARCH_CITATION_KEYS = 64;
 const claimConversationExportReference = makeFunctionReference<"mutation">(
   "admin/exports:claimConversationExportReference",
 );
@@ -109,10 +110,12 @@ function readResearchManifestRequest(bytes: Uint8Array) {
   }
   if (!isPlainObject(parsed)) return null;
   const keys = Object.keys(parsed);
+  const hasCitationKeys = Object.prototype.hasOwnProperty.call(parsed, "citationKeys");
   if (
-    keys.length !== 2 ||
+    keys.length !== (hasCitationKeys ? 3 : 2) ||
     !keys.includes("selectedJurisdictionId") ||
     !keys.includes("supplementaryJurisdictionIds") ||
+    (hasCitationKeys && !keys.includes("citationKeys")) ||
     !boundedOpaqueId(parsed.selectedJurisdictionId) ||
     !Array.isArray(parsed.supplementaryJurisdictionIds) ||
     parsed.supplementaryJurisdictionIds.length > 3 ||
@@ -123,15 +126,44 @@ function readResearchManifestRequest(bytes: Uint8Array) {
   const supplementaryJurisdictionIds = parsed.supplementaryJurisdictionIds as string[];
   const ids = [parsed.selectedJurisdictionId, ...supplementaryJurisdictionIds];
   if (new Set(ids).size !== ids.length) return null;
+  if (hasCitationKeys && (
+    !Array.isArray(parsed.citationKeys) ||
+    parsed.citationKeys.length > MAX_RESEARCH_CITATION_KEYS
+  )) return null;
+  const citationKeys = hasCitationKeys ? parsed.citationKeys as unknown[] : undefined;
+  const seenCitationKeys = new Set<string>();
+  for (const candidate of citationKeys ?? []) {
+    if (!isPlainObject(candidate)) return null;
+    const candidateKeys = Object.keys(candidate);
+    if (
+      candidateKeys.length !== 3 ||
+      !candidateKeys.includes("jurisdictionId") ||
+      !candidateKeys.includes("resourceId") ||
+      !candidateKeys.includes("versionId") ||
+      !boundedOpaqueId(candidate.jurisdictionId) ||
+      !boundedOpaqueId(candidate.resourceId) ||
+      !boundedOpaqueId(candidate.versionId) ||
+      !ids.includes(candidate.jurisdictionId)
+    ) return null;
+    const key = `${candidate.jurisdictionId}\u0000${candidate.resourceId}\u0000${candidate.versionId}`;
+    if (seenCitationKeys.has(key)) return null;
+    seenCitationKeys.add(key);
+  }
   return {
     selectedJurisdictionId: parsed.selectedJurisdictionId,
     supplementaryJurisdictionIds,
+    ...(citationKeys === undefined ? {} : { citationKeys: citationKeys as ResearchManifestRequest["citationKeys"] }),
   };
 }
 
 type ResearchManifestRequest = {
   selectedJurisdictionId: string;
   supplementaryJurisdictionIds: string[];
+  citationKeys?: Array<{
+    jurisdictionId: string;
+    resourceId: string;
+    versionId: string;
+  }>;
 };
 
 export async function researchManifestResolutionResponse(
@@ -164,7 +196,7 @@ http.route({
   path: "/internal/search-jurisdictions",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTIONS_BYTES);
+    const bytes = await readBoundedBody(request, MAX_RESEARCH_MANIFEST_REQUEST_BYTES);
     if (!bytes) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
     const proof = await verifySearchJurisdictionRequest(request, bytes, "/internal/search-jurisdictions");
     if (!proof) {

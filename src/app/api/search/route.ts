@@ -27,6 +27,8 @@ const REQUESTS_PER_MINUTE = 15;
 const MAX_INTERNAL_RESPONSE_BYTES = 262_144;
 const MAX_ID_LENGTH = 200;
 const MAX_DOCUMENTS_PER_STORE = 64;
+const MAX_CITATION_KEYS = 64;
+const MAX_CITATION_ID_LENGTH = 128;
 const UNIFIED_ENDPOINT = "/internal/search-jurisdictions";
 const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const SEARCH_FAILURE = "We couldn't find relevant legal information for your question.";
@@ -57,6 +59,7 @@ type Availability =
   | { jurisdictionId: string; status: "unconfigured" | "provisioning" | "needs_review" };
 type AvailabilityResolution = { selected: Availability; supplementary: Availability[] };
 type PlanItem = ResearchAuthority & { ordinal: 0 | 1 | 2 | 3 };
+type CitationKey = { jurisdictionId: string; resourceId: string; versionId: string };
 
 function elapsed(startedAt: number) { return Math.max(0, Math.round(performance.now() - startedAt)); }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]) {
@@ -160,11 +163,53 @@ async function protectedPost(body: object, overallDeadlineAt: number): Promise<u
     clearTimeout(timer);
   }
 }
-async function availability(selectedId: string, supplementaryIds: readonly string[], overallDeadlineAt: number) {
-  const raw = await protectedPost({ selectedJurisdictionId: selectedId, supplementaryJurisdictionIds: supplementaryIds }, overallDeadlineAt);
+async function availability(
+  selectedId: string,
+  supplementaryIds: readonly string[],
+  overallDeadlineAt: number,
+  citationKeys?: readonly CitationKey[],
+) {
+  const raw = await protectedPost({
+    selectedJurisdictionId: selectedId,
+    supplementaryJurisdictionIds: supplementaryIds,
+    ...(citationKeys === undefined ? {} : { citationKeys }),
+  }, overallDeadlineAt);
   const parsed = parseResolution(raw, selectedId, supplementaryIds);
   if (!parsed) throw new Error("Research availability response invalid");
   return parsed;
+}
+
+function citationKeysForPostflight(
+  sources: unknown,
+  allowedJurisdictionIds: ReadonlySet<string>,
+): CitationKey[] | null {
+  if (!Array.isArray(sources)) return null;
+  const seen = new Set<string>();
+  const keys: CitationKey[] = [];
+  for (const rawSource of sources) {
+    if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) continue;
+    const source = rawSource as { jurisdictionId?: unknown; spans?: unknown };
+    if (!boundedString(source.jurisdictionId) || !allowedJurisdictionIds.has(source.jurisdictionId)
+      || !Array.isArray(source.spans)) continue;
+    for (const rawSpan of source.spans) {
+      if (!rawSpan || typeof rawSpan !== "object" || Array.isArray(rawSpan)) continue;
+      const citation = (rawSpan as { citation?: unknown }).citation;
+      if (!citation || typeof citation !== "object" || Array.isArray(citation)) continue;
+      const candidate = citation as { resourceId?: unknown; versionId?: unknown };
+      if (!boundedString(candidate.resourceId, MAX_CITATION_ID_LENGTH)
+        || !boundedString(candidate.versionId, MAX_CITATION_ID_LENGTH)) continue;
+      const identity = `${source.jurisdictionId}\u0000${candidate.resourceId}\u0000${candidate.versionId}`;
+      if (seen.has(identity)) continue;
+      if (keys.length >= MAX_CITATION_KEYS) return null;
+      seen.add(identity);
+      keys.push({
+        jurisdictionId: source.jurisdictionId,
+        resourceId: candidate.resourceId,
+        versionId: candidate.versionId,
+      });
+    }
+  }
+  return keys;
 }
 
 async function recordQuestion() {
@@ -188,12 +233,12 @@ function availabilityMessage(name: string, status: Exclude<Availability["status"
 
 function authorizeCitation(
   jurisdictionId: string,
-  citation: { resourceId: string; versionId: string; documentName: string; pageNumber?: number },
+  citation: { resourceId: string; versionId: string; pageNumber?: number },
   manifest: Availability,
 ): { key: string; citation: TrustedCitation } | null {
   if (manifest.status !== "ready") return null;
   const document = manifest.documents.find((candidate) => candidate.resourceId === citation.resourceId
-    && candidate.versionId === citation.versionId && candidate.documentName === citation.documentName);
+    && candidate.versionId === citation.versionId);
   if (!document) return null;
   return {
     key: `${jurisdictionId}\u0000${document.resourceId}\u0000${document.versionId}\u0000${citation.pageNumber ?? ""}`,
@@ -283,7 +328,13 @@ async function governedSearch(query: string, body: Record<string, unknown>, mode
         kind: item.kind,
         relation: item.relation,
         storeName: available[index].storeName,
-        documents: available[index].documents.map(({ resourceId, versionId, documentName }) => ({ resourceId, versionId, documentName })),
+        ...(mode.mode === "stub" ? {
+          documents: available[index].documents.map(({ resourceId, versionId, documentName }) => ({
+            resourceId,
+            versionId,
+            documentName,
+          })),
+        } : {}),
       }]
     : []);
   const provider = createResearchProvider(process.env, {}, mode);
@@ -341,10 +392,20 @@ async function governedSearch(query: string, body: Record<string, unknown>, mode
   if (!Number.isSafeInteger(result.latencyMs) || result.latencyMs < 0 || result.latencyMs > DEFAULT_RETRIEVAL_TIMEOUT_MS) {
     return await failedSearch(1, Math.min(DEFAULT_RETRIEVAL_TIMEOUT_MS, elapsed(callStartedAt)));
   }
+  const citationKeys = citationKeysForPostflight(
+    result.sources,
+    new Set(stores.map(({ jurisdictionId: id }) => id)),
+  );
+  if (!citationKeys) return await failedSearch(1, result.latencyMs);
 
   let postflight: AvailabilityResolution;
   try {
-    postflight = await availability(selection.id, plan.slice(1).map(({ jurisdictionId: id }) => id), overallDeadlineAt);
+    postflight = await availability(
+      selection.id,
+      plan.slice(1).map(({ jurisdictionId: id }) => id),
+      overallDeadlineAt,
+      citationKeys,
+    );
   } catch {
     return await failedSearch(1, result.latencyMs);
   }

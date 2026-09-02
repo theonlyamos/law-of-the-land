@@ -1,5 +1,6 @@
 export const RESEARCH_MANIFEST_PROOF_VERSION = "1";
 export const RESEARCH_MANIFEST_REPLAY_WINDOW_MS = 30_000;
+export const MAX_RESEARCH_MANIFEST_REQUEST_BYTES = 64 * 1_024;
 export const RESEARCH_MANIFEST_HEADERS = {
   version: "x-research-manifest-version",
   timestamp: "x-research-manifest-timestamp",
@@ -86,7 +87,7 @@ export async function createResearchManifestHeaders(input: {
   const timestamp = String(input.timestamp);
   if (method !== input.method || method !== "POST" || !input.pathname.startsWith("/")
     || input.pathname.length > 128 || !TIMESTAMP.test(timestamp) || !decode32(input.nonce)
-    || input.bodyBytes.byteLength > 1_024) {
+    || input.bodyBytes.byteLength > MAX_RESEARCH_MANIFEST_REQUEST_BYTES) {
     throw new Error("Research manifest request is invalid");
   }
   const digest = await bodyDigest(input.bodyBytes);
@@ -117,7 +118,7 @@ export async function verifyResearchManifestProof(input: {
   if (input.version !== RESEARCH_MANIFEST_PROOF_VERSION || input.method !== "POST"
     || !input.pathname.startsWith("/") || input.pathname.length > 128
     || !TIMESTAMP.test(input.timestamp) || !decode32(input.nonce) || !decode32(input.signature)
-    || input.bodyBytes.byteLength > 1_024
+    || input.bodyBytes.byteLength > MAX_RESEARCH_MANIFEST_REQUEST_BYTES
     || !Number.isSafeInteger(input.now)) return null;
   const timestamp = Number(input.timestamp);
   if (!Number.isSafeInteger(timestamp)

@@ -99,7 +99,7 @@ async function signedResearchPost(
 ) {
   const signedBody = options.signedBody ?? (typeof body === "string" ? body : "");
   const bodyBytes = new TextEncoder().encode(signedBody);
-  const proofHeaders = bodyBytes.byteLength <= 1_024
+  const proofHeaders = bodyBytes.byteLength <= 65_536
     ? await createResearchManifestHeaders({
       secret,
       method: "POST",
@@ -576,9 +576,11 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
     });
     const { resourceId, versionId } = await insertPublishedDocument(t, selected, storeName);
+    const citationKeys = [{ jurisdictionId: selected, resourceId, versionId }];
     const response = await post(t, JSON.stringify({
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
+      citationKeys,
     }));
     await expect(response.json()).resolves.toEqual({
       selected: {
@@ -603,6 +605,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     const duplicate = await post(t, JSON.stringify({
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
+      citationKeys,
     }));
     await expect(duplicate.json()).resolves.toEqual({
       selected: { jurisdictionId: selected, status: "needs_review" },
@@ -622,6 +625,10 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     await expect(t.query(getResearchManifestAvailability, {
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
+      citationKeys: [
+        { jurisdictionId: selected, resourceId: published.resourceId, versionId: published.versionId },
+        { jurisdictionId: selected, resourceId: draft.resourceId, versionId: draft.versionId },
+      ],
     })).resolves.toEqual({
       selected: {
         jurisdictionId: selected,
@@ -645,13 +652,29 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     await expect(t.query(getResearchManifestAvailability, {
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
+      citationKeys: [
+        { jurisdictionId: selected, resourceId: published.resourceId, versionId: published.versionId },
+        { jurisdictionId: selected, resourceId: draft.resourceId, versionId: draft.versionId },
+      ],
     })).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "needs_review" },
+      selected: {
+        jurisdictionId: selected,
+        status: "ready",
+        storeName,
+        documents: [{
+          resourceId: published.resourceId,
+          versionId: published.versionId,
+          documentName: `${storeName}/documents/trusted-act-v1`,
+          title: "Trusted Act",
+          officialCitation: "Act 7 of 2026",
+          sourceUrl: "https://official.example/act-7",
+        }],
+      },
       supplementary: [],
     });
   });
 
-  it("keeps research ready with a bounded trusted manifest above 64 published documents", async () => {
+  it("authorizes a cited current document beyond the first 64 published documents", async () => {
     const t = createBackend();
     const storeName = "fileSearchStores/ghana";
     const selected = await insertJurisdiction(t, {
@@ -659,25 +682,46 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     });
     const published = await insertPublishedDocuments(t, selected, storeName, 65);
 
+    const cited = published[64];
+    const result = await t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+      citationKeys: [{ jurisdictionId: selected, ...cited }],
+    });
+
+    expect(result.selected).toEqual({
+      jurisdictionId: selected,
+      status: "ready",
+      storeName,
+      documents: [{
+        ...cited,
+        documentName: `${storeName}/documents/trusted-act-65`,
+        title: "Trusted Act 65",
+        officialCitation: "Act 65 of 2026",
+        sourceUrl: "https://official.example/act-65",
+      }],
+    });
+  });
+
+  it("retains at most 64 non-authoritative preflight document hints", async () => {
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    await insertPublishedDocuments(t, selected, storeName, 65);
+
     const result = await t.query(getResearchManifestAvailability, {
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
     });
 
     expect(result.selected.status).toBe("ready");
-    if (result.selected.status !== "ready") throw new Error("expected ready research manifest");
+    if (result.selected.status !== "ready") throw new Error("expected ready research availability");
     expect(result.selected.documents).toHaveLength(64);
-    const publishedKeys = new Set(published.map(({ resourceId, versionId }) =>
-      `${resourceId}:${versionId}`));
-    const manifestKeys: string[] = result.selected.documents.map((document: {
-      resourceId: string;
-      versionId: string;
-    }) => `${document.resourceId}:${document.versionId}`);
-    expect(new Set(manifestKeys).size).toBe(64);
-    expect(manifestKeys.every((key) => publishedKeys.has(key))).toBe(true);
   });
 
-  it("pauses research while a document lifecycle operation can change store contents", async () => {
+  it("omits a cited document while its lifecycle operation can change store contents", async () => {
     const t = createBackend();
     const storeName = "fileSearchStores/ghana";
     const selected = await insertJurisdiction(t, {
@@ -701,9 +745,51 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     await expect(t.query(getResearchManifestAvailability, {
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [],
+      citationKeys: [{ jurisdictionId: selected, resourceId, versionId }],
     })).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "needs_review" },
+      selected: { jurisdictionId: selected, status: "ready", storeName, documents: [] },
       supplementary: [],
+    });
+  });
+
+  it("omits forged, foreign-resource, draft, and stale citation candidates individually", async () => {
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const foreign = await insertJurisdiction(t, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
+    });
+    const current = await insertPublishedDocument(t, selected, storeName);
+    const foreignDocument = await insertPublishedDocument(t, foreign, "fileSearchStores/nigeria");
+    const draft = await insertDraftDocument(t, selected);
+    const stale = await insertPublishedDocument(t, selected, storeName);
+    await t.run(async (ctx) => await ctx.db.patch(stale.resourceId, { activeVersionId: undefined }));
+
+    const result = await t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+      citationKeys: [
+        { jurisdictionId: selected, ...current },
+        { jurisdictionId: selected, resourceId: "forged-resource", versionId: "forged-version" },
+        { jurisdictionId: selected, ...foreignDocument },
+        { jurisdictionId: selected, ...draft },
+        { jurisdictionId: selected, ...stale },
+      ],
+    });
+
+    expect(result.selected).toEqual({
+      jurisdictionId: selected,
+      status: "ready",
+      storeName,
+      documents: [{
+        ...current,
+        documentName: `${storeName}/documents/trusted-act-v1`,
+        title: "Trusted Act",
+        officialCitation: "Act 7 of 2026",
+        sourceUrl: "https://official.example/act-7",
+      }],
     });
   });
 
@@ -793,6 +879,33 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       .toEqual(ids.slice(1));
   });
 
+  it("accepts a signed citation-key request above the former 1 KiB limit", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
+    });
+    const citationKeys = Array.from({ length: 64 }, (_, index) => ({
+      jurisdictionId: selected,
+      resourceId: `forged-resource-${index.toString().padStart(2, "0")}-${"r".repeat(32)}`,
+      versionId: `forged-version-${index.toString().padStart(2, "0")}-${"v".repeat(32)}`,
+    }));
+    const body = JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+      citationKeys,
+    });
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(1_024);
+
+    const response = await post(t, body);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
+      supplementary: [],
+    });
+  });
+
   it.each([
     ["empty body", ""],
     ["malformed JSON", "{"],
@@ -804,7 +917,15 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     ["too many supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: ["a", "b", "c", "d"] })],
     ["raw duplicate", JSON.stringify({ selectedJurisdictionId: "same", supplementaryJurisdictionIds: ["same"] })],
     ["overlong ID", JSON.stringify({ selectedJurisdictionId: "x".repeat(129), supplementaryJurisdictionIds: [] })],
-    ["oversized body", "x".repeat(1_025)],
+    ["unknown citation key field", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "x", resourceId: "r", versionId: "v", documentName: "forged" }] })],
+    ["citation outside requested jurisdictions", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "y", resourceId: "r", versionId: "v" }] })],
+    ["duplicate citation key", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [
+      { jurisdictionId: "x", resourceId: "r", versionId: "v" },
+      { jurisdictionId: "x", resourceId: "r", versionId: "v" },
+    ] })],
+    ["too many citation keys", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: Array.from({ length: 65 }, (_, index) => ({ jurisdictionId: "x", resourceId: `r-${index}`, versionId: `v-${index}` })) })],
+    ["overlong citation ID", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "x", resourceId: "r".repeat(129), versionId: "v" }] })],
+    ["oversized body", "x".repeat(65_537)],
   ])("rejects %s as a bodyless bounded request error", async (_label, body) => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const response = await post(createBackend(), body);
@@ -833,7 +954,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
 
     const oversized = await post(t, new ReadableStream({
       start(controller) {
-        controller.enqueue(new TextEncoder().encode("x".repeat(1_025)));
+        controller.enqueue(new TextEncoder().encode("x".repeat(65_537)));
         controller.close();
       },
     }));
