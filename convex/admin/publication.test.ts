@@ -946,7 +946,7 @@ describe("governed document publication", () => {
     expect(state.locks).toHaveLength(1);
   });
 
-  it("recovers an accepted upload whose operation binding could not be persisted without uploading twice", async () => {
+  it("recovers an accepted upload without uploading twice or being blocked by legacy jobs", async () => {
     const t = createBackend();
     await enablePanel(t);
     const publisher = await asAdmin(t, "content_reviewer");
@@ -979,6 +979,17 @@ describe("governed document publication", () => {
     if (!recovery?.leaseToken) throw new Error("expected recovery lease");
     const target = await t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken: recovery.leaseToken });
     expect(target).not.toHaveProperty("signedUrl");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (let index = 0; index < 129; index += 1) {
+        await ctx.db.insert("integrationJobs", {
+          type: "ingest_remote", targetType: "legacyDocument", targetId: `legacy-${index}`,
+          payload: "{}", actorId: "legacy", actorRoles: [], idempotencyKey: `legacy-${index}`,
+          requestFingerprint: "{}", correlationId: `legacy-${index}`, status: "manual_review",
+          attemptCount: 1, lastErrorKind: "provider", createdAt: now + index, updatedAt: now + index,
+        });
+      }
+    });
     await t.mutation(applyGeminiProviderResult, {
       jobId: queued.jobId, leaseToken: recovery.leaseToken,
       result: { kind: "index_completed", documentName: "fileSearchStores/ghana-test/documents/persist-index-accepted" },
@@ -993,6 +1004,61 @@ describe("governed document publication", () => {
     expect(final.jurisdiction?.providerSyncState).toBe("synced");
     expect(final.resource?.activeVersionId).toBe(ids[0]);
     expect(final.locks).toHaveLength(0);
+  });
+
+  it("keeps a jurisdiction drifted when another resource job still needs manual review", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const { jurisdictionId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    const secondVersionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId, type: "act", title: "Electronic Transactions Act", issuer: "Parliament",
+        officialCitation: "Act 772", officialCitationKey: "act 772",
+        sourceUrl: "https://laws.example.gov/act-772", topics: ["commerce"], effectiveDate: "2008-12-18",
+        status: "active", createdBy: "manager", updatedBy: "manager", createdAt: now, updatedAt: now,
+      });
+      const body = "second-resource-version";
+      const originalStorageId = await ctx.storage.store(new Blob([body], { type: "application/pdf" }));
+      return await ctx.db.insert("documentVersions", {
+        resourceId, versionNumber: 1, originalStorageId, filename: "act-772-v1.pdf",
+        mimeType: "application/pdf", byteSize: body.length, sha256: await sha256(body),
+        sourceUrl: "https://laws.example.gov/act-772", effectiveDate: "2008-12-18", status: "approved",
+        submittedBy: "manager", submittedAt: now, reviewedBy: "prior-reviewer", reviewedAt: now,
+        createdAt: now, updatedAt: now,
+      });
+    });
+    await addStepUp(t, publisher, "document_publish", ids[0], "concurrent-publish-1");
+    await addStepUp(t, publisher, "document_publish", secondVersionId, "concurrent-publish-2");
+    const first = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish first verified original", idempotencyKey: "concurrent-publish-1",
+    });
+    const second = await publisher.client.mutation(publishVersion, {
+      versionId: secondVersionId, confirmation: `PUBLISH ${secondVersionId}`,
+      reason: "Publish second verified original", idempotencyKey: "concurrent-publish-2",
+    });
+    const firstPoll = await claimAcceptedIndexPoll(t, first.jobId, "concurrent-first");
+    const secondPoll = await claimAcceptedIndexPoll(t, second.jobId, "concurrent-second");
+    await t.mutation(recordProviderFailure, {
+      jobId: first.jobId, leaseToken: firstPoll.leaseToken,
+      kind: "network", retryable: true, sideEffectUncertain: true,
+    });
+
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: second.jobId, leaseToken: secondPoll.leaseToken,
+      result: { kind: "index_completed", documentName: "fileSearchStores/ghana-test/documents/concurrent-second" },
+    });
+
+    const final = await t.run(async (ctx) => ({
+      first: await ctx.db.get("integrationJobs", first.jobId),
+      second: await ctx.db.get("integrationJobs", second.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+    }));
+    expect(final.first?.status).toBe("manual_review");
+    expect(final.second?.status).toBe("succeeded");
+    expect(final.jurisdiction?.providerSyncState).toBe("drifted");
   });
 
   it("reconciles a deleted document whose completion write failed by repeating only the exact delete", async () => {

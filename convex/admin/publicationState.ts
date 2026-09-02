@@ -171,18 +171,76 @@ async function auditOutcome(ctx: MutationCtx, job: Doc<"integrationJobs">, opera
   await writeAudit(ctx, { actorId: job.actorId, actorRoles: job.actorRoles, action: `document.${operation}.${outcome}`, targetType: "documentVersion", targetId, correlationId: job.correlationId, outcome });
 }
 
+const MAX_UNRESOLVED_PROVIDER_JOBS_TO_CHECK = 128;
+const UNRESOLVED_PROVIDER_JOB_STATUSES = ["manual_review", "running", "waiting_provider"] as const;
+const GEMINI_PROVIDER_JOB_TYPES = [
+  "gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store",
+] as const;
+
+function unresolvedProviderJob(job: Doc<"integrationJobs">) {
+  if (!["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"].includes(job.type)) return false;
+  if (job.status === "manual_review") return true;
+  return (job.status === "running" || job.status === "waiting_provider")
+    && job.recoveryKind !== undefined
+    && job.lastErrorKind !== undefined;
+}
+
+async function unresolvedJobJurisdiction(
+  ctx: MutationCtx,
+  job: Doc<"integrationJobs">,
+): Promise<Id<"jurisdictions"> | null> {
+  if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
+    return job.targetType === "jurisdictionGeminiStore"
+      ? ctx.db.normalizeId("jurisdictions", job.targetId)
+      : null;
+  }
+  if (job.type !== "gemini_index_document" && job.type !== "gemini_delete_document") return null;
+  const versionId = job.targetType === "documentVersion"
+    ? ctx.db.normalizeId("documentVersions", job.targetId)
+    : null;
+  const version = versionId ? await ctx.db.get(versionId) : null;
+  const resource = version ? await ctx.db.get(version.resourceId) : null;
+  return resource?.jurisdictionId ?? null;
+}
+
+async function clearResolvedJurisdictionDrift(
+  ctx: MutationCtx,
+  jurisdiction: Doc<"jurisdictions">,
+  completedJobId: Id<"integrationJobs">,
+  now: number,
+) {
+  if (jurisdiction.providerSyncState !== "drifted") return;
+  const unresolved: Doc<"integrationJobs">[] = [];
+  for (const status of UNRESOLVED_PROVIDER_JOB_STATUSES) {
+    for (const type of GEMINI_PROVIDER_JOB_TYPES) {
+      const remaining = MAX_UNRESOLVED_PROVIDER_JOBS_TO_CHECK - unresolved.length;
+      const jobs = await ctx.db.query("integrationJobs")
+        .withIndex("by_status_and_type_and_createdAt", (q) => q.eq("status", status).eq("type", type))
+        .take(remaining + 1);
+      if (jobs.length > remaining) return;
+      unresolved.push(...jobs);
+    }
+  }
+  for (const candidate of unresolved) {
+    if (candidate._id === completedJobId || !unresolvedProviderJob(candidate)) continue;
+    const candidateJurisdictionId = await unresolvedJobJurisdiction(ctx, candidate);
+    if (candidateJurisdictionId === null || candidateJurisdictionId === jurisdiction._id) return;
+  }
+  await ctx.db.patch(jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+}
+
 export async function applyPublicationJobFailure(ctx: MutationCtx, job: Doc<"integrationJobs">, now: number): Promise<void> {
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
   if (workflow.kind === "delete") {
     if (workflow.payload.operation !== "unpublish") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
     await ctx.db.patch(workflow.target._id, { failureSummary: undefined, updatedAt: now });
-    if (workflow.jurisdiction.providerSyncState === "drifted") await ctx.db.patch(workflow.jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+    await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
     await auditOutcome(ctx, job, "unpublish", workflow.target._id, "failure");
     await releaseLifecycleLock(ctx, workflow.lock);
     return;
   }
   await ctx.db.patch(workflow.version._id, { status: workflow.publicationOperation === "rollback" ? "superseded" : "approved", failureSummary: workflow.previous ? "Publishing failed. The previous published version is still active." : "Publishing failed. No version was published.", updatedAt: now });
-  if (workflow.jurisdiction.providerSyncState === "drifted") await ctx.db.patch(workflow.jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+  await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, workflow.version._id, "failure");
   await releaseLifecycleLock(ctx, workflow.lock);
 }
@@ -198,7 +256,7 @@ export async function applyGeminiIndexCompletion(ctx: MutationCtx, job: Doc<"int
   }
   await ctx.db.patch(workflow.version._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
   await ctx.db.patch(workflow.resource._id, { activeVersionId: workflow.version._id, updatedBy: job.actorId, updatedAt: now });
-  if (workflow.jurisdiction.providerSyncState === "drifted") await ctx.db.patch(workflow.jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+  await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, workflow.version._id, "success");
   await releaseLifecycleLock(ctx, workflow.lock);
   return null;
@@ -216,7 +274,7 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
   if (workflow.payload.operation === "unpublish") {
     await ctx.db.patch(workflow.target._id, { status: "unpublished", geminiDocumentName: undefined, geminiIndexedAt: undefined, unpublishedAt: now, failureSummary: undefined, updatedAt: now });
     await ctx.db.patch(workflow.resource._id, { activeVersionId: undefined, updatedBy: job.actorId, updatedAt: now });
-    if (workflow.jurisdiction.providerSyncState === "drifted") await ctx.db.patch(workflow.jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+    await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
     await auditOutcome(ctx, job, "unpublish", workflow.target._id, "success");
     await releaseLifecycleLock(ctx, workflow.lock);
     return;
@@ -225,7 +283,7 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
   await ctx.db.patch(workflow.target._id, { status: "superseded", geminiDocumentName: undefined, geminiIndexedAt: undefined, updatedAt: now });
   await ctx.db.patch(candidate._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
   await ctx.db.patch(workflow.resource._id, { activeVersionId: candidate._id, updatedBy: job.actorId, updatedAt: now });
-  if (workflow.jurisdiction.providerSyncState === "drifted") await ctx.db.patch(workflow.jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+  await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, candidate._id, "success");
   await releaseLifecycleLock(ctx, workflow.lock);
 }
