@@ -221,6 +221,12 @@ describe("retrieval observation codec", () => {
     expect(decodeRetrievalObservationV2(encoded)).toEqual(validObservation);
   });
 
+  it("round-trips the governed context's maximum UTF-8 evidence size", () => {
+    const maximumUtf8Observation = { ...validObservation, evidenceBytes: 360_000 };
+    expect(decodeRetrievalObservationV2(encodeRetrievalObservationV2(maximumUtf8Observation)))
+      .toEqual(maximumUtf8Observation);
+  });
+
   it.each([
     ["version one", { ...validObservation, version: 1 }],
     ["top-level extra key", { ...validObservation, query: "must not be serialized" }],
@@ -231,6 +237,7 @@ describe("retrieval observation codec", () => {
     ["latency above the bound", { ...validObservation, totalLatencyMs: 120_001 }],
     ["more than four stores", { ...validObservation, fileSearchStoreCount: 5 }],
     ["more than one File Search call", { ...validObservation, fileSearchCallCount: 2 }],
+    ["evidence bytes above the governed-context bound", { ...validObservation, evidenceBytes: 360_001 }],
     ["zero stores with a call", { ...validObservation, fileSearchStoreCount: 0 }],
     ["nonzero latency without a call", { ...validObservation, fileSearchCallCount: 0, fileSearchStoreCount: 0 }],
     ["invalid ordinal", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], ordinal: 4 }, ...validObservation.jurisdictions.slice(1) ] }],

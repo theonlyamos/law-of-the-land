@@ -668,6 +668,48 @@ describe("privacy-bounded query telemetry", () => {
     expect(metrics[0]).not.toHaveProperty("jurisdictionCode");
   });
 
+  it("accepts the maximum UTF-8 evidence size allowed by the governed context", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, "utf8-evidence-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const digest = "f".repeat(64);
+    const evidenceBytes = 360_000;
+    const coverage = [
+      { ordinal: 0, relation: "selected" as const, coverage: "evidence" as const },
+      { ordinal: 1, relation: "geographic_ancestor" as const, coverage: "evidence" as const },
+    ];
+
+    await owner.client.mutation(issue, {
+      token,
+      jurisdictionId,
+      legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
+    });
+
+    await expect(owner.client.mutation(searchPhase, {
+      token,
+      providerStatus: "success",
+      totalLatencyMs: 10,
+      resultCount: 2,
+      scopeSize: 2,
+      retrievalPlanSize: 2,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 2,
+      fileSearchLatencyMs: 5,
+      evidenceBytes,
+      citationCount: 0,
+      contextDigest: digest,
+      partialCoverage: false,
+      jurisdictionCoverage: coverage,
+      serviceProof: await proof([
+        "search-jurisdiction-v2", token, "success", 10, 2, 2, 2, 1, 2,
+        5, evidenceBytes, 0, digest, 0,
+        "0:selected:evidence|1:geographic_ancestor:evidence",
+      ]),
+    })).resolves.toEqual(expect.objectContaining({ status: "search_complete" }));
+  });
+
   it("rejects the retired unified search telemetry V1 shape", async () => {
     const t = backend();
     const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });

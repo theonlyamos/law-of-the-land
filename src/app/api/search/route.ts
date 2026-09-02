@@ -297,7 +297,8 @@ async function governedSearch(query: string, body: Record<string, unknown>, mode
   try { selection = await fetchAuthQuery(api.jurisdictions.resolveResearchSelection, { jurisdictionId, country }) as Selection | null; } catch { /* sanitized below */ }
   if (!selection) return NextResponse.json({ error: RESEARCH_UNAVAILABLE }, { status: 400 });
 
-  const selectedPreflight = await availability(selection.id, [], overallDeadlineAt);
+  const readinessCitationKeys: readonly CitationKey[] | undefined = mode.mode === "stub" ? undefined : [];
+  const selectedPreflight = await availability(selection.id, [], overallDeadlineAt, readinessCitationKeys);
   if (selectedPreflight.selected.status !== "ready") {
     return NextResponse.json({ error: availabilityMessage(selection.name, selectedPreflight.selected.status) }, { status: 400 });
   }
@@ -309,7 +310,12 @@ async function governedSearch(query: string, body: Record<string, unknown>, mode
   const rawPlan = selectRetrievalScopeItems(scope, planner.ancestorDepth);
   if (rawPlan.length === 0 || rawPlan[0].jurisdictionId !== selection.id) throw new Error("Research scope invalid");
   const plan = rawPlan.map((item, index) => ({ ...item, ordinal: index as 0 | 1 | 2 | 3 }));
-  const full = await availability(selection.id, plan.slice(1).map(({ jurisdictionId: id }) => id), overallDeadlineAt);
+  const full = await availability(
+    selection.id,
+    plan.slice(1).map(({ jurisdictionId: id }) => id),
+    overallDeadlineAt,
+    readinessCitationKeys,
+  );
   const available = [full.selected, ...full.supplementary];
   if (full.selected.status !== "ready") return NextResponse.json({ error: availabilityMessage(selection.name, full.selected.status) }, { status: 400 });
   if (full.selected.storeName !== selectedPreflight.selected.storeName) {

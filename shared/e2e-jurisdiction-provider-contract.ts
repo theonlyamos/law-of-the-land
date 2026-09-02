@@ -28,6 +28,9 @@ export type RetrievalObservationV2 = {
 
 export const MAX_RETRIEVAL_OBSERVATION_ENCODED_BYTES = 4_096;
 export const MAX_RETRIEVAL_OBSERVATION_LATENCY_MS = 120_000;
+// Mirrors the 120,000 UTF-16-code-unit governed-context ceiling at the maximum
+// three UTF-8 bytes per retained code unit.
+export const MAX_RETRIEVAL_OBSERVATION_EVIDENCE_BYTES = 360_000;
 const TOP_LEVEL_KEYS = ["authorizedScopeSize", "citationCount", "evidenceBytes", "fileSearchCallCount", "fileSearchLatencyMs", "fileSearchStoreCount", "jurisdictions", "partialCoverage", "planSize", "totalLatencyMs", "unexpectedRealProviderCallCount", "version"] as const;
 const JURISDICTION_KEYS = ["coverage", "ordinal", "relation"] as const;
 const RELATIONS = ["selected", "geographic_ancestor", "organizational_geography"] as const;
@@ -59,7 +62,7 @@ function validateObservation(value: unknown): RetrievalObservationV2 {
     || !boundedInteger(value.authorizedScopeSize, 9) || !boundedInteger(value.planSize, 4)
     || !boundedInteger(value.fileSearchCallCount, 1) || !boundedInteger(value.fileSearchStoreCount, 4)
     || !boundedLatency(value.fileSearchLatencyMs) || !boundedLatency(value.totalLatencyMs)
-    || !boundedInteger(value.evidenceBytes, 240_000) || !boundedInteger(value.citationCount, 64)
+    || !boundedInteger(value.evidenceBytes, MAX_RETRIEVAL_OBSERVATION_EVIDENCE_BYTES) || !boundedInteger(value.citationCount, 64)
     || typeof value.partialCoverage !== "boolean" || value.unexpectedRealProviderCallCount !== 0
     || !Array.isArray(value.jurisdictions) || value.jurisdictions.length > 4) invalid();
   const jurisdictions = value.jurisdictions.map((entry, index) => {

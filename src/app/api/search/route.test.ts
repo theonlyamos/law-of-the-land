@@ -181,6 +181,8 @@ describe("POST /api/search Gemini File Search boundary", () => {
     expect(telemetry).toMatchObject({ fileSearchCallCount: 1, fileSearchStoreCount: 3, fileSearchLatencyMs: 23, citationCount: 2, partialCoverage: true });
     expect(JSON.stringify(telemetry)).not.toMatch(/fileSearchStores|What rules|Local evidence|Accra Bylaw/);
     expect(transport.fetch).toHaveBeenCalledTimes(3);
+    expect(transportBody(0)).not.toHaveProperty("citationKeys");
+    expect(transportBody(1)).not.toHaveProperty("citationKeys");
     expect(transportBody(2)).toEqual({
       selectedJurisdictionId: selected.id,
       supplementaryJurisdictionIds: ["ghana-id", "west-africa-id"],
@@ -235,6 +237,65 @@ describe("POST /api/search Gemini File Search boundary", () => {
       resourceId: overflow.resourceId,
       versionId: overflow.versionId,
     }]);
+  });
+
+  it("requests compact normal-mode readiness when a full bounded manifest exceeds the response ceiling", async () => {
+    const fourth = {
+      jurisdictionId: "africa-id",
+      name: "Africa",
+      kind: "geographic" as const,
+      relation: "geographic_ancestor" as const,
+    };
+    const fullPlan = [...plan, fourth];
+    const storeRows = fullPlan.map((item, storeIndex) => ({
+      jurisdictionId: item.jurisdictionId,
+      status: "ready" as const,
+      storeName: `fileSearchStores/store-${storeIndex}`,
+      documents: Array.from({ length: 64 }, (_, documentIndex) => ({
+        resourceId: `resource-${storeIndex}-${documentIndex}-${"r".repeat(90)}`,
+        versionId: `version-${storeIndex}-${documentIndex}-${"v".repeat(92)}`,
+        documentName: `fileSearchStores/store-${storeIndex}/documents/document-${documentIndex}`,
+        title: "T".repeat(300),
+        officialCitation: "C".repeat(300),
+        sourceUrl: `https://official.example/${"s".repeat(2_000)}`,
+      })),
+    }));
+    const citedDocument = storeRows[0].documents[0];
+    const fullResolution = { selected: storeRows[0], supplementary: storeRows.slice(1) };
+    expect(new TextEncoder().encode(JSON.stringify(fullResolution)).byteLength).toBeGreaterThan(262_144);
+    auth.fetchAuthQuery.mockImplementation(async (reference) => {
+      const name = getFunctionName(reference);
+      if (name === "jurisdictions:resolveResearchSelection") return selected;
+      if (name === "jurisdictions:resolveResearchScope") {
+        return { selectedJurisdictionId: selected.id, items: fullPlan };
+      }
+      return true;
+    });
+    transport.fetch.mockImplementation(async (_url, init) => {
+      const requestBody = (init as RequestInit).body;
+      const body = JSON.parse(ArrayBuffer.isView(requestBody)
+        ? new TextDecoder().decode(requestBody as ArrayBufferView<ArrayBuffer>)
+        : String(requestBody));
+      const requestedRows = storeRows.slice(0, body.supplementaryJurisdictionIds.length + 1);
+      const responseRows = Array.isArray(body.citationKeys)
+        ? requestedRows.map((row, index) => ({
+            ...row,
+            documents: body.citationKeys.length > 0 && index === 0 ? [citedDocument] : [],
+          }))
+        : requestedRows;
+      return responseJson({ selected: responseRows[0], supplementary: responseRows.slice(1) });
+    });
+    providers.search.mockResolvedValue({
+      latencyMs: 2,
+      sources: [providerSource(selected.id, "Compact preflight retained readiness.", [citationClaim(citedDocument)])],
+    });
+
+    const response = await POST(request({ query: "Question", jurisdictionId: selected.id }));
+
+    expect(transport.fetch).toHaveBeenCalledTimes(3);
+    expect(response.status).toBe(200);
+    expect(transportBody(0).citationKeys).toEqual([]);
+    expect(transportBody(1).citationKeys).toEqual([]);
   });
 
   it("fails closed before postflight when the provider returns more than 64 unique citation keys", async () => {

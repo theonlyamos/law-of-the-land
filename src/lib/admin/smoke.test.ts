@@ -105,6 +105,14 @@ describe("admin performance budgets", () => {
     expect(checkBudgets(approvedArtifact())).toEqual([]);
   });
 
+  it("accepts the governed context's maximum UTF-8 evidence size", () => {
+    const artifact = approvedArtifact();
+    for (const sample of artifact.retrievalPlan.samples) sample.evidenceBytes = 360_000;
+    artifact.retrievalPlan.evidenceBytes = 7_200_000;
+
+    expect(checkBudgets(artifact)).toEqual([]);
+  });
+
   it("rejects an unauthenticated baseline and the wrong sample count", () => {
     const artifact = {
       ...approvedArtifact(),

@@ -610,7 +610,6 @@ export async function updateLegacyJurisdictionForActor(
     name: requiredText(args.name, "INVALID_JURISDICTION_NAME"),
     slug,
     isDefault: args.isDefault,
-    providerSyncState: "pending" as const,
     updatedBy: actor.userId,
     updatedAt: Date.now(),
   };

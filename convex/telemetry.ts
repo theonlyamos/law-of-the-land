@@ -33,6 +33,9 @@ const MAX_PROVIDER_LATENCY_MS = 10 * 60_000;
 const MAX_RESULT_COUNT = 10_000;
 const MAX_SCOPE_SIZE = 9;
 const MAX_PLAN_SIZE = 4;
+// Governed evidence is capped at 120,000 UTF-16 code units; each retained code
+// unit can require at most three UTF-8 bytes.
+const MAX_EVIDENCE_BYTES = 360_000;
 const ROLLUP_BATCH = 500;
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const LATENCY_THRESHOLDS = [
@@ -341,7 +344,7 @@ export const recordSearchPhase = mutation({
     const fileSearchCallCount = unified ? boundedCount(args.fileSearchCallCount!, 1) : undefined;
     const fileSearchStoreCount = unified ? boundedCount(args.fileSearchStoreCount!, MAX_PLAN_SIZE) : undefined;
     const fileSearchLatencyMs = unified ? validateLatency(args.fileSearchLatencyMs!) : undefined;
-    const evidenceBytes = unified ? boundedCount(args.evidenceBytes!, 240_000) : undefined;
+    const evidenceBytes = unified ? boundedCount(args.evidenceBytes!, MAX_EVIDENCE_BYTES) : undefined;
     const citationCount = unified ? boundedCount(args.citationCount!, 64) : undefined;
     const coverage = unified ? args.jurisdictionCoverage : undefined;
     const contextDigest = validateDigest(args.contextDigest, unified && args.providerStatus !== "failure");

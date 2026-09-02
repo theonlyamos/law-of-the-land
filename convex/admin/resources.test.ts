@@ -510,6 +510,40 @@ describe("jurisdiction governance", () => {
     );
   });
 
+  it("preserves a synced legacy store when updating jurisdiction metadata", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await manager.client.mutation(createJurisdiction, {
+      code: "GH",
+      name: "Ghana",
+      slug: "ghana",
+      isDefault: false,
+      reason: "Create legacy jurisdiction",
+    });
+    await t.run(async (ctx) => await ctx.db.patch(jurisdictionId, {
+      geminiFileSearchStoreName: "fileSearchStores/ghana",
+      providerSyncState: "synced",
+    }));
+
+    const updated = await manager.client.mutation(updateJurisdiction, {
+      id: jurisdictionId,
+      name: "Republic of Ghana",
+      slug: "ghana",
+      isDefault: false,
+      reason: "Update display metadata",
+    });
+
+    expect(updated).toMatchObject({
+      name: "Republic of Ghana",
+      providerSyncState: "synced",
+    });
+    await expect(t.run(async (ctx) => await ctx.db.get(jurisdictionId))).resolves.toMatchObject({
+      geminiFileSearchStoreName: "fileSearchStores/ghana",
+      providerSyncState: "synced",
+    });
+  });
+
   it("rejects legacy updates for typed geographic rows that retain a two-letter code", async () => {
     const t = createBackend();
     await enablePanel(t);

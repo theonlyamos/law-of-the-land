@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const FORBIDDEN_KEY = /(?:cookie|token|secret|api.?key|claim|question|provider.?body|user.?id|place.?id|address)/i;
+const MAX_RETRIEVAL_EVIDENCE_BYTES = 360_000;
 
 /**
  * @param {unknown} metrics
@@ -234,7 +235,7 @@ export function checkBudgets(m) {
     if (!boundedInteger(retrieval.planSizeMax, 4)) failures.push("retrievalPlan plan must be non-negative and not exceed 4 libraries");
     if (!boundedInteger(retrieval.storeCountMax, 4)) failures.push("retrievalPlan store count must be non-negative and not exceed 4");
     if (!boundedInteger(retrieval.fileSearchCallCount, 20)) failures.push("retrievalPlan File Search call count must be bounded to 20");
-    if (!boundedInteger(retrieval.evidenceBytes, 4_800_000)) failures.push("retrievalPlan evidence bytes must be bounded");
+    if (!boundedInteger(retrieval.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES * 20)) failures.push("retrievalPlan evidence bytes must be bounded");
     if (!boundedInteger(retrieval.citationCount, 1_280)) failures.push("retrievalPlan citation count must be bounded");
     if (!boundedInteger(retrieval.partialCoverageCount, 20)) failures.push("retrievalPlan partial coverage count must be bounded to 20");
     if (retrieval.unexpectedRealProviderCallCount !== 0) failures.push("retrievalPlan has an unexpected provider call in stub mode");
@@ -254,7 +255,7 @@ export function checkBudgets(m) {
         || !boundedInteger(sample.fileSearchStoreCount, 4)
         || !Number.isFinite(sample.fileSearchLatencyMs) || sample.fileSearchLatencyMs < 0 || sample.fileSearchLatencyMs > 120_000
         || !Number.isFinite(sample.totalLatencyMs) || sample.totalLatencyMs < 0 || sample.totalLatencyMs > 120_000
-        || !boundedInteger(sample.evidenceBytes, 240_000)
+        || !boundedInteger(sample.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES)
         || !boundedInteger(sample.citationCount, 64)
         || typeof sample.partialCoverage !== "boolean"
         || sample.unexpectedRealProviderCallCount !== 0
