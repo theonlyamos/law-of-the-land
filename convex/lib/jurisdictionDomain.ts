@@ -91,8 +91,8 @@ export const jurisdictionDocumentValidator = v.object({
   slug: v.string(),
   status: jurisdictionStatusValidator,
   isDefault: v.boolean(),
-  stagingBucketId: v.optional(v.string()),
-  productionBucketId: v.optional(v.string()),
+  geminiFileSearchStoreName: v.optional(v.string()),
+  geminiEmbeddingModel: v.optional(v.string()),
   providerSyncState: providerSyncStateValidator,
   kind: v.optional(jurisdictionKindValidator),
   visibility: v.optional(jurisdictionVisibilityValidator),
@@ -140,31 +140,44 @@ export const researchScopeValidator = v.object({
   items: v.array(researchScopeItemValidator),
 });
 
-export const productionLibraryValidator = v.object({
-  ...researchScopeItemValidator.fields,
-  productionBucketId: v.string(),
+export const researchDocumentManifestValidator = v.object({
+  resourceId: v.id("legalResources"),
+  versionId: v.id("documentVersions"),
+  documentName: v.string(),
+  title: v.string(),
+  officialCitation: v.string(),
+  sourceUrl: v.string(),
 });
 
-export const productionLibraryAvailabilityValidator = v.union(
+export const researchLibraryAvailabilityValidator = v.union(
   v.object({
     jurisdictionId: v.id("jurisdictions"),
     status: v.literal("ready"),
-    productionBucketId: v.string(),
+    storeName: v.string(),
+    documents: v.array(researchDocumentManifestValidator),
   }),
   v.object({
     jurisdictionId: v.id("jurisdictions"),
     status: v.literal("unconfigured"),
   }),
+  v.object({
+    jurisdictionId: v.id("jurisdictions"),
+    status: v.literal("provisioning"),
+  }),
+  v.object({
+    jurisdictionId: v.id("jurisdictions"),
+    status: v.literal("needs_review"),
+  }),
 );
 
-export const productionLibraryRequestValidator = v.object({
+export const researchLibraryRequestValidator = v.object({
   selectedJurisdictionId: v.string(),
   supplementaryJurisdictionIds: v.array(v.string()),
 });
 
-export const productionLibraryResolutionValidator = v.object({
-  selected: productionLibraryAvailabilityValidator,
-  supplementary: v.array(productionLibraryAvailabilityValidator),
+export const researchLibraryResolutionValidator = v.object({
+  selected: researchLibraryAvailabilityValidator,
+  supplementary: v.array(researchLibraryAvailabilityValidator),
 });
 
 export const chatCitationValidator = v.object({
@@ -191,20 +204,30 @@ export type ResearchScope = {
   items: ResearchScopeItem[];
 };
 
-export type ProductionLibraryAvailability =
+export type ResearchDocumentManifest = {
+  resourceId: Id<"legalResources">;
+  versionId: Id<"documentVersions">;
+  documentName: string;
+  title: string;
+  officialCitation: string;
+  sourceUrl: string;
+};
+
+export type ResearchLibraryAvailability =
   | {
       jurisdictionId: Id<"jurisdictions">;
       status: "ready";
-      productionBucketId: string;
+      storeName: string;
+      documents: ResearchDocumentManifest[];
     }
   | {
       jurisdictionId: Id<"jurisdictions">;
-      status: "unconfigured";
+      status: "unconfigured" | "provisioning" | "needs_review";
     };
 
-export type ProductionLibraryResolution = {
-  selected: ProductionLibraryAvailability;
-  supplementary: ProductionLibraryAvailability[];
+export type ResearchLibraryResolution = {
+  selected: ResearchLibraryAvailability;
+  supplementary: ResearchLibraryAvailability[];
 };
 
 export type ChatCitation = {
@@ -276,11 +299,11 @@ export function normalizeUniqueJurisdictionIds(
 ): Id<"jurisdictions">[] {
   const normalized = values.map(normalize);
   if (normalized.some((id) => id === null)) {
-    throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
+    throw new ConvexError("RESEARCH_MANIFEST_NOT_FOUND");
   }
   const ids = normalized as Id<"jurisdictions">[];
   if (new Set(ids).size !== ids.length) {
-    throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
+    throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
   }
   return ids;
 }

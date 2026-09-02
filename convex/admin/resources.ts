@@ -45,7 +45,6 @@ const resourceTypeValidator = v.union(
 const jurisdictionDocValidator = v.object({
   _id: v.id("jurisdictions"), _creationTime: v.number(), code: v.string(), name: v.string(),
   slug: v.string(), status: jurisdictionStatusValidator, isDefault: v.boolean(),
-  stagingBucketId: v.optional(v.string()), productionBucketId: v.optional(v.string()),
   providerSyncState: v.union(v.literal("pending"), v.literal("synced"), v.literal("drifted"), v.literal("failed")),
   createdBy: v.string(), updatedBy: v.string(), createdAt: v.number(), updatedAt: v.number(),
 });
@@ -58,9 +57,8 @@ const resourceDocValidator = v.object({
   createdAt: v.number(), updatedAt: v.number(),
 });
 const versionStatusValidator = v.union(
-  v.literal("draft"), v.literal("uploading"), v.literal("staging_processing"),
-  v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"),
-  v.literal("published"), v.literal("rejected"), v.literal("failed"),
+  v.literal("draft"), v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"),
+  v.literal("published"), v.literal("rejected"),
   v.literal("superseded"), v.literal("unpublished"), v.literal("archived"),
 );
 const versionDocValidator = v.object({
@@ -68,21 +66,6 @@ const versionDocValidator = v.object({
   versionNumber: v.number(), originalStorageId: v.id("_storage"), filename: v.string(),
   mimeType: v.string(), byteSize: v.number(), sha256: v.string(), sourceUrl: v.string(),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: versionStatusValidator,
-  groundxStagingDocumentId: v.optional(v.string()), groundxStagingProcessId: v.optional(v.string()),
-  xrayEvidence: v.optional(v.object({
-    status: v.union(
-      v.literal("queued"), v.literal("training"), v.literal("processing"), v.literal("complete"),
-      v.literal("error"), v.literal("cancelled"),
-    ),
-    documentId: v.string(), processId: v.string(),
-    fileType: v.optional(v.union(
-      v.literal("txt"), v.literal("docx"), v.literal("pptx"),
-      v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
-      v.literal("jpg"), v.literal("csv"), v.literal("tsv"), v.literal("json"),
-    )),
-    fileSize: v.optional(v.number()), observedAt: v.number(),
-  })),
-  groundxProductionDocumentId: v.optional(v.string()), groundxProductionProcessId: v.optional(v.string()),
   submittedBy: v.string(), reviewedBy: v.optional(v.string()), submittedAt: v.optional(v.number()),
   reviewedAt: v.optional(v.number()), publishedAt: v.optional(v.number()), unpublishedAt: v.optional(v.number()),
   failureSummary: v.optional(v.string()), createdAt: v.number(), updatedAt: v.number(),
@@ -160,8 +143,6 @@ function projectLegacyJurisdiction(row: Doc<"jurisdictions">) {
     slug: row.slug,
     status: row.status,
     isDefault: row.isDefault,
-    ...(row.stagingBucketId === undefined ? {} : { stagingBucketId: row.stagingBucketId }),
-    ...(row.productionBucketId === undefined ? {} : { productionBucketId: row.productionBucketId }),
     providerSyncState: row.providerSyncState,
     createdBy: row.createdBy,
     updatedBy: row.updatedBy,
@@ -179,11 +160,36 @@ function projectPickerJurisdiction(row: Doc<"jurisdictions">) {
     slug: row.slug,
     status: row.status,
     isDefault: row.isDefault,
-    ...(row.stagingBucketId === undefined ? {} : { stagingBucketId: row.stagingBucketId }),
-    ...(row.productionBucketId === undefined ? {} : { productionBucketId: row.productionBucketId }),
     providerSyncState: row.providerSyncState,
     createdBy: row.createdBy,
     updatedBy: row.updatedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function projectVersion(row: Doc<"documentVersions">) {
+  return {
+    _id: row._id,
+    _creationTime: row._creationTime,
+    resourceId: row.resourceId,
+    versionNumber: row.versionNumber,
+    originalStorageId: row.originalStorageId,
+    filename: row.filename,
+    mimeType: row.mimeType,
+    byteSize: row.byteSize,
+    sha256: row.sha256,
+    sourceUrl: row.sourceUrl,
+    ...(row.effectiveDate === undefined ? {} : { effectiveDate: row.effectiveDate }),
+    ...(row.repealDate === undefined ? {} : { repealDate: row.repealDate }),
+    status: row.status,
+    submittedBy: row.submittedBy,
+    ...(row.reviewedBy === undefined ? {} : { reviewedBy: row.reviewedBy }),
+    ...(row.submittedAt === undefined ? {} : { submittedAt: row.submittedAt }),
+    ...(row.reviewedAt === undefined ? {} : { reviewedAt: row.reviewedAt }),
+    ...(row.publishedAt === undefined ? {} : { publishedAt: row.publishedAt }),
+    ...(row.unpublishedAt === undefined ? {} : { unpublishedAt: row.unpublishedAt }),
+    ...(row.failureSummary === undefined ? {} : { failureSummary: row.failureSummary }),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -303,6 +309,24 @@ function resourceSnapshot(row: Pick<Doc<"legalResources">, "jurisdictionId" | "t
   };
 }
 
+async function assertNoActiveGeminiStoreTeardown(
+  ctx: MutationCtx,
+  jurisdictionId: Id<"jurisdictions">,
+): Promise<void> {
+  const jobs = await Promise.all(([
+    "queued", "running", "waiting_provider", "manual_review",
+  ] as const).map(async (status) => await ctx.db.query("integrationJobs")
+    .withIndex("by_targetType_and_targetId_and_type_and_status", (q) => q
+      .eq("targetType", "jurisdictionGeminiStore")
+      .eq("targetId", jurisdictionId)
+      .eq("type", "gemini_delete_store")
+      .eq("status", status))
+    .take(1)));
+  if (jobs.some((rows) => rows.length > 0)) {
+    throw new ConvexError("GEMINI_STORE_TEARDOWN_IN_PROGRESS");
+  }
+}
+
 async function auditChange(
   ctx: MutationCtx,
   actor: Actor,
@@ -391,8 +415,6 @@ export const createJurisdiction = mutation({
     code: v.string(),
     name: v.string(),
     slug: v.string(),
-    stagingBucketId: v.optional(v.string()),
-    productionBucketId: v.optional(v.string()),
     isDefault: v.boolean(),
     reason: v.string(),
   },
@@ -409,8 +431,6 @@ export const updateJurisdiction = mutation({
     id: v.id("jurisdictions"),
     name: v.string(),
     slug: v.string(),
-    stagingBucketId: v.optional(v.string()),
-    productionBucketId: v.optional(v.string()),
     isDefault: v.boolean(),
     reason: v.string(),
   },
@@ -547,6 +567,7 @@ export const createResource = mutation({
     const reason = validateAuditReason(args.reason);
     const type = validateResourceType(args.type);
     const normalized = await resourceInput(ctx, args);
+    await assertNoActiveGeminiStoreTeardown(ctx, args.jurisdictionId);
     const now = Date.now();
     const id = await ctx.db.insert("legalResources", {
       jurisdictionId: args.jurisdictionId,
@@ -678,10 +699,11 @@ export const listVersions = query({
   handler: async (ctx, args) => {
     await requireEnabledAdminPermission(ctx, "document", "read");
     validatePageSize(args.paginationOpts.numItems);
-    return await ctx.db
+    const result = await ctx.db
       .query("documentVersions")
       .withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", args.resourceId))
       .order("desc")
       .paginate(args.paginationOpts);
+    return { ...result, page: result.page.map(projectVersion) };
   },
 });

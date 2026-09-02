@@ -151,7 +151,6 @@ describe("chat pagination", () => {
     "ghana-shadow",
     "non-ghana-shadow",
     "duplicate-default",
-    "bucket",
     "provider",
     "visibility",
     "kind-without-profile",
@@ -169,7 +168,7 @@ describe("chat pagination", () => {
         legacyCountryCode?: string;
         status?: "draft" | "enabled" | "archived";
         isDefault?: boolean;
-        productionBucketId?: string;
+        geminiFileSearchStoreName?: string;
         providerSyncState?: "pending" | "synced" | "drifted" | "failed";
         kind?: "geographic" | "organizational";
         visibility?: "public" | "members";
@@ -182,7 +181,9 @@ describe("chat pagination", () => {
         slug: input.slug,
         status: input.status ?? "enabled",
         isDefault: input.isDefault ?? false,
-        productionBucketId: input.productionBucketId,
+        geminiFileSearchStoreName: input.geminiFileSearchStoreName
+          ?? `fileSearchStores/${input.slug}`,
+        geminiEmbeddingModel: "models/gemini-embedding-2",
         providerSyncState: input.providerSyncState ?? "synced",
         kind: input.kind,
         visibility: input.visibility,
@@ -221,16 +222,15 @@ describe("chat pagination", () => {
         return;
       }
       if (variant === "duplicate-default") {
-        await insertCommon({ slug: "default-one", code: "GH", isDefault: true, productionBucketId: "11833" });
-        await insertCommon({ slug: "default-two", code: "GH", isDefault: true, productionBucketId: "11833" });
+        await insertCommon({ slug: "default-one", code: "GH", isDefault: true });
+        await insertCommon({ slug: "default-two", code: "GH", isDefault: true });
         return;
       }
-      if (["bucket", "provider", "visibility"].includes(variant)) {
+      if (["provider", "visibility"].includes(variant)) {
         await insertCommon({
           slug: variant,
           code: "GH",
           isDefault: true,
-          productionBucketId: variant === "bucket" ? "wrong" : "11833",
           providerSyncState: variant === "provider" ? "drifted" : "synced",
           visibility: variant === "visibility" ? "members" : undefined,
         });
@@ -241,7 +241,7 @@ describe("chat pagination", () => {
           name: "Wrong organization", slug: "wrong-organization", class: "company",
           status: "active", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
         });
-        await insertCommon({ slug: variant, code: "GH", isDefault: true, productionBucketId: "11833", organizationId });
+        await insertCommon({ slug: variant, code: "GH", isDefault: true, organizationId });
         return;
       }
       const id = await insertCommon({
@@ -424,7 +424,8 @@ describe("chat pagination", () => {
       const now = Date.now();
       return ctx.db.insert("jurisdictions", {
         code: "GH", name: "Ghana", slug: "ghana-v1", status: "enabled",
-        isDefault: true, productionBucketId: "11833", providerSyncState: "synced",
+        isDefault: true, geminiFileSearchStoreName: "fileSearchStores/ghana-v1",
+        geminiEmbeddingModel: "models/gemini-embedding-2", providerSyncState: "synced",
         createdBy: "migration:seed-ghana-jurisdiction-v1",
         updatedBy: "migration:seed-ghana-jurisdiction-v1", createdAt: now, updatedAt: now,
       });

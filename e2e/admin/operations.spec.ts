@@ -2,7 +2,7 @@ import { test } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { controlBrowserFixtures, loadBrowserFixtureManifest, openAuthenticatedRolePage, runAcceptanceSlice } from "./fixtures";
 
-test("super administrator opens an incident and callback replay remains idempotent", async ({ context, page, request }) => {
+test("super administrator opens an incident and the retired callback stays absent", async ({ context, page, request }) => {
   const fixture = await loadBrowserFixtureManifest();
   await openAuthenticatedRolePage(context, page, "super_admin", "/admin/incidents", "Incidents");
   const title = `${fixture.tag} provider incident`;
@@ -15,22 +15,17 @@ test("super administrator opens an incident and callback replay remains idempote
   await expect(page.getByRole("row").filter({ hasText: title })).toBeVisible();
 
   const callback = `${fixture.convexSiteUrl}/groundx/callback`;
-  const body = {
-    callbackData: fixture.records.callbackToken,
-    ingest: { processId: `${fixture.tag}-process`, status: "complete" },
-  };
-  expect((await request.post(callback, { data: body })).status()).toBe(202);
-  expect((await request.post(callback, { data: body })).status()).toBe(202);
+  expect((await request.post(callback, { data: {} })).status()).toBe(404);
 
   const retained = await controlBrowserFixtures(fixture, "run_retention");
   expect(retained.retention.deletedTotal).toBeGreaterThan(0);
-  expect(retained.callbackJob).toMatchObject({ status: "succeeded", payload: "{}" });
-  expect(retained.callbackJob?.retentionRedactedAt).toEqual(expect.any(Number));
+  expect(retained.providerJob).toMatchObject({ status: "waiting_provider", payload: "{}" });
+  expect(retained.providerJob?.retentionRedactedAt).toEqual(expect.any(Number));
   await page.goto("/admin/operations");
   await expect(page.getByRole("region", { name: "Retention policy" })).toContainText("90 days");
 });
 
-test("callbacks, retries, incidents, exports, and retention remain bounded and idempotent", async ({}, testInfo) => {
+test("provider polling, retries, incidents, exports, and retention remain bounded and idempotent", async ({}, testInfo) => {
   await runAcceptanceSlice(
     {
       convex: ["convex/admin/jobs.test.ts", "convex/admin/retention.test.ts"],
@@ -41,8 +36,8 @@ test("callbacks, retries, incidents, exports, and retention remain bounded and i
         "src/app/admin/incidents/page.test.tsx",
       ],
       evidence: [
-        /rejects callback token, process, target, and body mismatches and accepts replay/,
-        /retries transport and rate-limit failures at 1, 5, and 20 minutes/,
+        /presents only final Gemini job types and statuses without raw provider identifiers/,
+        /polls an accepted Gemini upload at 5, 10, 20, 30, then capped 60 second intervals/,
         /round-robins every retention category/,
         /preserves audit, aggregates, published originals, and attached blobs/,
         /creates a new incident through the permission-gated form/,

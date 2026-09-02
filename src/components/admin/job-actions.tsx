@@ -4,7 +4,7 @@ import type { Id } from "../../../convex/_generated/dataModel";
 import { useMutation } from "convex/react";
 import { useState } from "react";
 
-export function JobActions({ jobId, status, canRetry, canCancel }: { jobId: Id<"integrationJobs">; status: "queued" | "running" | "waiting_callback" | "succeeded" | "failed" | "cancelled" | "manual_review"; canRetry: boolean; canCancel: boolean }) {
+export function JobActions({ jobId, status, canRetry, canCancel }: { jobId: Id<"integrationJobs">; status: "queued" | "running" | "waiting_provider" | "succeeded" | "failed" | "cancelled" | "manual_review"; canRetry: boolean; canCancel: boolean }) {
   const retry = useMutation(api.admin.jobs.retryJob); const cancel = useMutation(api.admin.jobs.cancelJob);
   const [reason, setReason] = useState(""); const [state, setState] = useState<"idle" | "working" | "done" | "error">("idle");
   const execute = async (kind: "retry" | "cancel") => { setState("working"); try { const idempotencyKey = `${kind}_${crypto.randomUUID().replaceAll("-", "")}`; await (kind === "retry" ? retry : cancel)({ jobId, reason, idempotencyKey }); setState("done"); } catch { setState("error"); } };

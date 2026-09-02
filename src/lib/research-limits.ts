@@ -92,6 +92,14 @@ export async function runBoundedRetrieval<TJob extends { relation: ResearchRelat
 export type GovernedSource = ResearchAuthority & {
   sourceRef: `J${1 | 2 | 3 | 4}`;
   content: string;
+  citations?: TrustedCitation[];
+};
+
+export type TrustedCitation = {
+  title: string;
+  officialCitation: string;
+  sourceUrl: string;
+  pageNumber?: number;
 };
 
 export type GovernedContextEnvelope = {
@@ -99,7 +107,55 @@ export type GovernedContextEnvelope = {
   sources: GovernedSource[];
 };
 
-type SourceInput = ResearchAuthority & { content: string };
+type SourceInput = ResearchAuthority & {
+  content: string;
+  citations?: readonly TrustedCitation[];
+};
+
+const MAX_TRUSTED_CITATIONS_PER_SOURCE = 16;
+const MAX_CITATION_TEXT_LENGTH = 300;
+const MAX_CITATION_URL_LENGTH = 2_048;
+
+function trustedCitations(value: readonly TrustedCitation[] | undefined): TrustedCitation[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_TRUSTED_CITATIONS_PER_SOURCE) {
+    throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+  }
+  const seen = new Set<string>();
+  return value.map((citation) => {
+    if (!citation || typeof citation !== "object" || Array.isArray(citation)) {
+      throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    }
+    const keys = Object.keys(citation).sort();
+    const expected = ["officialCitation", ...(citation.pageNumber === undefined ? [] : ["pageNumber"]), "sourceUrl", "title"].sort();
+    if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) {
+      throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    }
+    if (
+      typeof citation.title !== "string" || !citation.title.trim() || citation.title.length > MAX_CITATION_TEXT_LENGTH
+      || typeof citation.officialCitation !== "string" || !citation.officialCitation.trim() || citation.officialCitation.length > MAX_CITATION_TEXT_LENGTH
+      || typeof citation.sourceUrl !== "string" || citation.sourceUrl.length > MAX_CITATION_URL_LENGTH
+    ) throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    let url: URL;
+    try { url = new URL(citation.sourceUrl); } catch { throw new Error("GOVERNED_CONTEXT_CITATION_INVALID"); }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    }
+    if (citation.pageNumber !== undefined && (!Number.isInteger(citation.pageNumber) || citation.pageNumber <= 0 || citation.pageNumber > 10_000)) {
+      throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    }
+    const normalized = {
+      title: citation.title.trim(),
+      officialCitation: citation.officialCitation.trim(),
+      sourceUrl: citation.sourceUrl,
+      ...(citation.pageNumber === undefined ? {} : { pageNumber: citation.pageNumber }),
+    };
+    const key = JSON.stringify(normalized);
+    if (seen.has(key)) throw new Error("GOVERNED_CONTEXT_CITATION_INVALID");
+    seen.add(key);
+    return normalized;
+  });
+}
 
 function normalizeParagraphs(value: string): string[] {
   return value
@@ -144,6 +200,7 @@ function safePrefix(value: string, length: number): string {
 }
 
 function sourceFor(input: SourceInput, index: number, content: string): GovernedSource {
+  const citations = trustedCitations(input.citations);
   return {
     sourceRef: `J${index + 1}` as GovernedSource["sourceRef"],
     jurisdictionId: input.jurisdictionId,
@@ -151,6 +208,7 @@ function sourceFor(input: SourceInput, index: number, content: string): Governed
     kind: input.kind,
     relation: input.relation,
     content,
+    ...(citations.length === 0 ? {} : { citations }),
   };
 }
 
@@ -195,7 +253,11 @@ export async function buildGovernedContext(
       seen.add(digest);
       retained.push(paragraph);
     }
-    normalized.push({ ...input, content: retained.join("\n\n") });
+    normalized.push({
+      ...input,
+      content: retained.join("\n\n"),
+      ...(input.citations === undefined ? {} : { citations: trustedCitations(input.citations) }),
+    });
   }
 
   const contents = normalized.map(() => "");
@@ -263,7 +325,8 @@ export function parseGovernedContext(value: string): GovernedContextEnvelope {
   const sources = envelope.sources.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("GOVERNED_CONTEXT_INVALID");
     const source = raw as Record<string, unknown>;
-    if (!exactKeys(source, ["content", "jurisdictionId", "kind", "name", "relation", "sourceRef"])) throw new Error("GOVERNED_CONTEXT_INVALID");
+    const sourceKeys = ["content", "jurisdictionId", "kind", "name", "relation", "sourceRef", ...(source.citations === undefined ? [] : ["citations"] )];
+    if (!exactKeys(source, sourceKeys)) throw new Error("GOVERNED_CONTEXT_INVALID");
     if (
       typeof source.sourceRef !== "string" || !/^J[1-4]$/u.test(source.sourceRef) || refs.has(source.sourceRef) ||
       typeof source.jurisdictionId !== "string" || !source.jurisdictionId || ids.has(source.jurisdictionId) ||
@@ -274,6 +337,10 @@ export function parseGovernedContext(value: string): GovernedContextEnvelope {
     ) throw new Error("GOVERNED_CONTEXT_INVALID");
     refs.add(source.sourceRef);
     ids.add(source.jurisdictionId);
+    if (source.citations !== undefined) {
+      try { source.citations = trustedCitations(source.citations as TrustedCitation[]); }
+      catch { throw new Error("GOVERNED_CONTEXT_INVALID"); }
+    }
     return source as GovernedSource;
   });
   return { version: 1, sources };

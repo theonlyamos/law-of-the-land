@@ -272,14 +272,15 @@ describe("admin permission registry", () => {
       role: "super_admin",
       twoFactorEnabled: true,
     });
-    await t.run(async (ctx) => {
-      await ctx.db.insert("jurisdictions", {
+    const jurisdictionId = await t.run(async (ctx) => {
+      return await ctx.db.insert("jurisdictions", {
         code: "GH",
         name: "Ghana",
         slug: "ghana",
         status: "enabled",
         isDefault: true,
-        productionBucketId: "11833",
+        geminiFileSearchStoreName: "fileSearchStores/ghana-permissions-test",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
         providerSyncState: "synced",
         createdBy: "bootstrap",
         updatedBy: "bootstrap",
@@ -299,6 +300,12 @@ describe("admin permission registry", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "permission-ghana-seed",
     });
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, {
+      status: "enabled",
+      providerSyncState: "synced",
+      geminiFileSearchStoreName: "fileSearchStores/ghana-permissions-test",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+    }));
     for (const target of [
       "chatSessions",
       "telemetryCorrelations",

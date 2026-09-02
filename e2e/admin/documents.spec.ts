@@ -102,9 +102,9 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   await dialog.getByRole("button", { name: "Queue publish" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Publish queued for version 2" })).toBeVisible();
 
-  let state = await waitForPublicationState(fixture, versionId, "approved", "Production copy failed", fixture.records.publishedVersionId);
+  let state = await waitForPublicationState(fixture, versionId, "approved", "Publishing failed. The previous published version is still active.", fixture.records.publishedVersionId);
   expect(state.activeVersionId).toBe(fixture.records.publishedVersionId);
-  expect(state.versions.find((row) => row.id === versionId)).toMatchObject({ status: "approved", failureSummary: "Production copy failed" });
+  expect(state.versions.find((row) => row.id === versionId)).toMatchObject({ status: "approved", failureSummary: "Publishing failed. The previous published version is still active." });
   expect(state.publicationJob).toMatchObject({ status: "failed", lastErrorKind: "provider" });
   await page.reload();
   const versionTwo = versionArticle(page, 2, `${fixture.tag}-review.pdf`);
@@ -172,11 +172,11 @@ test("document review separates duties and preserves publication state across pr
         "src/components/admin/document-review.test.tsx",
       ],
       evidence: [
-        /reviewer separation with immutable evidence/,
-        /preserves the prior active version on copy failure/,
-        /callback-driven unpublish and rollback/,
+        /shows safe evidence, body-free diff, immutable decisions, and reviewer actions/,
+        /restores a terminally failed index candidate and preserves the active pointer/,
+        /rollback reindexes the immutable original, and unpublish deletes before clearing state/,
         /hides mutating controls from document readers/,
-        /labels missing provider evidence as unavailable/,
+        /submits a verified Convex original for review without provider evidence or jobs/,
       ],
     },
     testInfo,

@@ -59,6 +59,9 @@ const claimVerificationEmail = makeFunctionReference<"mutation">(
 const finalizeVerificationEmail = makeFunctionReference<"mutation">(
   "admin/users:finalizeVerificationEmail",
 );
+const recordAdminStepUpProof = makeFunctionReference<"mutation">(
+  "admin/users:recordAdminStepUpProof",
+);
 const expireVerificationEmailRequest = makeFunctionReference<"mutation">(
   "admin/users:expireVerificationEmailRequest",
 );
@@ -188,6 +191,46 @@ async function insertPreparedImpersonation(
 }
 
 describe("audited administrative user actions", () => {
+  it("issues jurisdiction store deletion proof only for a writable existing jurisdiction", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const writer = await asAdmin(t, "content_manager");
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const jurisdictionId = await t.run((ctx) => ctx.db.insert("jurisdictions", {
+      name: "Ghana",
+      slug: "ghana",
+      status: "archived",
+      isDefault: false,
+      providerSyncState: "synced",
+      createdBy: "fixture",
+      updatedBy: "fixture",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }));
+
+    await expect(t.mutation(recordAdminStepUpProof, {
+      actorId: writer.user._id,
+      sessionId: writer.session._id,
+      action: "jurisdiction_store_delete",
+      targetId: jurisdictionId,
+      idempotencyKey: "jurisdiction-store-delete-valid",
+    })).resolves.toBeNull();
+    await expect(t.mutation(recordAdminStepUpProof, {
+      actorId: writer.user._id,
+      sessionId: writer.session._id,
+      action: "jurisdiction_store_delete",
+      targetId: "missing-jurisdiction",
+      idempotencyKey: "jurisdiction-store-delete-missing",
+    })).rejects.toThrow("ADMIN_STEP_UP_SCOPE_INVALID");
+    await expect(t.mutation(recordAdminStepUpProof, {
+      actorId: reviewer.user._id,
+      sessionId: reviewer.session._id,
+      action: "jurisdiction_store_delete",
+      targetId: jurisdictionId,
+      idempotencyKey: "jurisdiction-store-delete-cross-scope",
+    })).rejects.toThrow("ADMIN_STEP_UP_SCOPE_INVALID");
+  });
+
   it("denies role assignment without the authoritative permission", async () => {
     const t = createBackend();
     await enablePanel(t);

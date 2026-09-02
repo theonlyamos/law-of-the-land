@@ -52,8 +52,10 @@ function fixtureRecords() {
   return {
     chatId: "chat", resourceId: "resource", publishedVersionId: "published", reviewVersionId: "review",
     separationVersionId: "separation", conversationGrantId: "grant", jurisdictionId: "jurisdiction",
-    userId: "normal", stagingBucketId: "910001", productionBucketId: "910002", callbackToken: "gx_callback",
-    callbackJobId: "job", usageUserId: "usage", jurisdictionCountryId: "country", jurisdictionTownId: "town",
+    userId: "normal", geminiStoreName: "fileSearchStores/e2e-fixture",
+    geminiDocumentName: "fileSearchStores/e2e-fixture/documents/published",
+    geminiOperationName: "fileSearchStores/e2e-fixture/upload/operations/index",
+    providerJobId: "job", usageUserId: "usage", jurisdictionCountryId: "country", jurisdictionTownId: "town",
     publicOrganizationJurisdictionId: "public-org", jurisdictionMemberOnlyId: "member-org",
     jurisdictionMemberId: "membership", jurisdictionFormerMemberId: "former-membership",
   };
@@ -209,6 +211,13 @@ describe("admin E2E fixture lifecycle", () => {
       proof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(manifest.state).toBe("ready");
+    expect(manifest.records).toMatchObject({
+      geminiStoreName: "fileSearchStores/e2e-fixture",
+      geminiDocumentName: "fileSearchStores/e2e-fixture/documents/published",
+      geminiOperationName: "fileSearchStores/e2e-fixture/upload/operations/index",
+      providerJobId: "job",
+    });
+    expect(manifest.records).not.toHaveProperty("callbackToken");
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(manifest);
     expect(JSON.stringify(manifest)).not.toContain(observationSecret);
     expect(JSON.stringify(manifest)).not.toContain(placeClaimSecret);
@@ -643,7 +652,7 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_FIXTURE_SECRET: "must-not-leak",
       ADMIN_E2E_BETTER_AUTH_SECRET: "must-not-leak",
       NEXT_PUBLIC_CONVEX_URL: "https://inherited-live.convex.cloud",
-      GROUNDX_API_KEY: "must-not-leak",
+      GOOGLE_AI_API_KEY: "must-not-leak",
     });
 
     expect(environment).toMatchObject({
@@ -669,7 +678,7 @@ describe("Playwright web server environment", () => {
     expect(environment).not.toHaveProperty("ADMIN_E2E_PLACE_CLAIM_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_SEARCH_JURISDICTION_SECRET");
     expect(environment).not.toHaveProperty("ADMIN_E2E_TELEMETRY_INGEST_SECRET");
-    expect(environment).not.toHaveProperty("GROUNDX_API_KEY");
+    expect(environment).not.toHaveProperty("GOOGLE_AI_API_KEY");
     expect(Object.values(environment)).not.toContain("https://inherited-live.convex.cloud");
     expect(buildBrowserEnvironment({ ...environment, x_admin_e2e_retrieval_plan_v1: "must-not-leak" }))
       .toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
@@ -695,14 +704,14 @@ describe("Playwright web server environment", () => {
       ADMIN_E2E_PLACE_CLAIM_SECRET: placeClaimSecret,
       ADMIN_E2E_LOCAL_HEAD_SHA: approvedCommitSha,
       PLACE_CLAIM_SECRET: "inherited-place-claim-secret",
-      GROUNDX_API_KEY: "groundx-secret",
+      GOOGLE_AI_API_KEY: "google-secret",
       RESEND_API_KEY: "resend-secret",
       BETTER_AUTH_SECRET: "app-auth-secret",
       DATABASE_URL: "database-secret",
     });
     expect(environment).toEqual({ PATH: "tools", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
     expect(playwrightConfig.use?.launchOptions?.env).toEqual(buildBrowserEnvironment(process.env));
-    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, "search-jurisdiction-secret-that-is-at-least-32-characters", "telemetry-ingest-secret-that-is-at-least-32-characters", approvedCommitSha, "inherited-place-claim-secret", "groundx-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
+    for (const secret of ["manifest.json", "fixture-secret", "account-password", "role-cookies", "auth-secret", observationSecret, placeClaimSecret, "search-jurisdiction-secret-that-is-at-least-32-characters", "telemetry-ingest-secret-that-is-at-least-32-characters", approvedCommitSha, "inherited-place-claim-secret", "google-secret", "resend-secret", "app-auth-secret", "database-secret"]) {
       expect(JSON.stringify(environment)).not.toContain(secret);
     }
   });

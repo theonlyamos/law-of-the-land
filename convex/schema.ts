@@ -22,8 +22,8 @@ export default defineSchema({
       v.literal("archived"),
     ),
     isDefault: v.boolean(),
-    stagingBucketId: v.optional(v.string()),
-    productionBucketId: v.optional(v.string()),
+    geminiFileSearchStoreName: v.optional(v.string()),
+    geminiEmbeddingModel: v.optional(v.string()),
     providerSyncState: v.union(
       v.literal("pending"),
       v.literal("synced"),
@@ -57,6 +57,7 @@ export default defineSchema({
     .index("by_isDefault", ["isDefault"])
     .index("by_isDefault_and_status", ["isDefault", "status"])
     .index("by_organizationId", ["organizationId"])
+    .index("by_gemini_store_name", ["geminiFileSearchStoreName"])
     .searchIndex("search_name", {
       searchField: "name",
       filterFields: ["kind", "status", "visibility"],
@@ -188,42 +189,17 @@ export default defineSchema({
     repealDate: v.optional(v.string()),
     status: v.union(
       v.literal("draft"),
-      v.literal("uploading"),
-      v.literal("staging_processing"),
       v.literal("ready_for_review"),
       v.literal("approved"),
       v.literal("publishing"),
       v.literal("published"),
       v.literal("rejected"),
-      v.literal("failed"),
       v.literal("superseded"),
       v.literal("unpublished"),
       v.literal("archived"),
     ),
-    groundxStagingDocumentId: v.optional(v.string()),
-    groundxStagingProcessId: v.optional(v.string()),
-    xrayEvidence: v.optional(v.object({
-      status: v.union(
-        v.literal("queued"),
-        v.literal("training"),
-        v.literal("processing"),
-        v.literal("complete"),
-        v.literal("error"),
-        v.literal("cancelled"),
-      ),
-      documentId: v.string(),
-      processId: v.string(),
-      fileType: v.optional(v.union(
-        v.literal("txt"), v.literal("docx"), v.literal("pptx"),
-        v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
-        v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
-        v.literal("json"),
-      )),
-      fileSize: v.optional(v.number()),
-      observedAt: v.number(),
-    })),
-    groundxProductionDocumentId: v.optional(v.string()),
-    groundxProductionProcessId: v.optional(v.string()),
+    geminiDocumentName: v.optional(v.string()),
+    geminiIndexedAt: v.optional(v.number()),
     submittedBy: v.string(),
     reviewedBy: v.optional(v.string()),
     submittedAt: v.optional(v.number()),
@@ -270,7 +246,9 @@ export default defineSchema({
     expiresAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_resourceId", ["resourceId"]),
+  })
+    .index("by_resourceId", ["resourceId"])
+    .index("by_jobId", ["jobId"]),
   resourceVersionCounters: defineTable({
     resourceId: v.id("legalResources"),
     nextVersionNumber: v.number(),
@@ -408,11 +386,10 @@ export default defineSchema({
     .index("by_targetUserId_and_createdAt", ["targetUserId", "createdAt"]),
   integrationJobs: defineTable({
     type: v.union(
-      v.literal("create_bucket"),
-      v.literal("ingest_remote"),
-      v.literal("copy_documents"),
-      v.literal("delete_documents"),
-      v.literal("poll_process"),
+      v.literal("gemini_create_store"),
+      v.literal("gemini_index_document"),
+      v.literal("gemini_delete_document"),
+      v.literal("gemini_delete_store"),
     ),
     targetType: v.string(),
     targetId: v.string(),
@@ -431,14 +408,15 @@ export default defineSchema({
     idempotencyKey: v.string(),
     requestFingerprint: v.string(),
     correlationId: v.string(),
-    callbackTokenHash: v.string(),
-    processId: v.optional(v.string()),
+    providerOperationName: v.optional(v.string()),
+    providerPollCount: v.optional(v.number()),
+    recoveryKind: v.optional(v.union(v.literal("poll_operation"), v.literal("delete_document"))),
     leaseToken: v.optional(v.string()),
     leaseExpiresAt: v.optional(v.number()),
     status: v.union(
       v.literal("queued"),
       v.literal("running"),
-      v.literal("waiting_callback"),
+      v.literal("waiting_provider"),
       v.literal("succeeded"),
       v.literal("failed"),
       v.literal("cancelled"),
@@ -465,15 +443,15 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_actorId_and_idempotencyKey", ["actorId", "idempotencyKey"])
-    .index("by_callbackTokenHash", ["callbackTokenHash"])
-    .index("by_processId", ["processId"])
+    .index("by_providerOperationName", ["providerOperationName"])
     .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
-    .index("by_targetType_and_targetId", ["targetType", "targetId"]),
+    .index("by_targetType_and_targetId", ["targetType", "targetId"])
+    .index("by_targetType_and_targetId_and_type_and_status", ["targetType", "targetId", "type", "status"]),
   e2eFixtureOwnership: defineTable({
     tag: v.string(),
     kind: v.union(
@@ -668,7 +646,6 @@ export default defineSchema({
       v.object({
         jurisdictionId: v.id("jurisdictions"),
         changed: v.boolean(),
-        preservedProductionBucket: v.literal("11833"),
       }),
     ),
     legacyObservationGeneration: v.number(),
@@ -746,6 +723,11 @@ export default defineSchema({
     .index("by_expiresAt", ["expiresAt"])
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
+  researchManifestNonces: defineTable({
+    nonceHash: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("by_nonceHash", ["nonceHash"]),
   telemetryCorrelations: defineTable({
     tokenHash: v.string(),
     ownerBinding: v.string(),
@@ -774,6 +756,16 @@ export default defineSchema({
     scopeSize: v.optional(v.number()),
     retrievalPlanSize: v.optional(v.number()),
     providerCallCount: v.optional(v.number()),
+    fileSearchCallCount: v.optional(v.number()),
+    fileSearchStoreCount: v.optional(v.number()),
+    fileSearchLatencyMs: v.optional(v.number()),
+    evidenceBytes: v.optional(v.number()),
+    citationCount: v.optional(v.number()),
+    jurisdictionCoverage: v.optional(v.array(v.object({
+      ordinal: v.number(),
+      relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
+      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+    }))),
     plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),
@@ -817,6 +809,16 @@ export default defineSchema({
     scopeSize: v.optional(v.number()),
     retrievalPlanSize: v.optional(v.number()),
     providerCallCount: v.optional(v.number()),
+    fileSearchCallCount: v.optional(v.number()),
+    fileSearchStoreCount: v.optional(v.number()),
+    fileSearchLatencyMs: v.optional(v.number()),
+    evidenceBytes: v.optional(v.number()),
+    citationCount: v.optional(v.number()),
+    jurisdictionCoverage: v.optional(v.array(v.object({
+      ordinal: v.number(),
+      relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
+      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+    }))),
     plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),

@@ -3,19 +3,17 @@
 import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it } from "vitest";
-import { components } from "./_generated/api";
-import authSchema from "./betterAuth/schema";
 import schema from "./schema";
-import { productionLibraryResolutionResponse } from "./http";
+import { researchManifestResolutionResponse } from "./http";
 import { normalizeUniqueJurisdictionIds } from "./lib/jurisdictionDomain";
+import {
+  createResearchManifestHeaders,
+  createResearchManifestNonce,
+  RESEARCH_MANIFEST_HEADERS,
+  RESEARCH_MANIFEST_REPLAY_WINDOW_MS,
+} from "./lib/researchManifestProof";
 
 const modules = import.meta.glob("./**/*.ts");
-const authModules = Object.fromEntries(
-  Object.entries(import.meta.glob("./betterAuth/**/*.ts")).map(
-    ([path, load]) => [`./${path.slice("./betterAuth/".length)}`, load],
-  ),
-);
-
 type Backend = TestConvex<typeof schema>;
 
 const listPublicEnabled = makeFunctionReference<"query">(
@@ -24,24 +22,14 @@ const listPublicEnabled = makeFunctionReference<"query">(
 const getPublicByCode = makeFunctionReference<"query">(
   "jurisdictions:getPublicByCode",
 );
-const getProductionLibraryAvailability = makeFunctionReference<"query">(
-  "jurisdictions:getProductionLibraryAvailability",
+const getResearchManifestAvailability = makeFunctionReference<"query">(
+  "jurisdictions:getResearchManifestAvailability",
 );
-const createJurisdiction = makeFunctionReference<"mutation">(
-  "admin/resources:createJurisdiction",
-);
-const updateJurisdiction = makeFunctionReference<"mutation">(
-  "admin/resources:updateJurisdiction",
-);
-const enableJurisdiction = makeFunctionReference<"mutation">(
-  "admin/resources:enableJurisdiction",
-);
-
-const invalidProductionBuckets = [
-  ["nonnumeric", "bucket-gh"],
-  ["zero", "0"],
-  ["negative", "-1"],
-  ["unsafe integer", "9007199254740992"],
+const invalidGeminiStores = [
+  ["missing", null],
+  ["empty", ""],
+  ["malformed", "stores/ghana"],
+  ["cross-resource", "fileSearchStores/UPPERCASE"],
 ] as const;
 
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
@@ -61,58 +49,7 @@ afterEach(() => {
 });
 
 function createBackend() {
-  const t = convexTest(schema, modules);
-  t.registerComponent("betterAuth", authSchema, authModules);
-  return t;
-}
-
-async function enablePanel(t: Backend) {
-  process.env.ADMIN_PANEL_ENABLED = "true";
-  process.env.ADMIN_ENVIRONMENT = "test";
-  await t.run(async (ctx) => {
-    await ctx.db.insert("featureFlags", {
-      key: "admin_panel",
-      environment: "test",
-      enabled: true,
-      updatedAt: Date.now(),
-    });
-  });
-}
-
-async function asContentManager(t: Backend) {
-  const identity = await t.run(async (ctx) => {
-    const now = Date.now();
-    const user = await ctx.runMutation(components.betterAuth.adapter.create, {
-      input: {
-        model: "user",
-        data: {
-          name: "Content manager fixture",
-          email: `content-manager-${crypto.randomUUID()}@example.com`,
-          emailVerified: true,
-          createdAt: now,
-          updatedAt: now,
-          role: "content_manager",
-          banned: false,
-          twoFactorEnabled: true,
-        },
-      },
-    });
-    const session = await ctx.runMutation(components.betterAuth.adapter.create, {
-      input: {
-        model: "session",
-        data: {
-          token: `session-${crypto.randomUUID()}`,
-          userId: user._id,
-          expiresAt: now + 60_000,
-          createdAt: now,
-          updatedAt: now,
-          adminTwoFactorVerifiedAt: now,
-        },
-      },
-    });
-    return { userId: user._id, sessionId: session._id };
-  });
-  return t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId });
+  return convexTest(schema, modules);
 }
 
 async function insertJurisdiction(
@@ -122,7 +59,8 @@ async function insertJurisdiction(
     name: string;
     slug: string;
     status: "draft" | "enabled";
-    productionBucketId?: string;
+    geminiFileSearchStoreName?: string | null;
+    providerSyncState?: "pending" | "synced" | "drifted" | "failed";
     isDefault?: boolean;
   },
 ) {
@@ -134,8 +72,10 @@ async function insertJurisdiction(
       slug: input.slug,
       status: input.status,
       isDefault: input.isDefault ?? false,
-      productionBucketId: input.productionBucketId,
-      providerSyncState: "synced",
+      geminiFileSearchStoreName: input.geminiFileSearchStoreName === null
+        ? undefined
+        : input.geminiFileSearchStoreName ?? `fileSearchStores/${input.slug}`,
+      providerSyncState: input.providerSyncState ?? "synced",
       createdBy: "fixture",
       updatedBy: "fixture",
       createdAt: now,
@@ -144,17 +84,117 @@ async function insertJurisdiction(
   });
 }
 
+async function signedResearchPost(
+  t: Backend,
+  pathname: "/internal/search-jurisdiction" | "/internal/search-jurisdictions",
+  body: BodyInit | null,
+  secret: string,
+  options: {
+    signedBody?: string;
+    timestamp?: number;
+    nonce?: string;
+    headers?: Record<string, string>;
+  } = {},
+) {
+  const signedBody = options.signedBody ?? (typeof body === "string" ? body : "");
+  const bodyBytes = new TextEncoder().encode(signedBody);
+  const proofHeaders = bodyBytes.byteLength <= 1_024
+    ? await createResearchManifestHeaders({
+      secret,
+      method: "POST",
+      pathname,
+      timestamp: options.timestamp ?? Date.now(),
+      nonce: options.nonce ?? createResearchManifestNonce(),
+      bodyBytes,
+    })
+    : {};
+  const requestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json", ...proofHeaders, ...options.headers },
+    body,
+    ...(body instanceof ReadableStream ? { duplex: "half" as const } : {}),
+  } satisfies RequestInit & { duplex?: "half" };
+  return await t.fetch(pathname, requestInit);
+}
+
+describe("research manifest request proof", () => {
+  it("binds method, path, timestamp, nonce, and exact body bytes without sending the secret", async () => {
+    const bodyBytes = new TextEncoder().encode('{"selectedJurisdictionId":"one","supplementaryJurisdictionIds":[]}');
+    const headers = await createResearchManifestHeaders({
+      secret: "research-manifest-secret-at-least-32-characters",
+      method: "POST",
+      pathname: "/internal/search-jurisdictions",
+      timestamp: 1_700_000_000_000,
+      nonce: createResearchManifestNonce(),
+      bodyBytes,
+    });
+    expect(headers).toEqual({
+      "x-research-manifest-version": "1",
+      "x-research-manifest-timestamp": "1700000000000",
+      "x-research-manifest-nonce": expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      "x-research-manifest-signature": expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    expect(JSON.stringify(headers)).not.toContain("research-manifest-secret");
+  });
+});
+
+async function insertPublishedDocument(
+  t: Backend,
+  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
+  storeName: string,
+) {
+  return await t.run(async (ctx) => {
+    const now = Date.now();
+    const resourceId = await ctx.db.insert("legalResources", {
+      jurisdictionId,
+      type: "act",
+      title: "Trusted Act",
+      issuer: "Parliament",
+      officialCitation: "Act 7 of 2026",
+      officialCitationKey: "act 7 of 2026",
+      sourceUrl: "https://official.example/act-7",
+      topics: ["employment"],
+      effectiveDate: "2026-01-01",
+      status: "active",
+      createdBy: "fixture",
+      updatedBy: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const originalStorageId = await ctx.storage.store(new Blob(["law"]));
+    const versionId = await ctx.db.insert("documentVersions", {
+      resourceId,
+      versionNumber: 1,
+      originalStorageId,
+      filename: "act.pdf",
+      mimeType: "application/pdf",
+      byteSize: 3,
+      sha256: "a".repeat(64),
+      sourceUrl: "https://upload.example/untrusted",
+      status: "published",
+      geminiDocumentName: `${storeName}/documents/trusted-act-v1`,
+      geminiIndexedAt: now,
+      submittedBy: "fixture",
+      publishedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.patch(resourceId, { activeVersionId: versionId });
+    return { resourceId, versionId };
+  });
+}
+
 describe("public jurisdiction eligibility", () => {
-  it.each(invalidProductionBuckets)(
-    "excludes an enabled jurisdiction with a %s production bucket",
-    async (_label, productionBucketId) => {
+  it.each(invalidGeminiStores)(
+    "excludes an enabled jurisdiction with a %s Gemini store",
+    async (_label, geminiFileSearchStoreName) => {
       const t = createBackend();
       await insertJurisdiction(t, {
         code: "GH",
         name: "Ghana",
         slug: "ghana",
         status: "enabled",
-        productionBucketId,
+        geminiFileSearchStoreName,
         isDefault: true,
       });
 
@@ -170,7 +210,6 @@ describe("public jurisdiction eligibility", () => {
       name: "Ghana",
       slug: "ghana",
       status: "enabled",
-      productionBucketId: "11833",
       isDefault: true,
     });
     await insertJurisdiction(t, {
@@ -178,14 +217,12 @@ describe("public jurisdiction eligibility", () => {
       name: "Duplicate Ghana",
       slug: "duplicate-ghana",
       status: "enabled",
-      productionBucketId: "invalid",
     });
     await insertJurisdiction(t, {
       code: "NG",
       name: "Nigeria",
       slug: "nigeria",
       status: "enabled",
-      productionBucketId: "22001",
     });
 
     await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
@@ -201,7 +238,6 @@ describe("public jurisdiction eligibility", () => {
       name: "Ghana",
       slug: "ghana",
       status: "enabled",
-      productionBucketId: "11833",
       isDefault: true,
     });
     await insertJurisdiction(t, {
@@ -209,7 +245,6 @@ describe("public jurisdiction eligibility", () => {
       name: "Draft Ghana",
       slug: "draft-ghana",
       status: "draft",
-      productionBucketId: "22001",
     });
 
     await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
@@ -217,121 +252,16 @@ describe("public jurisdiction eligibility", () => {
     ]);
     await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toMatchObject({
       code: "GH",
-      productionBucketId: "11833",
+      searchReady: true,
     });
   });
-});
-
-describe("admin production bucket boundaries", () => {
-  it.each(invalidProductionBuckets)(
-    "create rejects a %s production bucket",
-    async (_label, productionBucketId) => {
-      const t = createBackend();
-      await enablePanel(t);
-      const manager = await asContentManager(t);
-
-      await expect(
-        manager.mutation(createJurisdiction, {
-          code: "GH",
-          name: "Ghana",
-          slug: "ghana",
-          productionBucketId,
-          isDefault: true,
-          reason: "Create governed jurisdiction",
-        }),
-      ).rejects.toThrow("INVALID_PRODUCTION_BUCKET_ID");
-    },
-  );
-
-  it("update cannot remove the production bucket from an enabled jurisdiction", async () => {
-    const t = createBackend();
-    await enablePanel(t);
-    const manager = await asContentManager(t);
-    const id = await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      productionBucketId: "11833",
-      isDefault: true,
-    });
-
-    await expect(
-      manager.mutation(updateJurisdiction, {
-        id,
-        name: "Ghana",
-        slug: "ghana",
-        isDefault: true,
-        reason: "Attempt to remove live provider configuration",
-      }),
-    ).rejects.toThrow("PRODUCTION_BUCKET_REQUIRED");
-  });
-
-  it.each(invalidProductionBuckets)(
-    "update rejects a %s production bucket",
-    async (_label, productionBucketId) => {
-      const t = createBackend();
-      await enablePanel(t);
-      const manager = await asContentManager(t);
-      const id = await insertJurisdiction(t, {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        status: "draft",
-        productionBucketId: "11833",
-        isDefault: true,
-      });
-
-      await expect(
-        manager.mutation(updateJurisdiction, {
-          id,
-          name: "Ghana",
-          slug: "ghana",
-          productionBucketId,
-          isDefault: true,
-          reason: "Update governed jurisdiction",
-        }),
-      ).rejects.toThrow("INVALID_PRODUCTION_BUCKET_ID");
-    },
-  );
-
-  it.each(invalidProductionBuckets)(
-    "enable rejects a persisted %s production bucket",
-    async (_label, productionBucketId) => {
-      const t = createBackend();
-      await enablePanel(t);
-      const manager = await asContentManager(t);
-      const id = await insertJurisdiction(t, {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        status: "draft",
-        productionBucketId,
-        isDefault: true,
-      });
-
-      await expect(
-        manager.mutation(enableJurisdiction, {
-          id,
-          reason: "Enable governed jurisdiction",
-        }),
-      ).rejects.toThrow("INVALID_PRODUCTION_BUCKET_ID");
-    },
-  );
 });
 
 describe("internal search jurisdiction HTTP boundary", () => {
   const secret = "search-jurisdiction-test-secret-at-least-32-characters";
 
   async function post(t: Backend, body: string, suppliedSecret = secret) {
-    return await t.fetch("/internal/search-jurisdiction", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-search-jurisdiction-secret": suppliedSecret,
-      },
-      body,
-    });
+    return await signedResearchPost(t, "/internal/search-jurisdiction", body, suppliedSecret);
   }
 
   it("fails closed for absent and incorrect transport secrets", async () => {
@@ -377,14 +307,12 @@ describe("internal search jurisdiction HTTP boundary", () => {
       name: "Ghana",
       slug: "ghana",
       status: "enabled",
-      productionBucketId: "11833",
     });
     await insertJurisdiction(t, {
       code: "GH",
       name: "Duplicate Ghana",
       slug: "duplicate-ghana",
       status: "enabled",
-      productionBucketId: "22001",
     });
 
     for (const code of ["ZZ", "GH"]) {
@@ -403,7 +331,6 @@ describe("internal search jurisdiction HTTP boundary", () => {
       name: "Ghana",
       slug: "ghana",
       status: "enabled",
-      productionBucketId: "11833",
       isDefault: true,
     });
 
@@ -420,7 +347,7 @@ describe("internal search jurisdiction HTTP boundary", () => {
       slug: "ghana",
       enabled: true,
       isDefault: true,
-      productionBucketId: "11833",
+      searchReady: true,
     });
   });
 });
@@ -433,19 +360,67 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     body: BodyInit | null,
     suppliedSecret = secret,
     headers: Record<string, string> = {},
+    signedBody?: string,
   ) {
-    const requestInit = {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-search-jurisdiction-secret": suppliedSecret,
-        ...headers,
-      },
-      body,
-      ...(body instanceof ReadableStream ? { duplex: "half" as const } : {}),
-    } satisfies RequestInit & { duplex?: "half" };
-    return await t.fetch("/internal/search-jurisdictions", requestInit);
+    return await signedResearchPost(t, "/internal/search-jurisdictions", body, suppliedSecret, {
+      headers,
+      ...(signedBody === undefined ? {} : { signedBody }),
+    });
   }
+
+  async function reusableRequest(body: string, overrides: {
+    pathname?: string;
+    timestamp?: number;
+    nonce?: string;
+  } = {}) {
+    const bodyBytes = new TextEncoder().encode(body);
+    const headers = await createResearchManifestHeaders({
+      secret,
+      method: "POST",
+      pathname: overrides.pathname ?? "/internal/search-jurisdictions",
+      timestamp: overrides.timestamp ?? Date.now(),
+      nonce: overrides.nonce ?? createResearchManifestNonce(),
+      bodyBytes,
+    });
+    return { method: "POST", headers: { "content-type": "application/json", ...headers }, body } satisfies RequestInit;
+  }
+
+  it("rejects proofs with tampered method, path, body, signature, timestamp, or nonce", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const body = JSON.stringify({ selectedJurisdictionId: "opaque", supplementaryJurisdictionIds: [] });
+    const original = await reusableRequest(body);
+    const badSignature = { ...original, headers: { ...original.headers, [RESEARCH_MANIFEST_HEADERS.signature]: "A".repeat(43) } };
+    const malformedNonce = { ...original, headers: { ...original.headers, [RESEARCH_MANIFEST_HEADERS.nonce]: "not-a-nonce" } };
+    const tamperedBody = { ...original, body: `${body} ` };
+    const wrongPath = await reusableRequest(body, { pathname: "/internal/search-jurisdiction" });
+    const stale = await reusableRequest(body, { timestamp: Date.now() - RESEARCH_MANIFEST_REPLAY_WINDOW_MS - 1 });
+    const future = await reusableRequest(body, { timestamp: Date.now() + RESEARCH_MANIFEST_REPLAY_WINDOW_MS + 1 });
+
+    for (const init of [badSignature, malformedNonce, tamperedBody, wrongPath, stale, future]) {
+      expect((await t.fetch("/internal/search-jurisdictions", init)).status).toBe(404);
+    }
+    expect((await t.fetch("/internal/search-jurisdictions", { ...original, method: "GET" })).status).toBe(404);
+  });
+
+  it("atomically rejects sequential and concurrent replay of a valid proof", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
+    });
+    const body = JSON.stringify({ selectedJurisdictionId: selected, supplementaryJurisdictionIds: [] });
+    const sequential = await reusableRequest(body);
+    expect((await t.fetch("/internal/search-jurisdictions", sequential)).status).toBe(200);
+    expect((await t.fetch("/internal/search-jurisdictions", sequential)).status).toBe(404);
+
+    const concurrent = await reusableRequest(body);
+    const statuses = await Promise.all([
+      t.fetch("/internal/search-jurisdictions", concurrent),
+      t.fetch("/internal/search-jurisdictions", concurrent),
+    ]).then((responses) => responses.map(({ status }) => status).sort());
+    expect(statuses).toEqual([200, 404]);
+  });
 
   it("returns canonical ready libraries in selected and supplementary request order", async () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
@@ -455,31 +430,28 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       name: "Ghana",
       slug: "ghana",
       status: "enabled",
-      productionBucketId: " 0011833 ",
     });
     const second = await insertJurisdiction(t, {
       code: "NG",
       name: "Nigeria",
       slug: "nigeria",
       status: "enabled",
-      productionBucketId: "22001",
     });
     const third = await insertJurisdiction(t, {
       code: "KE",
       name: "Kenya",
       slug: "kenya",
       status: "enabled",
-      productionBucketId: "33001",
     });
 
-    await expect(t.query(getProductionLibraryAvailability, {
+    await expect(t.query(getResearchManifestAvailability, {
       selectedJurisdictionId: selected,
       supplementaryJurisdictionIds: [third, second],
     })).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "0011833" },
+      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
       supplementary: [
-        { jurisdictionId: third, status: "ready", productionBucketId: "33001" },
-        { jurisdictionId: second, status: "ready", productionBucketId: "22001" },
+        { jurisdictionId: third, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
+        { jurisdictionId: second, status: "ready", storeName: "fileSearchStores/nigeria", documents: [] },
       ],
     });
 
@@ -492,24 +464,93 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     expect(response.headers.get("cache-control")).toBe("no-store, private");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     await expect(response.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "0011833" },
+      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
       supplementary: [
-        { jurisdictionId: third, status: "ready", productionBucketId: "33001" },
-        { jurisdictionId: second, status: "ready", productionBucketId: "22001" },
+        { jurisdictionId: third, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
+        { jurisdictionId: second, status: "ready", storeName: "fileSearchStores/nigeria", documents: [] },
       ],
     });
   });
 
+  it("returns only the current active Convex citation manifest and rejects duplicate store ownership", async () => {
+    process.env.SEARCH_JURISDICTION_SECRET = secret;
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const { resourceId, versionId } = await insertPublishedDocument(t, selected, storeName);
+    const response = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    }));
+    await expect(response.json()).resolves.toEqual({
+      selected: {
+        jurisdictionId: selected,
+        status: "ready",
+        storeName,
+        documents: [{
+          resourceId,
+          versionId,
+          documentName: `${storeName}/documents/trusted-act-v1`,
+          title: "Trusted Act",
+          officialCitation: "Act 7 of 2026",
+          sourceUrl: "https://official.example/act-7",
+        }],
+      },
+      supplementary: [],
+    });
+
+    await insertJurisdiction(t, {
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const duplicate = await post(t, JSON.stringify({
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    }));
+    await expect(duplicate.json()).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "needs_review" },
+      supplementary: [],
+    });
+  });
+
+  it("pauses research while a document lifecycle operation can change store contents", async () => {
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const { resourceId, versionId } = await insertPublishedDocument(t, selected, storeName);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert("documentLifecycleLocks", {
+        resourceId,
+        versionId,
+        operation: "publish",
+        actorId: "fixture",
+        idempotencyKey: "fixture-lock",
+        expiresAt: now + 60_000,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    await expect(t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    })).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "needs_review" },
+      supplementary: [],
+    });
+  });
+
   it.each([
-    ["missing", undefined],
-    ["empty", ""],
-    ["whitespace", "   "],
-    ["zero", "0"],
-    ["negative", "-1"],
-    ["decimal", "1.5"],
-    ["non-digit", "bucket-1"],
-    ["unsafe", "9007199254740992"],
-  ])("classifies a %s selected bucket as unconfigured without leaking its value", async (_label, productionBucketId) => {
+    ["missing", null, "synced", "unconfigured"],
+    ["pending", "fileSearchStores/secret", "pending", "provisioning"],
+    ["failed", "fileSearchStores/secret", "failed", "unconfigured"],
+    ["drifted", "fileSearchStores/secret", "drifted", "needs_review"],
+    ["malformed", "stores/secret", "synced", "needs_review"],
+  ] as const)("classifies a %s selected store without leaking its value", async (_label, geminiFileSearchStoreName, providerSyncState, status) => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const selected = await insertJurisdiction(t, {
@@ -517,7 +558,8 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       name: "SECRET_NAME",
       slug: "secret-slug",
       status: "enabled",
-      productionBucketId,
+      geminiFileSearchStoreName,
+      providerSyncState,
     });
 
     const response = await post(t, JSON.stringify({
@@ -528,23 +570,24 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload).toEqual({
-      selected: { jurisdictionId: selected, status: "unconfigured" },
+      selected: { jurisdictionId: selected, status },
       supplementary: [],
     });
-    expect(JSON.stringify(payload)).not.toMatch(/SECRET_NAME|secret-slug|bucket-|9007199254740992/);
+    expect(JSON.stringify(payload)).not.toMatch(/SECRET_NAME|secret-slug|legacy-secret|fileSearchStores|stores\/secret/);
   });
 
   it("keeps supplementary unconfigured entries in place while later entries retain order", async () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     const unavailable = await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", productionBucketId: "0",
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
+      geminiFileSearchStoreName: null,
     });
     const ready = await insertJurisdiction(t, {
-      code: "KE", name: "Kenya", slug: "kenya", status: "enabled", productionBucketId: "3",
+      code: "KE", name: "Kenya", slug: "kenya", status: "enabled",
     });
 
     const response = await post(t, JSON.stringify({
@@ -552,10 +595,10 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       supplementaryJurisdictionIds: [unavailable, ready],
     }));
     await expect(response.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", productionBucketId: "1" },
+      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
       supplementary: [
         { jurisdictionId: unavailable, status: "unconfigured" },
-        { jurisdictionId: ready, status: "ready", productionBucketId: "3" },
+        { jurisdictionId: ready, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
       ],
     });
   });
@@ -564,18 +607,17 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const ids = [];
-    for (const [code, name, bucket] of [
-      ["GH", "Ghana", "1"],
-      ["NG", "Nigeria", "2"],
-      ["KE", "Kenya", "3"],
-      ["ZA", "South Africa", "4"],
+    for (const [code, name] of [
+      ["GH", "Ghana"],
+      ["NG", "Nigeria"],
+      ["KE", "Kenya"],
+      ["ZA", "South Africa"],
     ] as const) {
       ids.push(await insertJurisdiction(t, {
         code,
         name,
         slug: name.toLowerCase().replaceAll(" ", "-"),
         status: "enabled",
-        productionBucketId: bucket,
       }));
     }
     const response = await post(t, JSON.stringify({
@@ -592,6 +634,8 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     ["empty body", ""],
     ["malformed JSON", "{"],
     ["unknown key", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], extra: true })],
+    ["client store", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], storeName: "fileSearchStores/forged" })],
+    ["client document", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], documentName: "fileSearchStores/forged/documents/forged" })],
     ["empty selected", JSON.stringify({ selectedJurisdictionId: "", supplementaryJurisdictionIds: [] })],
     ["non-array supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: "y" })],
     ["too many supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: ["a", "b", "c", "d"] })],
@@ -610,7 +654,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     const validBody = JSON.stringify({
       selectedJurisdictionId: selected,
@@ -621,7 +665,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
         controller.enqueue(new TextEncoder().encode(validBody));
         controller.close();
       },
-    }), secret, { "content-length": "not-a-number" });
+    }), secret, { "content-length": "not-a-number" }, validBody);
     expect(valid.status).toBe(200);
 
     const oversized = await post(t, new ReadableStream({
@@ -637,10 +681,10 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     const disabled = await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "draft", productionBucketId: "2",
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "draft",
     });
 
     for (const supplementaryJurisdictionIds of [
@@ -677,7 +721,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
   });
 
   it("maps an unexpected internal query failure to a sanitized bodyless 500", async () => {
-    const response = await productionLibraryResolutionResponse(
+    const response = await researchManifestResolutionResponse(
       async () => {
         throw new Error("database transport secret detail");
       },
@@ -692,7 +736,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     expect(() => normalizeUniqueJurisdictionIds(
       ["canonical", "alternate-encoding"],
       () => "canonical" as never,
-    )).toThrow("PRODUCTION_LIBRARY_REQUEST_INVALID");
+    )).toThrow("RESEARCH_MANIFEST_REQUEST_INVALID");
   });
 
   it("uniformly rejects missing selected or supplementary rows and a disabled selected row", async () => {
@@ -700,7 +744,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
 
     const missingSelectedBackend = createBackend();
     const missingSelected = await insertJurisdiction(missingSelectedBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     await missingSelectedBackend.run(async (ctx) => await ctx.db.delete(missingSelected));
     const missingSelectedResponse = await post(missingSelectedBackend, JSON.stringify({
@@ -712,10 +756,10 @@ describe("internal multi-jurisdiction library availability boundary", () => {
 
     const missingSupplementaryBackend = createBackend();
     const selected = await insertJurisdiction(missingSupplementaryBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     const missingSupplementary = await insertJurisdiction(missingSupplementaryBackend, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", productionBucketId: "2",
+      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
     });
     await missingSupplementaryBackend.run(async (ctx) => await ctx.db.delete(missingSupplementary));
     const missingSupplementaryResponse = await post(missingSupplementaryBackend, JSON.stringify({
@@ -727,7 +771,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
 
     const disabledBackend = createBackend();
     const disabled = await insertJurisdiction(disabledBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "draft", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "draft",
     });
     const disabledResponse = await post(disabledBackend, JSON.stringify({
       selectedJurisdictionId: disabled,
@@ -741,7 +785,7 @@ describe("internal multi-jurisdiction library availability boundary", () => {
     process.env.SEARCH_JURISDICTION_SECRET = secret;
     const t = createBackend();
     const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", productionBucketId: "1",
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
     });
     const response = await post(t, JSON.stringify({
       selectedJurisdictionId: selected,

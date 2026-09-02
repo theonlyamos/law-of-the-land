@@ -26,17 +26,6 @@ export type ReviewItem = {
   sourceHost: string;
   effectiveDate?: string;
   status: "ready_for_review" | "approved" | "published" | "superseded";
-  stagingDocumentId?: string;
-  stagingProcessId?: string;
-  xrayEvidence:
-    | { status: "unavailable" }
-    | {
-        status: "queued" | "processing" | "complete" | "error" | "cancelled";
-        documentId: string;
-        processId: string;
-        fileType?: string;
-        fileSize?: number;
-      };
   submittedBy: string;
   submittedAt?: number;
   previousVersion?: { versionNumber: number; filename: string; sha256: string; effectiveDate?: string };
@@ -94,7 +83,7 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
   }
 
   if (items.length === 0) {
-    return <p role="status" className="border-y border-[oklch(74%_0.028_78)] py-10 text-sm">The review docket is clear. New submissions will appear here after staging checks complete.</p>;
+    return <p role="status" className="border-y border-[oklch(74%_0.028_78)] py-10 text-sm">The review docket is clear. New submissions will appear here when their metadata is ready.</p>;
   }
 
   return (
@@ -120,17 +109,6 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
                   <div><dt className="text-xs font-semibold">Official source host</dt><dd className="mt-1 text-sm">{item.sourceHost}</dd></div>
                   <div className="sm:col-span-2"><dt className="text-xs font-semibold">Checksum</dt><dd className="mt-1 break-all text-sm">SHA-256 {item.sha256}</dd></div>
                 </dl>
-              </section>
-              <section aria-labelledby={`${item.id}-xray`}>
-                <h3 id={`${item.id}-xray`} className="text-sm font-semibold uppercase tracking-[0.14em]">X-Ray evidence</h3>
-                {item.xrayEvidence.status === "unavailable" ? (
-                  <p className="mt-3 text-sm leading-6">Provider-derived X-Ray evidence is unavailable.</p>
-                ) : (
-                  <div className="mt-3 space-y-2 text-sm leading-6">
-                    <p>Provider document <strong>{item.xrayEvidence.documentId}</strong>; process <strong>{item.xrayEvidence.processId}</strong>.</p>
-                    <p><strong>{item.xrayEvidence.status[0].toUpperCase()}{item.xrayEvidence.status.slice(1)}</strong> / {item.xrayEvidence.fileType ?? "type unavailable"} / {item.xrayEvidence.fileSize === undefined ? "size unavailable" : `${item.xrayEvidence.fileSize.toLocaleString()} bytes`}. Safe normalized fields only; provider links and extracted bodies are excluded.</p>
-                  </div>
-                )}
               </section>
               <section aria-labelledby={`${item.id}-diff`}>
                 <h3 id={`${item.id}-diff`} className="text-sm font-semibold uppercase tracking-[0.14em]">Metadata-only version diff</h3>
@@ -159,7 +137,7 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
                     void decide(event, item, submitter?.value === "reject" ? "reject" : "approve");
                   }} className="grid gap-4">
                     <fieldset className="grid gap-3"><legend className="mb-2 font-semibold">Required review record</legend>
-                      {[["sourceAuthentic", "Official source authenticated"], ["metadataAccurate", "Metadata is accurate"], ["extractionReviewed", "X-Ray extraction reviewed"], ["citationsVerified", "Citations verified"], ["evaluationPassed", "Search evaluation passed"]].map(([name, label]) => <label key={name} className="flex min-h-11 items-center gap-3 text-sm"><input name={name} type="checkbox" className="h-5 w-5 accent-amber-700" />{label}</label>)}
+                      {[["sourceAuthentic", "Official source authenticated"], ["metadataAccurate", "Metadata is accurate"], ["extractionReviewed", "Original text reviewed"], ["citationsVerified", "Citations verified"], ["evaluationPassed", "Search evaluation passed"]].map(([name, label]) => <label key={name} className="flex min-h-11 items-center gap-3 text-sm"><input name={name} type="checkbox" className="h-5 w-5 accent-amber-700" />{label}</label>)}
                     </fieldset>
                     <label className="grid gap-2 text-sm font-semibold">Evaluation run ID<input name="evaluationRunId" required maxLength={128} className="min-h-11 border border-[oklch(62%_0.035_252)] bg-transparent px-3 font-normal" /></label>
                     <label className="grid gap-2 text-sm font-semibold">Decision reason<textarea name="reason" required minLength={3} maxLength={500} rows={4} className="border border-[oklch(62%_0.035_252)] bg-transparent p-3 font-normal" /></label>

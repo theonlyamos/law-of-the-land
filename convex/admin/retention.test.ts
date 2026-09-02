@@ -70,10 +70,10 @@ async function asAdmin(t: Backend, role = "super_admin") {
 
 async function seedJob(t: Backend, status: "queued" | "succeeded" | "failed" | "manual_review", overrides: Record<string, unknown> = {}) {
   return await t.run((ctx) => ctx.db.insert("integrationJobs", {
-    type: "poll_process", targetType: "operation", targetId: `target_${crypto.randomUUID()}`,
+    type: "gemini_delete_store", targetType: "operation", targetId: `target_${crypto.randomUUID()}`,
     payload: "{}", actorId: "system", actorRoles: [], idempotencyKey: `seed_${crypto.randomUUID()}`,
     requestFingerprint: "{}", correlationId: `job_${crypto.randomUUID().replaceAll("-", "")}`,
-    callbackTokenHash: "a".repeat(64), status, attemptCount: status === "failed" ? 1 : 0,
+    status, attemptCount: status === "failed" ? 1 : 0,
     createdAt: Date.now(), updatedAt: Date.now(), ...overrides,
   } as never));
 }
@@ -137,7 +137,6 @@ describe("authoritative job controls", () => {
     const retried = await t.run((ctx) => ctx.db.get(failed));
     expect(retried).toMatchObject({ status: "queued" });
     expect(retried).not.toHaveProperty("leaseToken");
-    expect(retried).not.toHaveProperty("processId");
   });
 
   it("cancels only unclaimed queued work and preserves provider uncertainty", async () => {
@@ -145,7 +144,7 @@ describe("authoritative job controls", () => {
     const queued = await seedJob(t, "queued");
     const input = { jobId: queued, reason: "Duplicate work is no longer needed", idempotencyKey: "cancel-queued-1" };
     expect(await admin.client.mutation(cancelJob, input)).toEqual(await admin.client.mutation(cancelJob, input));
-    const uncertain = await seedJob(t, "manual_review", { processId: "provider-process", lastErrorKind: "timeout" });
+    const uncertain = await seedJob(t, "manual_review", { lastErrorKind: "timeout" });
     await expect(admin.client.mutation(cancelJob, { jobId: uncertain, reason: "Do not guess provider outcome", idempotencyKey: "cancel-uncertain-1" })).rejects.toThrow("provider outcome is uncertain");
   });
 
@@ -180,7 +179,7 @@ describe("incidents and immutable timeline", () => {
   it("creates an incident and append-only, bounded notes without exposing mutable audit fields", async () => {
     const t = createBackend(); await enablePanel(t); const admin = await asAdmin(t);
     const incident = await admin.client.mutation(createIncident, {
-      title: "GroundX callback backlog", severity: "high", reason: "Callbacks exceeded the operating threshold", idempotencyKey: "incident-create-1",
+      title: "Provider operation backlog", severity: "high", reason: "Provider operations exceeded the operating threshold", idempotencyKey: "incident-create-1",
     });
     await admin.client.mutation(addIncidentNote, { incidentId: incident.incidentId, note: "Provider status page is under review", reason: "Record investigation progress", idempotencyKey: "incident-note-1" });
     const timeline = await admin.client.query(listIncidentTimeline, { incidentId: incident.incidentId, paginationOpts: { numItems: 20, cursor: null } });
@@ -368,7 +367,7 @@ describe("bounded retention", () => {
     const t = createBackend();
     const old = Date.now() - 100 * 24 * 60 * 60_000;
     await t.run(async (ctx) => {
-      for (let index = 0; index < 90; index += 1) await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "operation", targetId: `concurrent_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `concurrent_${index}`, requestFingerprint: "{}", correlationId: `concurrent_${index}`, callbackTokenHash: "e".repeat(64), status: "failed", attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
+      for (let index = 0; index < 90; index += 1) await ctx.db.insert("integrationJobs", { type: "gemini_delete_store", targetType: "operation", targetId: `concurrent_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `concurrent_${index}`, requestFingerprint: "{}", correlationId: `concurrent_${index}`, status: "failed", attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
       await ctx.db.insert("retentionState", { key: "default", phase: "jobs_failed", cycleHadChanges: true, storagePassHadChanges: false, deletedTotal: 0, lastStartedAt: old, updatedAt: old });
     });
     vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
@@ -407,7 +406,7 @@ describe("bounded retention", () => {
       }
       for (let index = 0; index < 45; index += 1) await ctx.db.insert("queryRuns", { correlationId: `retention_fair_run_${index}`, day: "2025-01-01", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 1, completedAt: old, rollupStatus: "processed", rolledUpAt: old });
       for (const status of ["succeeded", "failed", "cancelled"] as const) {
-        for (let index = 0; index < 45; index += 1) await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "operation", targetId: `fair_${status}_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `fair_${status}_${index}`, requestFingerprint: "{}", correlationId: `fair_${status}_${index}`, callbackTokenHash: "c".repeat(64), status, attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
+        for (let index = 0; index < 45; index += 1) await ctx.db.insert("integrationJobs", { type: "gemini_delete_store", targetType: "operation", targetId: `fair_${status}_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `fair_${status}_${index}`, requestFingerprint: "{}", correlationId: `fair_${status}_${index}`, status, attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
       }
       const orphanIds = [] as Id<"_storage">[];
       for (let index = 0; index < 45; index += 1) orphanIds.push(await ctx.storage.store(new Blob([`orphan-${index}`])));
@@ -457,19 +456,19 @@ describe("bounded retention", () => {
       for (const status of ["succeeded", "failed", "cancelled"] as const) {
         for (let index = 0; index < 201; index += 1) {
           await ctx.db.insert("integrationJobs", {
-            type: "poll_process", targetType: "operation", targetId: `${status}_${index}`,
+            type: "gemini_delete_store", targetType: "operation", targetId: `${status}_${index}`,
             payload: JSON.stringify({ secret: `${status}-${index}` }), actorId: "system", actorRoles: [],
             idempotencyKey: `${status}_${index}_${crypto.randomUUID()}`, requestFingerprint: "{}",
-            correlationId: `retention_${status}_${index}`, callbackTokenHash: "a".repeat(64),
+            correlationId: `retention_${status}_${index}`,
             status, attemptCount: 1, lastErrorKind: "network", retentionPending: true,
             createdAt: old + index, updatedAt: old + index,
           });
         }
         for (let index = 0; index < 3; index += 1) {
           await ctx.db.insert("integrationJobs", {
-            type: "poll_process", targetType: "operation", targetId: `redacted_${status}_${index}`,
+            type: "gemini_delete_store", targetType: "operation", targetId: `redacted_${status}_${index}`,
             payload: "{}", actorId: "system", actorRoles: [], idempotencyKey: `redacted_${status}_${index}_${crypto.randomUUID()}`,
-            requestFingerprint: "{}", correlationId: `redacted_${status}_${index}`, callbackTokenHash: "a".repeat(64),
+            requestFingerprint: "{}", correlationId: `redacted_${status}_${index}`,
             status, attemptCount: 1, retentionPending: false, retentionRedactedAt: old,
             createdAt: old + index, updatedAt: old + index,
           });

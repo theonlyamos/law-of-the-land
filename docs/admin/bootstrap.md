@@ -8,8 +8,7 @@
 
 | Variable | Owner | Local | Preview | Production |
 | --- | --- | --- | --- | --- |
-| `GROUNDX_API_KEY` | Vercel and Convex | Required for provider work | Required | Required |
-| `GOOGLE_AI_API_KEY` | Vercel and Convex | Required for generated answers | Required | Required |
+| `GOOGLE_AI_API_KEY` | Vercel and Convex | Required for legal search, indexing, and generated answers | Required | Required |
 | `GOOGLE_AI_MODEL` | Vercel | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` |
 | `PLACES_API_KEY` | Vercel | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
 | `PLACE_CLAIM_SECRET` | Vercel and Convex | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
@@ -37,15 +36,19 @@
 | `POLAR_SERVER` | Convex | Required; `sandbox` | Required; `sandbox` | Required; approved live value |
 | `POLAR_PRO_MONTHLY_PRODUCT_ID` | Convex | Required when billing is enabled | Required when billing is enabled | Required when billing is enabled |
 
-Bucket IDs are governed `jurisdictions` rows, not environment variables. Ghana must retain production bucket `11833` and use a distinct staging bucket. The Polar webhook is the selected Convex Site origin plus `/polar/events`.
+Gemini File Search store names are governed server-only `jurisdictions` fields, not environment variables or browser inputs. Create one store per jurisdiction through the audited **Set up Gemini search** action; never copy store names into release evidence. The Polar webhook is the selected Convex Site origin plus `/polar/events`.
 
 For guarded admin E2E and performance-budget runs, provide the selected target's shared search and telemetry values to the controlling shell as `ADMIN_E2E_SEARCH_JURISDICTION_SECRET` and `ADMIN_E2E_TELEMETRY_INGEST_SECRET`. Each must be at least 32 characters. The launcher maps them to the canonical server-only names only inside the Next.js child, keeps them out of the browser and recovery manifest, and refuses bootstrap unless the isolated Convex runtime proves that its telemetry secret matches. Teardown clears the parent aliases.
 
-## Callback and export controls
+## Search indexing and export controls
 
-Remote staging ingest is callback-primary. Only after claiming an `ingest_remote` job, the action creates a one-time `gx_` token, stores its SHA-256 hash, and sends top-level GroundX `callbackUrl` and safe `callbackData`. The raw token never enters a job, scheduler argument, audit event, or log. Copy and delete do not support callbacks and therefore use the bounded 15-minute polling reconciler. A missing or non-HTTPS callback origin fails remote ingest as validation; do not silently downgrade it to polling.
+Only publishing queues Gemini indexing; drafts, submitted versions, review, and approval make no provider request. Accepted uploads are polled after 5, 10, 20, 30, then at most 60 seconds. After 30 minutes without confirmation, the job requires manual review and legal research for that jurisdiction remains paused. Legal research uses one File Search call across the complete server-authorized set of ready jurisdiction stores. Gemini store, document, and operation names remain server-only.
 
 Conversation exports use a hashed, one-time `exp_` reference. The browser posts it to the authenticated Next.js proxy `/api/admin/exports/download`, which forwards it to private Convex route `/admin/export-download`. Both export and reference expire within 10 minutes.
+
+### Disposable-development hard-cutover reset
+
+The legacy-provider reset is a release-time procedure, not a reusable operator action. Before installing the final schema, snapshot the explicitly approved disposable development deployment, run every bounded dry-run and execute phase from the reviewed cutover artifact, and require its final verification to report no remaining legacy provider jobs, locks, fields, or active pointers. Never run the reset against preview or production. Remove the temporary mutation with the final schema, then set up each jurisdiction's Gemini search store through the controlled admin action and republish only approved versions that should be searchable.
 
 ## Isolated bootstrap procedure
 
@@ -89,7 +92,7 @@ bun run build
 
 Abort before `bunx convex dev --once` if the value is missing, malformed, production, or differs from the pre-approved isolated target. If any later command reports a different target identity, stop immediately, keep both admin controls disabled, and open an incident; do not continue or retry against another deployment.
 
-Expected migration state: Ghana is enabled/default, `productionBucketId` is `11833`, the separate staging bucket is present, and a repeat seed is idempotent. Expected bootstrap state: only listed existing Better Auth users with verified email and 2FA receive `super_admin`. Abort on any unexpected row or authorization failure. Clear the allowlist immediately:
+Expected migration state: Ghana remains the default jurisdiction in `draft` with provider state `pending`, has no Gemini search store, and a repeat seed is idempotent. Store creation and readiness belong to the controlled admin setup action and Task 7's separately approved smoke; they are not seed output. Expected bootstrap state: only listed existing Better Auth users with verified email and 2FA receive `super_admin`. Abort on any unexpected row or authorization failure. Clear the allowlist immediately:
 
 ```powershell
 bunx convex env remove INITIAL_SUPER_ADMIN_IDS
@@ -97,7 +100,7 @@ bunx convex env remove INITIAL_SUPER_ADMIN_IDS
 
 The first administrative grant revokes the candidate's existing sessions. The candidate must return to `/signin`, enter the credential password, and complete the authenticator or one-time backup-code challenge. They can then open `/settings/security`, which shows the active Super Administrator handoff and links to `/admin-recovery`. Never attempt to bypass this forced reauthentication by editing session records.
 
-Record GroundX as **configured**, not healthy or smoke-passed, until an authorized remote-ingest callback actually completes. The external smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
+Record `Gemini legal search and indexing` as **Configured** only when the server-side `GOOGLE_AI_API_KEY` is nonblank. This reflects configuration, not provider health or smoke success. Task 7's separately authorized real-provider smoke remains a release gate. If a gate fails, keep both controls disabled, preserve audit evidence, correct the fault, and repeat only on the isolated target.
 
 ## Production promotion and first Super Admin
 
@@ -106,7 +109,7 @@ Do not reuse a preview user ID or run the isolated `convex dev` sequence against
 ### 1. Deploy disabled and prepare the production account
 
 1. In the Convex production deployment, set `ADMIN_ENVIRONMENT=production` and `ADMIN_PANEL_ENABLED=false`. Confirm `INITIAL_SUPER_ADMIN_IDS` is absent. Configure the Convex-owned variables in the matrix.
-2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GROUNDX_API_KEY`, `GOOGLE_AI_API_KEY`, `GOOGLE_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, `SEARCH_JURISDICTION_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared search and telemetry secrets must each match Convex exactly.
+2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GOOGLE_AI_API_KEY`, `GOOGLE_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, `SEARCH_JURISDICTION_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared search and telemetry secrets must each match Convex exactly.
 3. Promote the already-reviewed commit through the normal `main` deployment pipeline. Do not run an ad hoc `convex deploy` from the release shell: that command defaults to the project's production deployment and does not accept the exact-name selector used below.
 4. Verify the production site loads while ordinary `/admin` access remains disabled. The candidate must create a new production credential account, verify its email, enroll in 2FA at `/settings/security`, and copy the production Better Auth user ID. Verify the production ID, email-verification state, and 2FA state in that same environment.
 
@@ -153,7 +156,7 @@ try {
 }
 ```
 
-The interactive allowlist must contain only the approved production user ID or comma-separated approved production user IDs. Expected state matches the isolated run: Ghana retains production bucket `11833`, the seed is idempotent, and only existing verified, 2FA-enrolled users receive `super_admin`. Capture redacted command results and the evidence that the allowlist was removed. Never retry with a different target after a partial failure; keep both controls disabled and open an incident.
+The interactive allowlist must contain only the approved production user ID or comma-separated approved production user IDs. Expected state matches the isolated run: Ghana remains the default jurisdiction in `draft` with provider state `pending` and no Gemini search store, the seed is idempotent, and only existing verified, 2FA-enrolled users receive `super_admin`. Store creation and readiness require the later controlled admin setup action and Task 7's separately approved smoke; do not infer either from bootstrap. Capture redacted command results and the evidence that the allowlist was removed. Never retry with a different target after a partial failure; keep both controls disabled and open an incident.
 
 The role grant revokes the candidate's existing sessions. The candidate must sign in again with credentials and complete the 2FA challenge. On `/settings/security`, verify the production Super Administrator handoff and then use the production enablement procedure below. At least one different assured Super Admin is required for routine recovery after the initial handoff; add that administrator through the audited admin UI before treating production setup as complete.
 
@@ -171,7 +174,7 @@ npm run build
 
 This is a separate, additive rollout from the first-admin bootstrap. Deploy the
 schema and the flag-off dual-write code before running it. The migration functions
-are internal operator mutations; they never call Google, GroundX, or another
+are internal operator mutations; they never call Google or another
 provider, and no step below implicitly enables the feature flag. Use only an
 already approved exact target binding and placeholder values supplied through the
 change record. Do not paste production deployment names, secrets, coordinates,
@@ -183,8 +186,8 @@ First verify the exact environment and target, confirm
 Google Places projection. Then invoke the V2 seed with an exact environment,
 confirmation `SEED_GHANA_JURISDICTION_V2 <environment>`, reviewed reason, fresh
 8–128 character idempotency key, and operator-supplied projection. The seed must
-preserve the existing Ghana ID, every legal-resource ID, and production bucket
-`11833`; abort on any conflict instead of repairing it in place.
+preserve the existing Ghana ID, every legal-resource ID, and provider lifecycle
+state; abort on any conflict instead of repairing it in place.
 
 For each target below, run every returned opaque `ujm1_...` cursor to completion.
 Use a new idempotency key for every page. Never copy a cursor between a target,
@@ -292,7 +295,7 @@ For production, first verify `/admin-recovery` displays environment `production`
 Invoke-CheckedConvex @('env', 'set', 'ADMIN_PANEL_ENABLED', 'true', '--deployment', $ApprovedProductionDeployment)
 ```
 
-Smoke the fixed roles and monitor audit, job, incident, auth, and provider health. To roll back, disable the persisted flag first with `ADMIN_PANEL production DISABLE` and a fresh idempotency key, then set the deployment gate false on the exact target:
+Smoke the fixed roles and monitor audit, jobs, incidents, auth, and integration configuration. Do not report provider health before Task 7's real smoke. To roll back, disable the persisted flag first with `ADMIN_PANEL production DISABLE` and a fresh idempotency key, then set the deployment gate false on the exact target:
 
 ```powershell
 Invoke-CheckedConvex @('env', 'set', 'ADMIN_PANEL_ENABLED', 'false', '--deployment', $ApprovedProductionDeployment)

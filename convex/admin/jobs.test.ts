@@ -6,7 +6,6 @@ import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
-import { executeClaimedGroundxJob, executeGroundxJob } from "./groundxActions";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 
 const modules = Object.fromEntries(
@@ -23,30 +22,24 @@ const authModules = Object.fromEntries(
 type Backend = TestConvex<typeof schema>;
 
 const enqueueJob = makeFunctionReference<"mutation">("admin/jobs:enqueueSystemJob");
-const guardedEnqueueJob = makeFunctionReference<"mutation">("admin/jobs:enqueueJob");
-const applyProviderResult = makeFunctionReference<"mutation">(
-  "admin/jobs:applyProviderResult",
-);
 const claimJob = makeFunctionReference<"mutation">("admin/jobs:claimJob");
 const recordProviderFailure = makeFunctionReference<"mutation">(
   "admin/jobs:recordProviderFailure",
 );
-const completeGroundxCallback = makeFunctionReference<"mutation">(
-  "admin/jobs:completeGroundxCallback",
+const provisionJurisdictionGeminiStore = makeFunctionReference<"mutation">(
+  "admin/jobs:provisionJurisdictionGeminiStore",
 );
-const armGroundxCallback = makeFunctionReference<"mutation">(
-  "admin/jobs:armGroundxCallback",
+const deleteJurisdictionGeminiStore = makeFunctionReference<"mutation">(
+  "admin/jobs:deleteJurisdictionGeminiStore",
 );
-const reconcileStaleJobs = makeFunctionReference<"mutation">(
-  "admin/jobs:reconcileStaleJobs",
+const applyGeminiProviderResult = makeFunctionReference<"mutation">(
+  "admin/jobs:applyGeminiProviderResult",
 );
-const reconcileManualReviewJob = makeFunctionReference<"mutation">(
-  "admin/jobs:reconcileManualReviewJob",
-);
-const provisionJurisdictionStagingBucket = makeFunctionReference<"mutation">(
-  "admin/jobs:provisionJurisdictionStagingBucket",
-);
-const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
+const getGeminiJobTarget = makeFunctionReference<"query">("admin/jobs:getGeminiJobTarget");
+const retryJob = makeFunctionReference<"mutation">("admin/jobs:retryJob");
+const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGeminiJob");
+const listJobs = makeFunctionReference<"query">("admin/jobs:listJobs");
+const listIntegrationHealth = makeFunctionReference<"query">("admin/operations:listIntegrationHealth");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -65,6 +58,53 @@ async function enablePanel(t: Backend) {
       updatedAt: Date.now(),
     });
   });
+}
+
+async function seedBoundGeminiIndexJob(
+  t: Backend,
+  input: { suffix: string; status: "waiting_provider" | "manual_review"; providerSyncState: "synced" | "drifted"; lastErrorKind?: "provider" },
+) {
+  const fixture = await t.run(async (ctx) => {
+    const now = Date.now();
+    const storeName = `fileSearchStores/${input.suffix}`;
+    const jurisdictionId = await ctx.db.insert("jurisdictions", {
+      name: input.suffix, slug: input.suffix, status: "enabled", isDefault: false,
+      geminiFileSearchStoreName: storeName, geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: input.providerSyncState, createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+    });
+    const resourceId = await ctx.db.insert("legalResources", {
+      jurisdictionId, type: "act", title: input.suffix, issuer: "fixture", officialCitation: input.suffix,
+      officialCitationKey: input.suffix, sourceUrl: "https://example.invalid/law", topics: [], effectiveDate: "2026-01-01",
+      status: "active", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+    });
+    const storageId = await ctx.storage.store(new Blob(["law"]));
+    const versionId = await ctx.db.insert("documentVersions", {
+      resourceId, versionNumber: 1, originalStorageId: storageId, filename: "law.pdf", mimeType: "application/pdf",
+      byteSize: 3, sha256: "a".repeat(64), sourceUrl: "https://example.invalid/law", status: "publishing",
+      submittedBy: "fixture", createdAt: now, updatedAt: now,
+    });
+    return { storeName, resourceId, versionId };
+  });
+  const queued = await t.mutation(enqueueJob, {
+    type: "gemini_index_document", targetType: "documentVersion", targetId: fixture.versionId,
+    payload: { operation: "publish", storeName: fixture.storeName, sha256: "a".repeat(64) },
+    idempotencyKey: `job-${input.suffix}`, systemActor: "gemini_orchestrator",
+  });
+  await t.run(async (ctx) => {
+    const now = Date.now();
+    await ctx.db.insert("documentLifecycleLocks", {
+      resourceId: fixture.resourceId, versionId: fixture.versionId, operation: "publish", actorId: "gemini_orchestrator",
+      idempotencyKey: `job-${input.suffix}`, jobId: queued.jobId, expiresAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    await ctx.db.patch(queued.jobId, {
+      status: input.status,
+      providerOperationName: `${fixture.storeName}/upload/operations/${input.suffix}`,
+      recoveryKind: "poll_operation",
+      nextAttemptAt: input.status === "waiting_provider" ? now : undefined,
+      lastErrorKind: input.lastErrorKind,
+    });
+  });
+  return queued;
 }
 
 async function asAdmin(t: Backend, role: string) {
@@ -103,32 +143,22 @@ async function asAdmin(t: Backend, role: string) {
   return {
     client: t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId }),
     userId: identity.userId,
+    sessionId: identity.sessionId,
   };
 }
 
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
+const previousGoogleAiApiKey = process.env.GOOGLE_AI_API_KEY;
 
 afterEach(() => {
   if (previousAdminPanelEnabled === undefined) delete process.env.ADMIN_PANEL_ENABLED;
   else process.env.ADMIN_PANEL_ENABLED = previousAdminPanelEnabled;
   if (previousAdminEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
   else process.env.ADMIN_ENVIRONMENT = previousAdminEnvironment;
+  if (previousGoogleAiApiKey === undefined) delete process.env.GOOGLE_AI_API_KEY;
+  else process.env.GOOGLE_AI_API_KEY = previousGoogleAiApiKey;
 });
-
-function request(overrides: Record<string, unknown> = {}) {
-  return {
-    type: "ingest_remote",
-    targetType: "documentVersion",
-    targetId: "version_01",
-    payload: {
-      documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
-    },
-    idempotencyKey: "publish-version-01",
-    systemActor: "groundx_orchestrator",
-    ...overrides,
-  };
-}
 
 async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
   const claim = await t.mutation(claimJob, { jobId });
@@ -138,21 +168,119 @@ async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
   return claim.leaseToken as string;
 }
 
-describe("durable GroundX jobs", () => {
-  it("records a newly provisioned staging bucket on its enabled jurisdiction", async () => {
+describe("durable Gemini jobs", () => {
+  it("does not expose the generic provider dispatcher as a privileged public function", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain("admin/jobs:enqueueJob");
+  });
+
+  it("projects Gemini legal search configuration from the server key without exposing secrets or resource names", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    process.env.GOOGLE_AI_API_KEY = "server-only-test-key";
+
+    const result = await admin.client.query(listIntegrationHealth, {
+      paginationOpts: { numItems: 20, cursor: null },
+    }) as { page: Array<{ id: string; label: string; configured: boolean; status: string }> };
+    expect(result.page).toContainEqual({
+      id: "legal-search",
+      label: "Gemini legal search and indexing",
+      configured: true,
+      status: "configured",
+    });
+    expect(JSON.stringify(result)).not.toContain("server-only-test-key");
+    expect(JSON.stringify(result)).not.toContain("fileSearchStores/");
+  });
+
+  it("reports Gemini legal search as unconfigured when the server key is blank", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    process.env.GOOGLE_AI_API_KEY = "   ";
+
+    const result = await admin.client.query(listIntegrationHealth, {
+      paginationOpts: { numItems: 20, cursor: null },
+    }) as { page: Array<{ id: string; label: string; configured: boolean; status: string }> };
+    expect(result.page.find((row) => row.id === "legal-search")).toEqual({
+      id: "legal-search",
+      label: "Gemini legal search and indexing",
+      configured: false,
+      status: "configuration_required",
+    });
+  });
+
+  it("projects the persisted next provider check without provider identities", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const created = await t.mutation(enqueueJob, {
+      type: "gemini_create_store",
+      targetType: "jurisdictionGeminiStore",
+      targetId: "jurisdiction-safe-id",
+      payload: { displayName: "fixture", embeddingModel: "models/gemini-embedding-2" },
+      idempotencyKey: "operations-next-check",
+      systemActor: "gemini_orchestrator",
+    });
+    const nextAttemptAt = 1_900_000_000_000;
+    await t.run((ctx) => ctx.db.patch(created.jobId as Id<"integrationJobs">, { nextAttemptAt }));
+
+    const result = await admin.client.query(listJobs, {
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(result.page[0]).toMatchObject({
+      id: created.jobId,
+      nextAttemptAt,
+    });
+    expect(result.page[0]).not.toHaveProperty("providerOperationName");
+    expect(result.page[0]).not.toHaveProperty("payload");
+  });
+
+  it("terminalizes a stubbed Gemini job before API-key or client construction", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const jurisdictionId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("jurisdictions", {
+        name: "Fixture Ghana", slug: "fixture-ghana", status: "draft", isDefault: false,
+        providerSyncState: "pending", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+    });
+    const created = await admin.client.mutation(provisionJurisdictionGeminiStore, {
+      jurisdictionId,
+      reason: "Set up isolated fixture search",
+      idempotencyKey: "fixture-gemini-store",
+    });
+    Object.assign(process.env, {
+      ADMIN_E2E_FIXTURE_MODE: "true",
+      ADMIN_E2E_TARGET_ENV: "test",
+      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
+      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
+    });
+    delete process.env.GOOGLE_AI_API_KEY;
+    try {
+      await t.action(runGeminiJob, { jobId: created.jobId });
+      await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({ status: "succeeded" });
+      await expect(t.run((ctx) => ctx.db.get(jurisdictionId))).resolves.toMatchObject({
+        providerSyncState: "synced",
+        geminiFileSearchStoreName: expect.stringMatching(/^fileSearchStores\/[a-z0-9-]{1,40}$/),
+      });
+    } finally {
+      for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE"]) delete process.env[key];
+    }
+  });
+  it("provisions one idempotent environment-qualified Gemini store without callback credentials", async () => {
     const t = createBackend();
     await enablePanel(t);
     const admin = await asAdmin(t, "super_admin");
     const jurisdictionId = await t.run(async (ctx) => {
       const now = Date.now();
       return await ctx.db.insert("jurisdictions", {
-        code: "GH",
         name: "Ghana",
         slug: "ghana",
-        status: "enabled",
+        status: "draft",
         isDefault: true,
-        productionBucketId: "11833",
-        providerSyncState: "synced",
+        providerSyncState: "pending",
         createdBy: "fixture",
         updatedBy: "fixture",
         createdAt: now,
@@ -160,626 +288,278 @@ describe("durable GroundX jobs", () => {
       });
     });
 
-    const queued = await admin.client.mutation(provisionJurisdictionStagingBucket, {
+    const first = await admin.client.mutation(provisionJurisdictionGeminiStore, {
       jurisdictionId,
-      reason: "Provision Ghana staging bucket",
-      idempotencyKey: "provision-ghana-staging",
+      reason: "Set up legal search",
+      idempotencyKey: "gemini-store-ghana-1",
     });
-    const leaseToken = await claimLease(t, queued.jobId);
-    await t.mutation(applyProviderResult, {
-      jobId: queued.jobId,
-      leaseToken,
-      processId: "bucket-11834",
-      status: "complete",
+    const duplicate = await admin.client.mutation(provisionJurisdictionGeminiStore, {
+      jurisdictionId,
+      reason: "Retry legal search setup",
+      idempotencyKey: "gemini-store-ghana-2",
     });
 
+    expect(duplicate).toMatchObject({ jobId: first.jobId, duplicate: true });
+    expect(first).not.toHaveProperty("storeName");
+    expect(first).not.toHaveProperty("providerOperationName");
+    const queued = await t.run(async (ctx) => ctx.db.get("integrationJobs", first.jobId));
+    expect(queued).toMatchObject({
+      type: "gemini_create_store",
+      targetType: "jurisdictionGeminiStore",
+      targetId: jurisdictionId,
+      status: "queued",
+    });
+    expect(JSON.parse(queued?.payload ?? "{}")).toEqual({
+      displayName: "law-of-the-land-test-ghana",
+      embeddingModel: "models/gemini-embedding-2",
+    });
+    const leaseToken = await claimLease(t, first.jobId);
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: first.jobId,
+      leaseToken,
+      result: {
+        kind: "store_created",
+        storeName: "fileSearchStores/ghana-test",
+        embeddingModel: "models/gemini-embedding-2",
+      },
+    });
     await expect(t.run((ctx) => ctx.db.get(jurisdictionId))).resolves.toMatchObject({
-      stagingBucketId: "11834",
-      productionBucketId: "11833",
+      geminiFileSearchStoreName: "fileSearchStores/ghana-test",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
       providerSyncState: "synced",
     });
   });
 
-  it("does not expose the generic provider dispatcher as a privileged public function", () => {
-    expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain("admin/jobs:enqueueJob");
-  });
-  it("claims and terminalizes a stubbed E2E job without constructing a provider transport", async () => {
-    const t = convexTest(schema, modules);
-    Object.assign(process.env, {
-      ADMIN_E2E_FIXTURE_MODE: "true",
-      ADMIN_E2E_TARGET_ENV: "test",
-      ADMIN_E2E_ISOLATED_TARGET_MARKER: "isolated-admin-e2e",
-      ADMIN_E2E_PROVIDER_STUB_MODE: "true",
-    });
-    delete process.env.GROUNDX_API_KEY;
-    try {
-      const created = await t.mutation(enqueueJob, request({
-        type: "poll_process",
-        targetType: "e2e_fixture",
-        targetId: "e2e_stub_transport",
-        payload: { processId: "never-sent-to-provider" },
-        idempotencyKey: "e2e-stub-transport",
-      }));
-      await t.action(runGroundxJob, { jobId: created.jobId });
-      await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({
-        status: "succeeded",
-        processId: expect.stringMatching(/^e2e_stub_/),
-      });
-    } finally {
-      for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE"]) delete process.env[key];
-    }
-  });
-
-  it("refuses a partially configured E2E job before provider construction", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request({
-      type: "poll_process", targetType: "e2e_fixture", targetId: "e2e_partial_transport",
-      payload: { processId: "never-sent-to-provider" }, idempotencyKey: "e2e-partial-transport",
-    }));
-    process.env.ADMIN_E2E_FIXTURE_MODE = "true";
-    delete process.env.GROUNDX_API_KEY;
-    try {
-      await expect(t.action(runGroundxJob, { jobId: created.jobId })).rejects.toThrow("E2E_PROVIDER_ISOLATION_MISCONFIGURED");
-    } finally {
-      delete process.env.ADMIN_E2E_FIXTURE_MODE;
-    }
-  });
-
-  it("collapses concurrent identical enqueue attempts into one job", async () => {
-    const t = convexTest(schema, modules);
-    const [first, second] = await Promise.all([
-      t.mutation(enqueueJob, request()),
-      t.mutation(enqueueJob, request()),
-    ]);
-
-    expect(second.jobId).toBe(first.jobId);
-    expect(first.callbackToken).toBeNull();
-    expect(second.callbackToken).toBeNull();
-    expect(second.callbackTokenHash).toBe(first.callbackTokenHash);
-    expect(
-      await t.run(async (ctx) => ctx.db.query("integrationJobs").take(3)),
-    ).toHaveLength(1);
-  });
-
-  it("rejects idempotency reuse with a different request fingerprint", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(enqueueJob, request());
-
-    await expect(
-      t.mutation(
-        enqueueJob,
-        request({ payload: { documents: [{ bucketId: 18, sourceUrl: "https://law.example/doc.pdf" }] } }),
-      ),
-    ).rejects.toThrow("INTEGRATION_IDEMPOTENCY_CONFLICT");
-  });
-
-  it("bounds and sanitizes persisted payload and actor snapshots", async () => {
-    const t = convexTest(schema, modules);
-    await expect(
-      t.mutation(enqueueJob, request({ payload: { apiToken: "never-store-me" } })),
-    ).rejects.toThrow("INTEGRATION_PAYLOAD_UNSAFE");
-    await expect(
-      t.mutation(enqueueJob, request({ payload: { value: "x".repeat(8_193) } })),
-    ).rejects.toThrow("INTEGRATION_PAYLOAD_TOO_LARGE");
-
-    const created = await t.mutation(enqueueJob, request());
-    const snapshot = await t.run(async (ctx) => ({
-      jobs: await ctx.db.query("integrationJobs").take(2),
-      audits: await ctx.db.query("auditEvents").take(4),
-      scheduled: await ctx.db.system.query("_scheduled_functions").take(4),
-    }));
-    const persisted = JSON.stringify(snapshot);
-    expect(created.callbackToken).toBeNull();
-    expect(persisted).not.toMatch(/gx_[a-f0-9]{64}/);
-    expect(persisted).not.toContain("never-store-me");
-    expect(snapshot.jobs[0]).toMatchObject({ actorId: "system", actorRoles: [] });
-    expect(snapshot.audits).toHaveLength(1);
-    expect(snapshot.audits[0].correlationId).toBe(snapshot.jobs[0].correlationId);
-  });
-
-  it("allows a token-bound fast callback to bind the provider process once", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request());
-
-    await expect(
-      t.mutation(applyProviderResult, {
-        jobId: created.jobId,
-        leaseToken: "lease_not_current",
-        processId: "process-1",
-        status: "processing",
-      }),
-    ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
-    await expect(
-      t.mutation(recordProviderFailure, {
-        jobId: created.jobId,
-        leaseToken: "lease_not_current",
-        kind: "network",
-      }),
-    ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
-    const leaseToken = await claimLease(t, created.jobId);
-    const callbackTokenHash = "a".repeat(64);
-    await t.mutation(armGroundxCallback, {
-      jobId: created.jobId,
-      leaseToken,
-      tokenHash: callbackTokenHash,
-    });
-    const accepted = await t.mutation(completeGroundxCallback, {
-      tokenHash: callbackTokenHash,
-      processId: "process-1",
-      status: "complete",
-    });
-    expect(accepted).toEqual({ accepted: true, duplicate: false });
-    await expect(
-      t.mutation(completeGroundxCallback, {
-        tokenHash: callbackTokenHash,
-        processId: "process-1",
-        status: "complete",
-      }),
-    ).resolves.toEqual({ accepted: true, duplicate: true });
-    await expect(
-      t.mutation(applyProviderResult, {
-        jobId: created.jobId,
-        leaseToken,
-        processId: "process-1",
-        status: "complete",
-      }),
-    ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
-  });
-
-  it("never automatically replays an ambiguous ingest transport failure", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request({ idempotencyKey: "uncertain-ingest-send" }));
-    const leaseToken = await claimLease(t, created.jobId);
-
-    await expect(t.mutation(recordProviderFailure, {
-      jobId: created.jobId,
-      leaseToken,
-      kind: "network",
-    })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
-    await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({
-      status: "manual_review",
-      attemptCount: 1,
-      lastErrorKind: "network",
-    });
-  });
-
-  it("never automatically replays an ambiguous bucket creation transport failure", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request({
-      type: "create_bucket",
-      targetType: "jurisdictionStagingBucket",
-      targetId: "ghana",
-      payload: { name: "law-of-the-land-ghana-staging" },
-      idempotencyKey: "uncertain-bucket-create",
-    }));
-    const leaseToken = await claimLease(t, created.jobId);
-
-    await expect(t.mutation(recordProviderFailure, {
-      jobId: created.jobId,
-      leaseToken,
-      kind: "network",
-    })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
-  });
-
-  it("retries transport and rate-limit failures at 1, 5, and 20 minutes then requires review", async () => {
+  it("polls an accepted Gemini upload at 5, 10, 20, 30, then capped 60 second intervals", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-27T00:00:00Z"));
+    vi.setSystemTime(new Date("2026-09-01T00:00:00Z"));
     try {
-      const t = convexTest(schema, modules);
-      const created = await t.mutation(enqueueJob, request());
-      const delays = [60_000, 300_000, 1_200_000];
-      for (let index = 0; index < delays.length; index += 1) {
-        const leaseToken = await claimLease(t, created.jobId);
+      const t = createBackend();
+      const versionId = await t.run(async (ctx) => {
         const now = Date.now();
-        const result = await t.mutation(recordProviderFailure, {
-          jobId: created.jobId,
-          leaseToken,
-          kind: "rate_limit",
+        const jurisdictionId = await ctx.db.insert("jurisdictions", {
+          code: "GH", name: "Ghana", slug: "ghana-poll", status: "enabled", isDefault: false,
+          geminiFileSearchStoreName: "fileSearchStores/ghana-poll", geminiEmbeddingModel: "models/gemini-embedding-2",
+          providerSyncState: "synced", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
         });
-        expect(result).toMatchObject({ status: "queued", nextAttemptAt: now + delays[index] });
-        vi.setSystemTime(now + delays[index]);
-      }
-      const leaseToken = await claimLease(t, created.jobId);
-      await expect(
-        t.mutation(recordProviderFailure, {
+        const resourceId = await ctx.db.insert("legalResources", {
+          jurisdictionId, type: "act", title: "Poll Act", issuer: "Parliament", officialCitation: "Act poll",
+          officialCitationKey: "act poll", sourceUrl: "https://example.invalid/poll", topics: [], effectiveDate: "2026-01-01",
+          status: "active", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+        });
+        const storageId = await ctx.storage.store(new Blob(["poll"]));
+        return await ctx.db.insert("documentVersions", {
+          resourceId, versionNumber: 1, originalStorageId: storageId, filename: "poll.pdf", mimeType: "application/pdf",
+          byteSize: 4, sha256: "b".repeat(64), sourceUrl: "https://example.invalid/poll", status: "publishing",
+          submittedBy: "fixture", createdAt: now, updatedAt: now,
+        });
+      });
+      const created = await t.mutation(enqueueJob, {
+        type: "gemini_index_document",
+        targetType: "documentVersion",
+        targetId: versionId,
+        payload: { operation: "publish", storeName: "fileSearchStores/ghana-poll", sha256: "b".repeat(64) },
+        idempotencyKey: "gemini-index-poll",
+        systemActor: "gemini_orchestrator",
+      });
+      await t.run(async (ctx) => {
+        const version = await ctx.db.get(versionId);
+        if (!version) throw new Error("missing version fixture");
+        await ctx.db.insert("documentLifecycleLocks", {
+          resourceId: version.resourceId,
+          versionId,
+          operation: "publish",
+          actorId: "gemini_orchestrator",
+          idempotencyKey: "gemini-index-poll",
+          jobId: created.jobId,
+          expiresAt: Date.now() + 24 * 60 * 60_000,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      });
+      let leaseToken = await claimLease(t, created.jobId);
+      await expect(t.mutation(applyGeminiProviderResult, {
+        jobId: created.jobId,
+        leaseToken,
+        result: { kind: "index_accepted", operationName: "fileSearchStores/other-store/upload/operations/index-poll" },
+      })).rejects.toThrow("DOCUMENT_PUBLICATION_STATE_INVALID");
+      await t.mutation(applyGeminiProviderResult, {
+        jobId: created.jobId,
+        leaseToken,
+        result: { kind: "index_accepted", operationName: "fileSearchStores/ghana-poll/upload/operations/index-poll" },
+      });
+      let job = await t.run((ctx) => ctx.db.get("integrationJobs", created.jobId));
+      expect(job).toMatchObject({
+        status: "waiting_provider",
+        providerOperationName: "fileSearchStores/ghana-poll/upload/operations/index-poll",
+        nextAttemptAt: Date.now() + 5_000,
+      });
+
+      for (const delay of [10_000, 20_000, 30_000, 60_000, 60_000]) {
+        vi.setSystemTime(job!.nextAttemptAt!);
+        leaseToken = await claimLease(t, created.jobId);
+        await t.mutation(applyGeminiProviderResult, {
           jobId: created.jobId,
           leaseToken,
-          kind: "rate_limit",
-        }),
-      ).resolves.toMatchObject({ status: "manual_review", nextAttemptAt: null });
+          result: { kind: "index_pending" },
+        });
+        job = await t.run((ctx) => ctx.db.get("integrationJobs", created.jobId));
+        expect(job?.nextAttemptAt).toBe(Date.now() + delay);
+      }
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("explicitly reclaims transport-uncertain manual review work for a durable provider poll", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request({
-      targetType: "operation",
-      targetId: "uncertain-operation",
-      idempotencyKey: "uncertain-operation",
+  it("retries a safe Gemini poll but quarantines an uncertain initial Gemini mutation", async () => {
+    const t = createBackend();
+    const safePoll = await seedBoundGeminiIndexJob(t, { suffix: "safe-poll", status: "waiting_provider", providerSyncState: "synced" });
+    const safeLease = await claimLease(t, safePoll.jobId);
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: safePoll.jobId, leaseToken: safeLease, kind: "provider", retryable: true,
+    })).resolves.toMatchObject({ status: "queued" });
+
+    const uncertain = await t.mutation(enqueueJob, {
+      type: "gemini_create_store", targetType: "jurisdictionGeminiStore", targetId: "initial-create",
+      payload: { displayName: "law-of-the-land-test", embeddingModel: "models/gemini-embedding-2" },
+      idempotencyKey: "gemini-uncertain-create", systemActor: "gemini_orchestrator",
+    });
+    const uncertainLease = await claimLease(t, uncertain.jobId);
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: uncertain.jobId, leaseToken: uncertainLease, kind: "provider", retryable: true, sideEffectUncertain: true,
+    })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
+  });
+
+  it("permits an admin retry only for a Gemini manual-review poll with persisted recovery provenance", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const safePoll = await seedBoundGeminiIndexJob(t, { suffix: "retry-poll", status: "manual_review", providerSyncState: "drifted", lastErrorKind: "provider" });
+    await expect(admin.client.mutation(retryJob, {
+      jobId: safePoll.jobId, reason: "Retry safe provider poll", idempotencyKey: "retry-safe-gemini-poll-admin",
+    })).resolves.toMatchObject({ status: "running" });
+
+    const uncertain = await t.mutation(enqueueJob, {
+      type: "gemini_create_store", targetType: "jurisdictionGeminiStore", targetId: "retry-initial-create",
+      payload: { displayName: "law-of-the-land-test", embeddingModel: "models/gemini-embedding-2" },
+      idempotencyKey: "retry-initial-create", systemActor: "gemini_orchestrator",
+    });
+    await t.run((ctx) => ctx.db.patch(uncertain.jobId, {
+      status: "manual_review", lastErrorKind: "provider", nextAttemptAt: undefined,
     }));
-    const initialLease = await claimLease(t, created.jobId);
-    await t.mutation(applyProviderResult, {
-      jobId: created.jobId,
-      leaseToken: initialLease,
-      processId: "uncertain-process",
-      status: "processing",
-    });
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      await t.run(async (ctx) => ctx.db.patch(created.jobId, { nextAttemptAt: Date.now() - 1 }));
-      const leaseToken = await claimLease(t, created.jobId);
-      await t.mutation(recordProviderFailure, {
-        jobId: created.jobId,
-        leaseToken,
-        kind: "network",
+    await expect(admin.client.mutation(retryJob, {
+      jobId: uncertain.jobId, reason: "Do not replay uncertain creation", idempotencyKey: "retry-initial-create-admin",
+    })).rejects.toThrow("Integration job is not retryable");
+  });
+
+  it("fails store teardown closed across lifecycle, step-up, confirmation, and jurisdiction ownership", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const fixture = await t.run(async (ctx) => {
+      const now = Date.now();
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Ghana",
+        slug: "ghana",
+        status: "draft",
+        isDefault: true,
+        geminiFileSearchStoreName: "fileSearchStores/ghana-test",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
+        providerSyncState: "synced",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
       });
-    }
-
-    const reclaimed = await t.mutation(reconcileManualReviewJob, { jobId: created.jobId });
-    expect(reclaimed).toMatchObject({
-      workKind: "poll",
-      leaseToken: expect.any(String),
-      job: { status: "running", processId: "uncertain-process" },
-    });
-    await expect(t.mutation(applyProviderResult, {
-      jobId: created.jobId,
-      leaseToken: reclaimed?.leaseToken,
-      processId: "uncertain-process",
-      status: "complete",
-    })).resolves.toEqual({ accepted: true, duplicate: false });
-  });
-
-  it("fails non-retryable provider errors without scheduling another attempt", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request());
-    const leaseToken = await claimLease(t, created.jobId);
-    await expect(
-      t.mutation(recordProviderFailure, {
-        jobId: created.jobId,
-        leaseToken,
-        kind: "validation",
-      }),
-    ).resolves.toEqual({ status: "failed", nextAttemptAt: null });
-  });
-
-  it("uses the typed adapter retryability decision for provider failures", async () => {
-    const t = convexTest(schema, modules);
-    const terminal = await t.mutation(
-      enqueueJob,
-      request({ targetId: "terminal-provider", idempotencyKey: "terminal-provider" }),
-    );
-    const leaseToken = await claimLease(t, terminal.jobId);
-    await expect(
-      t.mutation(recordProviderFailure, {
-        jobId: terminal.jobId,
-        leaseToken,
-        kind: "provider",
-        retryable: true,
-      }),
-    ).rejects.toThrow();
-    await expect(
-      t.mutation(recordProviderFailure, {
-        jobId: terminal.jobId,
-        leaseToken,
-        kind: "provider",
-      }),
-    ).resolves.toEqual({ status: "failed", nextAttemptAt: null });
-  });
-
-  it("rejects callback token, process, target, and body mismatches and accepts replay", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request());
-    const leaseToken = await claimLease(t, created.jobId);
-    const callbackToken = `gx_${"c".repeat(64)}`;
-    const callbackTokenHash = Array.from(
-      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(callbackToken))),
-      (byte) => byte.toString(16).padStart(2, "0"),
-    ).join("");
-    await t.mutation(armGroundxCallback, {
-      jobId: created.jobId,
-      leaseToken,
-      tokenHash: callbackTokenHash,
-    });
-    await t.mutation(applyProviderResult, {
-      jobId: created.jobId,
-      leaseToken,
-      processId: "process-7",
-      status: "processing",
-    });
-
-    expect(
-      (await t.fetch("/groundx/callback", {
-        method: "POST",
-        body: JSON.stringify({ callbackData: `gx_${"d".repeat(64)}`, ingest: { processId: "process-7", status: "complete" } }),
-      })).status,
-    ).toBe(404);
-    expect(
-      (await t.fetch("/groundx/callback", {
-        method: "POST",
-        body: JSON.stringify({ callbackData: callbackToken, ingest: { processId: "other", status: "complete" } }),
-      })).status,
-    ).toBe(404);
-    expect(
-      (await t.fetch("/groundx/callback", {
-        method: "POST",
-        body: "x".repeat(16_385),
-      })).status,
-    ).toBe(400);
-    expect(
-      (await t.fetch("/groundx/callback", {
-        method: "POST",
-        body: "{",
-      })).status,
-    ).toBe(400);
-    expect(
-      (await t.fetch("/groundx/callback", {
-        method: "POST",
-        body: JSON.stringify({}),
-      })).status,
-    ).toBe(400);
-    const body = JSON.stringify({
-      callbackData: callbackToken,
-      ingest: { processId: "process-7", status: "complete" },
-      rawBody: "provider-sensitive-body",
-    });
-    expect((await t.fetch("/groundx/callback", { method: "POST", body })).status).toBe(202);
-    expect((await t.fetch("/groundx/callback", { method: "POST", body })).status).toBe(202);
-    const persisted = JSON.stringify(await t.run(async (ctx) => ({
-      jobs: await ctx.db.query("integrationJobs").take(2),
-      audits: await ctx.db.query("auditEvents").take(10),
-    })));
-    expect(persisted).not.toContain(callbackToken);
-    expect(persisted).not.toContain("provider-sensitive-body");
-  }, 20_000);
-
-  it("reconciles only due stale jobs in bounded batches", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-27T00:00:00Z"));
-    try {
-      const t = convexTest(schema, modules);
-      for (let index = 0; index < 30; index += 1) {
-        const created = await t.mutation(
-          enqueueJob,
-          request({ targetId: `version_${index}`, idempotencyKey: `publish-version-${index}` }),
-        );
-        await t.run(async (ctx) => ctx.db.patch(created.jobId, { nextAttemptAt: Date.now() - 1 }));
-      }
-      const future = await t.mutation(
-        enqueueJob,
-        request({ targetId: "future", idempotencyKey: "publish-version-future" }),
-      );
-      await t.run(async (ctx) => ctx.db.patch(future.jobId, { nextAttemptAt: Date.now() + 1 }));
-
-      expect(await t.mutation(reconcileStaleJobs, {})).toEqual({ scheduled: 25, hasMore: true });
-      const state = await t.run(async (ctx) => ctx.db.get(future.jobId as Id<"integrationJobs">));
-      expect(state?.nextAttemptAt).toBe(Date.now() + 1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("recovers due running and waiting-callback jobs without touching the exact future boundary", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-27T00:00:00Z"));
-    try {
-      const t = convexTest(schema, modules);
-      const running = await t.mutation(enqueueJob, request({ targetId: "running", idempotencyKey: "publish-running" }));
-      const waiting = await t.mutation(enqueueJob, request({ targetId: "waiting", idempotencyKey: "publish-waiting" }));
-      const future = await t.mutation(enqueueJob, request({ targetId: "not-due", idempotencyKey: "publish-not-due" }));
-      await t.run(async (ctx) => {
-        await ctx.db.patch(running.jobId, { status: "running", nextAttemptAt: Date.now() - 1 });
-        await ctx.db.patch(waiting.jobId, { status: "waiting_callback", processId: "process-waiting", nextAttemptAt: Date.now() });
-        await ctx.db.patch(future.jobId, { status: "running", nextAttemptAt: Date.now() + 1 });
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId,
+        type: "act",
+        title: "Active Act",
+        issuer: "Parliament",
+        officialCitation: "Act 1",
+        officialCitationKey: "act 1",
+        sourceUrl: "https://example.invalid/act",
+        topics: [],
+        effectiveDate: "2026-01-01",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
       });
-
-      expect(await t.mutation(reconcileStaleJobs, {})).toEqual({ scheduled: 2, hasMore: false });
-      await expect(t.run(async (ctx) => ctx.db.get(running.jobId))).resolves.toMatchObject({
-        status: "running",
-        leaseToken: expect.any(String),
+      const storageId = await ctx.storage.store(new Blob(["act"]));
+      const versionId = await ctx.db.insert("documentVersions", {
+        resourceId,
+        versionNumber: 1,
+        originalStorageId: storageId,
+        filename: "act.pdf",
+        mimeType: "application/pdf",
+        byteSize: 3,
+        sha256: "a".repeat(64),
+        sourceUrl: "https://example.invalid/act",
+        status: "published",
+        submittedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
       });
-      await expect(t.run(async (ctx) => ctx.db.get(future.jobId))).resolves.toMatchObject({ status: "running" });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("dispatches a job through the typed adapter boundary without network access", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request());
-    const job = await t.run(async (ctx) => ctx.db.get(created.jobId as Id<"integrationJobs">));
-    if (!job) throw new Error("missing fixture job");
-    const adapter = {
-      createBucket: vi.fn(),
-      ingestRemote: vi.fn(async () => ({ processId: "process-mock", status: "processing" as const })),
-      copyDocuments: vi.fn(),
-      deleteDocuments: vi.fn(),
-      getProcess: vi.fn(),
+      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      return { jurisdictionId, resourceId };
+    });
+    const idempotencyKey = "delete-gemini-store-ghana";
+    const input = {
+      jurisdictionId: fixture.jurisdictionId,
+      reason: "Remove unused legal search store",
+      confirmation: "DELETE GEMINI STORE ghana",
+      idempotencyKey,
     };
 
-    await expect(executeGroundxJob(adapter, job)).resolves.toEqual({ processId: "process-mock", status: "processing" });
-    expect(adapter.ingestRemote).toHaveBeenCalledWith({
-      documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
-    });
-  });
-
-  it("arms the callback hash before the claimed action calls the remote ingest adapter", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(enqueueJob, request({ idempotencyKey: "callback-order" }));
-    const job = await t.run(async (ctx) => ctx.db.get(created.jobId as Id<"integrationJobs">));
-    if (!job) throw new Error("missing fixture job");
-    const order: string[] = [];
-    const adapter = {
-      createBucket: vi.fn(),
-      ingestRemote: vi.fn(async () => {
-        order.push("adapter");
-        return { processId: "process-callback", status: "processing" as const };
-      }),
-      copyDocuments: vi.fn(),
-      deleteDocuments: vi.fn(),
-      getProcess: vi.fn(),
-    };
-    const arm = vi.fn(async ({ tokenHash }: { tokenHash: string }) => {
-      expect(tokenHash).toMatch(/^[a-f0-9]{64}$/);
-      order.push("arm");
-    });
-
-    await expect(executeClaimedGroundxJob({
-      adapter,
-      job: { ...job, status: "running" as const, leaseToken: "lease_callback" },
-      leaseToken: "lease_callback",
-      callbackSiteUrl: "https://law.example.convex.site/ignored/path",
-      armCallback: arm,
-      tokenFactory: () => `gx_${"b".repeat(64)}`,
-    })).resolves.toEqual({ processId: "process-callback", status: "processing" });
-
-    expect(order).toEqual(["arm", "adapter"]);
-    expect(adapter.ingestRemote).toHaveBeenCalledWith({
-      documents: [{ bucketId: 17, sourceUrl: "https://law.example/doc.pdf" }],
-      callbackUrl: "https://law.example.convex.site/groundx/callback",
-      callbackData: `gx_${"b".repeat(64)}`,
-    });
-    expect(JSON.stringify(arm.mock.calls)).not.toContain(`gx_${"b".repeat(64)}`);
-  });
-
-  it("does not expose the generic job dispatcher as a privileged public command", () => {
-    expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain(
-      "admin/jobs:enqueueJob",
+    await expect(admin.client.mutation(deleteJurisdictionGeminiStore, input)).rejects.toThrow(
+      "JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE",
     );
-  });
-
-  it("rejects results from an expired lease after a newer worker reclaims the job", async () => {
-    const t = convexTest(schema, modules);
-    const created = await t.mutation(
-      enqueueJob,
-      request({ targetId: "lease-race", idempotencyKey: "lease-race-job" }),
+    await t.run((ctx) => ctx.db.patch(fixture.resourceId, { activeVersionId: undefined, status: "repealed" }));
+    await expect(admin.client.mutation(deleteJurisdictionGeminiStore, {
+      ...input,
+      confirmation: "DELETE GEMINI STORE wrong",
+    })).rejects.toThrow("ADMIN_CONFIRMATION_MISMATCH");
+    await expect(admin.client.mutation(deleteJurisdictionGeminiStore, input)).rejects.toThrow(
+      "ADMIN_STEP_UP_REQUIRED",
     );
-    const leaseA = await t.mutation(claimJob, { jobId: created.jobId });
-    expect(leaseA).toMatchObject({ leaseToken: expect.any(String) });
-    await t.run(async (ctx) => {
-      await ctx.db.patch(created.jobId, { nextAttemptAt: Date.now() - 1 });
+
+    await t.run((ctx) => ctx.db.insert("adminStepUpProofs", {
+      actorId: admin.userId,
+      sessionId: admin.sessionId,
+      action: "jurisdiction_store_delete",
+      targetId: fixture.jurisdictionId,
+      idempotencyKey,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 300_000,
+    }));
+    const queued = await admin.client.mutation(deleteJurisdictionGeminiStore, input);
+    expect(queued).not.toHaveProperty("storeName");
+    expect(queued).not.toHaveProperty("providerOperationName");
+    const job = await t.run((ctx) => ctx.db.get("integrationJobs", queued.jobId));
+    expect(job).toMatchObject({ type: "gemini_delete_store", targetId: fixture.jurisdictionId });
+    expect(JSON.parse(job?.payload ?? "{}")).toMatchObject({ storeName: "fileSearchStores/ghana-test" });
+    await expect(t.run((ctx) => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
+
+    const leaseToken = await claimLease(t, queued.jobId);
+    await t.run((ctx) => ctx.db.patch(fixture.jurisdictionId, { status: "enabled" }));
+    await expect(t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken })).rejects.toThrow(
+      "GEMINI_STORE_DELETE_PRECONDITION_FAILED",
+    );
+    await t.run((ctx) => ctx.db.patch(fixture.jurisdictionId, { status: "draft", providerSyncState: "pending" }));
+    await expect(t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken })).rejects.toThrow(
+      "GEMINI_STORE_DELETE_PRECONDITION_FAILED",
+    );
+    await t.run((ctx) => ctx.db.patch(fixture.jurisdictionId, { providerSyncState: "drifted" }));
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: queued.jobId,
+      leaseToken,
+      result: { kind: "store_deleted", storeName: "fileSearchStores/ghana-test" },
     });
-    await t.mutation(reconcileStaleJobs, {});
-    const current = await t.run(async (ctx) =>
-      ctx.db.get(created.jobId as Id<"integrationJobs">),
-    );
-    expect(current?.leaseToken).not.toBe(leaseA.leaseToken);
-
-    await expect(
-      t.mutation(applyProviderResult, {
-        jobId: created.jobId,
-        leaseToken: leaseA.leaseToken,
-        processId: "stale-process",
-        status: "complete",
-      }),
-    ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
-    await expect(
-      t.mutation(recordProviderFailure, {
-        jobId: created.jobId,
-        leaseToken: leaseA.leaseToken,
-        kind: "network",
-      }),
-    ).rejects.toThrow("INTEGRATION_LEASE_INVALID");
-    await expect(
-      t.mutation(applyProviderResult, {
-        jobId: created.jobId,
-        leaseToken: current?.leaseToken,
-        processId: "current-process",
-        status: "complete",
-      }),
-    ).resolves.toEqual({ accepted: true, duplicate: false });
-    const auditText = JSON.stringify(
-      await t.run(async (ctx) => ctx.db.query("auditEvents").take(10)),
-    );
-    expect(auditText).not.toContain(leaseA.leaseToken);
-    expect(auditText).not.toContain(current?.leaseToken);
-  });
-
-  it("fairly drains more than one mixed batch and schedules immediate continuation", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-27T00:00:00Z"));
-    try {
-      const t = convexTest(schema, modules);
-      const groupIds: Record<"queued" | "running" | "waiting_callback", Id<"integrationJobs">[]> = {
-        queued: [],
-        running: [],
-        waiting_callback: [],
-      };
-      await t.run(async (ctx) => {
-        for (let index = 0; index < 30; index += 1) {
-          for (const status of ["queued", "running", "waiting_callback"] as const) {
-            const id = await ctx.db.insert("integrationJobs", {
-              type: "ingest_remote",
-              targetType: "documentVersion",
-              targetId: `${status}-${index}`,
-              payload: "{}",
-              actorId: "system",
-              actorRoles: [],
-              idempotencyKey: `${status}-job-${index}`,
-              requestFingerprint: `${status}${String(index).padStart(58, "0")}`,
-              correlationId: `${status}-${index}`,
-              callbackTokenHash: `${index.toString(16).padStart(64, "0")}`,
-              ...(status !== "queued" ? { processId: `${status}-process-${index}` } : {}),
-              status,
-              attemptCount: 0,
-              nextAttemptAt: Date.now() - 1,
-              createdAt: Date.now() + index,
-              updatedAt: Date.now(),
-            });
-            groupIds[status].push(id);
-          }
-        }
-      });
-
-      expect(await t.mutation(reconcileStaleJobs, {})).toEqual({
-        scheduled: 25,
-        hasMore: true,
-      });
-      const afterFirst = await t.run(async (ctx) => ({
-        groups: Object.fromEntries(
-          await Promise.all(
-            Object.entries(groupIds).map(async ([status, ids]) => [
-              status,
-              (await Promise.all(ids.map((id) => ctx.db.get(id)))).filter(
-                (job) => job?.leaseToken !== undefined,
-              ).length,
-            ]),
-          ),
-        ),
-        scheduled: await ctx.db.system.query("_scheduled_functions").take(100),
-      }));
-      expect(afterFirst.groups).toMatchObject({
-        queued: expect.any(Number),
-        running: expect.any(Number),
-        waiting_callback: expect.any(Number),
-      });
-      expect(
-        Object.values(afterFirst.groups as Record<string, number>).every(
-          (count) => count > 0,
-        ),
-      ).toBe(true);
-      expect(afterFirst.scheduled).toHaveLength(26);
-
-      let result = { scheduled: 25, hasMore: true };
-      for (let batch = 0; batch < 4 && result.hasMore; batch += 1) {
-        result = await t.mutation(reconcileStaleJobs, {});
-      }
-      expect(result.hasMore).toBe(false);
-      const due = await t.run(async (ctx) =>
-        Promise.all(
-          (["queued", "running", "waiting_callback"] as const).map((status) =>
-            ctx.db
-              .query("integrationJobs")
-              .withIndex("by_status_and_nextAttemptAt", (q) =>
-                q.eq("status", status).lte("nextAttemptAt", Date.now()),
-              )
-              .take(1),
-          ),
-        ),
-      );
-      expect(due.flat()).toHaveLength(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    const jurisdiction = await t.run((ctx) => ctx.db.get(fixture.jurisdictionId));
+    expect(jurisdiction).toMatchObject({ providerSyncState: "pending" });
+    expect(jurisdiction).not.toHaveProperty("geminiFileSearchStoreName");
+    expect(jurisdiction).not.toHaveProperty("geminiEmbeddingModel");
   });
 });

@@ -63,9 +63,8 @@ function expectOperationSuccess(path: string, result: unknown, args: Record<stri
   if (path === "admin/resources:markResourceRepealed") { expect(value).toMatchObject({ _id: args.id, status: "repealed", repealDate: "2026-03-01" }); return; }
   const reviewStatuses: Record<string, string> = { "admin/reviews:submitForReview": "ready_for_review", "admin/reviews:approveVersion": "approved", "admin/reviews:rejectVersion": "rejected" };
   if (reviewStatuses[path]) { expect(value).toMatchObject({ status: reviewStatuses[path], versionId: args.versionId, correlationId: expect.any(String) }); return; }
-  if (path.startsWith("admin/publication:")) { expect(value).toMatchObject({ jobId: expect.any(String), type: path.includes("unpublish") ? "groundx_delete" : "groundx_copy", duplicate: false, correlationId: expect.any(String) }); return; }
+  if (path.startsWith("admin/publication:")) { expect(value).toMatchObject({ jobId: expect.any(String), type: path.includes("unpublish") ? "gemini_delete" : "gemini_index", duplicate: false, correlationId: expect.any(String) }); return; }
   if (path.startsWith("admin/billing:")) { expect(value).toMatchObject({ status: "succeeded", overrideId: expect.any(String), correlationId: expect.any(String), startsAt: expect.any(Number) }); return; }
-  if (path === "admin/jobs:enqueueJob") { expect(value).toMatchObject({ jobId: expect.any(String), callbackToken: expect.stringMatching(/^gx_[a-f0-9]{64}$/), callbackTokenHash: expect.stringMatching(/^[a-f0-9]{64}$/), duplicate: false }); return; }
   if (path === "admin/jobs:retryJob") { expect(value).toMatchObject({ jobId: args.jobId, status: "queued", correlationId: expect.any(String) }); return; }
   if (path === "admin/jobs:cancelJob") { expect(value).toMatchObject({ jobId: args.jobId, status: "cancelled", correlationId: expect.any(String) }); return; }
   if (path.startsWith("admin/operations:")) { expect(value).toMatchObject({ incidentId: expect.any(String), correlationId: expect.any(String) }); return; }

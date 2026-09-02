@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { lazy, Suspense, type FormEvent, useEffect, useState } from "react";
 import type { GeographicPlaceSelection } from "./geographic-place-picker";
+import { StepUpDialog } from "./step-up-dialog";
 
 const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[oklch(98%_0.01_82)] px-3 text-base text-[oklch(23%_0.045_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700";
 const labelClass = "grid gap-2 text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]";
@@ -39,7 +40,6 @@ const PARENTS: Record<GeographicLevel, readonly GeographicLevel[]> = {
   other_locality: ["country", "state", "province", "region", "territory", "district"],
 };
 
-function optionalBucket(value: string) { const result = value.trim(); return result || undefined; }
 function safeReason(value: string) {
   const result = value.trim();
   return result.length >= 3 && result.length <= 500 &&
@@ -181,12 +181,7 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
     const form = event.currentTarget;
     const data = new FormData(form);
     const reason = text(data, "reason").trim();
-    const stagingBucketId = optionalBucket(text(data, "stagingBucketId"));
-    const productionText = text(data, "productionBucketId").trim();
     if (!safeReason(reason)) { setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms."); return; }
-    if (stagingBucketId && stagingBucketId.length > 300) { setError("Staging bucket ID must be 300 characters or fewer."); return; }
-    if (productionText && (!/^[1-9]\d*$/.test(productionText) || !Number.isSafeInteger(Number(productionText)))) { setError("Production bucket ID must be a positive safe integer."); return; }
-    const productionBucketId = productionText || undefined;
     setPending(true); setError(""); setSuccess("");
     try {
       if (kind === "geographic") {
@@ -197,8 +192,6 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
           verifiedPlaceClaim: selection.verifiedPlaceClaim,
           level,
           ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}),
-          ...(stagingBucketId ? { stagingBucketId } : {}),
-          ...(productionBucketId ? { productionBucketId } : {}),
           reason,
         });
       } else {
@@ -227,8 +220,6 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
           visibility: text(data, "visibility") as "public" | "members",
           scopeMode,
           geographicJurisdictionIds: (scopeMode === "global" ? [] : distinctIds) as Id<"jurisdictions">[],
-          ...(stagingBucketId ? { stagingBucketId } : {}),
-          ...(productionBucketId ? { productionBucketId } : {}),
           reason,
         });
       }
@@ -267,8 +258,6 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
         <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
         {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
       </> : null}
-      <label className={labelClass}>Staging bucket ID<input name="stagingBucketId" maxLength={300} className={fieldClass} /></label>
-      <label className={labelClass}>Production bucket ID<input name="productionBucketId" inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
       <label className={`${labelClass} sm:col-span-2`}>Audit reason<input aria-label="Audit reason" name="reason" required minLength={3} maxLength={500} className={fieldClass} /></label>
       <div className="flex flex-wrap gap-3 sm:col-span-2 lg:col-span-4"><button disabled={pending || !kind} className={buttonClass}>{pending ? "Creating draft…" : "Create draft jurisdiction"}</button></div>
       {success ? <p role="status" aria-live="polite" className="text-sm sm:col-span-2 lg:col-span-4">{success}</p> : null}
@@ -285,8 +274,8 @@ export function JurisdictionLifecycleActions({
 }: {
   jurisdiction: {
     id: string; name: string; status: "draft" | "enabled" | "archived"; kind: "geographic" | "organizational";
-    visibility: "public" | "members"; scopeMode: null | "global" | "linked_geographies";
-    provider: { stagingConfigured: boolean; productionConfigured: boolean };
+    slug: string; visibility: "public" | "members"; scopeMode: null | "global" | "linked_geographies";
+    provider: { syncState: "pending" | "synced" | "drifted" | "failed"; setupState: "not_set_up" | "setting_up" | "ready" | "needs_review" | "setup_failed"; storeConfigured: boolean; embeddingModel?: string };
     geographic: null | { level: GeographicLevel; parent: null | { id: string; name: string; level: GeographicLevel } };
   };
   geographicOptions?: readonly GeographicOption[];
@@ -298,7 +287,8 @@ export function JurisdictionLifecycleActions({
   const archive = useMutation(api.admin.jurisdictions.archiveJurisdiction);
   const updateGeographic = useMutation(api.admin.jurisdictions.updateGeographicJurisdiction);
   const updateOrganizational = useMutation(api.admin.jurisdictions.updateOrganizationalJurisdiction);
-  const provisionStaging = useMutation(api.admin.jobs.provisionJurisdictionStagingBucket);
+  const provisionGemini = useMutation(api.admin.jobs.provisionJurisdictionGeminiStore);
+  const deleteGemini = useMutation(api.admin.jobs.deleteJurisdictionGeminiStore);
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -310,8 +300,8 @@ export function JurisdictionLifecycleActions({
   const [visibility, setVisibility] = useState(jurisdiction.visibility);
   const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">(jurisdiction.scopeMode ?? "global");
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
-  const [stagingBucketId, setStagingBucketId] = useState("");
-  const [productionBucketId, setProductionBucketId] = useState("");
+  const [deletingStore, setDeletingStore] = useState(false);
+  const [deleteIdempotencyKey, setDeleteIdempotencyKey] = useState("");
 
   async function run(action: "enable" | "archive") {
     const auditReason = reason.trim();
@@ -341,22 +331,17 @@ export function JurisdictionLifecycleActions({
       setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
       return;
     }
-    if ((jurisdiction.provider.stagingConfigured && !stagingBucketId.trim()) || (jurisdiction.provider.productionConfigured && !productionBucketId.trim())) {
-      setError("Re-enter each configured provider bucket ID before saving; stored provider identifiers are never displayed.");
-      return;
-    }
     setPending(true);
     setError("");
     try {
-      const buckets = { ...(optionalBucket(stagingBucketId) ? { stagingBucketId: optionalBucket(stagingBucketId) } : {}), ...(optionalBucket(productionBucketId) ? { productionBucketId: optionalBucket(productionBucketId) } : {}) };
       if (jurisdiction.kind === "geographic") {
         if (!selection || selection.expiresAt <= Date.now()) throw new Error("EXPIRED_PLACE");
         if (level !== "country" && !parentId) throw new Error("PARENT_REQUIRED");
-        await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), ...buckets, reason: auditReason });
+        await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), reason: auditReason });
       } else {
         const geographicJurisdictionIds = [...new Set(linkedIds)];
         if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
-        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], ...buckets, reason: auditReason });
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], reason: auditReason });
       }
       router.refresh();
     } catch {
@@ -364,7 +349,7 @@ export function JurisdictionLifecycleActions({
     } finally { setPending(false); }
   }
 
-  async function provisionStagingBucket() {
+  async function provisionGeminiStore() {
     const auditReason = reason.trim();
     if (!safeReason(auditReason)) {
       setError("Use a 3-500 character audit reason without URLs, email addresses, or sensitive terms.");
@@ -374,34 +359,60 @@ export function JurisdictionLifecycleActions({
     setError("");
     setNotice("");
     try {
-      await provisionStaging({
+      await provisionGemini({
         jurisdictionId: jurisdiction.id as Id<"jurisdictions">,
         reason: auditReason,
-        idempotencyKey: `provision-staging-${jurisdiction.id}-${crypto.randomUUID().replaceAll("-", "")}`,
+        idempotencyKey: `provision-gemini-${jurisdiction.id}-${crypto.randomUUID().replaceAll("-", "")}`,
       });
-      setNotice("Staging bucket provisioning was queued. Refresh shortly to see the configured bucket.");
+      setNotice(`Gemini search is being set up for ${jurisdiction.name}. You can leave this page; the status updates automatically.`);
       router.refresh();
     } catch {
-      setError("Staging bucket provisioning was not accepted. Confirm this enabled jurisdiction has a production bucket and your catalog permissions allow it.");
+      setError("Gemini search setup was not accepted. Review the jurisdiction and your catalog permissions, then retry.");
     } finally {
       setPending(false);
     }
   }
 
-  if (jurisdiction.status === "archived") return null;
+  function beginStoreDelete() {
+    setError("");
+    setDeleteIdempotencyKey(`delete-gemini-${jurisdiction.id}-${crypto.randomUUID().replaceAll("-", "")}`);
+    setDeletingStore(true);
+  }
+
+  async function deleteGeminiStore(input: { reason: string; confirmation?: string }) {
+    if (!deleteIdempotencyKey) return;
+    await deleteGemini({
+      jurisdictionId: jurisdiction.id as Id<"jurisdictions">,
+      reason: input.reason,
+      confirmation: input.confirmation ?? "",
+      idempotencyKey: deleteIdempotencyKey,
+    });
+    setNotice("Gemini store deletion was queued. Legal research remains unavailable until a new search store is set up.");
+    router.refresh();
+  }
+
+  const canSetUp = jurisdiction.status === "draft" && (
+    jurisdiction.provider.setupState === "not_set_up" || jurisdiction.provider.setupState === "setup_failed"
+  );
+  const canDeleteStore = jurisdiction.status !== "enabled" && jurisdiction.provider.storeConfigured;
 
   return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
     <label className={labelClass}>Audit reason
       <input aria-label={`Audit reason for ${jurisdiction.name}`} value={reason} onChange={(event) => setReason(event.target.value)} required minLength={3} maxLength={500} className={fieldClass} />
     </label>
     <div className="flex flex-wrap gap-2">
-      {editable ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
+      {editable && jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
       {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
-      {editable && jurisdiction.status === "enabled" && !jurisdiction.provider.stagingConfigured && jurisdiction.provider.productionConfigured ? <button type="button" disabled={pending} onClick={provisionStagingBucket} className={buttonClass}>Provision staging bucket</button> : null}
-      <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button>
+      {canSetUp ? <button type="button" disabled={pending} onClick={provisionGeminiStore} className={buttonClass}>{jurisdiction.provider.setupState === "setup_failed" ? "Retry setup" : "Set up Gemini search"}</button> : null}
+      {canDeleteStore ? <button type="button" disabled={pending} onClick={beginStoreDelete} className={secondaryButtonClass}>Delete Gemini store</button> : null}
+      {jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button> : null}
     </div>
+    {jurisdiction.provider.setupState === "needs_review" ? <div className="grid gap-2 border-l-4 border-amber-700 bg-amber-50 p-3 text-sm text-amber-950">
+      <p>{`Search is paused for ${jurisdiction.name} because its index needs review.`}</p>
+      <Link href="/admin/operations?status=manual_review" className="font-semibold underline underline-offset-4">View provider job</Link>
+    </div> : null}
     {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
-      <p className="text-sm">Stored provider IDs are never displayed. Re-enter configured IDs to preserve them; changing a linked organizational scope replaces its current links.</p>
+      <p className="text-sm">Stored Gemini identifiers are never displayed. Changing a linked organizational scope replaces its current links.</p>
       {jurisdiction.kind === "geographic" ? <>
         <Suspense fallback={<p role="status">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={(next) => { setSelection(next); setParentId(""); }} disabled={pending} /></Suspense>
         <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
@@ -411,12 +422,23 @@ export function JurisdictionLifecycleActions({
         <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
         {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
       </>}
-      <label className={labelClass}>Staging bucket ID<input value={stagingBucketId} onChange={(event) => setStagingBucketId(event.target.value)} maxLength={300} className={fieldClass} /></label>
-      <label className={labelClass}>Production bucket ID<input value={productionBucketId} onChange={(event) => setProductionBucketId(event.target.value)} inputMode="numeric" pattern="[1-9][0-9]*" className={fieldClass} /></label>
       <button type="button" disabled={pending} onClick={saveUpdate} className={buttonClass}>Save {jurisdiction.kind} changes</button>
     </div> : null}
     {notice ? <p role="status" aria-live="polite" className="text-sm text-[oklch(32%_0.07_150)]">{notice}</p> : null}
     {error ? <p role="alert" className="text-sm text-red-800">{error}</p> : null}
+    <StepUpDialog
+      open={deletingStore}
+      title={`Remove Gemini search store for ${jurisdiction.name}?`}
+      description={`Remove the Gemini search store for ${jurisdiction.name}? This deletes its indexed documents from Gemini. Uploads and reviewed versions remain in Convex. Legal research stays unavailable until you set up a new store and republish.`}
+      submitLabel="Remove search store"
+      cancelLabel="Cancel"
+      targetId={jurisdiction.id}
+      idempotencyKey={deleteIdempotencyKey}
+      stepUpAction="jurisdiction_store_delete"
+      confirmationPhrase={`DELETE GEMINI STORE ${jurisdiction.slug}`}
+      onClose={() => setDeletingStore(false)}
+      onConfirmed={deleteGeminiStore}
+    />
   </div>;
 }
 

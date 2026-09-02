@@ -13,10 +13,18 @@ import {
   type JurisdictionProviderMode,
 } from "./e2e-jurisdiction-provider-isolation";
 import type { PlaceSuggestion, VerifiedPlace } from "./google-places";
-import type { ResearchRelation, RetrievalExecutionOptions } from "./research-limits";
+import {
+  GeminiFileSearchResearch,
+  resolveFileSearchModel,
+  type GeminiInteractionClient,
+  type ResearchResult,
+  type ResearchStore,
+} from "./gemini-file-search-research";
+import type { RetrievalExecutionOptions } from "./research-limits";
 
 type Environment = Record<string, string | undefined>;
 export type { JurisdictionProviderMode } from "./e2e-jurisdiction-provider-isolation";
+export type { ResearchStore, ResearchResult } from "./gemini-file-search-research";
 
 type TopicResponse = { text?: string };
 type TopicClient = {
@@ -26,17 +34,8 @@ type TopicDependencies = {
   createGoogleClient?(apiKey: string): TopicClient | Promise<TopicClient>;
 };
 
-type GroundxResponse = { data: { search: { text?: unknown } } };
-type ResearchClient = {
-  search: {
-    content(
-      request: { id: number; query: string },
-      options?: { timeout: number; signal: AbortSignal },
-    ): Promise<GroundxResponse>;
-  };
-};
 type ResearchDependencies = {
-  createGroundxClient?(apiKey: string): ResearchClient | Promise<ResearchClient>;
+  createProviderClient?(apiKey: string): GeminiInteractionClient | Promise<GeminiInteractionClient>;
 };
 
 export type ChatHistoryMessage = {
@@ -71,16 +70,12 @@ export type TopicProvider = {
   generate(question: string, request: GenerateContentParameters): Promise<TopicResponse>;
 };
 
-export type ResearchCall = {
-  ordinal: 0 | 1 | 2 | 3;
-  relation: ResearchRelation;
-  bucketId: number;
-  query: string;
-};
-
 export type ResearchProvider = {
   initialize(): Promise<void>;
-  search(call: ResearchCall, options?: RetrievalExecutionOptions): Promise<string>;
+  search(
+    input: { query: string; stores: ResearchStore[] },
+    options: RetrievalExecutionOptions,
+  ): Promise<ResearchResult>;
 };
 
 export type ChatProvider = {
@@ -98,9 +93,9 @@ async function defaultGoogleClient(apiKey: string): Promise<TopicClient> {
   return new GoogleGenAI({ apiKey });
 }
 
-async function defaultGroundxClient(apiKey: string): Promise<ResearchClient> {
-  const { Groundx } = await import("groundx-typescript-sdk");
-  return new Groundx({ apiKey });
+async function defaultResearchClient(apiKey: string): Promise<GeminiInteractionClient> {
+  const { GoogleGenAI } = await import("@google/genai");
+  return new GoogleGenAI({ apiKey });
 }
 
 async function defaultChatClient(apiKey: string): Promise<ChatClient> {
@@ -141,19 +136,6 @@ export function createTopicProvider(
   };
 }
 
-function stubResearch(call: ResearchCall, scenario: JurisdictionProviderMode & { mode: "stub" }) {
-  const selectedScenario = scenario.scenarioForQuestion(call.query);
-  if (selectedScenario === "selected_failure" && call.ordinal === 0) {
-    throw new Error("E2E_JURISDICTION_STUB_SELECTED_FAILURE");
-  }
-  if (selectedScenario === "supplementary_failure" && call.ordinal === 1) {
-    throw new Error("E2E_JURISDICTION_STUB_SUPPLEMENTARY_FAILURE");
-  }
-  return call.ordinal === 0
-    ? `Isolated ${E2E_FIXTURE_TOWN_ALIAS} selected legal research evidence.`
-    : `Isolated ${E2E_FIXTURE_TOWN_ALIAS} supplementary legal research evidence ${call.ordinal}.`;
-}
-
 export function createResearchProvider(
   environment: Environment,
   dependencies: ResearchDependencies = {},
@@ -162,20 +144,35 @@ export function createResearchProvider(
   if (resolvedMode.mode === "stub") {
     return {
       async initialize() {},
-      async search(call) {
-        return stubResearch(call, resolvedMode);
+      async search(input: { query: string; stores: ResearchStore[] }) {
+        const selectedScenario = resolvedMode.scenarioForQuestion(input.query);
+        if (selectedScenario === "selected_failure") throw new Error("E2E_JURISDICTION_STUB_SELECTED_FAILURE");
+        const sources = input.stores.flatMap((store, index) => {
+          const citation = store.documents?.[0];
+          return selectedScenario === "supplementary_failure" && index === 1 || !citation ? [] : [{
+            jurisdictionId: store.jurisdictionId,
+            spans: [{
+              content: index === 0
+              ? `Isolated ${E2E_FIXTURE_TOWN_ALIAS} selected legal research evidence.`
+              : `Isolated ${E2E_FIXTURE_TOWN_ALIAS} supplementary legal research evidence ${index}.`,
+              citation,
+            }],
+          }];
+        });
+        return { sources, latencyMs: 0 };
       },
-    };
+    } as ResearchProvider;
   }
 
-  let clientPromise: Promise<ResearchClient> | undefined;
-  function client(): Promise<ResearchClient> {
+  const model = resolveFileSearchModel(environment);
+  let clientPromise: Promise<GeminiFileSearchResearch> | undefined;
+  function client(): Promise<GeminiFileSearchResearch> {
     if (clientPromise) return clientPromise;
-    const apiKey = environment.GROUNDX_API_KEY;
+    const apiKey = environment.GOOGLE_AI_API_KEY;
     clientPromise = apiKey
       ? Promise.resolve().then(
-        () => (dependencies.createGroundxClient ?? defaultGroundxClient)(apiKey),
-      )
+        () => (dependencies.createProviderClient ?? defaultResearchClient)(apiKey),
+      ).then((providerClient) => new GeminiFileSearchResearch({ model, client: providerClient }))
       : Promise.reject(new Error("RESEARCH_PROVIDER_NOT_CONFIGURED"));
     return clientPromise;
   }
@@ -183,18 +180,8 @@ export function createResearchProvider(
     async initialize() {
       await client();
     },
-    async search(call, options) {
-      const initializedClient = await client();
-      const request = { id: call.bucketId, query: call.query };
-      const response = options
-        ? await initializedClient.search.content(request, {
-          timeout: options.timeoutMs,
-          signal: options.signal,
-        })
-        : await initializedClient.search.content(request);
-      return typeof response.data.search.text === "string"
-        ? response.data.search.text
-        : "";
+    async search(input: { query: string; stores: ResearchStore[] }, options: RetrievalExecutionOptions) {
+      return await (await client()).search(input, options);
     },
   };
 }

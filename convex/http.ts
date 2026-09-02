@@ -3,9 +3,12 @@ import { ConvexError } from "convex/values";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { authComponent, createAuth } from "./auth";
-import { hashCallbackToken } from "./admin/jobs";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
+import {
+  RESEARCH_MANIFEST_HEADERS,
+  verifyResearchManifestProof,
+} from "./lib/researchManifestProof";
 
 const http = httpRouter();
 
@@ -14,14 +17,10 @@ authComponent.registerRoutes(http, createAuth);
 // Polar webhooks at /polar/events keep subscription data in sync.
 polar.registerRoutes(http);
 
-const MAX_GROUNDX_CALLBACK_BYTES = 16_384;
 const MAX_EXPORT_REFERENCE_BYTES = 256;
 const MAX_SEARCH_JURISDICTION_BYTES = 64;
 const MAX_SEARCH_JURISDICTIONS_BYTES = 1_024;
 const MAX_JURISDICTION_ID_LENGTH = 128;
-const completeGroundxCallback = makeFunctionReference<"mutation">(
-  "admin/jobs:completeGroundxCallback",
-);
 const claimConversationExportReference = makeFunctionReference<"mutation">(
   "admin/exports:claimConversationExportReference",
 );
@@ -29,34 +28,36 @@ const bootstrapE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:
 const cleanupE2eFixtures = makeFunctionReference<"mutation">("admin/e2eFixtures:cleanup");
 const controlE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:control");
 const getSearchJurisdiction = internal.jurisdictions.getPublicByCode;
-const getProductionLibraryAvailability = makeFunctionReference<"query">(
-  "jurisdictions:getProductionLibraryAvailability",
+const getResearchManifestAvailability = makeFunctionReference<"query">(
+  "jurisdictions:getResearchManifestAvailability",
+);
+const consumeResearchManifestNonce = makeFunctionReference<"mutation">(
+  "jurisdictions:consumeResearchManifestNonce",
 );
 
-async function secretsMatch(left: string, right: string) {
-  const [leftHash, rightHash] = await Promise.all([
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(left)),
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(right)),
-  ]);
-  const leftBytes = new Uint8Array(leftHash);
-  const rightBytes = new Uint8Array(rightHash);
-  let difference = 0;
-  for (let index = 0; index < leftBytes.length; index += 1) {
-    difference |= leftBytes[index] ^ rightBytes[index];
-  }
-  return difference === 0;
-}
-
-async function authorizeSearchJurisdictionRequest(request: Request) {
+async function verifySearchJurisdictionRequest(
+  request: Request,
+  bodyBytes: Uint8Array,
+  expectedPathname: string,
+) {
   const configured = process.env.SEARCH_JURISDICTION_SECRET;
-  const supplied = request.headers.get("x-search-jurisdiction-secret") ?? "";
-  if (!configured || configured.length < 32 || supplied.length < 32) return false;
-  return secretsMatch(configured, supplied);
+  let pathname = "";
+  try { pathname = new URL(request.url).pathname; } catch { return null; }
+  if (!configured || configured.length < 32 || request.method !== "POST" || pathname !== expectedPathname) return null;
+  return await verifyResearchManifestProof({
+    secret: configured,
+    method: request.method,
+    pathname,
+    version: request.headers.get(RESEARCH_MANIFEST_HEADERS.version) ?? "",
+    timestamp: request.headers.get(RESEARCH_MANIFEST_HEADERS.timestamp) ?? "",
+    nonce: request.headers.get(RESEARCH_MANIFEST_HEADERS.nonce) ?? "",
+    signature: request.headers.get(RESEARCH_MANIFEST_HEADERS.signature) ?? "",
+    bodyBytes,
+    now: Date.now(),
+  });
 }
 
-async function readSearchJurisdictionCode(request: Request) {
-  const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTION_BYTES);
-  if (!bytes) return null;
+function readSearchJurisdictionCode(bytes: Uint8Array) {
   try {
     const code = (JSON.parse(new TextDecoder().decode(bytes)) as { code?: unknown }).code;
     return typeof code === "string" && /^[A-Z]{2}$/.test(code) ? code : null;
@@ -69,10 +70,15 @@ http.route({
   path: "/internal/search-jurisdiction",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    if (!(await authorizeSearchJurisdictionRequest(request))) {
+    const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTION_BYTES);
+    if (!bytes) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
+    const proof = await verifySearchJurisdictionRequest(request, bytes, "/internal/search-jurisdiction");
+    if (!proof) {
       return new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
     }
-    const code = await readSearchJurisdictionCode(request);
+    try { await ctx.runMutation(consumeResearchManifestNonce, proof); }
+    catch { return new Response(null, { status: 404, headers: { "cache-control": "no-store" } }); }
+    const code = readSearchJurisdictionCode(bytes);
     if (!code) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
     const jurisdiction = await ctx.runQuery(getSearchJurisdiction, { code });
     return Response.json(jurisdiction, {
@@ -93,8 +99,7 @@ function boundedOpaqueId(value: unknown): value is string {
   );
 }
 
-async function readProductionLibraryRequest(request: Request) {
-  const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTIONS_BYTES);
+function readResearchManifestRequest(bytes: Uint8Array) {
   if (!bytes || bytes.byteLength === 0) return null;
   let parsed: unknown;
   try {
@@ -124,14 +129,14 @@ async function readProductionLibraryRequest(request: Request) {
   };
 }
 
-type ProductionLibraryRequest = {
+type ResearchManifestRequest = {
   selectedJurisdictionId: string;
   supplementaryJurisdictionIds: string[];
 };
 
-export async function productionLibraryResolutionResponse(
-  runQuery: (input: ProductionLibraryRequest) => Promise<unknown>,
-  input: ProductionLibraryRequest,
+export async function researchManifestResolutionResponse(
+  runQuery: (input: ResearchManifestRequest) => Promise<unknown>,
+  input: ResearchManifestRequest,
 ): Promise<Response> {
   try {
     const resolution = await runQuery(input);
@@ -143,9 +148,9 @@ export async function productionLibraryResolutionResponse(
     });
   } catch (error) {
     const code = error instanceof ConvexError ? error.message : null;
-    const status = code === "PRODUCTION_LIBRARY_REQUEST_INVALID"
+    const status = code === "RESEARCH_MANIFEST_REQUEST_INVALID"
       ? 400
-      : code === "PRODUCTION_LIBRARY_NOT_FOUND"
+      : code === "RESEARCH_MANIFEST_NOT_FOUND"
         ? 404
         : 500;
     return new Response(null, {
@@ -159,22 +164,27 @@ http.route({
   path: "/internal/search-jurisdictions",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    if (!(await authorizeSearchJurisdictionRequest(request))) {
+    const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTIONS_BYTES);
+    if (!bytes) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
+    const proof = await verifySearchJurisdictionRequest(request, bytes, "/internal/search-jurisdictions");
+    if (!proof) {
       return new Response(null, {
         status: 404,
         headers: { "cache-control": "no-store" },
       });
     }
-    const input = await readProductionLibraryRequest(request);
+    try { await ctx.runMutation(consumeResearchManifestNonce, proof); }
+    catch { return new Response(null, { status: 404, headers: { "cache-control": "no-store" } }); }
+    const input = readResearchManifestRequest(bytes);
     if (!input) {
       return new Response(null, {
         status: 400,
         headers: { "cache-control": "no-store" },
       });
     }
-    return await productionLibraryResolutionResponse(
+    return await researchManifestResolutionResponse(
       async (queryInput) =>
-        await ctx.runQuery(getProductionLibraryAvailability, queryInput),
+        await ctx.runQuery(getResearchManifestAvailability, queryInput),
       input,
     );
   }),
@@ -314,58 +324,6 @@ http.route({
       return Response.json(result, { status: 200, headers: { "cache-control": "no-store, private", pragma: "no-cache" } });
     } catch {
       return Response.json({ error: "Fixture control refused" }, { status: 409, headers: { "cache-control": "no-store" } });
-    }
-  }),
-});
-
-http.route({
-  path: "/groundx/callback",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const declaredSize = Number(request.headers.get("content-length") ?? "0");
-    if (Number.isFinite(declaredSize) && declaredSize > MAX_GROUNDX_CALLBACK_BYTES) {
-      return new Response(null, { status: 400 });
-    }
-    const bytes = await readBoundedBody(request, MAX_GROUNDX_CALLBACK_BYTES);
-    if (!bytes) {
-      return new Response(null, { status: 400 });
-    }
-    let body: unknown;
-    try {
-      body = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      return new Response(null, { status: 400 });
-    }
-    if (
-      typeof body !== "object" || body === null ||
-      typeof (body as Record<string, unknown>).callbackData !== "string" ||
-      !/^gx_[a-f0-9]{64}$/.test(String((body as Record<string, unknown>).callbackData)) ||
-      typeof (body as Record<string, unknown>).ingest !== "object" ||
-      (body as Record<string, unknown>).ingest === null ||
-      typeof ((body as Record<string, unknown>).ingest as Record<string, unknown>).processId !== "string" ||
-      !["queued", "training", "processing", "complete", "error", "cancelled"].includes(String(((body as Record<string, unknown>).ingest as Record<string, unknown>).status))
-    ) {
-      return new Response(null, { status: 400 });
-    }
-    try {
-      const token = (body as { callbackData: string }).callbackData;
-      const ingest = (body as { ingest: { processId: string; status: "queued" | "training" | "processing" | "complete" | "error" | "cancelled" } }).ingest;
-      const completed = (body as { ingest?: { progress?: { complete?: { documents?: Array<Record<string, unknown>> } } } }).ingest?.progress?.complete?.documents?.[0];
-      await ctx.runMutation(completeGroundxCallback, {
-        tokenHash: await hashCallbackToken(token),
-        processId: ingest.processId,
-        status: ingest.status,
-        ...(completed && typeof completed.documentId === "string"
-          ? { documentEvidence: {
-              documentId: completed.documentId,
-              status: ingest.status,
-              ...(typeof completed.bucketId === "number" ? { bucketId: completed.bucketId } : {}),
-            } }
-          : {}),
-      });
-      return new Response(null, { status: 202 });
-    } catch {
-      return new Response(null, { status: 404 });
     }
   }),
 });

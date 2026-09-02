@@ -111,6 +111,7 @@ async function asAdmin(
   return {
     userId: identity.userId,
     client: t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId }),
+    backend: t,
   };
 }
 
@@ -133,20 +134,27 @@ async function createGeo(
     placeId: string;
     level: "country" | "region" | "district" | "town";
     parentJurisdictionId?: string;
-    productionBucketId?: string;
+    configureSearch?: boolean;
   },
 ) {
   const verifiedPlaceClaim = await issueVerifiedPlaceClaim(
     admin.userId,
     place(input.name, input.placeId),
   );
-  return await admin.client.mutation(createGeographicJurisdiction, {
+  const jurisdictionId = await admin.client.mutation(createGeographicJurisdiction, {
     verifiedPlaceClaim,
     level: input.level,
     parentJurisdictionId: input.parentJurisdictionId,
-    productionBucketId: input.productionBucketId,
     reason: `Create ${input.name}`,
   });
+  if (input.configureSearch) {
+    await admin.backend.run((ctx) => ctx.db.patch(jurisdictionId, {
+      geminiFileSearchStoreName: `fileSearchStores/${input.placeId.replace(/[^a-z0-9-]/g, "-")}`,
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: "synced",
+    }));
+  }
+  return jurisdictionId;
 }
 
 describe("typed jurisdiction administration", () => {
@@ -180,6 +188,47 @@ describe("typed jurisdiction administration", () => {
     );
   });
 
+  it("enables only a jurisdiction with a valid synced Gemini store", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t);
+    const jurisdictionId = await createGeo(admin, {
+      name: "Ghana",
+      placeId: "place-ghana-ready",
+      level: "country",
+    });
+
+    await expect(admin.client.mutation(enableJurisdiction, {
+      id: jurisdictionId,
+      reason: "Enable Ghana",
+    })).rejects.toThrow("GEMINI_STORE_NOT_READY");
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, {
+      geminiFileSearchStoreName: "not-a-store",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: "synced",
+    }));
+    await expect(admin.client.mutation(enableJurisdiction, {
+      id: jurisdictionId,
+      reason: "Enable Ghana",
+    })).rejects.toThrow("GEMINI_STORE_NOT_READY");
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, {
+      geminiFileSearchStoreName: "fileSearchStores/ghana-ready",
+      providerSyncState: "pending",
+    }));
+    await expect(admin.client.mutation(enableJurisdiction, {
+      id: jurisdictionId,
+      reason: "Enable Ghana",
+    })).rejects.toThrow("GEMINI_STORE_NOT_READY");
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, { providerSyncState: "synced" }));
+    const enabled = await admin.client.mutation(enableJurisdiction, {
+      id: jurisdictionId,
+      reason: "Enable Ghana",
+    });
+    expect(enabled).toMatchObject({ status: "enabled" });
+    expect(enabled).not.toHaveProperty("geminiFileSearchStoreName");
+    expect(enabled).not.toHaveProperty("geminiEmbeddingModel");
+  });
+
   it("requires an enabled broader geographic parent and rejects cycles", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -188,7 +237,7 @@ describe("typed jurisdiction administration", () => {
       name: "Ghana",
       placeId: "place-ghana",
       level: "country",
-      productionBucketId: "11833",
+      configureSearch: true,
     });
     await admin.client.mutation(enableJurisdiction, { id: countryId, reason: "Publish Ghana" });
     const draftRegionId = await createGeo(admin, {
@@ -196,7 +245,7 @@ describe("typed jurisdiction administration", () => {
       placeId: "place-greater-accra",
       level: "region",
       parentJurisdictionId: countryId,
-      productionBucketId: "11834",
+      configureSearch: true,
     });
 
     await t.run((ctx) => ctx.db.patch(countryId, { status: "archived" }));
@@ -216,7 +265,7 @@ describe("typed jurisdiction administration", () => {
       placeId: "place-accra",
       level: "town",
       parentJurisdictionId: draftRegionId,
-      productionBucketId: "11837",
+      configureSearch: true,
     });
 
     const replacementClaim = await issueVerifiedPlaceClaim(
@@ -228,7 +277,6 @@ describe("typed jurisdiction administration", () => {
       verifiedPlaceClaim: replacementClaim,
       level: "country",
       parentJurisdictionId: townId,
-      productionBucketId: "11833",
       reason: "Cycle test",
     })).rejects.toThrow("GEOGRAPHIC_PARENT_CYCLE");
 
@@ -237,7 +285,7 @@ describe("typed jurisdiction administration", () => {
       placeId: "place-tema",
       level: "town",
       parentJurisdictionId: draftRegionId,
-      productionBucketId: "11836",
+      configureSearch: true,
     });
     await admin.client.mutation(enableJurisdiction, {
       id: otherTownId,
@@ -271,7 +319,6 @@ describe("typed jurisdiction administration", () => {
           slug: `level-${index}`,
           status: "enabled",
           isDefault: false,
-          productionBucketId: String(20_000 + index),
           providerSyncState: "pending",
           kind: "geographic",
           visibility: "public",
@@ -313,7 +360,7 @@ describe("typed jurisdiction administration", () => {
       name: "Ghana",
       placeId: "place-ghana",
       level: "country",
-      productionBucketId: "11833",
+      configureSearch: true,
     });
     await admin.client.mutation(enableJurisdiction, { id: countryId, reason: "Publish Ghana" });
     const organizationId = await t.run((ctx) => {
@@ -350,9 +397,13 @@ describe("typed jurisdiction administration", () => {
       visibility: "members",
       scopeMode: "linked_geographies",
       geographicJurisdictionIds: [countryId],
-      productionBucketId: "11835",
       reason: "Create organization rules",
     });
+    await t.run((ctx) => ctx.db.patch(jurisdictionId, {
+      geminiFileSearchStoreName: "fileSearchStores/example-university",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: "synced",
+    }));
     await expect(admin.client.mutation(createOrganizationalJurisdiction, {
       organizationId,
       visibility: "members",
@@ -372,14 +423,15 @@ describe("typed jurisdiction administration", () => {
       id: jurisdictionId,
       reason: "Retire linked organization rules",
     })).rejects.toThrow("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
-    await expect(admin.client.mutation(updateOrganizationalJurisdiction, {
+    const updated = await admin.client.mutation(updateOrganizationalJurisdiction, {
       id: jurisdictionId,
       visibility: "public",
       scopeMode: "global",
       geographicJurisdictionIds: [],
-      productionBucketId: "11835",
       reason: "Make organization scope global",
-    })).resolves.toMatchObject({ visibility: "public" });
+    });
+    expect(updated).toMatchObject({ visibility: "public" });
+    expect(updated).not.toHaveProperty("geminiFileSearchStoreName");
     await expect(admin.client.mutation(archiveJurisdiction, {
       id: jurisdictionId,
       reason: "Retire global organization rules",
@@ -397,7 +449,6 @@ describe("typed jurisdiction administration", () => {
         slug: "corrupt-ancestor",
         status: "enabled",
         isDefault: false,
-        productionBucketId: "12101",
         providerSyncState: "pending",
         kind: "organizational",
         visibility: "public",
@@ -422,7 +473,6 @@ describe("typed jurisdiction administration", () => {
         slug: "immediate-district",
         status: "enabled",
         isDefault: false,
-        productionBucketId: "12102",
         providerSyncState: "pending",
         kind: "geographic",
         visibility: "public",
@@ -470,7 +520,6 @@ describe("typed jurisdiction administration", () => {
         slug: "valid-corrupt-test-root",
         status: "enabled",
         isDefault: false,
-        productionBucketId: "12103",
         providerSyncState: "pending",
         kind: "geographic",
         visibility: "public",
@@ -539,7 +588,6 @@ describe("typed jurisdiction administration", () => {
         slug: "not-a-geography",
         status: "enabled",
         isDefault: false,
-        productionBucketId: "12201",
         providerSyncState: "pending",
         kind: "organizational",
         visibility: "public",
@@ -579,7 +627,7 @@ describe("typed jurisdiction administration", () => {
       name: "Ghana",
       placeId: "audit-ghana",
       level: "country",
-      productionBucketId: "12301",
+      configureSearch: true,
     });
     await admin.client.mutation(enableJurisdiction, { id: countryId, reason: "Publish Ghana" });
     const firstRegionId = await createGeo(admin, {
@@ -587,14 +635,14 @@ describe("typed jurisdiction administration", () => {
       placeId: "audit-region-1",
       level: "region",
       parentJurisdictionId: countryId,
-      productionBucketId: "12302",
+      configureSearch: true,
     });
     const secondRegionId = await createGeo(admin, {
       name: "Second Region",
       placeId: "audit-region-2",
       level: "region",
       parentJurisdictionId: countryId,
-      productionBucketId: "12303",
+      configureSearch: true,
     });
     await admin.client.mutation(enableJurisdiction, { id: firstRegionId, reason: "Publish first" });
     await admin.client.mutation(enableJurisdiction, { id: secondRegionId, reason: "Publish second" });
@@ -607,8 +655,6 @@ describe("typed jurisdiction administration", () => {
       verifiedPlaceClaim: firstTownClaim,
       level: "town",
       parentJurisdictionId: firstRegionId,
-      stagingBucketId: "staging-old",
-      productionBucketId: "12304",
       reason: "Create audited town",
     });
     const secondTownClaim = await issueVerifiedPlaceClaim(admin.userId, {
@@ -620,10 +666,13 @@ describe("typed jurisdiction administration", () => {
       verifiedPlaceClaim: secondTownClaim,
       level: "town",
       parentJurisdictionId: secondRegionId,
-      stagingBucketId: "staging-new",
-      productionBucketId: "12305",
       reason: "Reparent audited town",
     });
+    await t.run((ctx) => ctx.db.patch(townId, {
+      geminiFileSearchStoreName: "fileSearchStores/audit-town",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: "synced",
+    }));
     await admin.client.mutation(enableJurisdiction, {
       id: townId,
       reason: "Publish audited town",
@@ -649,7 +698,6 @@ describe("typed jurisdiction administration", () => {
         visibility: "members",
         scopeMode: "linked_geographies",
         geographicJurisdictionIds: [firstRegionId],
-        productionBucketId: "12306",
         reason: "Create audited organization",
       },
     );
@@ -658,7 +706,6 @@ describe("typed jurisdiction administration", () => {
       visibility: "members",
       scopeMode: "linked_geographies",
       geographicJurisdictionIds: [secondRegionId],
-      productionBucketId: "12307",
       reason: "Change audited organization scope",
     });
 
@@ -681,7 +728,6 @@ describe("typed jurisdiction administration", () => {
     const townUpdateAfter = JSON.parse(townAudits[1].afterSummary!);
     const townEnableAfter = JSON.parse(townAudits[2].afterSummary!);
     expect(townCreateAfter).toMatchObject({
-      common: { stagingBucketId: "staging-old", productionBucketId: "12304" },
       geographic: {
         googlePlaceId: "audit-town-v1",
         parentJurisdictionId: firstRegionId,
@@ -690,7 +736,6 @@ describe("typed jurisdiction administration", () => {
     });
     expect(townUpdateBefore.geographic.parentJurisdictionId).toBe(firstRegionId);
     expect(townUpdateAfter).toMatchObject({
-      common: { stagingBucketId: "staging-new", productionBucketId: "12305" },
       geographic: {
         googlePlaceId: "audit-town-v2",
         parentJurisdictionId: secondRegionId,
@@ -698,7 +743,7 @@ describe("typed jurisdiction administration", () => {
       },
     });
     expect(townEnableAfter).toMatchObject({
-      common: { status: "enabled", productionBucketId: "12305" },
+      common: { status: "enabled" },
       geographic: {
         googlePlaceId: "audit-town-v2",
         parentJurisdictionId: secondRegionId,
@@ -716,7 +761,6 @@ describe("typed jurisdiction administration", () => {
       firstRegionId,
     ]);
     expect(organizationUpdateAfter).toMatchObject({
-      common: { productionBucketId: "12307" },
       organizational: { geographicJurisdictionIds: [secondRegionId] },
     });
   });
@@ -733,7 +777,6 @@ describe("typed jurisdiction administration", () => {
         slug: "ghana-legacy-profile",
         status: "archived",
         isDefault: false,
-        productionBucketId: "12401",
         providerSyncState: "pending",
         createdBy: "fixture",
         updatedBy: "fixture",
@@ -757,8 +800,9 @@ describe("typed jurisdiction administration", () => {
         slug: "legacy-accra-profile",
         status: "draft",
         isDefault: false,
-        productionBucketId: "12402",
-        providerSyncState: "pending",
+        geminiFileSearchStoreName: "fileSearchStores/legacy-accra",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
+        providerSyncState: "synced",
         createdBy: "fixture",
         updatedBy: "fixture",
         createdAt: now,
@@ -1181,8 +1225,8 @@ describe("administration catalog projections", () => {
           slug: "ghana-catalog",
           status: "enabled",
           isDefault: false,
-          stagingBucketId: "secret-staging-bucket",
-          productionBucketId: "secret-production-bucket",
+          geminiFileSearchStoreName: "fileSearchStores/ghana-catalog-test",
+          geminiEmbeddingModel: "models/gemini-embedding-2",
           providerSyncState: "synced",
           kind: "geographic",
           visibility: "public",
@@ -1327,8 +1371,8 @@ describe("administration catalog projections", () => {
       },
       provider: {
         syncState: "drifted",
-        stagingConfigured: false,
-        productionConfigured: false,
+        setupState: "needs_review",
+        storeConfigured: false,
       },
       scopeMode: "linked_geographies",
     });

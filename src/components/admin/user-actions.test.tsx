@@ -79,10 +79,8 @@ describe("administrative user actions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Assign roles" }));
 
-    expect(screen.getByRole("dialog")).toHaveAttribute(
-      "aria-labelledby",
-      "admin-step-up-title",
-    );
+    expect(screen.getByRole("dialog"))
+      .toHaveAccessibleName("Assign administrative roles?");
     expect(
       screen.getByRole("textbox", { name: "Reason for this action" }),
     ).toBeVisible();

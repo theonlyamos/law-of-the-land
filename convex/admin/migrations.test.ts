@@ -19,7 +19,6 @@ const modules = Object.fromEntries(
 const seedGhanaJurisdiction = makeFunctionReference<"mutation">(
   "admin/migrations:seedGhanaJurisdiction",
 );
-
 const before = {
   component: "betterAuth" as const,
   counts: {
@@ -63,7 +62,7 @@ describe("Better Auth migration preservation gate", () => {
 });
 
 describe("Ghana governed jurisdiction migration", () => {
-  it("creates an enabled default with the production bucket and migration provenance", async () => {
+  it("creates a draft default awaiting controlled Gemini provisioning", async () => {
     const t = convexTest(schema, modules);
 
     await expect(t.mutation(seedGhanaJurisdiction, {})).resolves.toMatchObject({
@@ -85,14 +84,13 @@ describe("Ghana governed jurisdiction migration", () => {
       code: "GH",
       name: "Ghana",
       slug: "ghana",
-      status: "enabled",
+      status: "draft",
       isDefault: true,
-      productionBucketId: "11833",
-      providerSyncState: "synced",
+      providerSyncState: "pending",
       createdBy: "migration:seed-ghana-jurisdiction-v1",
       updatedBy: "migration:seed-ghana-jurisdiction-v1",
     });
-    expect(snapshot.jurisdictions[0]).not.toHaveProperty("stagingBucketId");
+    expect(snapshot.jurisdictions[0]).not.toHaveProperty("geminiFileSearchStoreName");
     expect(snapshot.audits).toHaveLength(1);
     expect(snapshot.audits[0]).toMatchObject({
       actorType: "system",
@@ -115,8 +113,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "ghana-law",
         status: "draft",
         isDefault: false,
-        stagingBucketId: "user-staging-bucket",
-        productionBucketId: "old-production-bucket",
         providerSyncState: "drifted",
         createdBy: "user-123",
         updatedBy: "user-456",
@@ -136,13 +132,11 @@ describe("Ghana governed jurisdiction migration", () => {
       code: "GH",
       name: "Republic of Ghana",
       slug: "ghana-law",
-      stagingBucketId: "user-staging-bucket",
       createdBy: "user-123",
       createdAt,
-      status: "enabled",
+      status: "draft",
       isDefault: true,
-      productionBucketId: "11833",
-      providerSyncState: "synced",
+      providerSyncState: "pending",
       updatedBy: "migration:seed-ghana-jurisdiction-v1",
     });
   });
@@ -184,7 +178,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "nigeria",
         status: "enabled",
         isDefault: true,
-        productionBucketId: "ng-production",
         providerSyncState: "synced",
         createdBy: "user-1",
         updatedBy: "user-1",
@@ -197,7 +190,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "custom-ghana",
         status: "draft",
         isDefault: false,
-        stagingBucketId: "custom-staging",
         providerSyncState: "pending",
         createdBy: "user-2",
         updatedBy: "user-2",
@@ -250,7 +242,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "nigeria",
         status: "enabled",
         isDefault: true,
-        productionBucketId: "ng-production",
         providerSyncState: "synced",
         createdBy: "user-1",
         updatedBy: "user-1",
@@ -263,7 +254,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "user-ghana",
         status: "draft",
         isDefault: false,
-        stagingBucketId: "user-staging",
         providerSyncState: "pending",
         createdBy: "user-2",
         updatedBy: "user-2",
@@ -337,7 +327,6 @@ describe("Ghana governed jurisdiction migration", () => {
         slug: "ghana",
         status: "draft",
         isDefault: false,
-        stagingBucketId: "user-staging",
         providerSyncState: "pending",
         createdBy: "user-1",
         updatedBy: "user-1",

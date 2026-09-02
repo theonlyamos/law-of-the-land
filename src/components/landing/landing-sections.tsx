@@ -209,7 +209,7 @@ export function LandingSections({
             <h2 className={styles.sectionTitle}>Coverage grows through governed publication.</h2>
             <p className={styles.sectionCopy}>
               A jurisdiction becomes available only after its legal sources are reviewed and
-              published to the production library. This keeps public coverage explicit and
+              published to the governed search index. This keeps public coverage explicit and
               verifiable.
             </p>
           </div>

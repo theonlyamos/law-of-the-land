@@ -50,10 +50,10 @@ type FixtureRecords = {
   conversationGrantId: string;
   jurisdictionId: string;
   userId: string;
-  stagingBucketId: string;
-  productionBucketId: string;
-  callbackToken: string;
-  callbackJobId: string;
+  geminiStoreName: string;
+  geminiDocumentName: string;
+  geminiOperationName: string;
+  providerJobId: string;
   usageUserId: string;
   jurisdictionCountryId: string;
   jurisdictionTownId: string;
@@ -354,8 +354,8 @@ export async function bootstrapAdminFixtures(options: {
   }
   const requiredRecordIds: Array<keyof FixtureRecords> = [
     "chatId", "resourceId", "publishedVersionId", "reviewVersionId", "separationVersionId",
-    "conversationGrantId", "jurisdictionId", "userId", "stagingBucketId", "productionBucketId",
-    "callbackToken", "callbackJobId", "usageUserId", "jurisdictionCountryId", "jurisdictionTownId",
+    "conversationGrantId", "jurisdictionId", "userId", "geminiStoreName", "geminiDocumentName",
+    "geminiOperationName", "providerJobId", "usageUserId", "jurisdictionCountryId", "jurisdictionTownId",
     "publicOrganizationJurisdictionId", "jurisdictionMemberOnlyId", "jurisdictionMemberId", "jurisdictionFormerMemberId",
   ];
   if (!payload.records || requiredRecordIds.some((key) => typeof payload.records[key] !== "string" || !payload.records[key])) {

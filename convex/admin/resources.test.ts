@@ -63,6 +63,9 @@ const markResourceRepealed = makeFunctionReference<"mutation">(
 const listVersions = makeFunctionReference<"query">(
   "admin/resources:listVersions",
 );
+const enqueueSystemJob = makeFunctionReference<"mutation">(
+  "admin/jobs:enqueueSystemJob",
+);
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -135,6 +138,35 @@ afterEach(() => {
 const page = { paginationOpts: { numItems: 20, cursor: null } };
 
 describe("jurisdiction governance", () => {
+  it("blocks an active resource while a Gemini store teardown is active", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        code: "GH", name: "Ghana", slug: "ghana-teardown", status: "draft", isDefault: false,
+        providerSyncState: "drifted", createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
+    });
+    const input = {
+      jurisdictionId, type: "act", title: "Teardown Act", issuer: "Parliament", officialCitation: "Act teardown",
+      sourceUrl: "https://example.invalid/teardown", topics: [], effectiveDate: "2026-01-01", reason: "Add resource",
+    };
+    await expect(manager.client.mutation(createResource, input)).resolves.toBeDefined();
+    const teardown = await t.mutation(enqueueSystemJob, {
+      type: "gemini_delete_store", targetType: "jurisdictionGeminiStore", targetId: jurisdictionId,
+      payload: { storeName: "fileSearchStores/ghana-teardown" }, idempotencyKey: "gemini-delete-resource-race", systemActor: "gemini_orchestrator",
+    });
+    await expect(manager.client.mutation(createResource, {
+      ...input, title: "Blocked teardown Act", officialCitation: "Act teardown blocked",
+    })).rejects.toThrow("GEMINI_STORE_TEARDOWN_IN_PROGRESS");
+    await t.run((ctx) => ctx.db.patch(teardown.jobId, { status: "running" }));
+    await expect(manager.client.mutation(createResource, {
+      ...input, title: "Blocked running teardown Act", officialCitation: "Act teardown running",
+    })).rejects.toThrow("GEMINI_STORE_TEARDOWN_IN_PROGRESS");
+  });
+
   it("lists browser-safe enabled jurisdictions with the default first", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {
@@ -146,8 +178,8 @@ describe("jurisdiction governance", () => {
           slug: "nigeria",
           status: "enabled" as const,
           isDefault: true,
-          stagingBucketId: "staging-ng",
-          productionBucketId: "22001",
+          geminiFileSearchStoreName: "fileSearchStores/nigeria-resources-test",
+          geminiEmbeddingModel: "models/gemini-embedding-2",
         },
         {
           code: "GH",
@@ -155,8 +187,8 @@ describe("jurisdiction governance", () => {
           slug: "ghana",
           status: "enabled" as const,
           isDefault: false,
-          stagingBucketId: "staging-gh",
-          productionBucketId: "11833",
+          geminiFileSearchStoreName: "fileSearchStores/ghana-resources-test",
+          geminiEmbeddingModel: "models/gemini-embedding-2",
         },
         {
           code: "CI",
@@ -164,8 +196,6 @@ describe("jurisdiction governance", () => {
           slug: "cote-divoire",
           status: "draft" as const,
           isDefault: false,
-          stagingBucketId: "staging-ci",
-          productionBucketId: "22002",
         },
       ]) {
         await ctx.db.insert("jurisdictions", {
@@ -195,7 +225,6 @@ describe("jurisdiction governance", () => {
         isDefault: false,
       },
     ]);
-    expect(publicRows.every((row: Record<string, unknown>) => !Object.prototype.hasOwnProperty.call(row, "productionBucketId"))).toBe(true);
     expect(publicRows.every((row: Record<string, unknown>) => !Object.prototype.hasOwnProperty.call(row, "providerSyncState"))).toBe(true);
   });
 
@@ -211,8 +240,8 @@ describe("jurisdiction governance", () => {
           slug: `jurisdiction-${index}`,
           status: "enabled",
           isDefault: index === 249,
-          stagingBucketId: `staging-${index}`,
-          productionBucketId: String(30_000 + index),
+          geminiFileSearchStoreName: `fileSearchStores/jurisdiction-${index}`,
+          geminiEmbeddingModel: "models/gemini-embedding-2",
           providerSyncState: "synced",
           createdBy: "fixture",
           updatedBy: "fixture",
@@ -230,10 +259,9 @@ describe("jurisdiction governance", () => {
       slug: "jurisdiction-249",
       isDefault: true,
     });
-    expect(result.every((jurisdiction: Record<string, unknown>) => !Object.prototype.hasOwnProperty.call(jurisdiction, "productionBucketId"))).toBe(true);
   });
 
-  it("returns only enabled, production-configured jurisdictions publicly", async () => {
+  it("returns only enabled, search-ready jurisdictions publicly", async () => {
     const t = createBackend();
     await t.run(async (ctx) => {
       const now = Date.now();
@@ -243,8 +271,8 @@ describe("jurisdiction governance", () => {
         slug: "ghana",
         status: "enabled",
         isDefault: true,
-        stagingBucketId: "staging-gh",
-        productionBucketId: "11833",
+        geminiFileSearchStoreName: "fileSearchStores/ghana-public-test",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
         providerSyncState: "synced",
         createdBy: "fixture",
         updatedBy: "fixture",
@@ -257,8 +285,6 @@ describe("jurisdiction governance", () => {
         slug: "nigeria",
         status: "draft",
         isDefault: false,
-        stagingBucketId: "staging-ng",
-        productionBucketId: "production-ng",
         providerSyncState: "pending",
         createdBy: "fixture",
         updatedBy: "fixture",
@@ -273,7 +299,7 @@ describe("jurisdiction governance", () => {
       slug: "ghana",
       enabled: true,
       isDefault: true,
-      productionBucketId: "11833",
+      searchReady: true,
     });
     await expect(t.query(getPublicByCode, { code: "NG" })).resolves.toBeNull();
     await expect(t.query(getPublicByCode, { code: "GHA" })).rejects.toThrow(
@@ -293,8 +319,8 @@ describe("jurisdiction governance", () => {
         slug: "ghana",
         status: "enabled",
         isDefault: true,
-        stagingBucketId: "staging-gh",
-        productionBucketId: "11833",
+        geminiFileSearchStoreName: "fileSearchStores/ghana-admin-test",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
         providerSyncState: "synced",
         kind: "geographic",
         visibility: "public",
@@ -309,7 +335,7 @@ describe("jurisdiction governance", () => {
     expect(result.page).toEqual([expect.objectContaining({ code: "GH", name: "Ghana" })]);
     expect(Object.keys(result.page[0]).sort()).toEqual([
       "_creationTime", "_id", "code", "createdAt", "createdBy", "isDefault",
-      "name", "productionBucketId", "providerSyncState", "slug", "stagingBucketId",
+      "name", "providerSyncState", "slug",
       "status", "updatedAt", "updatedBy",
     ].sort());
     await expect(auditor.client.query(listJurisdictions, {
@@ -395,8 +421,6 @@ describe("jurisdiction governance", () => {
         code: "GH",
         name: "Ghana",
         slug: "ghana",
-        stagingBucketId: "staging-gh",
-        productionBucketId: "11833",
         isDefault: true,
         reason: "Initial governed jurisdiction",
       }),
@@ -406,8 +430,6 @@ describe("jurisdiction governance", () => {
       code: "gh",
       name: "Ghana",
       slug: "ghana",
-      stagingBucketId: "staging-gh",
-      productionBucketId: "11833",
       isDefault: true,
       reason: "Initial governed jurisdiction",
     });
@@ -420,6 +442,11 @@ describe("jurisdiction governance", () => {
         reason: "Duplicate code check",
       }),
     ).rejects.toThrow("JURISDICTION_CODE_EXISTS");
+    await t.run((ctx) => ctx.db.patch(ghId, {
+      geminiFileSearchStoreName: "fileSearchStores/ghana",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+      providerSyncState: "synced",
+    }));
     await expect(
       manager.client.mutation(enableJurisdiction, {
         id: ghId,
@@ -437,8 +464,6 @@ describe("jurisdiction governance", () => {
         id: ghId,
         name: "Republic of Ghana",
         slug: "ghana",
-        stagingBucketId: "staging-gh",
-        productionBucketId: "11833",
         isDefault: true,
         reason: "Use official display name",
       }),
@@ -472,11 +497,11 @@ describe("jurisdiction governance", () => {
     expect(updateAudit.correlationId).toMatch(/^op_[a-f0-9]{32}$/);
     expect(JSON.parse(updateAudit.beforeSummary!)).toMatchObject({
       code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-      isDefault: true, stagingBucketId: "staging-gh", productionBucketId: "11833",
+      isDefault: true,
     });
     expect(JSON.parse(updateAudit.afterSummary!)).toMatchObject({
       code: "GH", name: "Republic of Ghana", slug: "ghana", status: "enabled",
-      isDefault: true, stagingBucketId: "staging-gh", productionBucketId: "11833",
+      isDefault: true,
     });
 
     process.env.ADMIN_PANEL_ENABLED = "false";

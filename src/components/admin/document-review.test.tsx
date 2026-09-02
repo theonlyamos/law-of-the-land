@@ -34,15 +34,6 @@ const item = {
   sourceHost: "laws.example.gov",
   effectiveDate: "2026-01-01",
   status: "ready_for_review" as const,
-  stagingDocumentId: "gx-staging-2",
-  stagingProcessId: "gx-process-2",
-  xrayEvidence: {
-    status: "complete" as const,
-    documentId: "gx-staging-2",
-    processId: "gx-process-2",
-    fileType: "pdf",
-    fileSize: 4096,
-  },
   submittedBy: "manager-1",
   submittedAt: 1_700_000_000_000,
   previousVersion: { versionNumber: 1, filename: "act-843-v1.pdf", sha256: "b".repeat(64), effectiveDate: "2025-01-01" },
@@ -55,11 +46,7 @@ describe("document review workbench", () => {
     expect(screen.getByRole("heading", { name: "Data Protection Act" })).toBeVisible();
     expect(screen.getByText("Act 843")).toBeVisible();
     expect(screen.getByText(`SHA-256 ${"a".repeat(64)}`)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "X-Ray evidence" })).toBeVisible();
-    expect(screen.getByText("gx-staging-2")).toBeVisible();
-    expect(screen.getByText((_, node) =>
-      node?.tagName === "P" && node.textContent?.includes("Complete / pdf / 4,096 bytes") === true,
-    )).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "X-Ray evidence" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Metadata-only version diff" })).toBeVisible();
     expect(screen.getByText(/Original file bodies are never loaded/)).toBeVisible();
     expect(screen.getByText("Changed")).toBeVisible();
@@ -80,7 +67,7 @@ describe("document review workbench", () => {
   it("refreshes server-rendered review items after recording a decision", async () => {
     render(<AdminPermissionProvider permissions={["document:review"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     for (const label of [
-      "Official source authenticated", "Metadata is accurate", "X-Ray extraction reviewed", "Citations verified", "Search evaluation passed",
+      "Official source authenticated", "Metadata is accurate", "Original text reviewed", "Citations verified", "Search evaluation passed",
     ]) fireEvent.click(screen.getByLabelText(label));
     fireEvent.change(screen.getByLabelText("Evaluation run ID"), { target: { value: "eval-2" } });
     fireEvent.change(screen.getByLabelText("Decision reason"), { target: { value: "Evidence complete" } });
@@ -90,13 +77,4 @@ describe("document review workbench", () => {
     expect(mocks.approve).toHaveBeenCalledTimes(1);
   });
 
-  it("labels missing provider evidence as unavailable instead of synthesizing it", () => {
-    render(<AdminPermissionProvider permissions={["document:read"]}><DocumentReview items={[{
-      ...item,
-      id: "version_without_evidence",
-      xrayEvidence: { status: "unavailable" as const },
-    }]} /></AdminPermissionProvider>);
-    expect(screen.getByText("Provider-derived X-Ray evidence is unavailable.")).toBeVisible();
-    expect(screen.queryByText(/Complete \/ pdf \/ 4,096 bytes/)).toBeNull();
-  });
 });

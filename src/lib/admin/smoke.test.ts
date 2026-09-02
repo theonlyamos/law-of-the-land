@@ -5,6 +5,59 @@ import {
   checkBudgets,
   requireAdminFixtureBoundary,
 } from "../../../scripts/check-admin-budgets.mjs";
+import { buildJurisdictionPerformanceSections } from "../../../scripts/admin-performance-collector.mjs";
+
+function approvedSections() {
+  const samples = Array(20).fill(10);
+  const observation = {
+    version: 2 as const,
+    authorizedScopeSize: 3,
+    planSize: 3,
+    fileSearchCallCount: 1 as const,
+    fileSearchStoreCount: 3,
+    fileSearchLatencyMs: 10,
+    totalLatencyMs: 30,
+    evidenceBytes: 100,
+    citationCount: 2,
+    partialCoverage: false,
+    jurisdictions: [
+      { ordinal: 0 as const, relation: "selected" as const, coverage: "evidence" as const },
+      { ordinal: 1 as const, relation: "organizational_geography" as const, coverage: "evidence" as const },
+      { ordinal: 2 as const, relation: "geographic_ancestor" as const, coverage: "evidence" as const },
+    ],
+    unexpectedRealProviderCallCount: 0 as const,
+  };
+  const sections = buildJurisdictionPerformanceSections({
+    selectorProfiles: [
+      { flagState: "off", profile: "desktop", resultRowCount: 1, samplesMs: samples, baselineP95Ms: 10 },
+      { flagState: "on", profile: "desktop", resultRowCount: 2, samplesMs: samples, baselineP95Ms: 10 },
+      { flagState: "on", profile: "mobile", resultRowCount: 2, samplesMs: samples, baselineP95Ms: 10 },
+      { flagState: "on", profile: "throttled", resultRowCount: 2, samplesMs: samples, baselineP95Ms: 10 },
+    ],
+    placePicker: {
+      branch: "geographic",
+      autocompleteSamplesMs: samples,
+      detailsSamplesMs: samples,
+      resultCount: 1,
+      requestCount: 40,
+      sameSessionCorrelation: true,
+      placesInvocationCount: 40,
+    },
+    organizationalPlacesInvocationCount: 0,
+    retrievalObservations: Array(20).fill(observation),
+  });
+  Object.assign(sections.jurisdictionSelector.calibration, { status: "approved", reference: "change-record-123", outcome: "pass" });
+  for (const profile of sections.jurisdictionSelector.profiles) Object.assign(profile, { approvedP95LimitMs: 20, outcome: "pass" });
+  Object.assign(sections.geographicPlacePicker.calibration, {
+    status: "approved", reference: "change-record-123", autocompleteP95LimitMs: 20,
+    detailsP95LimitMs: 20, autocompleteOutcome: "pass", detailsOutcome: "pass", outcome: "pass",
+  });
+  Object.assign(sections.retrievalPlan.calibration, {
+    status: "approved", reference: "change-record-123", fileSearchP95LimitMs: 20,
+    totalP95LimitMs: 40, fileSearchOutcome: "pass", totalOutcome: "pass", outcome: "pass",
+  });
+  return sections;
+}
 
 function approvedArtifact() {
   const before = {
@@ -43,58 +96,7 @@ function approvedArtifact() {
     before,
     after,
     delta,
-    jurisdictionSelector: {
-      sampleCount: 20,
-      calibration: { status: "approved", reference: "change-record-123", outcome: "pass" },
-      profiles: [
-        { flagState: "off", profile: "desktop", resultRowCount: 1, samplesMs: Array(20).fill(10), p50Ms: 10, p95Ms: 10, flagOffBaselineDeltaMs: 0, approvedP95LimitMs: 20, outcome: "pass" },
-        { flagState: "on", profile: "desktop", resultRowCount: 2, samplesMs: Array(20).fill(11), p50Ms: 11, p95Ms: 11, flagOffBaselineDeltaMs: 1, approvedP95LimitMs: 20, outcome: "pass" },
-        { flagState: "on", profile: "mobile", resultRowCount: 2, samplesMs: Array(20).fill(12), p50Ms: 12, p95Ms: 12, flagOffBaselineDeltaMs: 2, approvedP95LimitMs: 20, outcome: "pass" },
-        { flagState: "on", profile: "throttled", resultRowCount: 2, samplesMs: Array(20).fill(13), p50Ms: 13, p95Ms: 13, flagOffBaselineDeltaMs: 3, approvedP95LimitMs: 20, outcome: "pass" },
-      ],
-    },
-    geographicPlacePicker: {
-      sampleCount: 20,
-      calibration: { status: "approved", reference: "change-record-123", autocompleteP95LimitMs: 20, detailsP95LimitMs: 20, autocompleteOutcome: "pass", detailsOutcome: "pass", outcome: "pass" },
-      branch: "geographic",
-      autocomplete: { samplesMs: Array(20).fill(10), p50Ms: 10, p95Ms: 10 },
-      details: { samplesMs: Array(20).fill(10), p50Ms: 10, p95Ms: 10 },
-      resultCount: 1,
-      requestCount: 40,
-      sameSessionCorrelation: true,
-      placesInvocationCount: 40,
-      organizationalPlacesInvocationCount: 0,
-    },
-    retrievalPlan: {
-      sampleCount: 20,
-      calibration: { status: "approved", reference: "change-record-123", plannerP95LimitMs: 20, totalP95LimitMs: 40, plannerOutcome: "pass", totalOutcome: "pass", outcome: "pass" },
-      planner: { samplesMs: Array(20).fill(10), p50Ms: 10, p95Ms: 10, plannedCount: 20, fallbackCount: 0 },
-      total: { samplesMs: Array(20).fill(30), p50Ms: 30, p95Ms: 30 },
-      scopeSizeMax: 3,
-      planSizeMax: 3,
-      concurrencyPeak: 2,
-      failureCount: 0,
-      providerCallCount: 60,
-      unexpectedRealProviderCallCount: 0,
-      coverageStates: { complete: 20, supplementary_incomplete: 0, selected_unavailable: 0 },
-      samples: Array.from({ length: 20 }, () => ({
-        plannerStatus: "planned",
-        plannerLatencyMs: 10,
-        authorizedScopeSize: 3,
-        planSize: 3,
-        peakConcurrency: 2,
-        libraries: [
-          { ordinal: 0, relation: "selected", status: "fulfilled", latencyMs: 10 },
-          { ordinal: 1, relation: "organizational_geography", status: "fulfilled", latencyMs: 10 },
-          { ordinal: 2, relation: "geographic_ancestor", status: "fulfilled", latencyMs: 10 },
-        ],
-        totalLatencyMs: 30,
-        failureCount: 0,
-        coverageState: "complete",
-        providerCallCount: 3,
-        unexpectedRealProviderCallCount: 0,
-      })),
-    },
+    ...approvedSections(),
   };
 }
 
@@ -191,12 +193,12 @@ describe("admin performance budgets", () => {
 
   it("rejects structural over-caps, provider leakage, and missing calibration", () => {
     const artifact = approvedArtifact();
-    artifact.jurisdictionSelector.calibration = { status: "pending", reference: "", outcome: "incomplete" };
+    Object.assign(artifact.jurisdictionSelector.calibration, { status: "pending", reference: "", outcome: "incomplete" });
     artifact.jurisdictionSelector.profiles[1].resultRowCount = 21;
     artifact.geographicPlacePicker.organizationalPlacesInvocationCount = 1;
     artifact.retrievalPlan.scopeSizeMax = 10;
     artifact.retrievalPlan.planSizeMax = 5;
-    artifact.retrievalPlan.concurrencyPeak = 4;
+    artifact.retrievalPlan.storeCountMax = 5;
     artifact.retrievalPlan.unexpectedRealProviderCallCount = 1;
     expect(checkBudgets(artifact)).toEqual(expect.arrayContaining([
       expect.stringMatching(/calibration.*incomplete/i),
@@ -204,7 +206,7 @@ describe("admin performance budgets", () => {
       expect.stringMatching(/Organizational.*Places/i),
       expect.stringMatching(/scope.*9/i),
       expect.stringMatching(/plan.*4/i),
-      expect.stringMatching(/concurrency.*3/i),
+      expect.stringMatching(/store.*4/i),
       expect.stringMatching(/unexpected provider/i),
     ]));
   });
@@ -247,15 +249,15 @@ describe("admin performance budgets", () => {
     artifact.geographicPlacePicker.requestCount = 39;
     artifact.geographicPlacePicker.placesInvocationCount = 39;
     artifact.retrievalPlan.scopeSizeMax = -1;
-    artifact.retrievalPlan.failureCount = 7;
-    artifact.retrievalPlan.coverageStates.complete = 19;
-    artifact.retrievalPlan.samples[0].libraries[0].latencyMs = Number.POSITIVE_INFINITY;
-    artifact.retrievalPlan.samples[0].libraries[0].status = "unknown";
+    artifact.retrievalPlan.fileSearchCallCount = 19;
+    artifact.retrievalPlan.partialCoverageCount = 1;
+    artifact.retrievalPlan.samples[0].fileSearchLatencyMs = Number.POSITIVE_INFINITY;
+    artifact.retrievalPlan.samples[0].jurisdictions[0].coverage = "unknown" as never;
     expect(checkBudgets(artifact)).toEqual(expect.arrayContaining([
       expect.stringMatching(/40 requests/i),
       expect.stringMatching(/40 provider invocations/i),
       expect.stringMatching(/non-negative/i),
-      expect.stringMatching(/library schema/i),
+      expect.stringMatching(/sample schema|structural bounds/i),
       expect.stringMatching(/aggregate/i),
     ]));
   });
@@ -275,19 +277,36 @@ describe("admin performance budgets", () => {
   it("rejects semantically inconsistent retrieval observations", () => {
     const artifact = approvedArtifact();
     const sample = artifact.retrievalPlan.samples[0];
-    sample.providerCallCount = 1;
-    sample.failureCount = 1;
+    sample.fileSearchCallCount = 0;
     sample.totalLatencyMs = 5;
-    sample.libraries[0].relation = "geographic_ancestor";
-    sample.libraries[1].status = "not_started";
-    sample.coverageState = "complete";
+    sample.jurisdictions[0].relation = "geographic_ancestor" as never;
     expect(checkBudgets(artifact)).toEqual(expect.arrayContaining([
-      expect.stringMatching(/provider call count.*library/i),
-      expect.stringMatching(/failure count.*rejected/i),
+      expect.stringMatching(/call count.*store|sample/i),
       expect.stringMatching(/total latency/i),
-      expect.stringMatching(/selected/i),
-      expect.stringMatching(/not_started.*zero latency/i),
-      expect.stringMatching(/coverage state/i),
+      expect.stringMatching(/selected|sample/i),
+    ]));
+  });
+
+  it("rejects retired or mixed retrieval and calibration fields", () => {
+    const mixed = approvedArtifact();
+    Object.assign(mixed.retrievalPlan.calibration, { plannerP95LimitMs: 20, plannerOutcome: "pass" });
+    Object.assign(mixed.retrievalPlan, { planner: mixed.retrievalPlan.fileSearch, providerCallCount: 20 });
+    Object.assign(mixed.retrievalPlan.samples[0], { plannerStatus: "planned", libraries: [] });
+    expect(checkBudgets(mixed)).toEqual(expect.arrayContaining([
+      "retrievalPlan calibration schema is invalid",
+      "retrievalPlan schema is invalid",
+      "retrievalPlan sample schema is invalid",
+    ]));
+  });
+
+  it("rejects retired or mixed fields nested in V2 retrieval distributions", () => {
+    const mixed = approvedArtifact();
+    Object.assign(mixed.retrievalPlan.fileSearch, { plannerStatus: "planned" });
+    Object.assign(mixed.retrievalPlan.total, { peakConcurrency: 2 });
+
+    expect(checkBudgets(mixed)).toEqual(expect.arrayContaining([
+      "retrievalPlan File Search distribution schema is invalid",
+      "retrievalPlan total distribution schema is invalid",
     ]));
   });
 
@@ -295,8 +314,8 @@ describe("admin performance budgets", () => {
     const artifact = approvedArtifact();
     artifact.calibratedOutcome = "fail";
     artifact.jurisdictionSelector.profiles[0].outcome = "fail";
-    artifact.geographicPlacePicker.calibration.autocompleteOutcome = "fail";
-    artifact.retrievalPlan.calibration.totalOutcome = "fail";
+    Object.assign(artifact.geographicPlacePicker.calibration, { autocompleteOutcome: "fail" });
+    Object.assign(artifact.retrievalPlan.calibration, { totalOutcome: "fail" });
     expect(checkBudgets(artifact)).toEqual(expect.arrayContaining([
       expect.stringMatching(/calibrated outcome.*pass/i),
       expect.stringMatching(/selector.*outcome/i),

@@ -4,7 +4,6 @@ import { DocumentUpload } from "./document-upload";
 
 const generateUploadUrl = vi.fn();
 const createDocumentVersion = vi.fn();
-const stageDocumentVersion = vi.fn();
 
 vi.mock("../../../convex/_generated/api", () => ({
   api: {
@@ -12,7 +11,6 @@ vi.mock("../../../convex/_generated/api", () => ({
       documents: {
         generateUploadUrl: "generate-upload-url",
         createDocumentVersion: "create-document-version",
-        stageDocumentVersion: "stage-document-version",
       },
     },
   },
@@ -20,8 +18,7 @@ vi.mock("../../../convex/_generated/api", () => ({
 vi.mock("convex/react", () => ({
   useMutation: (reference: string) =>
     reference === "generate-upload-url" ? generateUploadUrl
-      : reference === "create-document-version" ? createDocumentVersion
-      : stageDocumentVersion,
+      : createDocumentVersion,
 }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
@@ -30,8 +27,6 @@ vi.mock("next/navigation", () => ({
 beforeEach(() => {
   generateUploadUrl.mockReset();
   createDocumentVersion.mockReset();
-  stageDocumentVersion.mockReset();
-  stageDocumentVersion.mockResolvedValue({ jobId: "job_1", duplicate: false });
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -87,7 +82,9 @@ describe("document original upload", () => {
     });
     fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Unsupported file type");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Choose a supported PDF, Office, text, image, CSV, TSV, or JSON file.",
+    );
     expect(generateUploadUrl).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -131,45 +128,19 @@ describe("document original upload", () => {
       sourceUrl: "https://laws.example.gov/files/act.pdf",
       effectiveAt: "2012-10-16",
     });
-    expect(stageDocumentVersion).toHaveBeenCalledWith({
-      versionId: "version_1",
-      reason: "Stage newly uploaded governed original",
-      idempotencyKey: "stage-version_1",
-    });
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "Draft version recorded",
+      "Draft version recorded. Submit it for review when the metadata is ready.",
     );
   });
 
-  it("explains that the draft was recorded when only staging fails", async () => {
-    generateUploadUrl.mockResolvedValue("https://upload.example/token-secret");
-    createDocumentVersion.mockResolvedValue("version_1");
-    stageDocumentVersion.mockRejectedValue(new Error("GROUNDX_STAGING_NOT_CONFIGURED"));
-    vi.mocked(fetch).mockResolvedValue(
-      new Response(JSON.stringify({ storageId: "storage_1" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+  it("uses the approved bounded-size guidance before requesting an upload URL", async () => {
     renderUpload();
-    const file = new File(["abc"], "law.pdf", { type: "application/pdf" });
-    Object.defineProperty(file, "arrayBuffer", {
-      value: async () => new TextEncoder().encode("abc").buffer,
-    });
-    fireEvent.change(screen.getByLabelText("Original legal file"), {
-      target: { files: [file] },
-    });
+    const file = new File([new Uint8Array(101)], "law.pdf", { type: "application/pdf" });
+    fireEvent.change(screen.getByLabelText("Original legal file"), { target: { files: [file] } });
     fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Draft version recorded, but GroundX staging could not be started/i,
-    );
-    expect(createDocumentVersion).toHaveBeenCalledTimes(1);
-    expect(stageDocumentVersion).toHaveBeenCalledWith({
-      versionId: "version_1",
-      reason: "Stage newly uploaded governed original",
-      idempotencyKey: "stage-version_1",
-    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Choose a file smaller than 100 B.");
+    expect(generateUploadUrl).not.toHaveBeenCalled();
   });
 
   it("announces a storage failure without submitting authoritative metadata", async () => {

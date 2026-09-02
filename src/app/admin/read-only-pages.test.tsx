@@ -22,6 +22,9 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/components/admin/user-actions", () => ({
   UserActions: () => <section aria-label="User actions" />,
 }));
+vi.mock("@/components/admin/job-actions", () => ({
+  JobActions: () => <span>No safe transition</span>,
+}));
 
 import ConversationsPage from "./conversations/page";
 import OperationsPage from "./operations/page";
@@ -280,7 +283,6 @@ describe("read-only admin pages", () => {
       { paginationOpts: { numItems: 20, cursor: null } },
     );
     expect(screen.getByText("Configuration required")).toBeVisible();
-    expect(screen.queryByText("groundx-secret-value")).toBeNull();
     expect(screen.queryByText("polar-secret-value")).toBeNull();
   });
 });

@@ -25,7 +25,7 @@ const STATUS_LABELS: Record<CatalogStatusValue, string> = {
   staging_processing: "Staging processing",
   ready_for_review: "Ready for review",
   approved: "Approved",
-  publishing: "Publishing",
+  publishing: "Indexing",
   published: "Published",
   rejected: "Rejected",
   failed: "Failed",
@@ -56,8 +56,12 @@ export type VersionHistoryItem = {
   byteSize: number;
   sha256: string;
   status: CatalogStatusValue;
+  failureSummary?: string;
   createdAt: number;
 };
+
+const INDEX_REVIEW_MESSAGE = "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.";
+const INDEXING_MESSAGE = "Gemini is indexing this document. You can leave this page; the status updates automatically.";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -94,7 +98,17 @@ export function VersionHistory({ versions }: { versions: readonly VersionHistory
                   {version.mimeType} / {formatBytes(version.byteSize)} / SHA-256 {version.sha256.slice(0, 12)}...
                 </span>
               </td>
-              <td className="px-4 py-4 align-top"><CatalogStatus status={version.status} /></td>
+              <td className="px-4 py-4 align-top">
+                <CatalogStatus status={version.status} />
+                {version.status === "publishing" && version.failureSummary === INDEX_REVIEW_MESSAGE ? (
+                  <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[oklch(40%_0.11_45)]">Indexing needs review</p>
+                ) : null}
+                {version.failureSummary ? (
+                  <p className="mt-2 max-w-[40ch] text-sm leading-5 text-[oklch(38%_0.055_35)]">{version.failureSummary}</p>
+                ) : version.status === "publishing" ? (
+                  <p className="mt-2 max-w-[40ch] text-sm leading-5 text-[oklch(40%_0.035_252)]">{INDEXING_MESSAGE}</p>
+                ) : null}
+              </td>
               <td className="px-4 py-4 align-top text-sm">
                 <time dateTime={new Date(version.createdAt).toISOString()}>
                   {new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(version.createdAt)}

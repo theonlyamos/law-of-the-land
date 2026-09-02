@@ -8,6 +8,7 @@ export const ADMIN_STEP_UP_ACTIONS = new Set([
   "document_publish",
   "document_unpublish",
   "document_rollback",
+  "jurisdiction_store_delete",
   "admin_panel_set",
   "unified_jurisdictions_set",
 ] as const);

@@ -12,7 +12,7 @@ const runRetentionBatch = makeFunctionReference<"mutation">(
 );
 
 crons.interval(
-  "reconcile stale GroundX jobs",
+  "reconcile stale provider jobs",
   { minutes: 15 },
   reconcileStaleJobs,
   {},

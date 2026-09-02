@@ -1,7 +1,35 @@
 import { assertFiniteMetrics } from "./admin-performance-artifact.mjs";
-import { decodeRetrievalObservationV1 } from "../shared/e2e-jurisdiction-provider-contract.ts";
+import { decodeRetrievalObservationV2 } from "../shared/e2e-jurisdiction-provider-contract.ts";
 
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
+const CALIBRATION_KEYS = [
+  "autocompleteP95LimitMs",
+  "detailsP95LimitMs",
+  "fileSearchP95LimitMs",
+  "reference",
+  "selectorP95LimitsMs",
+  "totalP95LimitMs",
+];
+
+export function validatePerformanceCalibration(value) {
+  const keys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : [];
+  const numbers = value && typeof value === "object"
+    ? [...(Array.isArray(value.selectorP95LimitsMs) ? value.selectorP95LimitsMs : []),
+      value.autocompleteP95LimitMs, value.detailsP95LimitMs,
+      value.fileSearchP95LimitMs, value.totalP95LimitMs]
+    : [];
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || keys.join("|") !== [...CALIBRATION_KEYS].sort().join("|")
+    || typeof value.reference !== "string" || !value.reference.trim() || value.reference.length > 200
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(value.reference)
+    || !Array.isArray(value.selectorP95LimitsMs) || value.selectorP95LimitsMs.length !== 4
+    || numbers.some((entry) => !Number.isFinite(entry) || entry < 0)) {
+    throw new Error("Approved performance calibration file is invalid.");
+  }
+  return value;
+}
 
 export function percentile95(values) {
   if (
@@ -49,9 +77,9 @@ export async function collectRetrievalObservation({ url, cookie, observationSecr
   if (!response.ok) {
     throw new Error(`Authorized collection failed with status ${response.status}; no sample was recorded.`);
   }
-  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v1");
+  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v2");
   if (!encoded) throw new Error("Authorized collection response omitted its retrieval observation.");
-  return decodeRetrievalObservationV1(encoded);
+  return decodeRetrievalObservationV2(encoded);
 }
 
 export async function collectPacedRetrievalObservations({
@@ -94,7 +122,7 @@ export function buildJurisdictionPerformanceSections(input) {
   if (!Array.isArray(observations) || observations.length !== 20) {
     throw new TypeError("Retrieval planning requires exactly 20 decoded observations.");
   }
-  const plannerSamples = observations.map((entry) => entry.planner.latencyMs);
+  const fileSearchSamples = observations.map((entry) => entry.fileSearchLatencyMs);
   const totalSamples = observations.map((entry) => entry.totalLatencyMs);
   return {
     jurisdictionSelector: {
@@ -117,34 +145,27 @@ export function buildJurisdictionPerformanceSections(input) {
     retrievalPlan: {
       sampleCount: 20,
       calibration: { status: "pending", outcome: "incomplete" },
-      planner: {
-        ...distribution(plannerSamples, "Retrieval planner"),
-        plannedCount: observations.filter((entry) => entry.planner.status === "planned").length,
-        fallbackCount: observations.filter((entry) => entry.planner.status === "fallback").length,
-      },
+      fileSearch: distribution(fileSearchSamples, "Gemini File Search"),
       total: distribution(totalSamples, "Retrieval total"),
       scopeSizeMax: Math.max(...observations.map((entry) => entry.authorizedScopeSize)),
       planSizeMax: Math.max(...observations.map((entry) => entry.planSize)),
-      concurrencyPeak: Math.max(...observations.map((entry) => entry.peakConcurrency)),
-      failureCount: observations.reduce((total, entry) => total + entry.failureCount, 0),
-      providerCallCount: observations.reduce((total, entry) => total + entry.providerCallCount, 0),
+      fileSearchCallCount: observations.reduce((total, entry) => total + entry.fileSearchCallCount, 0),
+      storeCountMax: Math.max(...observations.map((entry) => entry.fileSearchStoreCount)),
+      evidenceBytes: observations.reduce((total, entry) => total + entry.evidenceBytes, 0),
+      citationCount: observations.reduce((total, entry) => total + entry.citationCount, 0),
+      partialCoverageCount: observations.filter((entry) => entry.partialCoverage).length,
       unexpectedRealProviderCallCount: observations.reduce((total, entry) => total + entry.unexpectedRealProviderCallCount, 0),
-      coverageStates: {
-        complete: observations.filter((entry) => entry.coverageState === "complete").length,
-        supplementary_incomplete: observations.filter((entry) => entry.coverageState === "supplementary_incomplete").length,
-        selected_unavailable: observations.filter((entry) => entry.coverageState === "selected_unavailable").length,
-      },
       samples: observations.map((entry) => ({
-        plannerStatus: entry.planner.status,
-        plannerLatencyMs: entry.planner.latencyMs,
         authorizedScopeSize: entry.authorizedScopeSize,
         planSize: entry.planSize,
-        peakConcurrency: entry.peakConcurrency,
-        libraries: entry.libraries,
+        fileSearchCallCount: entry.fileSearchCallCount,
+        fileSearchStoreCount: entry.fileSearchStoreCount,
+        fileSearchLatencyMs: entry.fileSearchLatencyMs,
+        evidenceBytes: entry.evidenceBytes,
+        citationCount: entry.citationCount,
+        partialCoverage: entry.partialCoverage,
+        jurisdictions: entry.jurisdictions,
         totalLatencyMs: entry.totalLatencyMs,
-        failureCount: entry.failureCount,
-        coverageState: entry.coverageState,
-        providerCallCount: entry.providerCallCount,
         unexpectedRealProviderCallCount: entry.unexpectedRealProviderCallCount,
       })),
     },

@@ -88,7 +88,6 @@ async function insertGeographic(
     level: GeographicLevel;
     parentJurisdictionId?: string;
     status?: "draft" | "enabled" | "archived";
-    productionBucketId?: string;
   },
 ) {
   return await t.run(async (ctx) => {
@@ -101,8 +100,6 @@ async function insertGeographic(
       providerSyncState: "synced",
       kind: "geographic",
       visibility: "public",
-      stagingBucketId: "SECRET_STAGING_BUCKET",
-      productionBucketId: input.productionBucketId,
       createdBy: "SECRET_ACTOR",
       updatedBy: "SECRET_ACTOR",
       createdAt: now,
@@ -148,8 +145,6 @@ async function insertOrganization(
       kind: "organizational",
       visibility: input.visibility,
       organizationId,
-      stagingBucketId: "SECRET_STAGING_BUCKET",
-      productionBucketId: "7100",
       createdBy: "SECRET_ACTOR",
       updatedBy: "SECRET_ACTOR",
       createdAt: now,
@@ -189,7 +184,6 @@ describe("authorized research scope", () => {
       name: "Accra",
       level: "town",
       parentJurisdictionId: greaterAccra.jurisdictionId,
-      productionBucketId: " 11833 ",
     });
 
     const scope = await t.query(resolveResearchScope, {
@@ -206,7 +200,7 @@ describe("authorized research scope", () => {
       ],
     });
     expect(JSON.stringify(scope)).not.toMatch(
-      /11833|SECRET_|bucket|provider|visibility|alias|organization|actor/i,
+      /SECRET_|provider|visibility|alias|organization|actor/i,
     );
   });
 
@@ -591,7 +585,6 @@ describe("authorized research scope", () => {
         name,
         level: "town",
         parentJurisdictionId: country.jurisdictionId,
-        productionBucketId: `SECRET_BUCKET_${name}`,
       });
       await addAlias(t, place.jurisdictionId, name.toLowerCase());
       places.push(place);
@@ -611,7 +604,7 @@ describe("authorized research scope", () => {
       places[0].jurisdictionId,
       places[2].jurisdictionId,
     ]);
-    expect(JSON.stringify(scope)).not.toMatch(/SECRET_BUCKET|production|staging|provider|visibility/i);
+    expect(JSON.stringify(scope)).not.toMatch(/provider|visibility/i);
   });
 
   it("caps three independent hint hierarchies at eight geographic nodes", async () => {

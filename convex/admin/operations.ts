@@ -13,7 +13,7 @@ const integrationHealthRowValidator = v.object({
   id: v.string(),
   label: v.string(),
   configured: v.boolean(),
-  status: v.union(v.literal("ready"), v.literal("configuration_required")),
+  status: v.union(v.literal("configured"), v.literal("configuration_required")),
 });
 
 const INTEGRATIONS = [
@@ -24,8 +24,8 @@ const INTEGRATIONS = [
   },
   {
     id: "legal-search",
-    label: "Legal search",
-    environmentVariables: ["GROUNDX_API_KEY"],
+    label: "Gemini legal search and indexing",
+    environmentVariables: ["GOOGLE_AI_API_KEY"],
   },
   {
     id: "answer-generation",
@@ -89,7 +89,7 @@ export const listIntegrationHealth = query({
         label: integration.label,
         configured,
         status: configured
-          ? "ready" as const
+          ? "configured" as const
           : "configuration_required" as const,
       };
     });

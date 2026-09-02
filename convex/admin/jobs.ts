@@ -1,11 +1,22 @@
 import { ConvexError, v } from "convex/values";
 import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import type { Doc, Id } from "../_generated/dataModel";
-import { internalMutation, internalQuery, mutation, query, type MutationCtx } from "../_generated/server";
+import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
+import {
+  isGeminiDocumentName,
+  isGeminiFileSearchStoreName,
+  parseGeminiUploadOperationName,
+} from "../lib/geminiFileSearchNames";
 import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
-import { applyPublicationJobOutcome } from "./publicationState";
+import {
+  applyGeminiDeleteCompletion,
+  applyGeminiIndexCompletion,
+  applyPublicationJobFailure,
+  resolveGeminiPublicationWorkflow,
+  transferPublicationLock,
+} from "./publicationState";
 
 const MAX_PAYLOAD_BYTES = 8_192;
 const MAX_PAYLOAD_DEPTH = 5;
@@ -13,40 +24,21 @@ const MAX_PAYLOAD_ENTRIES = 100;
 const MAX_PAYLOAD_ARRAY = 100;
 const MAX_PAYLOAD_STRING = 10_000;
 const MAX_RECONCILE_BATCH = 25;
-const POLL_AFTER_MS = 15 * 60_000;
+const JOB_LEASE_MS = 15 * 60_000;
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 20 * 60_000] as const;
+const GEMINI_POLL_DELAYS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const;
+const GEMINI_INDEX_REVIEW_AFTER_MS = 30 * 60_000;
+const GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-2" as const;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_TARGET_TYPE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SENSITIVE_KEY = /(?:token|secret|password|passwd|credential|auth(?:entication|orization)?|bearer|cookie|api.?key|signature|private.?key)/i;
 
 const jobTypeValidator = v.union(
-  v.literal("create_bucket"),
-  v.literal("ingest_remote"),
-  v.literal("copy_documents"),
-  v.literal("delete_documents"),
-  v.literal("poll_process"),
+  v.literal("gemini_create_store"),
+  v.literal("gemini_index_document"),
+  v.literal("gemini_delete_document"),
+  v.literal("gemini_delete_store"),
 );
-const providerStatusValidator = v.union(
-  v.literal("queued"),
-  v.literal("training"),
-  v.literal("processing"),
-  v.literal("complete"),
-  v.literal("error"),
-  v.literal("cancelled"),
-);
-const documentTypeValidator = v.union(
-  v.literal("txt"), v.literal("docx"), v.literal("pptx"),
-  v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
-  v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
-  v.literal("json"),
-);
-const documentEvidenceValidator = v.object({
-  documentId: v.string(),
-  bucketId: v.optional(v.number()),
-  status: providerStatusValidator,
-  fileType: v.optional(documentTypeValidator),
-  fileSize: v.optional(v.number()),
-});
 const providerErrorKindValidator = v.union(
   v.literal("invalid_request"),
   v.literal("validation"),
@@ -69,7 +61,7 @@ const actorRoleValidator = v.union(
 const jobStatusValidator = v.union(
   v.literal("queued"),
   v.literal("running"),
-  v.literal("waiting_callback"),
+  v.literal("waiting_provider"),
   v.literal("succeeded"),
   v.literal("failed"),
   v.literal("cancelled"),
@@ -87,8 +79,9 @@ const jobDocumentValidator = v.object({
   idempotencyKey: v.string(),
   requestFingerprint: v.string(),
   correlationId: v.string(),
-  callbackTokenHash: v.string(),
-  processId: v.optional(v.string()),
+  providerOperationName: v.optional(v.string()),
+  providerPollCount: v.optional(v.number()),
+  recoveryKind: v.optional(v.union(v.literal("poll_operation"), v.literal("delete_document"))),
   leaseToken: v.optional(v.string()),
   leaseExpiresAt: v.optional(v.number()),
   status: jobStatusValidator,
@@ -101,11 +94,8 @@ const jobDocumentValidator = v.object({
 });
 const enqueueResultValidator = v.object({
   jobId: v.id("integrationJobs"),
-  callbackToken: v.union(v.string(), v.null()),
-  callbackTokenHash: v.string(),
   duplicate: v.boolean(),
 });
-const completionResultValidator = v.object({ accepted: v.boolean(), duplicate: v.boolean() });
 const failureResultValidator = v.object({
   status: v.union(v.literal("queued"), v.literal("failed"), v.literal("manual_review")),
   nextAttemptAt: v.union(v.number(), v.null()),
@@ -119,15 +109,19 @@ const claimResultValidator = v.union(
   }),
 );
 
-type JobType = "create_bucket" | "ingest_remote" | "copy_documents" | "delete_documents" | "poll_process";
-type ProviderStatus = "queued" | "training" | "processing" | "complete" | "error" | "cancelled";
+type GeminiJobType = "gemini_create_store" | "gemini_index_document" | "gemini_delete_document" | "gemini_delete_store";
+type JobType = GeminiJobType;
 type ProviderErrorKind = "invalid_request" | "validation" | "authentication" | "not_found" | "rate_limit" | "timeout" | "network" | "invalid_response" | "provider";
 type SafeJson = null | boolean | number | string | SafeJson[] | { [key: string]: SafeJson };
 
-const runGroundxJobRef = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
+const runGeminiJobRef = makeFunctionReference<"action">("admin/geminiActions:runGeminiJob");
 const reconcileStaleJobsRef = makeFunctionReference<"mutation">(
   "admin/jobs:reconcileStaleJobs",
 );
+
+function jobRunner(_type: JobType) {
+  return runGeminiJobRef;
+}
 
 function assertIdentifier(value: string, error: string): string {
   if (!SAFE_IDENTIFIER.test(value)) throw new ConvexError(error);
@@ -171,7 +165,7 @@ function canonicalPayload(payload: unknown): string {
   return encoded;
 }
 
-export async function hashCallbackToken(token: string): Promise<string> {
+export async function hashJobValue(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -225,7 +219,7 @@ export async function persistJob(
       throw new ConvexError("INTEGRATION_IDEMPOTENCY_INVALID");
     }
     const payload = canonicalPayload(args.payload);
-    const fingerprint = await hashCallbackToken(JSON.stringify({ type: args.type, targetType, targetId, payload }));
+    const fingerprint = await hashJobValue(JSON.stringify({ type: args.type, targetType, targetId, payload }));
     const existing = await ctx.db
       .query("integrationJobs")
       .withIndex("by_actorId_and_idempotencyKey", (q) => q.eq("actorId", actor.id).eq("idempotencyKey", idempotencyKey))
@@ -235,18 +229,16 @@ export async function persistJob(
       if (!safeEqual(existing[0].requestFingerprint, fingerprint)) {
         throw new ConvexError("INTEGRATION_IDEMPOTENCY_CONFLICT");
       }
-      return { jobId: existing[0]._id, callbackToken: null, callbackTokenHash: existing[0].callbackTokenHash, duplicate: true };
+      return {
+        jobId: existing[0]._id,
+        duplicate: true,
+      };
     }
 
-    // The live callback token is minted only after an action claims the job.
-    // This sentinel hash is never a usable callback credential.
-    const callbackTokenHash = await hashCallbackToken(
-      `unarmed_${crypto.randomUUID()}${crypto.randomUUID()}`,
-    );
     const now = Date.now();
     const correlationId = `job_${crypto.randomUUID().replaceAll("-", "")}`;
     const jobId = await ctx.db.insert("integrationJobs", {
-      type: args.type as JobType,
+      type: args.type,
       targetType,
       targetId,
       payload,
@@ -255,7 +247,6 @@ export async function persistJob(
       idempotencyKey,
       requestFingerprint: fingerprint,
       correlationId,
-      callbackTokenHash,
       status: "queued",
       attemptCount: 0,
       nextAttemptAt: now,
@@ -265,8 +256,11 @@ export async function persistJob(
     const job = await ctx.db.get(jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     await auditJob(ctx, job, "success", "integration.job_queued");
-    await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId });
-    return { jobId, callbackToken: null, callbackTokenHash, duplicate: false };
+    await ctx.scheduler.runAfter(0, jobRunner(args.type), { jobId });
+    return {
+      jobId,
+      duplicate: false,
+    };
 }
 
 const enqueueArgs = {
@@ -288,7 +282,7 @@ export const enqueueJob = internalMutation({
 export const enqueueSystemJob = internalMutation({
   args: {
     ...enqueueArgs,
-    systemActor: v.literal("groundx_orchestrator"),
+    systemActor: v.literal("gemini_orchestrator"),
   },
   returns: enqueueResultValidator,
   handler: async (ctx, args) => {
@@ -300,64 +294,80 @@ export const enqueueSystemJob = internalMutation({
   },
 });
 
-export const provisionJurisdictionStagingBucket = mutation({
+const geminiStoreJobResultValidator = v.object({
+  jobId: v.id("integrationJobs"),
+  duplicate: v.boolean(),
+});
+
+function geminiDisplayName(slug: string): string {
+  const environment = process.env.ADMIN_ENVIRONMENT?.trim().toLowerCase();
+  if (!environment || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(environment)) {
+    throw new ConvexError("ADMIN_ENVIRONMENT_INVALID");
+  }
+  const displayName = `law-of-the-land-${environment}-${slug}`;
+  if (displayName.length > 200) throw new ConvexError("GEMINI_STORE_DISPLAY_NAME_INVALID");
+  return displayName;
+}
+
+async function activeGeminiStoreJob(
+  ctx: MutationCtx,
+  jurisdictionId: Id<"jurisdictions">,
+  type: "gemini_create_store" | "gemini_delete_store",
+) {
+  const jobs = await Promise.all(([
+    "queued", "running", "waiting_provider", "manual_review",
+  ] as const).map(async (status) => await ctx.db.query("integrationJobs")
+    .withIndex("by_targetType_and_targetId_and_type_and_status", (q) => q
+      .eq("targetType", "jurisdictionGeminiStore")
+      .eq("targetId", jurisdictionId)
+      .eq("type", type)
+      .eq("status", status))
+    .take(1)));
+  return jobs.flat()[0];
+}
+
+export const provisionJurisdictionGeminiStore = mutation({
   args: {
     jurisdictionId: v.id("jurisdictions"),
     reason: v.string(),
     idempotencyKey: v.string(),
   },
-  returns: enqueueResultValidator,
+  returns: geminiStoreJobResultValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
     const reason = validateAuditReason(args.reason);
     const jurisdiction = await ctx.db.get(args.jurisdictionId);
     if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    if (jurisdiction.status !== "enabled") throw new ConvexError("JURISDICTION_NOT_ENABLED");
-    if (!/^[1-9][0-9]*$/.test(jurisdiction.productionBucketId ?? "")) {
-      throw new ConvexError("GROUNDX_PRODUCTION_NOT_CONFIGURED");
+    if (jurisdiction.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
+    if (jurisdiction.geminiFileSearchStoreName !== undefined) {
+      throw new ConvexError("GEMINI_STORE_ALREADY_CONFIGURED");
     }
-    if (jurisdiction.stagingBucketId !== undefined) {
-      throw new ConvexError("GROUNDX_STAGING_ALREADY_CONFIGURED");
-    }
-
-    const existing = await ctx.db
-      .query("integrationJobs")
-      .withIndex("by_targetType_and_targetId", (q) =>
-        q.eq("targetType", "jurisdictionStagingBucket").eq("targetId", jurisdiction._id),
-      )
-      .order("desc")
-      .take(20);
-    const active = existing.find(
-      (job) =>
-        job.type === "create_bucket" &&
-        ["queued", "running", "waiting_callback", "manual_review"].includes(job.status),
-    );
+    const active = await activeGeminiStoreJob(ctx, jurisdiction._id, "gemini_create_store");
     if (active) {
-      return {
-        jobId: active._id,
-        callbackToken: null,
-        callbackTokenHash: active.callbackTokenHash,
-        duplicate: true,
-      };
+      return { jobId: active._id, duplicate: true };
     }
-
-    const queued = await persistJob(
-      ctx,
-      {
-        type: "create_bucket",
-        targetType: "jurisdictionStagingBucket",
-        targetId: jurisdiction._id,
-        payload: { name: `law-of-the-land-${jurisdiction.slug}-staging` },
-        idempotencyKey: args.idempotencyKey,
+    const queued = await persistJob(ctx, {
+      type: "gemini_create_store",
+      targetType: "jurisdictionGeminiStore",
+      targetId: jurisdiction._id,
+      payload: {
+        displayName: geminiDisplayName(jurisdiction.slug),
+        embeddingModel: GEMINI_EMBEDDING_MODEL,
       },
-      { id: actor.userId, roles: actor.roles },
-    );
+      idempotencyKey: args.idempotencyKey,
+    }, { id: actor.userId, roles: actor.roles });
     const job = await ctx.db.get(queued.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    await ctx.db.patch(jurisdiction._id, {
+      geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+      providerSyncState: "pending",
+      updatedBy: actor.userId,
+      updatedAt: Date.now(),
+    });
     await writeAudit(ctx, {
       actorId: actor.userId,
       actorRoles: actor.roles,
-      action: "jurisdiction.staging_bucket.provision_queued",
+      action: "jurisdiction.gemini_store.provision_queued",
       targetType: "jurisdiction",
       targetId: jurisdiction._id,
       reason,
@@ -365,6 +375,438 @@ export const provisionJurisdictionStagingBucket = mutation({
       outcome: "success",
     });
     return queued;
+  },
+});
+
+async function consumeJurisdictionStoreStepUp(
+  ctx: MutationCtx,
+  actorId: string,
+  sessionId: string,
+  jurisdictionId: Id<"jurisdictions">,
+  idempotencyKey: string,
+) {
+  const proofs = await ctx.db
+    .query("adminStepUpProofs")
+    .withIndex("by_actorId_sessionId_action_targetId_idempotencyKey", (q) => q
+      .eq("actorId", actorId)
+      .eq("sessionId", sessionId)
+      .eq("action", "jurisdiction_store_delete")
+      .eq("targetId", jurisdictionId)
+      .eq("idempotencyKey", idempotencyKey))
+    .take(2);
+  if (
+    proofs.length !== 1 ||
+    proofs[0].consumedAt !== undefined ||
+    proofs[0].expiresAt <= Date.now() ||
+    Date.now() - proofs[0].issuedAt > 5 * 60_000
+  ) {
+    throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
+  }
+  await ctx.db.patch(proofs[0]._id, { consumedAt: Date.now() });
+}
+
+export const deleteJurisdictionGeminiStore = mutation({
+  args: {
+    jurisdictionId: v.id("jurisdictions"),
+    reason: v.string(),
+    confirmation: v.string(),
+    idempotencyKey: v.string(),
+  },
+  returns: geminiStoreJobResultValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity || identity.subject !== actor.userId || typeof identity.sessionId !== "string") {
+      throw new ConvexError("ADMIN_AUTH_REQUIRED");
+    }
+    const reason = validateAuditReason(args.reason);
+    const jurisdiction = await ctx.db.get(args.jurisdictionId);
+    if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
+    if (jurisdiction.status === "enabled") throw new ConvexError("JURISDICTION_MUST_BE_DISABLED");
+    if (args.confirmation !== `DELETE GEMINI STORE ${jurisdiction.slug}`) {
+      throw new ConvexError("ADMIN_CONFIRMATION_MISMATCH");
+    }
+    const storeName = jurisdiction.geminiFileSearchStoreName;
+    if (!storeName || !isGeminiFileSearchStoreName(storeName)) {
+      throw new ConvexError("GEMINI_STORE_NOT_CONFIGURED");
+    }
+    const activeResource = await ctx.db
+      .query("legalResources")
+      .withIndex("by_jurisdictionId_and_status", (q) =>
+        q.eq("jurisdictionId", jurisdiction._id).eq("status", "active"))
+      .first();
+    if (activeResource) throw new ConvexError("JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE");
+    const references = await ctx.db
+      .query("jurisdictions")
+      .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
+      .take(2);
+    if (references.some((row) => row._id !== jurisdiction._id) || references.length !== 1) {
+      throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
+    }
+    const active = await activeGeminiStoreJob(ctx, jurisdiction._id, "gemini_delete_store");
+    if (active) return { jobId: active._id, duplicate: true };
+    await consumeJurisdictionStoreStepUp(
+      ctx,
+      actor.userId,
+      identity.sessionId,
+      jurisdiction._id,
+      args.idempotencyKey,
+    );
+    const queued = await persistJob(ctx, {
+      type: "gemini_delete_store",
+      targetType: "jurisdictionGeminiStore",
+      targetId: jurisdiction._id,
+      payload: { storeName, reasonDigest: await hashJobValue(reason) },
+      idempotencyKey: args.idempotencyKey,
+    }, { id: actor.userId, roles: actor.roles });
+    const job = await ctx.db.get(queued.jobId);
+    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    await ctx.db.patch(jurisdiction._id, {
+      providerSyncState: "drifted",
+      updatedBy: actor.userId,
+      updatedAt: Date.now(),
+    });
+    await writeAudit(ctx, {
+      actorId: actor.userId,
+      actorRoles: actor.roles,
+      action: "jurisdiction.gemini_store.delete_queued",
+      targetType: "jurisdiction",
+      targetId: jurisdiction._id,
+      reason,
+      correlationId: job.correlationId,
+      outcome: "success",
+    });
+    return queued;
+  },
+});
+
+const geminiTargetValidator = v.union(
+  v.object({
+    kind: v.literal("create_store"),
+    displayName: v.string(),
+    embeddingModel: v.literal("models/gemini-embedding-2"),
+  }),
+  v.object({
+    kind: v.literal("index_document"),
+    signedUrl: v.optional(v.string()),
+    byteSize: v.number(),
+    storeName: v.string(),
+    mimeType: v.string(),
+    displayName: v.string(),
+    customMetadata: v.array(v.object({ key: v.string(), stringValue: v.string() })),
+  }),
+  v.object({ kind: v.literal("delete_document"), documentName: v.string() }),
+  v.object({ kind: v.literal("delete_store"), storeName: v.string() }),
+);
+
+function storedSha256Hex(value: string): string {
+  if (/^[a-f0-9]{64}$/i.test(value)) return value.toLowerCase();
+  try {
+    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    if (bytes.length !== 32) throw new Error("invalid digest length");
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    throw new ConvexError("DOCUMENT_STORAGE_CHECKSUM_INVALID");
+  }
+}
+
+async function assertNoActiveGeminiStoreTeardown(
+  ctx: MutationCtx | QueryCtx,
+  jurisdictionId: Id<"jurisdictions">,
+) {
+  const jobs = await Promise.all(([
+    "queued", "running", "waiting_provider", "manual_review",
+  ] as const).map(async (status) => await ctx.db.query("integrationJobs")
+    .withIndex("by_targetType_and_targetId_and_type_and_status", (q) => q
+      .eq("targetType", "jurisdictionGeminiStore")
+      .eq("targetId", jurisdictionId)
+      .eq("type", "gemini_delete_store")
+      .eq("status", status))
+    .take(1)));
+  if (jobs.some((rows) => rows.length > 0)) {
+    throw new ConvexError("GEMINI_STORE_TEARDOWN_IN_PROGRESS");
+  }
+}
+
+export const getGeminiJobTarget = internalQuery({
+  args: { jobId: v.id("integrationJobs"), leaseToken: v.string() },
+  returns: v.union(v.null(), geminiTargetValidator),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const job = await ctx.db.get(args.jobId);
+    if (
+      !job ||
+      job.status !== "running" ||
+      job.leaseToken === undefined ||
+      job.leaseExpiresAt === undefined ||
+      job.leaseExpiresAt <= now ||
+      !safeEqual(job.leaseToken, args.leaseToken)
+    ) return null;
+    if (job.type === "gemini_create_store") {
+      let payload: { displayName?: unknown; embeddingModel?: unknown };
+      try { payload = JSON.parse(job.payload) as typeof payload; }
+      catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
+      if (
+        typeof payload.displayName !== "string" ||
+        payload.embeddingModel !== GEMINI_EMBEDDING_MODEL
+      ) throw new ConvexError("INTEGRATION_PAYLOAD_INVALID");
+      return { kind: "create_store" as const, displayName: payload.displayName, embeddingModel: GEMINI_EMBEDDING_MODEL };
+    }
+    if (job.type === "gemini_delete_store") {
+      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      let payload: { storeName?: unknown };
+      try { payload = JSON.parse(job.payload) as typeof payload; } catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
+      const boundStore = typeof payload.storeName === "string" ? payload.storeName : undefined;
+      const activeResource = jurisdiction && await ctx.db.query("legalResources")
+        .withIndex("by_jurisdictionId_and_status", (q) => q.eq("jurisdictionId", jurisdiction._id).eq("status", "active"))
+        .first();
+      const references = boundStore && isGeminiFileSearchStoreName(boundStore)
+        ? await ctx.db.query("jurisdictions").withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", boundStore)).take(2)
+        : [];
+      if (!jurisdiction || jurisdiction.status === "enabled" || jurisdiction.providerSyncState !== "drifted" || activeResource || !boundStore || jurisdiction.geminiFileSearchStoreName !== boundStore || references.length !== 1 || references[0]._id !== jurisdiction._id) throw new ConvexError("GEMINI_STORE_DELETE_PRECONDITION_FAILED");
+      return { kind: "delete_store" as const, storeName: boundStore };
+    }
+    const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+    if (workflow.kind === "delete") return { kind: "delete_document" as const, documentName: workflow.payload.documentName };
+    const metadata = await ctx.db.system.get("_storage", workflow.version.originalStorageId);
+    if (!metadata || metadata.size !== workflow.version.byteSize || storedSha256Hex(metadata.sha256) !== workflow.version.sha256) throw new ConvexError("DOCUMENT_ORIGINAL_INVALID");
+    const environment = process.env.ADMIN_ENVIRONMENT?.trim();
+    if (!environment || environment.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(environment)) throw new ConvexError("ADMIN_ENVIRONMENT_INVALID");
+    let signedUrl: string | undefined;
+    if (job.providerOperationName === undefined) {
+      const issuedUrl = await ctx.storage.getUrl(workflow.version.originalStorageId);
+      if (!issuedUrl) throw new ConvexError("DOCUMENT_ORIGINAL_NOT_FOUND");
+      signedUrl = issuedUrl;
+    }
+    return {
+      kind: "index_document" as const,
+      ...(signedUrl === undefined ? {} : { signedUrl }),
+      byteSize: workflow.version.byteSize,
+      storeName: workflow.storeName,
+      mimeType: workflow.version.mimeType,
+      displayName: workflow.version.filename,
+      customMetadata: [
+        { key: "environment", stringValue: environment },
+        { key: "jurisdiction_id", stringValue: workflow.jurisdiction._id },
+        { key: "resource_id", stringValue: workflow.resource._id },
+        { key: "version_id", stringValue: workflow.version._id },
+        { key: "version_number", stringValue: String(workflow.version.versionNumber) },
+        { key: "sha256", stringValue: workflow.version.sha256 },
+      ],
+    };
+  },
+});
+
+const geminiProviderResultValidator = v.union(
+  v.object({ kind: v.literal("store_created"), storeName: v.string(), embeddingModel: v.string() }),
+  v.object({ kind: v.literal("index_accepted"), operationName: v.string() }),
+  v.object({ kind: v.literal("index_pending") }),
+  v.object({ kind: v.literal("index_completed"), documentName: v.string() }),
+  v.object({ kind: v.literal("index_failed"), errorKind: providerErrorKindValidator }),
+  v.object({ kind: v.literal("document_deleted") }),
+  v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
+);
+
+async function markGeminiJurisdictionDrifted(ctx: MutationCtx, job: Doc<"integrationJobs">) {
+  if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
+    const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+    if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
+    return;
+  }
+  const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
+  const manualReviewSummary = "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.";
+  if (version && job.type === "gemini_index_document") {
+    await ctx.db.patch(version._id, { failureSummary: manualReviewSummary, updatedAt: Date.now() });
+  } else if (version && job.type === "gemini_delete_document") {
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(job.payload) as Record<string, unknown>; }
+    catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
+    if (payload.operation === "unpublish" && payload.documentName === version.geminiDocumentName) {
+      await ctx.db.patch(version._id, { failureSummary: manualReviewSummary, updatedAt: Date.now() });
+    } else if (payload.operation === "replace_delete" && typeof payload.candidateVersionId === "string" && payload.previousVersionId === version._id && payload.documentName === version.geminiDocumentName) {
+      const candidate = await ctx.db.get(payload.candidateVersionId as Id<"documentVersions">);
+      const locks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", version.resourceId)).take(2);
+      if (!candidate || candidate.resourceId !== version.resourceId || candidate.status !== "publishing" || locks.length !== 1 || locks[0].jobId !== job._id) throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
+      await ctx.db.patch(candidate._id, { failureSummary: manualReviewSummary, updatedAt: Date.now() });
+    } else {
+      throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
+    }
+  }
+  const resource = version ? await ctx.db.get(version.resourceId) : null;
+  const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
+  if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
+}
+
+async function succeedGeminiJob(ctx: MutationCtx, job: Doc<"integrationJobs">) {
+  await ctx.db.patch(job._id, {
+    status: "succeeded",
+    leaseToken: undefined,
+    leaseExpiresAt: undefined,
+    nextAttemptAt: undefined,
+    recoveryKind: undefined,
+    updatedAt: Date.now(),
+    retentionPending: true,
+  });
+  await auditJob(ctx, job, "success", "integration.job_succeeded");
+}
+
+export const applyGeminiProviderResult = internalMutation({
+  args: {
+    jobId: v.id("integrationJobs"),
+    leaseToken: v.string(),
+    result: geminiProviderResultValidator,
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    const now = Date.now();
+    assertCurrentLease(job, args.leaseToken, now);
+    if (args.result.kind === "store_created") {
+      const storeName = args.result.storeName;
+      if (job.type !== "gemini_create_store" || !isGeminiFileSearchStoreName(storeName) || args.result.embeddingModel !== GEMINI_EMBEDDING_MODEL) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
+      const references = await ctx.db.query("jurisdictions")
+        .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
+        .take(2);
+      if (references.some((row) => row._id !== jurisdiction._id)) throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
+      if (jurisdiction.geminiFileSearchStoreName && jurisdiction.geminiFileSearchStoreName !== storeName) {
+        throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
+      }
+      await ctx.db.patch(jurisdiction._id, {
+        geminiFileSearchStoreName: storeName,
+        geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+        providerSyncState: "synced",
+        updatedBy: job.actorId,
+        updatedAt: now,
+      });
+      await succeedGeminiJob(ctx, job);
+      return null;
+    }
+    if (args.result.kind === "store_deleted") {
+      const storeName = args.result.storeName;
+      if (job.type !== "gemini_delete_store" || !isGeminiFileSearchStoreName(storeName)) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      let payload: { storeName?: unknown };
+      try { payload = JSON.parse(job.payload) as typeof payload; }
+      catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
+      const boundStore = typeof payload.storeName === "string" ? payload.storeName : undefined;
+      if (!boundStore || boundStore !== storeName || !jurisdiction || jurisdiction.geminiFileSearchStoreName !== boundStore) {
+        throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
+      }
+      const references = await ctx.db.query("jurisdictions")
+        .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
+        .take(2);
+      if (references.length !== 1 || references[0]._id !== jurisdiction._id) {
+        throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
+      }
+      await ctx.db.patch(jurisdiction._id, {
+        geminiFileSearchStoreName: undefined,
+        geminiEmbeddingModel: undefined,
+        providerSyncState: "pending",
+        updatedBy: job.actorId,
+        updatedAt: now,
+      });
+      await succeedGeminiJob(ctx, job);
+      return null;
+    }
+    if (args.result.kind === "document_deleted") {
+      if (job.type !== "gemini_delete_document") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      await applyGeminiDeleteCompletion(ctx, job, now);
+      await succeedGeminiJob(ctx, job);
+      return null;
+    }
+    if (args.result.kind === "index_accepted") {
+      if (job.type !== "gemini_index_document" || parseGeminiUploadOperationName(args.result.operationName) === null || job.providerOperationName !== undefined) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.result.operationName }, now);
+      if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      const nextAttemptAt = now + GEMINI_POLL_DELAYS_MS[0];
+      await ctx.db.patch(job._id, {
+        providerOperationName: args.result.operationName,
+        providerPollCount: 0,
+        recoveryKind: "poll_operation",
+        status: "waiting_provider",
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+        nextAttemptAt,
+        updatedAt: now,
+      });
+      await ctx.scheduler.runAfter(GEMINI_POLL_DELAYS_MS[0], runGeminiJobRef, { jobId: job._id });
+      return null;
+    }
+    if (args.result.kind === "index_pending") {
+      if (job.type !== "gemini_index_document" || !job.providerOperationName) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      if (now - job.createdAt >= GEMINI_INDEX_REVIEW_AFTER_MS) {
+        await ctx.db.patch(job._id, {
+          status: "manual_review",
+          leaseToken: undefined,
+          leaseExpiresAt: undefined,
+          nextAttemptAt: undefined,
+          lastErrorKind: "timeout",
+          updatedAt: now,
+        });
+        await markGeminiJurisdictionDrifted(ctx, job);
+        await auditJob(ctx, job, "failure", "integration.job_manual_review");
+        return null;
+      }
+      const pollCount = job.providerPollCount ?? 0;
+      const delay = GEMINI_POLL_DELAYS_MS[Math.min(pollCount + 1, GEMINI_POLL_DELAYS_MS.length - 1)];
+      await ctx.db.patch(job._id, {
+        providerPollCount: pollCount + 1,
+        status: "waiting_provider",
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+        nextAttemptAt: now + delay,
+        updatedAt: now,
+      });
+      await ctx.scheduler.runAfter(delay, runGeminiJobRef, { jobId: job._id });
+      return null;
+    }
+    if (args.result.kind === "index_failed") {
+      if (job.type !== "gemini_index_document" || !job.providerOperationName || job.recoveryKind !== "poll_operation") {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      await applyPublicationJobFailure(ctx, job, now);
+      await ctx.db.patch(job._id, {
+        status: "failed",
+        leaseToken: undefined,
+        leaseExpiresAt: undefined,
+        nextAttemptAt: undefined,
+        lastErrorKind: args.result.errorKind,
+        recoveryKind: undefined,
+        updatedAt: now,
+        retentionPending: true,
+      });
+      await auditJob(ctx, job, "failure", "integration.job_failed");
+      return null;
+    }
+    if (job.type !== "gemini_index_document" || !isGeminiDocumentName(args.result.documentName)) {
+      throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+    }
+    const replacement = await applyGeminiIndexCompletion(ctx, job, args.result.documentName, now);
+    if (replacement) {
+      const queued = await persistJob(ctx, {
+        type: "gemini_delete_document",
+        targetType: "documentVersion",
+        targetId: replacement.previousVersionId,
+        payload: replacement.payload,
+        idempotencyKey: `replace-delete-${job._id}`,
+      }, { id: job.actorId, roles: job.actorRoles });
+      await transferPublicationLock(ctx, job, queued.jobId, args.result.documentName, now);
+    }
+    await succeedGeminiJob(ctx, job);
+    return null;
   },
 });
 
@@ -387,34 +829,6 @@ export const getJobForRun = internalQuery({
   },
 });
 
-export const armGroundxCallback = internalMutation({
-  args: {
-    jobId: v.id("integrationJobs"),
-    leaseToken: v.string(),
-    tokenHash: v.string(),
-  },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    if (!/^[a-f0-9]{64}$/.test(args.tokenHash)) {
-      throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-    }
-    const job = await ctx.db.get(args.jobId);
-    if (
-      !job ||
-      job.type !== "ingest_remote" ||
-      job.status !== "running" ||
-      job.leaseToken !== args.leaseToken
-    ) {
-      throw new ConvexError("INTEGRATION_CALLBACK_NOT_READY");
-    }
-    await ctx.db.patch(job._id, {
-      callbackTokenHash: args.tokenHash,
-      updatedAt: Date.now(),
-    });
-    return null;
-  },
-});
-
 async function claimJobDocument(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
@@ -423,7 +837,7 @@ async function claimJobDocument(
 ) {
     if (
       job.status !== "queued" &&
-      job.status !== "waiting_callback" &&
+      job.status !== "waiting_provider" &&
       !(allowStaleRunning && job.status === "running") &&
       !(allowUncertainManualReview && job.status === "manual_review")
     ) {
@@ -434,7 +848,7 @@ async function claimJobDocument(
     }
     const now = Date.now();
     const leaseToken = `lease_${crypto.randomUUID().replaceAll("-", "")}`;
-    const leaseExpiresAt = now + POLL_AFTER_MS;
+    const leaseExpiresAt = now + JOB_LEASE_MS;
     const claimedJob: Doc<"integrationJobs"> = {
       ...job,
       status: "running",
@@ -452,7 +866,7 @@ async function claimJobDocument(
     });
     return {
       leaseToken,
-      workKind: (job.processId === undefined ? "execute" : "poll") as
+      workKind: (job.providerOperationName === undefined ? "execute" : "poll") as
         | "execute"
         | "poll",
       job: claimedJob,
@@ -473,19 +887,27 @@ export const reconcileManualReviewJob = internalMutation({
   args: { jobId: v.id("integrationJobs") },
   returns: claimResultValidator,
   handler: async (ctx, args) => {
+    const now = Date.now();
     const job = await ctx.db.get(args.jobId);
+    let geminiRecovery = false;
+    if (job?.type === "gemini_index_document" || job?.type === "gemini_delete_document") {
+      try {
+        const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+        geminiRecovery = workflow.kind === "index"
+          ? job.recoveryKind === "poll_operation" && job.providerOperationName !== undefined
+          : job.recoveryKind === "delete_document";
+      } catch { geminiRecovery = false; }
+    }
     if (
       !job ||
       job.status !== "manual_review" ||
-      job.processId === undefined ||
-      job.lastErrorKind === undefined ||
-      !["rate_limit", "timeout", "network"].includes(job.lastErrorKind)
+      !geminiRecovery
     ) {
       return null;
     }
     const claim = await claimJobDocument(ctx, job, false, true);
     if (claim) {
-      await ctx.scheduler.runAfter(0, runGroundxJobRef, {
+      await ctx.scheduler.runAfter(0, jobRunner(job.type), {
         jobId: job._id,
         leaseToken: claim.leaseToken,
       });
@@ -494,240 +916,67 @@ export const reconcileManualReviewJob = internalMutation({
   },
 });
 
-function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string) {
+function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string, now = Date.now()) {
   if (
     job.status !== "running" ||
     job.leaseToken === undefined ||
     job.leaseExpiresAt === undefined ||
-    job.leaseExpiresAt <= Date.now() ||
+    job.leaseExpiresAt <= now ||
     !safeEqual(job.leaseToken, leaseToken)
   ) {
     throw new ConvexError("INTEGRATION_LEASE_INVALID");
   }
 }
 
-type DocumentEvidence = { documentId: string; bucketId?: number; status: ProviderStatus; fileType?: "txt" | "docx" | "pptx" | "xlsx" | "pdf" | "png" | "jpg" | "csv" | "tsv" | "json"; fileSize?: number };
-
-function jobOperation(job: Doc<"integrationJobs">): string | undefined {
-  try { const value = JSON.parse(job.payload) as { operation?: unknown }; return typeof value.operation === "string" ? value.operation : undefined; }
-  catch { return undefined; }
-}
-
-async function applyStagingOutcome(ctx: MutationCtx, job: Doc<"integrationJobs">, outcome: "succeeded" | "failed", processId: string, evidence?: DocumentEvidence) {
-  if (job.type !== "ingest_remote" || jobOperation(job) !== "stage" || job.targetType !== "documentVersion") return;
-  const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
-  if (!version || version.status !== "staging_processing") throw new ConvexError("DOCUMENT_STAGING_STATE_INVALID");
-  if (outcome === "succeeded" && (!evidence || evidence.status !== "complete")) throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
-  await ctx.db.patch(version._id, outcome === "succeeded" ? {
-    status: "draft", groundxStagingDocumentId: evidence!.documentId, groundxStagingProcessId: processId,
-    xrayEvidence: { documentId: evidence!.documentId, processId, status: "complete", ...(evidence!.fileType ? { fileType: evidence!.fileType } : {}), ...(evidence!.fileSize === undefined ? {} : { fileSize: evidence!.fileSize }), observedAt: Date.now() },
-    failureSummary: undefined, updatedAt: Date.now(),
-  } : { status: "draft", failureSummary: "GroundX staging failed", updatedAt: Date.now() });
-  const locks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", version.resourceId)).take(2);
-  if (locks.length > 1) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
-  if (locks[0]?.jobId === job._id) await ctx.db.delete(locks[0]._id);
-}
-
-async function applyJurisdictionStagingBucketOutcome(
-  ctx: MutationCtx,
-  job: Doc<"integrationJobs">,
-  outcome: "succeeded" | "failed",
-  processId: string,
-) {
-  if (job.type !== "create_bucket" || job.targetType !== "jurisdictionStagingBucket") return;
-  const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
-  if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
-  if (outcome === "failed") return;
-
-  const bucketId = /^bucket-([1-9][0-9]*)$/.exec(processId)?.[1];
-  if (!bucketId || bucketId === jurisdiction.productionBucketId) {
-    throw new ConvexError("GROUNDX_STAGING_BUCKET_INVALID");
-  }
-  if (jurisdiction.stagingBucketId !== undefined) {
-    if (jurisdiction.stagingBucketId !== bucketId) {
-      throw new ConvexError("GROUNDX_STAGING_BUCKET_CONFLICT");
-    }
-    return;
-  }
-
-  const now = Date.now();
-  await ctx.db.patch(jurisdiction._id, {
-    stagingBucketId: bucketId,
-    providerSyncState: "synced",
-    updatedBy: job.actorId,
-    updatedAt: now,
-  });
-  await writeAudit(ctx, {
-    actorId: job.actorId,
-    actorRoles: job.actorRoles,
-    action: "jurisdiction.staging_bucket.provisioned",
-    targetType: "jurisdiction",
-    targetId: jurisdiction._id,
-    reason: "Provision distinct GroundX staging bucket",
-    afterSummary: JSON.stringify({ stagingBucketId: bucketId }),
-    correlationId: job.correlationId,
-    outcome: "success",
-  });
-}
-
-async function completeJob(ctx: MutationCtx, job: Doc<"integrationJobs">, processId: string, status: ProviderStatus, evidence?: DocumentEvidence) {
-  if (job.processId !== undefined && job.processId !== processId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-  if (["succeeded", "failed", "cancelled"].includes(job.status)) {
-    const expected = status === "complete" ? "succeeded" : status === "cancelled" ? "cancelled" : "failed";
-    if (job.status === expected) return { accepted: true, duplicate: true };
-    throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
-  }
-  const uncertainManualReview =
-    job.status === "manual_review" &&
-    job.processId !== undefined &&
-    job.lastErrorKind !== undefined &&
-    ["rate_limit", "timeout", "network"].includes(job.lastErrorKind);
-  if (
-    job.status !== "running" &&
-    job.status !== "waiting_callback" &&
-    !uncertainManualReview
-  ) {
-    throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
-  }
-  if (status === "queued" || status === "training" || status === "processing") {
-    if (uncertainManualReview) throw new ConvexError("INTEGRATION_TRANSITION_INVALID");
-    await ctx.db.patch(job._id, {
-      processId,
-      status: "waiting_callback",
-      leaseToken: undefined,
-      leaseExpiresAt: undefined,
-      nextAttemptAt: Date.now() + POLL_AFTER_MS,
-      updatedAt: Date.now(),
-    });
-    return { accepted: true, duplicate: false };
-  }
-  const nextStatus = status === "complete" ? "succeeded" : status === "cancelled" ? "cancelled" : "failed";
-  await ctx.db.patch(job._id, {
-    processId,
-    status: nextStatus,
-    leaseToken: undefined,
-    leaseExpiresAt: undefined,
-    nextAttemptAt: undefined,
-    updatedAt: Date.now(),
-    retentionPending: true,
-  });
-  if (job.targetType === "documentVersion") {
-    await applyStagingOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, evidence);
-    await applyPublicationJobOutcome(ctx, job, nextStatus === "succeeded" ? "succeeded" : "failed", processId, job.type === "copy_documents" ? evidence?.documentId : undefined);
-  }
-  await applyJurisdictionStagingBucketOutcome(
-    ctx,
-    job,
-    nextStatus === "succeeded" ? "succeeded" : "failed",
-    processId,
-  );
-  await auditJob(ctx, job, nextStatus === "succeeded" ? "success" : "failure", `integration.job_${nextStatus}`);
-  return { accepted: true, duplicate: false };
-}
-
-export const applyProviderResult = internalMutation({
-  args: {
-    jobId: v.id("integrationJobs"),
-    leaseToken: v.string(),
-    processId: v.string(),
-    status: providerStatusValidator,
-    documentEvidence: v.optional(documentEvidenceValidator),
-  },
-  returns: completionResultValidator,
-  handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
-    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
-    assertCurrentLease(job, args.leaseToken);
-    const processId = assertIdentifier(args.processId, "INTEGRATION_PROCESS_INVALID");
-    if (args.status === "complete" && job.type === "copy_documents" && args.documentEvidence === undefined) {
-      throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
-    }
-    if (args.documentEvidence !== undefined) {
-      if (job.targetType !== "documentVersion" || !["ingest_remote", "poll_process", "copy_documents"].includes(job.type)) {
-        throw new ConvexError("INTEGRATION_EVIDENCE_TARGET_INVALID");
-      }
-      const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
-      let expectedCopyBucket: number | undefined;
-      if (job.type === "copy_documents") {
-        try {
-          const payload = JSON.parse(job.payload) as { toBucket?: unknown };
-          expectedCopyBucket = typeof payload.toBucket === "number" ? payload.toBucket : undefined;
-        } catch {
-          throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
-        }
-      }
-      const stagingOperation = job.type === "ingest_remote" && jobOperation(job) === "stage";
-      let expectedStagingBucket: number | undefined;
-      if (stagingOperation) {
-        try { expectedStagingBucket = (JSON.parse(job.payload) as { documents?: Array<{ bucketId?: number }> }).documents?.[0]?.bucketId; }
-        catch { throw new ConvexError("INTEGRATION_EVIDENCE_INVALID"); }
-      }
-      if (!version ||
-        (!stagingOperation && job.type !== "copy_documents" && version.groundxStagingDocumentId !== args.documentEvidence.documentId) ||
-        (stagingOperation && (expectedStagingBucket === undefined || args.documentEvidence.bucketId !== expectedStagingBucket)) ||
-        (job.type === "copy_documents" && (expectedCopyBucket === undefined || args.documentEvidence.bucketId !== expectedCopyBucket)) ||
-        args.documentEvidence.status !== args.status ||
-        (args.documentEvidence.fileSize !== undefined &&
-          (!Number.isSafeInteger(args.documentEvidence.fileSize) || args.documentEvidence.fileSize < 0))
-      ) {
-        throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
-      }
-      if (job.type !== "copy_documents" && !stagingOperation) await ctx.db.patch(version._id, {
-        xrayEvidence: {
-          documentId: args.documentEvidence.documentId,
-          status: args.documentEvidence.status,
-          ...(args.documentEvidence.fileType === undefined ? {} : { fileType: args.documentEvidence.fileType }),
-          ...(args.documentEvidence.fileSize === undefined ? {} : { fileSize: args.documentEvidence.fileSize }),
-          processId,
-          observedAt: Date.now(),
-        },
-        updatedAt: Date.now(),
-      });
-    }
-    return await completeJob(ctx, job, processId, args.status as ProviderStatus, args.documentEvidence as DocumentEvidence | undefined);
-  },
-});
-
-export const completeGroundxCallback = internalMutation({
-  args: { tokenHash: v.string(), processId: v.string(), status: providerStatusValidator, documentEvidence: v.optional(documentEvidenceValidator) },
-  returns: completionResultValidator,
-  handler: async (ctx, args) => {
-    if (!/^[a-f0-9]{64}$/.test(args.tokenHash)) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-    const candidates = await ctx.db.query("integrationJobs").withIndex("by_callbackTokenHash", (q) => q.eq("callbackTokenHash", args.tokenHash)).take(2);
-    if (candidates.length !== 1 || !safeEqual(candidates[0].callbackTokenHash, args.tokenHash)) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-    const job = candidates[0];
-    if (job.processId !== undefined && job.processId !== args.processId) throw new ConvexError("INTEGRATION_CALLBACK_NOT_FOUND");
-    if (job.type === "copy_documents" && args.status === "complete") {
-      if (!args.documentEvidence) throw new ConvexError("INTEGRATION_EVIDENCE_REQUIRED");
-      let toBucket: unknown;
-      try { toBucket = (JSON.parse(job.payload) as { toBucket?: unknown }).toBucket; } catch { /* fail below */ }
-      if (args.documentEvidence.status !== "complete" || args.documentEvidence.bucketId !== toBucket) {
-        throw new ConvexError("INTEGRATION_EVIDENCE_INVALID");
-      }
-    }
-    return await completeJob(ctx, job, args.processId, args.status as ProviderStatus, args.documentEvidence as DocumentEvidence | undefined);
-  },
-});
-
 export const recordProviderFailure = internalMutation({
   args: {
     jobId: v.id("integrationJobs"),
     leaseToken: v.string(),
     kind: providerErrorKindValidator,
+    retryable: v.optional(v.boolean()),
+    sideEffectUncertain: v.optional(v.boolean()),
+    providerOperationName: v.optional(v.string()),
   },
   returns: failureResultValidator,
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    let job = await ctx.db.get(args.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
-    assertCurrentLease(job, args.leaseToken);
-    const retryable = ["rate_limit", "timeout", "network"].includes(args.kind);
-    const ambiguousSideEffect =
-      job.processId === undefined &&
-      ["create_bucket", "ingest_remote", "copy_documents", "delete_documents"].includes(job.type) &&
-      ["timeout", "network"].includes(args.kind);
+    const now = Date.now();
+    assertCurrentLease(job, args.leaseToken, now);
+    if (args.providerOperationName !== undefined) {
+      if (job.type !== "gemini_index_document" || job.providerOperationName !== undefined) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.providerOperationName }, now);
+      if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      await ctx.db.patch(job._id, {
+        providerOperationName: args.providerOperationName,
+        providerPollCount: 0,
+        recoveryKind: "poll_operation",
+        updatedAt: now,
+      });
+      job = { ...job, providerOperationName: args.providerOperationName, providerPollCount: 0, recoveryKind: "poll_operation" };
+    }
+    if (job.type === "gemini_delete_document" && args.sideEffectUncertain === true && job.recoveryKind === undefined) {
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      if (workflow.kind !== "delete") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
+      await ctx.db.patch(job._id, { recoveryKind: "delete_document", updatedAt: now });
+      job = { ...job, recoveryKind: "delete_document" };
+    }
+    let replacementDeleteRecovery = false;
+    if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      replacementDeleteRecovery = workflow.kind === "delete" && workflow.payload.operation === "replace_delete" && job.recoveryKind === "delete_document";
+    }
+    const retryable = args.retryable ?? ["rate_limit", "timeout", "network"].includes(args.kind);
+    const ambiguousSideEffect = args.sideEffectUncertain === true || (
+      job.providerOperationName === undefined &&
+      ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"].includes(job.type) &&
+      ["timeout", "network"].includes(args.kind)
+    );
     const attemptCount = job.attemptCount + 1;
     if (!ambiguousSideEffect && retryable && attemptCount <= RETRY_DELAYS_MS.length) {
-      const nextAttemptAt = Date.now() + RETRY_DELAYS_MS[attemptCount - 1];
+      const nextAttemptAt = now + RETRY_DELAYS_MS[attemptCount - 1];
       await ctx.db.patch(job._id, {
         status: "queued",
         attemptCount,
@@ -735,12 +984,13 @@ export const recordProviderFailure = internalMutation({
         leaseToken: undefined,
         leaseExpiresAt: undefined,
         lastErrorKind: args.kind,
-        updatedAt: Date.now(),
+        updatedAt: now,
       });
-      await ctx.scheduler.runAfter(RETRY_DELAYS_MS[attemptCount - 1], runGroundxJobRef, { jobId: job._id });
+      await ctx.scheduler.runAfter(RETRY_DELAYS_MS[attemptCount - 1], jobRunner(job.type), { jobId: job._id });
       return { status: "queued" as const, nextAttemptAt };
     }
-    const status: "manual_review" | "failed" = (retryable || ambiguousSideEffect) ? "manual_review" : "failed";
+    const pollObservationUncertain = job.type === "gemini_index_document" && job.recoveryKind === "poll_operation";
+    const status: "manual_review" | "failed" = (pollObservationUncertain || replacementDeleteRecovery || retryable || ambiguousSideEffect) ? "manual_review" : "failed";
     await ctx.db.patch(job._id, {
       status,
       attemptCount,
@@ -748,15 +998,19 @@ export const recordProviderFailure = internalMutation({
       leaseToken: undefined,
       leaseExpiresAt: undefined,
       lastErrorKind: args.kind,
-      updatedAt: Date.now(),
+      recoveryKind: status === "failed" ? undefined : job.recoveryKind,
+      updatedAt: now,
       retentionPending: status === "failed" ? true : undefined,
     });
     if (status === "failed" && job.targetType === "documentVersion") {
-      await applyStagingOutcome(ctx, job, "failed", job.processId ?? job.correlationId);
-      await applyPublicationJobOutcome(ctx, job, "failed", job.processId);
+      await applyPublicationJobFailure(ctx, job, now);
     }
-    if (status === "failed") {
-      await applyJurisdictionStagingBucketOutcome(ctx, job, "failed", job.processId ?? job.correlationId);
+    if (status === "manual_review") {
+      await markGeminiJurisdictionDrifted(ctx, job);
+    }
+    if (status === "failed" && job.type === "gemini_create_store") {
+      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "failed", updatedAt: now });
     }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");
     return { status, nextAttemptAt: null };
@@ -769,7 +1023,7 @@ export const reconcileStaleJobs = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const candidatesByStatus = await Promise.all(
-      (["queued", "running", "waiting_callback"] as const).map(
+      (["queued", "running", "waiting_provider"] as const).map(
         async (status) =>
           await ctx.db
             .query("integrationJobs")
@@ -791,9 +1045,67 @@ export const reconcileStaleJobs = internalMutation({
       candidatesByStatus.some((rows) => rows.length > MAX_RECONCILE_BATCH);
     let scheduled = 0;
     for (const job of candidates.slice(0, MAX_RECONCILE_BATCH)) {
+      if (
+        (job.type === "gemini_index_document" || job.type === "gemini_delete_document") &&
+        job.status === "running"
+      ) {
+        const staleLease = job.leaseToken !== undefined &&
+          job.leaseExpiresAt !== undefined &&
+          Number.isFinite(job.leaseExpiresAt) &&
+          job.leaseExpiresAt <= now;
+        if (!staleLease) continue;
+        let recoveryKind: "poll_operation" | "delete_document" | undefined;
+        try {
+          const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "stale_reconciliation" }, now);
+          recoveryKind = workflow.kind === "index"
+            ? job.providerOperationName === undefined ? undefined : "poll_operation"
+            : "delete_document";
+        } catch {
+          await ctx.db.patch(job._id, {
+            status: "manual_review",
+            leaseToken: undefined,
+            leaseExpiresAt: undefined,
+            nextAttemptAt: undefined,
+            lastErrorKind: "invalid_response",
+            recoveryKind: undefined,
+            updatedAt: now,
+          });
+          await auditJob(ctx, job, "failure", "integration.job_manual_review");
+          continue;
+        }
+        await ctx.db.patch(job._id, {
+          status: "manual_review",
+          leaseToken: undefined,
+          leaseExpiresAt: undefined,
+          nextAttemptAt: undefined,
+          lastErrorKind: "timeout",
+          recoveryKind,
+          updatedAt: now,
+        });
+        await markGeminiJurisdictionDrifted(ctx, job);
+        await auditJob(ctx, job, "failure", "integration.job_manual_review");
+        continue;
+      }
+      if (
+        job.status === "running" &&
+        job.providerOperationName === undefined
+      ) {
+        await ctx.db.patch(job._id, {
+          status: "manual_review",
+          leaseToken: undefined,
+          leaseExpiresAt: undefined,
+          nextAttemptAt: undefined,
+          lastErrorKind: "timeout",
+          recoveryKind: undefined,
+          updatedAt: now,
+        });
+        await markGeminiJurisdictionDrifted(ctx, job);
+        await auditJob(ctx, job, "failure", "integration.job_manual_review");
+        continue;
+      }
       const claim = await claimJobDocument(ctx, job, true);
       if (!claim) continue;
-      await ctx.scheduler.runAfter(0, runGroundxJobRef, {
+      await ctx.scheduler.runAfter(0, jobRunner(job.type), {
         jobId: job._id,
         leaseToken: claim.leaseToken,
       });
@@ -874,6 +1186,7 @@ export const retryJob = mutation({
   args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
   returns: controlledJobResultValidator,
   handler: async (ctx, args) => {
+    const now = Date.now();
     const actor = await requireEnabledAdminPermission(ctx, "operations", "retry");
     const reason = validateAuditReason(args.reason);
     const idempotencyKey = validateOperationKey(args.idempotencyKey);
@@ -885,16 +1198,25 @@ export const retryJob = mutation({
 
     let status: Doc<"integrationJobs">["status"];
     if (job.status === "manual_review") {
-      if (!job.processId || !job.lastErrorKind || !["network", "timeout", "rate_limit"].includes(job.lastErrorKind)) {
+      let hasGeminiRecoveryTarget = false;
+      if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
+        try {
+          const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+          hasGeminiRecoveryTarget = workflow.kind === "index"
+            ? job.recoveryKind === "poll_operation" && job.providerOperationName !== undefined
+            : job.recoveryKind === "delete_document";
+        } catch { hasGeminiRecoveryTarget = false; }
+      }
+      if (!hasGeminiRecoveryTarget) {
         throw new ConvexError("Integration job is not retryable");
       }
       const claim = await claimJobDocument(ctx, job, false, true);
       if (!claim) throw new ConvexError("Integration job is not retryable");
-      await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId: job._id, leaseToken: claim.leaseToken });
+      await ctx.scheduler.runAfter(0, jobRunner(job.type), { jobId: job._id, leaseToken: claim.leaseToken });
       status = "running";
     } else if (
       job.status === "failed" &&
-      job.processId === undefined &&
+      job.providerOperationName === undefined &&
       job.leaseToken === undefined &&
       job.targetType !== "documentVersion" &&
       job.lastErrorKind !== undefined &&
@@ -905,7 +1227,7 @@ export const retryJob = mutation({
         status, attemptCount: 0, nextAttemptAt: Date.now(), lastErrorKind: undefined,
         leaseToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now(),
       });
-      await ctx.scheduler.runAfter(0, runGroundxJobRef, { jobId: job._id });
+      await ctx.scheduler.runAfter(0, jobRunner(job.type), { jobId: job._id });
     } else {
       throw new ConvexError("Integration job is not retryable");
     }
@@ -925,7 +1247,7 @@ export const cancelJob = mutation({
     if (replay) return replay;
     const job = await ctx.db.get(args.jobId);
     if (!job) throw new ConvexError("Integration job was not found");
-    if (job.processId || job.status === "manual_review" || job.status === "running" || job.status === "waiting_callback") {
+    if (job.providerOperationName || job.status === "manual_review" || job.status === "running" || job.status === "waiting_provider") {
       throw new ConvexError("Integration job provider outcome is uncertain");
     }
     if (job.status !== "queued" || job.leaseToken || job.targetType === "documentVersion") {
@@ -939,7 +1261,7 @@ export const cancelJob = mutation({
 const jobListRowValidator = v.object({
   id: v.id("integrationJobs"), type: jobTypeValidator, targetType: v.string(), targetId: v.string(),
   status: jobStatusValidator, attemptCount: v.number(), lastErrorKind: v.optional(providerErrorKindValidator),
-  correlationId: v.string(), createdAt: v.number(), updatedAt: v.number(),
+  nextAttemptAt: v.optional(v.number()), correlationId: v.string(), createdAt: v.number(), updatedAt: v.number(),
 });
 
 export const listJobs = query({
@@ -957,6 +1279,6 @@ export const listJobs = query({
           ? ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", args.type!))
           : ctx.db.query("integrationJobs").withIndex("by_createdAt");
     const result = await base.order("desc").paginate(opts);
-    return { page: result.page.map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+    return { page: result.page.map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, nextAttemptAt: job.nextAttemptAt, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
   },
 });
