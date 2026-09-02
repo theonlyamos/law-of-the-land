@@ -140,6 +140,38 @@ describe("GeminiFileSearchResearch", () => {
       .not.toHaveProperty("response_mime_type");
   });
 
+  it("derives citations from the Interactions API outputs contract", async () => {
+    const text = "The Constitution applies.";
+    const research = new GeminiFileSearchResearch({
+      model: "server-retrieval-model",
+      client: client({
+        outputs: [{
+          type: "text",
+          text,
+          annotations: [fileCitation(text, "ghana", { page_number: 4 })],
+        }],
+      }),
+    });
+
+    await expect(research.search({ query: "Which constitution applies?", stores }, {
+      signal: new AbortController().signal,
+      timeoutMs: 10_000,
+    })).resolves.toMatchObject({
+      sources: [{
+        jurisdictionId: "ghana",
+        spans: [{
+          content: text,
+          citation: {
+            resourceId: "resource-1",
+            versionId: "version-1",
+            documentName: "fileSearchStores/ghana-law/documents/document-1",
+            pageNumber: 4,
+          },
+        }],
+      }],
+    });
+  });
+
   it("resolves provider citation URIs through the authorized document manifest", async () => {
     const authorized = new GeminiFileSearchResearch({
       model: "server-retrieval-model",

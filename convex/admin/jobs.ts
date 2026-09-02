@@ -67,6 +67,14 @@ const jobStatusValidator = v.union(
   v.literal("cancelled"),
   v.literal("manual_review"),
 );
+const knownStoreResultValidator = v.union(
+  v.object({
+    kind: v.literal("store_created"),
+    storeName: v.string(),
+    embeddingModel: v.string(),
+  }),
+  v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
+);
 const jobDocumentValidator = v.object({
   _id: v.id("integrationJobs"),
   _creationTime: v.number(),
@@ -81,7 +89,12 @@ const jobDocumentValidator = v.object({
   correlationId: v.string(),
   providerOperationName: v.optional(v.string()),
   providerPollCount: v.optional(v.number()),
-  recoveryKind: v.optional(v.union(v.literal("poll_operation"), v.literal("delete_document"))),
+  knownStoreResult: v.optional(knownStoreResultValidator),
+  recoveryKind: v.optional(v.union(
+    v.literal("poll_operation"),
+    v.literal("delete_document"),
+    v.literal("apply_store_result"),
+  )),
   leaseToken: v.optional(v.string()),
   leaseExpiresAt: v.optional(v.number()),
   status: jobStatusValidator,
@@ -123,6 +136,9 @@ type GeminiIntegrationJob = Omit<Doc<"integrationJobs">, "type" | "status"> & {
   status: GeminiJobStatus;
 };
 type ProviderErrorKind = "invalid_request" | "validation" | "authentication" | "not_found" | "rate_limit" | "timeout" | "network" | "invalid_response" | "provider";
+type KnownStoreResult =
+  | { kind: "store_created"; storeName: string; embeddingModel: string }
+  | { kind: "store_deleted"; storeName: string };
 type SafeJson = null | boolean | number | string | SafeJson[] | { [key: string]: SafeJson };
 
 const runGeminiJobRef = makeFunctionReference<"action">("admin/geminiActions:runGeminiJob");
@@ -152,6 +168,24 @@ function isGeminiJobDocument(job: Doc<"integrationJobs">): job is GeminiIntegrat
     job.status === "cancelled" ||
     job.status === "manual_review";
   return isGeminiJobType(job.type) && currentStatus;
+}
+
+function knownStoreResultMatchesJob(
+  job: Doc<"integrationJobs">,
+  result: KnownStoreResult,
+): boolean {
+  if (!isGeminiFileSearchStoreName(result.storeName)) return false;
+  if (result.kind === "store_created") {
+    return job.type === "gemini_create_store" &&
+      result.embeddingModel === GEMINI_EMBEDDING_MODEL;
+  }
+  if (job.type !== "gemini_delete_store") return false;
+  try {
+    const payload = JSON.parse(job.payload) as { storeName?: unknown };
+    return payload.storeName === result.storeName;
+  } catch {
+    return false;
+  }
 }
 
 function assertIdentifier(value: string, error: string): string {
@@ -683,6 +717,7 @@ async function succeedGeminiJob(ctx: MutationCtx, job: Doc<"integrationJobs">) {
     leaseExpiresAt: undefined,
     nextAttemptAt: undefined,
     recoveryKind: undefined,
+    knownStoreResult: undefined,
     updatedAt: Date.now(),
     retentionPending: true,
   });
@@ -930,8 +965,10 @@ export const reconcileManualReviewJob = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const job = await ctx.db.get(args.jobId);
-    let geminiRecovery = false;
-    if (job?.type === "gemini_index_document" || job?.type === "gemini_delete_document") {
+    let geminiRecovery = job?.recoveryKind === "apply_store_result" &&
+      job.knownStoreResult !== undefined &&
+      knownStoreResultMatchesJob(job, job.knownStoreResult);
+    if (!geminiRecovery && (job?.type === "gemini_index_document" || job?.type === "gemini_delete_document")) {
       try {
         const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
         geminiRecovery = workflow.kind === "index"
@@ -977,6 +1014,7 @@ export const recordProviderFailure = internalMutation({
     retryable: v.optional(v.boolean()),
     sideEffectUncertain: v.optional(v.boolean()),
     providerOperationName: v.optional(v.string()),
+    knownStoreResult: v.optional(knownStoreResultValidator),
   },
   returns: failureResultValidator,
   handler: async (ctx, args) => {
@@ -997,6 +1035,24 @@ export const recordProviderFailure = internalMutation({
         updatedAt: now,
       });
       job = { ...job, providerOperationName: args.providerOperationName, providerPollCount: 0, recoveryKind: "poll_operation" };
+    }
+    if (args.knownStoreResult !== undefined) {
+      if (
+        args.sideEffectUncertain !== true ||
+        !knownStoreResultMatchesJob(job, args.knownStoreResult)
+      ) {
+        throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+      }
+      await ctx.db.patch(job._id, {
+        knownStoreResult: args.knownStoreResult,
+        recoveryKind: "apply_store_result",
+        updatedAt: now,
+      });
+      job = {
+        ...job,
+        knownStoreResult: args.knownStoreResult,
+        recoveryKind: "apply_store_result",
+      };
     }
     if (job.type === "gemini_delete_document" && args.sideEffectUncertain === true && job.recoveryKind === undefined) {
       const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
@@ -1040,6 +1096,7 @@ export const recordProviderFailure = internalMutation({
       leaseExpiresAt: undefined,
       lastErrorKind: args.kind,
       recoveryKind: status === "failed" ? undefined : job.recoveryKind,
+      knownStoreResult: status === "failed" ? undefined : job.knownStoreResult,
       updatedAt: now,
       retentionPending: status === "failed" ? true : undefined,
     });
@@ -1134,13 +1191,18 @@ export const reconcileStaleJobs = internalMutation({
         job.status === "running" &&
         job.providerOperationName === undefined
       ) {
+        const recoveryKind = job.recoveryKind === "apply_store_result" &&
+          job.knownStoreResult !== undefined &&
+          knownStoreResultMatchesJob(job, job.knownStoreResult)
+          ? "apply_store_result" as const
+          : undefined;
         await ctx.db.patch(job._id, {
           status: "manual_review",
           leaseToken: undefined,
           leaseExpiresAt: undefined,
           nextAttemptAt: undefined,
           lastErrorKind: "timeout",
-          recoveryKind: undefined,
+          recoveryKind,
           updatedAt: now,
         });
         await markGeminiJurisdictionDrifted(ctx, job);
@@ -1242,8 +1304,10 @@ export const retryJob = mutation({
 
     let status: Doc<"integrationJobs">["status"];
     if (job.status === "manual_review") {
-      let hasGeminiRecoveryTarget = false;
-      if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
+      let hasGeminiRecoveryTarget = job.recoveryKind === "apply_store_result" &&
+        job.knownStoreResult !== undefined &&
+        knownStoreResultMatchesJob(job, job.knownStoreResult);
+      if (!hasGeminiRecoveryTarget && (job.type === "gemini_index_document" || job.type === "gemini_delete_document")) {
         try {
           const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
           hasGeminiRecoveryTarget = workflow.kind === "index"

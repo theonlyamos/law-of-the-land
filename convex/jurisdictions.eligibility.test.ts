@@ -184,6 +184,47 @@ async function insertPublishedDocument(
   });
 }
 
+async function insertDraftDocument(
+  t: Backend,
+  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
+) {
+  return await t.run(async (ctx) => {
+    const now = Date.now();
+    const resourceId = await ctx.db.insert("legalResources", {
+      jurisdictionId,
+      type: "act",
+      title: "Draft Act",
+      issuer: "Parliament",
+      officialCitation: "Draft Act of 2026",
+      officialCitationKey: "draft act of 2026",
+      sourceUrl: "https://official.example/draft-act",
+      topics: ["employment"],
+      effectiveDate: "2026-06-01",
+      status: "active",
+      createdBy: "fixture",
+      updatedBy: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const originalStorageId = await ctx.storage.store(new Blob(["draft"]));
+    const versionId = await ctx.db.insert("documentVersions", {
+      resourceId,
+      versionNumber: 1,
+      originalStorageId,
+      filename: "draft-act.pdf",
+      mimeType: "application/pdf",
+      byteSize: 5,
+      sha256: "b".repeat(64),
+      sourceUrl: "https://upload.example/draft-act",
+      status: "draft",
+      submittedBy: "fixture",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { resourceId, versionId };
+  });
+}
+
 describe("public jurisdiction eligibility", () => {
   it.each(invalidGeminiStores)(
     "excludes an enabled jurisdiction with a %s Gemini store",
@@ -509,6 +550,47 @@ describe("internal multi-jurisdiction library availability boundary", () => {
       supplementaryJurisdictionIds: [],
     }));
     await expect(duplicate.json()).resolves.toEqual({
+      selected: { jurisdictionId: selected, status: "needs_review" },
+      supplementary: [],
+    });
+  });
+
+  it("treats only non-null active-version pointers as publication claims", async () => {
+    const t = createBackend();
+    const storeName = "fileSearchStores/ghana";
+    const selected = await insertJurisdiction(t, {
+      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
+    });
+    const published = await insertPublishedDocument(t, selected, storeName);
+    const draft = await insertDraftDocument(t, selected);
+
+    await expect(t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    })).resolves.toEqual({
+      selected: {
+        jurisdictionId: selected,
+        status: "ready",
+        storeName,
+        documents: [{
+          resourceId: published.resourceId,
+          versionId: published.versionId,
+          documentName: `${storeName}/documents/trusted-act-v1`,
+          title: "Trusted Act",
+          officialCitation: "Act 7 of 2026",
+          sourceUrl: "https://official.example/act-7",
+        }],
+      },
+      supplementary: [],
+    });
+
+    await t.run(async (ctx) => {
+      await ctx.db.patch(draft.resourceId, { activeVersionId: draft.versionId });
+    });
+    await expect(t.query(getResearchManifestAvailability, {
+      selectedJurisdictionId: selected,
+      supplementaryJurisdictionIds: [],
+    })).resolves.toEqual({
       selected: { jurisdictionId: selected, status: "needs_review" },
       supplementary: [],
     });

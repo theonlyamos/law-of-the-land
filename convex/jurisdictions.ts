@@ -647,8 +647,8 @@ async function researchAvailability(
   }
   const resources = await ctx.db
     .query("legalResources")
-    .withIndex("by_jurisdictionId_and_status", (q) =>
-      q.eq("jurisdictionId", row._id).eq("status", "active"))
+    .withIndex("by_jurisdictionId_and_activeVersionId", (q) =>
+      q.eq("jurisdictionId", row._id).gt("activeVersionId", undefined))
     .take(MAX_RESEARCH_DOCUMENTS_PER_JURISDICTION + 1);
   if (resources.length > MAX_RESEARCH_DOCUMENTS_PER_JURISDICTION) {
     return { jurisdictionId: row._id, status: "needs_review" };
@@ -666,6 +666,7 @@ async function researchAvailability(
     const version = versions[index];
     const documentName = version?.geminiDocumentName;
     if (
+      resource.status !== "active" ||
       !version ||
       version.resourceId !== resource._id ||
       version.status !== "published" ||

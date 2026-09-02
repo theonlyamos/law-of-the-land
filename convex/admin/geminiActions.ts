@@ -59,11 +59,17 @@ export type GeminiExecutionResult =
   | { kind: "document_deleted" }
   | { kind: "store_deleted"; storeName: string };
 
+type KnownStoreResult = Extract<
+  GeminiExecutionResult,
+  { kind: "store_created" } | { kind: "store_deleted" }
+>;
+
 type PersistenceFailure = {
   kind: ProviderErrorKind;
   retryable: boolean;
   sideEffectUncertain: boolean;
   providerOperationName?: string;
+  knownStoreResult?: KnownStoreResult;
 };
 
 export async function persistGeminiProviderResult(input: {
@@ -81,6 +87,9 @@ export async function persistGeminiProviderResult(input: {
       sideEffectUncertain: true,
       ...(input.result.kind === "index_accepted"
         ? { providerOperationName: input.result.operationName }
+        : {}),
+      ...(input.result.kind === "store_created" || input.result.kind === "store_deleted"
+        ? { knownStoreResult: input.result }
         : {}),
     };
     try {
@@ -256,6 +265,19 @@ export const runGeminiJob = internalAction({
     const job = args.leaseToken
       ? (claim as Doc<"integrationJobs">)
       : (claim as { job: Doc<"integrationJobs"> }).job;
+    if (job.recoveryKind === "apply_store_result" && job.knownStoreResult !== undefined) {
+      const result = job.knownStoreResult as KnownStoreResult;
+      await persistGeminiProviderResult({
+        result,
+        persist: async () => {
+          await ctx.runMutation(resultRef, { jobId: args.jobId, leaseToken, result });
+        },
+        failure: async (failure) => {
+          await ctx.runMutation(failureRef, { jobId: args.jobId, leaseToken, ...failure });
+        },
+      });
+      return null;
+    }
     const target = (await ctx.runQuery(targetRef, {
       jobId: args.jobId,
       leaseToken,

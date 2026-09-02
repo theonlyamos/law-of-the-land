@@ -367,6 +367,82 @@ describe("durable Gemini jobs", () => {
     });
   });
 
+  it("recovers a known store result without replaying the provider operation", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        name: "Ghana recovery",
+        slug: "ghana-recovery",
+        status: "draft",
+        isDefault: false,
+        providerSyncState: "pending",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    const created = await admin.client.mutation(provisionJurisdictionGeminiStore, {
+      jurisdictionId,
+      reason: "Set up recoverable legal search",
+      idempotencyKey: "gemini-store-recovery",
+    });
+    const leaseToken = await claimLease(t, created.jobId);
+    const knownStoreResult = {
+      kind: "store_created" as const,
+      storeName: "fileSearchStores/ghana-recovery",
+      embeddingModel: "models/gemini-embedding-2",
+    };
+
+    await t.mutation(recordProviderFailure, {
+      jobId: created.jobId,
+      leaseToken,
+      kind: "invalid_response",
+      retryable: false,
+      sideEffectUncertain: true,
+      knownStoreResult,
+    });
+    await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({
+      status: "manual_review",
+      recoveryKind: "apply_store_result",
+      knownStoreResult,
+    });
+
+    await expect(admin.client.mutation(retryJob, {
+      jobId: created.jobId,
+      reason: "Apply the known Gemini store result",
+      idempotencyKey: "retry-known-store-result",
+    })).resolves.toMatchObject({ status: "running" });
+    await t.run((ctx) => ctx.db.patch(created.jobId as Id<"integrationJobs">, {
+      leaseExpiresAt: Date.now() - 1,
+      nextAttemptAt: Date.now() - 1,
+    }));
+    await t.mutation(reconcileStaleJobs, {});
+    await expect(t.run((ctx) => ctx.db.get("integrationJobs", created.jobId))).resolves.toMatchObject({
+      status: "manual_review",
+      recoveryKind: "apply_store_result",
+      knownStoreResult,
+    });
+    await expect(admin.client.mutation(retryJob, {
+      jobId: created.jobId,
+      reason: "Apply the preserved Gemini store result",
+      idempotencyKey: "retry-preserved-store-result",
+    })).resolves.toMatchObject({ status: "running" });
+    const recovery = await t.run((ctx) => ctx.db.get("integrationJobs", created.jobId));
+    if (!recovery?.leaseToken) throw new Error("expected recovery lease");
+    delete process.env.GOOGLE_AI_API_KEY;
+    await t.action(runGeminiJob, { jobId: created.jobId, leaseToken: recovery.leaseToken });
+
+    await expect(t.run((ctx) => ctx.db.get(created.jobId))).resolves.toMatchObject({ status: "succeeded" });
+    await expect(t.run((ctx) => ctx.db.get(jurisdictionId))).resolves.toMatchObject({
+      providerSyncState: "synced",
+      geminiFileSearchStoreName: knownStoreResult.storeName,
+    });
+  });
+
   it("polls an accepted Gemini upload at 5, 10, 20, 30, then capped 60 second intervals", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T00:00:00Z"));

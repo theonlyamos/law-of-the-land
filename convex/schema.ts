@@ -455,7 +455,19 @@ export default defineSchema({
     processId: v.optional(v.string()),
     providerOperationName: v.optional(v.string()),
     providerPollCount: v.optional(v.number()),
-    recoveryKind: v.optional(v.union(v.literal("poll_operation"), v.literal("delete_document"))),
+    knownStoreResult: v.optional(v.union(
+      v.object({
+        kind: v.literal("store_created"),
+        storeName: v.string(),
+        embeddingModel: v.string(),
+      }),
+      v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
+    )),
+    recoveryKind: v.optional(v.union(
+      v.literal("poll_operation"),
+      v.literal("delete_document"),
+      v.literal("apply_store_result"),
+    )),
     leaseToken: v.optional(v.string()),
     leaseExpiresAt: v.optional(v.number()),
     status: v.union(

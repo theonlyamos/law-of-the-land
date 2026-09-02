@@ -207,6 +207,7 @@ describe("Gemini durable job executor", () => {
     })).resolves.toBe("manual_review");
     expect(failure).toHaveBeenLastCalledWith({
       kind: "invalid_response", retryable: false, sideEffectUncertain: true,
+      knownStoreResult: { kind: "store_deleted", storeName: "fileSearchStores/ghana-test" },
     });
   });
 });

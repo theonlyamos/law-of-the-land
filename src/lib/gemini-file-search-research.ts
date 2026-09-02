@@ -69,7 +69,12 @@ function interactionEvidence(
   stores: readonly ResearchStore[],
 ): ResearchResult["sources"] {
   if (!response || typeof response !== "object" || Array.isArray(response)) return invalidResponse();
-  const steps = (response as { steps?: unknown }).steps;
+  const outputs = (response as { outputs?: unknown }).outputs;
+  const steps = outputs === undefined
+    ? (response as { steps?: unknown }).steps
+    : Array.isArray(outputs) && outputs.length <= MAX_MODEL_OUTPUT_BLOCKS
+      ? [{ type: "model_output", content: outputs }]
+      : invalidResponse();
   if (!Array.isArray(steps) || steps.length > MAX_INTERACTION_STEPS) return invalidResponse();
   const storesById = new Map(stores.map((store) => [store.jurisdictionId, store]));
   const evidence = new Map<string, {
