@@ -10,6 +10,8 @@ const providers = vi.hoisted(() => ({
   createTopic: vi.fn(), createResearch: vi.fn(), topicGenerate: vi.fn(), initialize: vi.fn(), search: vi.fn(),
 }));
 const transport = vi.hoisted(() => ({ fetch: vi.fn() }));
+const STUB_OBSERVATION_SECRET = Buffer.from("stub-observation-secret-32-bytes")
+  .toString("base64url");
 
 vi.mock("@/lib/auth-server", () => auth);
 vi.mock("server-only", () => ({}));
@@ -51,7 +53,7 @@ function request(body: Record<string, unknown>, observation = false) {
     method: "POST",
     headers: {
       "content-type": "application/json", "x-forwarded-for": crypto.randomUUID(),
-      ...(observation ? { "x-admin-e2e-provider-observation": "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM" } : {}),
+      ...(observation ? { "x-admin-e2e-provider-observation": STUB_OBSERVATION_SECRET } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -81,7 +83,7 @@ function enableObservation() {
   vi.stubEnv("ADMIN_E2E_CONVEX_SITE_URL", "http://127.0.0.1:3211");
   vi.stubEnv("ADMIN_E2E_APPROVED_COMMIT_SHA", "a".repeat(40));
   vi.stubEnv("ADMIN_E2E_LOCAL_HEAD_SHA", "a".repeat(40));
-  vi.stubEnv("ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM");
+  vi.stubEnv("ADMIN_E2E_PROVIDER_OBSERVATION_SECRET", STUB_OBSERVATION_SECRET);
 }
 
 beforeEach(() => {
