@@ -126,6 +126,22 @@ describe("GeminiFileSearchAdapter", () => {
     })).rejects.toMatchObject({ kind: "provider", retryable: true, sideEffectUncertain: true });
   });
 
+  it.each([
+    [400, "validation", false],
+    [401, "authentication", false],
+    [403, "authentication", false],
+    [429, "rate_limit", true],
+  ] as const)("treats explicit mutating HTTP %i rejections as definitive", async (status, kind, retryable) => {
+    const client = sdk();
+    vi.mocked(client.fileSearchStores.create).mockRejectedValue({ status });
+    const adapter = new GeminiFileSearchAdapter({ apiKey: "test-key", sdk: client });
+
+    await expect(adapter.createStore({
+      displayName: "Development Ghana legal research",
+      embeddingModel: "models/gemini-embedding-2",
+    })).rejects.toMatchObject({ kind, retryable, sideEffectUncertain: false });
+  });
+
   it("rejects stores that do not confirm the required embedding model", async () => {
     const client = sdk();
     vi.mocked(client.fileSearchStores.create).mockResolvedValue({

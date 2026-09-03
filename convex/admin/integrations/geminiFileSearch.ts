@@ -145,7 +145,9 @@ function translateError(error: unknown, sideEffectUncertain = false): ProviderEr
         : typeof candidate.error?.code === "number" ? candidate.error.code : null;
     if (status !== null) {
       const translated = errorForStatus(status);
-      return new ProviderError(translated.kind, translated.retryable, translated.status, translated.message, sideEffectUncertain);
+      const mutationMayBeAmbiguous = sideEffectUncertain &&
+        (status === 408 || status === 504 || status >= 500);
+      return new ProviderError(translated.kind, translated.retryable, translated.status, translated.message, mutationMayBeAmbiguous);
     }
   }
   return new ProviderError("network", true, null, "Gemini network request failed", sideEffectUncertain);
