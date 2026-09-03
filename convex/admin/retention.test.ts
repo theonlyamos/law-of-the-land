@@ -319,6 +319,50 @@ describe("one-time conversation export references", () => {
 });
 
 describe("bounded retention", () => {
+  it("clears expired raw provider diagnostics while preserving safe failure metadata", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const t = createBackend();
+    const expired = await seedJob(t, "manual_review", {
+      lastProviderOperation: "document_upload",
+      lastProviderStatus: 403,
+      lastProviderRawResponse: '{"error":"permission denied"}',
+      providerDiagnosticExpiresAt: Date.now() - 1,
+    });
+    const active = await seedJob(t, "failed", {
+      lastProviderOperation: "store_create",
+      lastProviderStatus: 429,
+      lastProviderRawResponse: '{"error":"retry later"}',
+      providerDiagnosticExpiresAt: Date.now(),
+    });
+    await t.run((ctx) => ctx.db.insert("retentionState", {
+      key: "default",
+      phase: "job_provider_diagnostics",
+      cycleHadChanges: false,
+      storagePassHadChanges: false,
+      deletedTotal: 0,
+      lastStartedAt: Date.now(),
+      updatedAt: Date.now(),
+    }));
+
+    await t.mutation(runRetentionBatch, { cursor: null });
+
+    const jobs = await t.run(async (ctx) => ({
+      expired: await ctx.db.get(expired),
+      active: await ctx.db.get(active),
+    }));
+    expect(jobs.expired).toMatchObject({
+      status: "manual_review",
+      lastProviderOperation: "document_upload",
+      lastProviderStatus: 403,
+    });
+    expect(jobs.expired?.lastProviderRawResponse).toBeUndefined();
+    expect(jobs.expired?.providerDiagnosticExpiresAt).toBeUndefined();
+    expect(jobs.active).toMatchObject({
+      lastProviderRawResponse: '{"error":"retry later"}',
+      providerDiagnosticExpiresAt: Date.now(),
+    });
+  });
+
   it("keeps a multi-operation export phase when only one budget unit remains", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const t = createBackend();

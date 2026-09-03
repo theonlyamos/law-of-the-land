@@ -3,7 +3,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { components } from "../_generated/api";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
@@ -362,6 +362,12 @@ describe("durable Gemini jobs", () => {
       event.action === "jurisdiction.gemini_store.provision_queued",
     )).toHaveLength(1);
     const leaseToken = await claimLease(t, first.jobId);
+    await t.run((ctx) => ctx.db.patch(first.jobId, {
+      lastErrorKind: "rate_limit",
+      lastProviderOperation: "store_create",
+      lastProviderStatus: 429,
+      lastProviderRawResponse: "temporary Gemini error body",
+    }));
     await t.mutation(applyGeminiProviderResult, {
       jobId: first.jobId,
       leaseToken,
@@ -376,6 +382,11 @@ describe("durable Gemini jobs", () => {
       geminiEmbeddingModel: "models/gemini-embedding-2",
       providerSyncState: "synced",
     });
+    const completedJob = await t.run((ctx) => ctx.db.get(first.jobId));
+    expect(completedJob).not.toHaveProperty("lastErrorKind");
+    expect(completedJob).not.toHaveProperty("lastProviderOperation");
+    expect(completedJob).not.toHaveProperty("lastProviderStatus");
+    expect(completedJob).not.toHaveProperty("lastProviderRawResponse");
   });
 
   it("recovers a known store result without replaying the provider operation", async () => {
@@ -559,6 +570,60 @@ describe("durable Gemini jobs", () => {
     await expect(t.mutation(recordProviderFailure, {
       jobId: uncertain.jobId, leaseToken: uncertainLease, kind: "provider", retryable: true, sideEffectUncertain: true,
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
+  });
+
+  it("persists a safe Gemini diagnostic for a denied document upload", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const superAdmin = await asAdmin(t, "super_admin");
+    const auditor = await asAdmin(t, "auditor");
+    const failed = await seedBoundGeminiIndexJob(t, {
+      suffix: "denied-upload",
+      status: "queued",
+      providerSyncState: "synced",
+    });
+    const leaseToken = await claimLease(t, failed.jobId);
+    const rawProviderResponse = "{\"error\":{\"code\":403,\"message\":\"Caller does not have permission\"}}";
+    const failureStartedAt = Date.now();
+
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: failed.jobId,
+      leaseToken,
+      kind: "authentication",
+      retryable: false,
+      sideEffectUncertain: false,
+      providerOperation: "document_upload",
+      providerStatus: 403,
+      providerRawResponse: rawProviderResponse,
+    })).resolves.toEqual({ status: "failed", nextAttemptAt: null });
+
+    await expect(t.run((ctx) => ctx.db.get(failed.jobId))).resolves.toMatchObject({
+      lastProviderOperation: "document_upload",
+      lastProviderStatus: 403,
+      lastProviderRawResponse: rawProviderResponse,
+      providerDiagnosticExpiresAt: expect.any(Number),
+    });
+    const recorded = await t.run((ctx) => ctx.db.get(failed.jobId)) as Doc<"integrationJobs"> | null;
+    const expiresAt = recorded?.providerDiagnosticExpiresAt;
+    expect(expiresAt).toBeDefined();
+    expect(expiresAt!).toBeGreaterThanOrEqual(
+      failureStartedAt + 24 * 60 * 60_000,
+    );
+    expect(expiresAt!).toBeLessThanOrEqual(
+      Date.now() + 24 * 60 * 60_000,
+    );
+    await expect(superAdmin.client.query(listJobs, {
+      paginationOpts: { numItems: 10, cursor: null },
+    })).resolves.toMatchObject({
+      page: [expect.objectContaining({
+        id: failed.jobId,
+        lastProviderRawResponse: rawProviderResponse,
+      })],
+    });
+    const auditorJobs = await auditor.client.query(listJobs, {
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(auditorJobs.page[0]).not.toHaveProperty("lastProviderRawResponse");
   });
 
   it("retains an expired permit for an unresolved provider mutation", async () => {

@@ -501,6 +501,19 @@ export default defineSchema({
         v.literal("provider"),
       ),
     ),
+    lastProviderOperation: v.optional(
+      v.union(
+        v.literal("store_create"),
+        v.literal("document_upload"),
+        v.literal("operation_poll"),
+        v.literal("store_get"),
+        v.literal("document_delete"),
+        v.literal("store_delete"),
+      ),
+    ),
+    lastProviderStatus: v.optional(v.number()),
+    lastProviderRawResponse: v.optional(v.string()),
+    providerDiagnosticExpiresAt: v.optional(v.number()),
     retentionPending: v.optional(v.boolean()),
     retentionRedactedAt: v.optional(v.number()),
     createdAt: v.number(),
@@ -513,6 +526,7 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
+    .index("by_providerDiagnosticExpiresAt", ["providerDiagnosticExpiresAt"])
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"])

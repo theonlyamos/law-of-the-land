@@ -16,7 +16,7 @@ beforeEach(() => {
     if (name.endsWith("listIntegrationHealth")) return Promise.resolve({ page: [{ id: "legal-search", label: "Gemini legal search and indexing", configured: true, status: "configured" }], isDone: true, continueCursor: "" });
     if (name.endsWith("listJobs")) return Promise.resolve({ page: [
       { id: "job-1", type: "gemini_index_document", targetType: "documentVersion", targetId: "safe-target", status: "waiting_provider", attemptCount: 1, nextAttemptAt: Date.now() + 5_000, correlationId: "job_safe", createdAt: 1, updatedAt: 2 },
-      { id: "job-2", type: "gemini_index_document", targetType: "documentVersion", targetId: "review-target", status: "manual_review", attemptCount: 4, lastErrorKind: "timeout", correlationId: "job_review", createdAt: 1, updatedAt: 2 },
+      { id: "job-2", type: "gemini_index_document", targetType: "documentVersion", targetId: "review-target", status: "manual_review", attemptCount: 4, lastErrorKind: "authentication", lastProviderOperation: "document_upload", lastProviderStatus: 403, lastProviderRawResponse: '{"error":{"code":403,"message":"Caller does not have permission"}}', correlationId: "job_review", createdAt: 1, updatedAt: 2 },
     ], isDone: true, continueCursor: "" });
     return Promise.resolve({ queryRunDays: 90, exportHours: 24, unattachedStorageHours: 24, maxPerInvocation: 200, lastSuccessfulAt: 1, deletedTotal: 205 });
   });
@@ -38,6 +38,8 @@ describe("operations register", () => {
     expect(within(jobsTable).getByText("Next check in 5 seconds")).toBeVisible();
     expect(within(jobsTable).getByText("Indexing needs review")).toBeVisible();
     expect(within(jobsTable).getByText("Search is paused until an administrator reviews the job.")).toBeVisible();
+    expect(within(jobsTable).getByText("Gemini denied document upload (HTTP 403).")).toBeVisible();
+    expect(within(jobsTable).getByText('{"error":{"code":403,"message":"Caller does not have permission"}}')).toBeVisible();
     expect(screen.getByText("Gemini legal search and indexing")).toBeVisible();
     expect(screen.getByRole("table", { name: "Integration configuration" })).toBeVisible();
     expect(screen.getByText("Configured")).toBeVisible();

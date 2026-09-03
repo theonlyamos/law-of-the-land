@@ -6,6 +6,8 @@ vi.mock("server-only", () => ({}));
 
 import {
   buildGovernedContext,
+  DEFAULT_RETRIEVAL_TIMEOUT_MS,
+  DEFAULT_TOTAL_RETRIEVAL_TIMEOUT_MS,
   digestExactContext,
   parseGovernedContext,
   runBoundedRetrieval,
@@ -19,6 +21,11 @@ const selected = {
 };
 
 describe("governed research limits", () => {
+  it("allows a 60-second Gemini retrieval within a 60-second overall budget", () => {
+    expect(DEFAULT_RETRIEVAL_TIMEOUT_MS).toBe(60_000);
+    expect(DEFAULT_TOTAL_RETRIEVAL_TIMEOUT_MS).toBe(60_000);
+  });
+
   it("keeps selected first, caps four jobs at three concurrent starts, and preserves plan order", async () => {
     let active = 0;
     let peak = 0;

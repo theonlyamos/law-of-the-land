@@ -231,6 +231,7 @@ const RETENTION_PHASES = [
   "grants", "references",
   "exports_queued", "exports_ready", "exports_failed", "exports_expired",
   "query_runs",
+  "job_provider_diagnostics",
   "jobs_succeeded", "jobs_failed", "jobs_cancelled",
   "correlations_issued", "correlations_search_complete", "correlations_chat_claimed", "correlations_finalized",
   "storage",
@@ -285,6 +286,21 @@ export const runRetentionBatch = internalMutation({
       } else if (phase === "query_runs") {
         const rows = await ctx.db.query("queryRuns").withIndex("by_rollupStatus_and_completedAt", (q) => q.eq("rollupStatus", "processed").lt("completedAt", now - 90 * DAY_MS)).take(capacity);
         for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
+      } else if (phase === "job_provider_diagnostics") {
+        const rows = await ctx.db
+          .query("integrationJobs")
+          .withIndex("by_providerDiagnosticExpiresAt", (q) =>
+            q.gt("providerDiagnosticExpiresAt", 0).lt("providerDiagnosticExpiresAt", now),
+          )
+          .take(capacity);
+        for (const row of rows) {
+          await ctx.db.patch(row._id, {
+            lastProviderRawResponse: undefined,
+            providerDiagnosticExpiresAt: undefined,
+            updatedAt: now,
+          });
+          deleted += 1;
+        }
       } else if (phase.startsWith("jobs_")) {
         const status = phase.slice("jobs_".length) as "succeeded" | "failed" | "cancelled";
         const [pending, legacy] = await Promise.all([
@@ -292,7 +308,18 @@ export const runRetentionBatch = internalMutation({
           ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", status).eq("retentionPending", undefined).lt("createdAt", now - 90 * DAY_MS)).take(capacity),
         ]);
         for (const row of [...pending, ...legacy].sort((a, b) => a.createdAt - b.createdAt).slice(0, capacity)) {
-          await ctx.db.patch(row._id, { payload: "{}", lastErrorKind: undefined, retentionPending: false, retentionRedactedAt: now, updatedAt: now }); deleted += 1;
+          await ctx.db.patch(row._id, {
+            payload: "{}",
+            lastErrorKind: undefined,
+            lastProviderOperation: undefined,
+            lastProviderStatus: undefined,
+            lastProviderRawResponse: undefined,
+            providerDiagnosticExpiresAt: undefined,
+            retentionPending: false,
+            retentionRedactedAt: now,
+            updatedAt: now,
+          });
+          deleted += 1;
         }
       } else if (phase.startsWith("correlations_")) {
         const status = phase.slice("correlations_".length) as "issued" | "search_complete" | "chat_claimed" | "finalized";

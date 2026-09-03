@@ -166,7 +166,8 @@ describe("POST /api/search Gemini File Search boundary", () => {
       })),
     }, expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }));
     expect(providers.search.mock.calls[0][1].timeoutMs).toBeGreaterThan(0);
-    expect(providers.search.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(10_000);
+    expect(providers.search.mock.calls[0][1].timeoutMs).toBeGreaterThan(10_000);
+    expect(providers.search.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(60_000);
     const payload = await response.json();
     const context = JSON.parse(payload.result);
     expect(context.sources.map((source: { sourceRef: string; jurisdictionId: string }) => [source.sourceRef, source.jurisdictionId]))
@@ -389,7 +390,7 @@ describe("POST /api/search Gemini File Search boundary", () => {
         (init as RequestInit).signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       }));
       const pending = POST(request({ query: "Question", jurisdictionId: selected.id }));
-      await vi.advanceTimersByTimeAsync(20_001);
+      await vi.advanceTimersByTimeAsync(60_001);
       const response = await pending;
       expect(response.status).toBe(500);
       await expect(response.json()).resolves.toEqual({ error: "We couldn't find relevant legal information for your question." });

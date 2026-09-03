@@ -264,7 +264,7 @@ describe("GeminiFileSearchResearch", () => {
     })).rejects.toThrow("FILE_SEARCH_TIMEOUT");
   });
 
-  it("caps a caller-provided 60-second deadline at the 10-second retrieval limit", async () => {
+  it("honors a caller-provided 60-second deadline", async () => {
     vi.useFakeTimers();
     const create = vi.fn((_request: unknown, options?: { signal?: AbortSignal }) => new Promise((_, reject) => {
       options?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
@@ -279,7 +279,7 @@ describe("GeminiFileSearchResearch", () => {
     });
     const timeout = expect(pending).rejects.toThrow("FILE_SEARCH_TIMEOUT");
 
-    await vi.advanceTimersByTimeAsync(9_999);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(create).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
     await timeout;

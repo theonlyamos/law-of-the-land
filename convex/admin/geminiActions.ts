@@ -358,6 +358,21 @@ export const runGeminiJob = internalAction({
         sideEffectUncertain: error instanceof ProviderError
           ? error.sideEffectUncertain === true
           : false,
+        ...(
+          error instanceof ProviderError
+          && error.operation !== undefined
+          && error.status !== null
+          && Number.isInteger(error.status)
+          && error.status >= 100
+          && error.status <= 599
+            ? { providerOperation: error.operation, providerStatus: error.status }
+            : {}
+        ),
+        ...(
+          error instanceof ProviderError && error.rawResponse !== undefined
+            ? { providerRawResponse: error.rawResponse }
+            : {}
+        ),
       });
       return null;
     }
