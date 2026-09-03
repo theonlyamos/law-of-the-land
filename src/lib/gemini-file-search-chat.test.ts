@@ -33,6 +33,8 @@ type CanonicalInteraction = Interactions.Interaction;
 class FakeInteractionsClient implements GeminiInteractionsClient {
   readonly requests: Interactions.CreateModelInteractionParamsStreaming[] = [];
   readonly getIds: string[] = [];
+  readonly createOptions: Array<object | undefined> = [];
+  readonly getOptions: Array<object | undefined> = [];
 
   constructor(
     private readonly events: readonly StreamEvent[],
@@ -40,12 +42,14 @@ class FakeInteractionsClient implements GeminiInteractionsClient {
   ) {}
 
   readonly interactions = {
-    create: async (request: Interactions.CreateModelInteractionParamsStreaming) => {
+    create: async (request: Interactions.CreateModelInteractionParamsStreaming, options?: object) => {
       this.requests.push(request);
+      this.createOptions.push(options);
       return this.stream();
     },
-    get: async (interactionId: string) => {
+    get: async (interactionId: string, _params?: object | null, options?: object) => {
       this.getIds.push(interactionId);
+      this.getOptions.push(options);
       return this.canonical;
     },
   };
@@ -74,10 +78,13 @@ function eventStream(answer = "The Constitution applies."): StreamEvent[] {
     { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } },
     { event_type: "step.start", index: 0, step: { type: "thought", summary: [{ type: "text", text: "private reasoning" }] } },
     { event_type: "step.delta", index: 0, delta: { type: "thought_summary", content: { type: "text", text: "private reasoning" } } },
+    { event_type: "step.stop", index: 0 },
     { event_type: "step.start", index: 1, step: { type: "file_search_call", id: "file-search-1" } },
     { event_type: "step.delta", index: 1, delta: { type: "file_search_call" } },
+    { event_type: "step.stop", index: 1 },
     { event_type: "step.start", index: 2, step: { type: "file_search_result", call_id: "file-search-1" } },
     { event_type: "step.delta", index: 2, delta: { type: "file_search_result", result: [] } },
+    { event_type: "step.stop", index: 2 },
     { event_type: "step.start", index: 3, step: { type: "model_output" } },
     { event_type: "step.delta", index: 3, delta: { type: "text", text: answer.slice(0, 8) } },
     { event_type: "step.delta", index: 3, delta: { type: "text", text: answer.slice(8) } },
@@ -183,6 +190,21 @@ describe("GeminiFileSearchChat", () => {
     });
   });
 
+  it("passes the route signal to the streamed creation and canonical read", async () => {
+    const controller = new AbortController();
+    const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
+    const chat = new GeminiFileSearchChat(client, {});
+
+    await chat.run(input(), {
+      signal: controller.signal,
+      deadlineAt: Date.now() + 10_000,
+      onDelta: () => {},
+    });
+
+    expect(client.createOptions).toEqual([{ signal: controller.signal }]);
+    expect(client.getOptions).toEqual([{ signal: controller.signal }]);
+  });
+
   it("keeps a bounded question independent of citation identifier limits", async () => {
     const question = "q".repeat(500);
     const { client } = await run(undefined, undefined, input({ query: question }));
@@ -222,6 +244,52 @@ describe("GeminiFileSearchChat", () => {
 
   it.each(invalidCases)("rejects without a result when %s", async (_name, events, final) => {
     await expect(run(events, final)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it.each([
+    ["a duplicate stop", [
+      ...eventStream().slice(0, -1),
+      { event_type: "step.stop", index: 3 },
+      { event_type: "interaction.completed", interaction: { id: "interaction-1", status: "completed" } },
+    ] satisfies StreamEvent[]],
+    ["a model delta after its stop", [
+      ...eventStream().slice(0, -1),
+      { event_type: "step.delta", index: 3, delta: { type: "text", text: "forged" } },
+      { event_type: "interaction.completed", interaction: { id: "interaction-1", status: "completed" } },
+    ] satisfies StreamEvent[]],
+    ["completion with an open step", eventStream().filter((event) => !(event.event_type === "step.stop" && event.index === 2))],
+  ] satisfies Array<[string, StreamEvent[]]>)("rejects %s", async (_name, events) => {
+    await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it("rejects a canonical annotation that is not a File Search citation", async () => {
+    await expect(run(undefined, canonical(undefined, [{
+      type: "url_citation",
+      url: "https://forged.example",
+    }]))).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it.each([
+    ["text is not a string", () => {
+      const response = canonical(undefined, [citation()]);
+      const step = response.steps?.[0];
+      if (!step || step.type !== "model_output") throw new Error("fixture invalid");
+      const block = step.content?.[0];
+      if (!block || block.type !== "text") throw new Error("fixture invalid");
+      Object.defineProperty(block, "text", { value: 7 });
+      return response;
+    }],
+    ["annotations are not an array", () => {
+      const response = canonical(undefined, [citation()]);
+      const step = response.steps?.[0];
+      if (!step || step.type !== "model_output") throw new Error("fixture invalid");
+      const block = step.content?.[0];
+      if (!block || block.type !== "text") throw new Error("fixture invalid");
+      Object.defineProperty(block, "annotations", { value: { forged: true } });
+      return response;
+    }],
+  ])("rejects canonical output when %s", async (_name, malformed) => {
+    await expect(run(undefined, malformed())).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
   });
 
   it("rejects an aborted or expired shared route deadline before making a provider request", async () => {
