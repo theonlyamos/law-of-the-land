@@ -32,6 +32,7 @@ import {
   requireEnabledAdminCatalogRead,
   requireEnabledAdminPermission,
 } from "./featureFlags";
+import { queueGeminiStoreProvision } from "./jobs";
 
 const MAX_TEXT_LENGTH = 300;
 const MAX_SCOPE_LINKS = 8;
@@ -1078,6 +1079,12 @@ export const createGeographicJurisdiction = mutation({
         place.aliases,
       ),
     });
+    await queueGeminiStoreProvision(
+      ctx,
+      created,
+      { id: actor.userId, roles: actor.roles },
+      `provision-gemini-${id}`,
+    );
     return id;
   },
 });
@@ -1239,6 +1246,12 @@ export const createOrganizationalJurisdiction = mutation({
         profiles,
       ),
     });
+    await queueGeminiStoreProvision(
+      ctx,
+      created,
+      { id: actor.userId, roles: actor.roles },
+      `provision-gemini-${id}`,
+    );
     return id;
   },
 });

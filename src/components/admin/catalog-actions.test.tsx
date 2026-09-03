@@ -379,21 +379,13 @@ describe("jurisdiction lifecycle actions", () => {
     );
   });
 
-  it("queues controlled Gemini setup for a draft jurisdiction", async () => {
+  it("does not offer manual Gemini setup for a new draft jurisdiction", () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
       id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
       provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, geographic: { level: "country", parent: null },
     }} />);
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for Ghana" }), { target: { value: "Set up legal search" } });
-    fireEvent.click(screen.getByRole("button", { name: "Set up Gemini search" }));
-
-    await waitFor(() => expect(mocks.provisionGemini).toHaveBeenCalledWith({
-      jurisdictionId: "geo_1",
-      reason: "Set up legal search",
-      idempotencyKey: expect.stringMatching(/^provision-gemini-geo_1-/),
-    }));
-    expect(await screen.findByRole("status")).toHaveTextContent(/being set up/i);
+    expect(screen.queryByRole("button", { name: "Set up Gemini search" })).toBeNull();
   });
 
   it("enables a draft jurisdiction with an auditable reason", async () => {

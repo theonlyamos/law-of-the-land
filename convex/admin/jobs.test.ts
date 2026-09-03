@@ -352,6 +352,15 @@ describe("durable Gemini jobs", () => {
       displayName: "law-of-the-land-test-ghana",
       embeddingModel: "models/gemini-embedding-2",
     });
+    const provisionAudits = await t.run(async (ctx) => await ctx.db
+      .query("auditEvents")
+      .withIndex("by_targetType_and_targetId", (q) => q
+        .eq("targetType", "jurisdiction")
+        .eq("targetId", jurisdictionId))
+      .collect());
+    expect(provisionAudits.filter((event) =>
+      event.action === "jurisdiction.gemini_store.provision_queued",
+    )).toHaveLength(1);
     const leaseToken = await claimLease(t, first.jobId);
     await t.mutation(applyGeminiProviderResult, {
       jobId: first.jobId,
