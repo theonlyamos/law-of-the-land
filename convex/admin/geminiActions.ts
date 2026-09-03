@@ -17,6 +17,7 @@ const PROVIDER_MAX_DOCUMENT_BYTES = 100_000_000;
 
 const getJobRef = makeFunctionReference<"query">("admin/jobs:getJobForRun");
 const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
+const deferUnstartedPublicationJobRef = makeFunctionReference<"mutation">("admin/jobs:deferUnstartedPublicationJob");
 const targetRef = makeFunctionReference<"query">("admin/jobs:getGeminiJobTarget");
 const resultRef = makeFunctionReference<"mutation">("admin/jobs:applyGeminiProviderResult");
 const failureRef = makeFunctionReference<"mutation">("admin/jobs:recordProviderFailure");
@@ -282,10 +283,20 @@ export const runGeminiJob = internalAction({
       });
       return null;
     }
-    const target = (await ctx.runQuery(targetRef, {
-      jobId: args.jobId,
-      leaseToken,
-    })) as GeminiExecutionTarget | null;
+    let target: GeminiExecutionTarget | null;
+    try {
+      target = (await ctx.runQuery(targetRef, {
+        jobId: args.jobId,
+        leaseToken,
+      })) as GeminiExecutionTarget | null;
+    } catch (error) {
+      const deferred = await ctx.runMutation(deferUnstartedPublicationJobRef, {
+        jobId: args.jobId,
+        leaseToken,
+      }) as boolean;
+      if (deferred) return null;
+      throw error;
+    }
     if (!target) return null;
     const executionJob: GeminiExecutionJob = {
       type: job.type as GeminiExecutionJob["type"],

@@ -1061,6 +1061,170 @@ describe("governed document publication", () => {
     expect(final.jurisdiction?.providerSyncState).toBe("drifted");
   });
 
+  it("defers unstarted work while another resource job owns jurisdiction drift", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const operator = await asAdmin(t, "super_admin");
+    const { jurisdictionId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    const second = await t.run(async (ctx) => {
+      const now = Date.now();
+      const resourceId = await ctx.db.insert("legalResources", {
+        jurisdictionId, type: "act", title: "Electronic Transactions Act", issuer: "Parliament",
+        officialCitation: "Act 772", officialCitationKey: "act 772",
+        sourceUrl: "https://laws.example.gov/act-772", topics: ["commerce"], effectiveDate: "2008-12-18",
+        status: "active", createdBy: "manager", updatedBy: "manager", createdAt: now, updatedAt: now,
+      });
+      const body = "deferred-second-resource";
+      const originalStorageId = await ctx.storage.store(new Blob([body], { type: "application/pdf" }));
+      const versionId = await ctx.db.insert("documentVersions", {
+        resourceId, versionNumber: 1, originalStorageId, filename: "act-772-v1.pdf",
+        mimeType: "application/pdf", byteSize: body.length, sha256: await sha256(body),
+        sourceUrl: "https://laws.example.gov/act-772", effectiveDate: "2008-12-18", status: "approved",
+        submittedBy: "manager", submittedAt: now, reviewedBy: "prior-reviewer", reviewedAt: now,
+        createdAt: now, updatedAt: now,
+      });
+      return { resourceId, versionId };
+    });
+    await addStepUp(t, publisher, "document_publish", ids[0], "defer-first-publication");
+    await addStepUp(t, publisher, "document_publish", second.versionId, "defer-second-publication");
+    const first = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish first verified original", idempotencyKey: "defer-first-publication",
+    });
+    const deferred = await publisher.client.mutation(publishVersion, {
+      versionId: second.versionId, confirmation: `PUBLISH ${second.versionId}`,
+      reason: "Publish second verified original", idempotencyKey: "defer-second-publication",
+    });
+    const firstPoll = await claimAcceptedIndexPoll(t, first.jobId, "defer-first");
+    const racedLease = await t.mutation(claimJob, { jobId: deferred.jobId });
+    if (!racedLease) throw new Error("expected second publication lease before drift");
+    await t.mutation(recordProviderFailure, {
+      jobId: first.jobId, leaseToken: firstPoll.leaseToken,
+      kind: "network", retryable: true, sideEffectUncertain: true,
+    });
+
+    await expect(t.action(runGeminiJob, { jobId: deferred.jobId, leaseToken: racedLease.leaseToken })).resolves.toBeNull();
+    await expect(t.mutation(claimJob, { jobId: deferred.jobId })).resolves.toBeNull();
+    const waiting = await t.run(async (ctx) => ctx.db.get(deferred.jobId as Id<"integrationJobs">));
+    expect(waiting?.status).toBe("queued");
+    expect(waiting?.recoveryKind).toBeUndefined();
+    expect(waiting?.leaseToken).toBeUndefined();
+    expect(waiting?.nextAttemptAt).toBeGreaterThan(Date.now());
+
+    await operator.client.mutation(retryJob, {
+      jobId: first.jobId, reason: "Recover first publication", idempotencyKey: "recover-deferred-first",
+    });
+    const firstRecovery = await t.run(async (ctx) => ctx.db.get(first.jobId as Id<"integrationJobs">));
+    if (!firstRecovery?.leaseToken) throw new Error("expected first recovery lease");
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: first.jobId, leaseToken: firstRecovery.leaseToken,
+      result: { kind: "index_completed", documentName: "fileSearchStores/ghana-test/documents/defer-first" },
+    });
+    expect((await t.run(async (ctx) => ctx.db.get(jurisdictionId)))?.providerSyncState).toBe("synced");
+
+    await t.run(async (ctx) => ctx.db.patch(deferred.jobId, { nextAttemptAt: Date.now() - 1 }));
+    await expect(t.mutation(reconcileStaleJobs, {})).resolves.toMatchObject({ scheduled: 1 });
+    const resumed = await t.run(async (ctx) => ctx.db.get(deferred.jobId as Id<"integrationJobs">));
+    expect(resumed?.status).toBe("running");
+    expect(resumed?.recoveryKind).toBeUndefined();
+    if (!resumed?.leaseToken) throw new Error("expected deferred job lease");
+    await expect(t.query(getGeminiJobTarget, { jobId: deferred.jobId, leaseToken: resumed.leaseToken })).resolves.toMatchObject({
+      kind: "index_document", storeName: "fileSearchStores/ghana-test",
+    });
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: deferred.jobId, leaseToken: resumed.leaseToken,
+      result: { kind: "index_accepted", operationName: "fileSearchStores/ghana-test/upload/operations/deferred-second" },
+    });
+    await t.run(async (ctx) => ctx.db.patch(deferred.jobId, { nextAttemptAt: Date.now() - 1 }));
+    const secondPoll = await t.mutation(claimJob, { jobId: deferred.jobId });
+    if (!secondPoll) throw new Error("expected deferred poll lease");
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: deferred.jobId, leaseToken: secondPoll.leaseToken,
+      result: { kind: "index_completed", documentName: "fileSearchStores/ghana-test/documents/deferred-second" },
+    });
+    const final = await t.run(async (ctx) => ({
+      first: await ctx.db.get("integrationJobs", first.jobId), second: await ctx.db.get("integrationJobs", deferred.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId), resource: await ctx.db.get(second.resourceId),
+    }));
+    expect(final.first?.status).toBe("succeeded");
+    expect(final.second?.status).toBe("succeeded");
+    expect(final.jurisdiction?.providerSyncState).toBe("synced");
+    expect(final.resource?.activeVersionId).toBe(second.versionId);
+  });
+
+  it("advances a full reconciliation batch of drift-blocked jobs", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const { jurisdictionId } = await seedCatalog(t, "manager", ["approved"]);
+    const body = "deferred-batch-version";
+    const digest = await sha256(body);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const originalStorageId = await ctx.storage.store(new Blob([body], { type: "application/pdf" }));
+      await ctx.db.patch(jurisdictionId, { providerSyncState: "drifted", updatedAt: now });
+      for (let index = 0; index < 26; index += 1) {
+        const resourceId = await ctx.db.insert("legalResources", {
+          jurisdictionId, type: "act", title: `Deferred Act ${index}`, issuer: "Parliament",
+          officialCitation: `Act ${index}`, officialCitationKey: `act ${index}`,
+          sourceUrl: `https://laws.example.gov/deferred-${index}`, topics: ["deferred"], effectiveDate: "2026-01-01",
+          status: "active", createdBy: "manager", updatedBy: "manager", createdAt: now + index, updatedAt: now + index,
+        });
+        const versionId = await ctx.db.insert("documentVersions", {
+          resourceId, versionNumber: 1, originalStorageId, filename: `deferred-${index}.pdf`,
+          mimeType: "application/pdf", byteSize: body.length, sha256: digest,
+          sourceUrl: `https://laws.example.gov/deferred-${index}`, effectiveDate: "2026-01-01", status: "publishing",
+          submittedBy: "manager", submittedAt: now, reviewedBy: "reviewer", reviewedAt: now,
+          createdAt: now + index, updatedAt: now + index,
+        });
+        const jobId = await ctx.db.insert("integrationJobs", {
+          type: "gemini_index_document", targetType: "documentVersion", targetId: versionId,
+          payload: JSON.stringify({ operation: "publish", storeName: "fileSearchStores/ghana-test", sha256: digest }),
+          actorId: "reviewer", actorRoles: ["content_reviewer"], idempotencyKey: `deferred-batch-${index}`,
+          requestFingerprint: digest, correlationId: `job_deferred_batch_${index}`,
+          status: "queued", attemptCount: 0, nextAttemptAt: now - 1, createdAt: now + index, updatedAt: now + index,
+        });
+        await ctx.db.insert("documentLifecycleLocks", {
+          resourceId, versionId, operation: "publish", actorId: "reviewer", idempotencyKey: `deferred-batch-${index}`,
+          jobId, expiresAt: now + 60 * 60_000, createdAt: now, updatedAt: now,
+        });
+      }
+    });
+
+    await expect(t.mutation(reconcileStaleJobs, {})).resolves.toEqual({ scheduled: 0, hasMore: true });
+    const afterFirstBatch = await t.run(async (ctx) => ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", "gemini_index_document")).take(30));
+    expect(afterFirstBatch.filter((job) => (job.nextAttemptAt ?? 0) <= Date.now())).toHaveLength(1);
+    await expect(t.mutation(reconcileStaleJobs, {})).resolves.toEqual({ scheduled: 0, hasMore: false });
+    const final = await t.run(async (ctx) => ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", "gemini_index_document")).take(30));
+    expect(final).toHaveLength(26);
+    expect(final.every((job) => job.status === "queued" && job.leaseToken === undefined && (job.nextAttemptAt ?? 0) > Date.now())).toBe(true);
+  });
+
+  it("does not mask an invalid unstarted workflow as drift deferral", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const { jurisdictionId, resourceId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    await addStepUp(t, publisher, "document_publish", ids[0], "invalid-drift-deferral");
+    const queued = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish verified original", idempotencyKey: "invalid-drift-deferral",
+    });
+    const lease = await t.mutation(claimJob, { jobId: queued.jobId });
+    if (!lease) throw new Error("expected publication lease");
+    await t.run(async (ctx) => {
+      await ctx.db.patch(jurisdictionId, { providerSyncState: "drifted" });
+      const lock = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId)).unique();
+      if (!lock) throw new Error("expected lifecycle lock");
+      await ctx.db.delete(lock._id);
+    });
+
+    await expect(t.action(runGeminiJob, { jobId: queued.jobId, leaseToken: lease.leaseToken })).rejects.toThrow("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
+    expect(await t.run(async (ctx) => ctx.db.get(queued.jobId as Id<"integrationJobs">))).toMatchObject({
+      status: "running", leaseToken: lease.leaseToken,
+    });
+  });
+
   it("reconciles a deleted document whose completion write failed by repeating only the exact delete", async () => {
     const t = createBackend();
     await enablePanel(t);

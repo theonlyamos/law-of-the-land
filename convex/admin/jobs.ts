@@ -904,6 +904,41 @@ export const getJobForRun = internalQuery({
   },
 });
 
+async function unstartedPublicationBlockedByDrift(
+  ctx: MutationCtx,
+  job: Doc<"integrationJobs">,
+  now: number,
+) {
+  if (
+    job.targetType !== "documentVersion" ||
+    (job.type !== "gemini_index_document" && job.type !== "gemini_delete_document") ||
+    job.providerOperationName !== undefined ||
+    job.recoveryKind !== undefined
+  ) return false;
+  try {
+    await resolveGeminiPublicationWorkflow(ctx, job, { kind: "defer_unstarted" }, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deferPublicationJobForDrift(
+  ctx: MutationCtx,
+  job: GeminiIntegrationJob,
+  now: number,
+) {
+  const delay = RETRY_DELAYS_MS[0];
+  await ctx.db.patch(job._id, {
+    status: "queued",
+    leaseToken: undefined,
+    leaseExpiresAt: undefined,
+    nextAttemptAt: now + delay,
+    updatedAt: now,
+  });
+  await ctx.scheduler.runAfter(delay, jobRunner(job.type), { jobId: job._id });
+}
+
 async function claimJobDocument(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
@@ -919,10 +954,14 @@ async function claimJobDocument(
     ) {
       return null;
     }
-    if (job.nextAttemptAt !== undefined && job.nextAttemptAt > Date.now()) {
+    const now = Date.now();
+    if (job.nextAttemptAt !== undefined && job.nextAttemptAt > now) {
       return null;
     }
-    const now = Date.now();
+    if (job.status === "queued" && await unstartedPublicationBlockedByDrift(ctx, job, now)) {
+      await deferPublicationJobForDrift(ctx, job, now);
+      return null;
+    }
     const leaseToken = `lease_${crypto.randomUUID().replaceAll("-", "")}`;
     const leaseExpiresAt = now + JOB_LEASE_MS;
     const claimedJob: GeminiIntegrationJob = {
@@ -956,6 +995,27 @@ export const claimJob = internalMutation({
     const job = await ctx.db.get(args.jobId);
     if (!job) return null;
     return await claimJobDocument(ctx, job);
+  },
+});
+
+export const deferUnstartedPublicationJob = internalMutation({
+  args: { jobId: v.id("integrationJobs"), leaseToken: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    const now = Date.now();
+    if (
+      !job ||
+      !isGeminiJobDocument(job) ||
+      job.status !== "running" ||
+      job.leaseToken === undefined ||
+      job.leaseExpiresAt === undefined ||
+      job.leaseExpiresAt <= now ||
+      !safeEqual(job.leaseToken, args.leaseToken) ||
+      !(await unstartedPublicationBlockedByDrift(ctx, job, now))
+    ) return false;
+    await deferPublicationJobForDrift(ctx, job, now);
+    return true;
   },
 });
 

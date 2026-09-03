@@ -86,6 +86,7 @@ export async function resolveGeminiPublicationWorkflow(
   mode:
     | { kind: "active"; pendingOperationName?: string }
     | { kind: "stale_reconciliation" }
+    | { kind: "defer_unstarted" }
     | { kind: "indexed_candidate"; documentName: string } = { kind: "active" },
   now: number,
 ): Promise<IndexWorkflow | DeleteWorkflow> {
@@ -116,6 +117,7 @@ export async function resolveGeminiPublicationWorkflow(
     const candidateDocumentValid = mode.kind === "indexed_candidate"
       ? target.geminiDocumentName === mode.documentName && isGeminiDocumentName(mode.documentName) && mode.documentName.startsWith(`${storeName}/documents/`)
       : target.geminiDocumentName === undefined;
+    const deferredForDrift = mode.kind === "defer_unstarted" && job.providerOperationName === undefined && job.recoveryKind === undefined;
     const provenanceValid = mode.kind === "stale_reconciliation"
       ? (job.providerOperationName === undefined
           ? job.recoveryKind === undefined
@@ -131,7 +133,8 @@ export async function resolveGeminiPublicationWorkflow(
       !provenanceValid ||
       (job.providerOperationName !== undefined && !operationBound) ||
       (pendingOperationName !== undefined && (job.providerOperationName !== undefined || job.recoveryKind !== undefined || !operationBound)) ||
-      (driftRecovery && !(job.recoveryKind === "poll_operation" && operationBound)) ||
+      (driftRecovery && !(deferredForDrift || (job.recoveryKind === "poll_operation" && operationBound))) ||
+      (mode.kind === "defer_unstarted" && !driftRecovery) ||
       (!driftRecovery && jurisdiction.providerSyncState !== "synced")
     ) throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
     return { kind: "index", payload, publicationOperation, version: target, previous, resource, jurisdiction, lock, storeName };
@@ -139,10 +142,11 @@ export async function resolveGeminiPublicationWorkflow(
 
   if (job.type === "gemini_delete_document" && (payload.operation === "unpublish" || payload.operation === "replace_delete")) {
     const recovering = job.recoveryKind === "delete_document";
+    const deferredForDrift = mode.kind === "defer_unstarted" && job.providerOperationName === undefined && job.recoveryKind === undefined;
     const provenanceValid = mode.kind === "stale_reconciliation"
       ? job.recoveryKind === undefined || recovering
       : recovering || job.recoveryKind === undefined;
-    if ((driftRecovery && !recovering) || (!driftRecovery && jurisdiction.providerSyncState !== "synced") || !provenanceValid || job.providerOperationName !== undefined || mode.kind === "indexed_candidate") {
+    if ((driftRecovery && !recovering && !deferredForDrift) || (mode.kind === "defer_unstarted" && !driftRecovery) || (!driftRecovery && jurisdiction.providerSyncState !== "synced") || !provenanceValid || job.providerOperationName !== undefined || mode.kind === "indexed_candidate") {
       throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
     }
     if (!target.geminiDocumentName || target.geminiDocumentName !== payload.documentName || !isGeminiDocumentName(payload.documentName) || !payload.documentName.startsWith(`${storeName}/documents/`)) {
