@@ -108,7 +108,7 @@ export function DocumentUpload({
       setFile(null);
       setState({
         kind: "success",
-        message: "Draft version recorded. Submit it for review when the metadata is ready.",
+        message: "Version recorded and ready for review.",
       });
       router.refresh();
     } catch {
@@ -137,7 +137,7 @@ export function DocumentUpload({
           </h2>
           <p className="mt-3 max-w-[38ch] text-sm leading-6 text-[oklch(40%_0.035_252)]">
             The browser sends the file directly to protected Convex storage.
-            A SHA-256 checksum binds the immutable original to its draft record.
+            A SHA-256 checksum binds the immutable original to its review record.
           </p>
           <p className="mt-4 text-xs font-semibold uppercase tracking-[0.1em] text-[oklch(37%_0.05_252)]">
             PDF, Office, text, image, CSV, TSV, or JSON / {formatBytes(maxBytes)} maximum
@@ -198,7 +198,7 @@ export function DocumentUpload({
               disabled={busy}
               className="min-h-11 bg-[oklch(29%_0.05_252)] px-5 text-sm font-semibold text-[oklch(97%_0.012_78)] transition-colors hover:bg-[oklch(23%_0.05_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:cursor-wait disabled:opacity-60"
             >
-              {busy ? "Upload in progress" : "Upload draft version"}
+              {busy ? "Upload in progress" : "Upload version"}
             </button>
             {state.kind !== "idle" ? (
               <p

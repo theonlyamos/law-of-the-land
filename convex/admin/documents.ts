@@ -236,8 +236,9 @@ export const createDocumentVersion = mutation({
       sha256,
       sourceUrl,
       effectiveDate,
-      status: "draft",
+      status: "ready_for_review",
       submittedBy: actor.userId,
+      submittedAt: now,
       createdAt: now,
       updatedAt: now,
     };

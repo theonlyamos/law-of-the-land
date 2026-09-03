@@ -193,7 +193,7 @@ describe("governed original-file uploads", () => {
     );
   });
 
-  it("creates the next immutable draft from verified storage metadata and writes a secret-safe audit", async () => {
+  it("creates the next immutable version ready for review from verified storage metadata", async () => {
     const t = createBackend();
     await enablePanel(t);
     const manager = await asAdmin(t, "content_manager");
@@ -235,8 +235,9 @@ describe("governed original-file uploads", () => {
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
       sourceUrl,
       effectiveDate: "2012-10-16",
-      status: "draft",
+      status: "ready_for_review",
       submittedBy: manager.userId,
+      submittedAt: expect.any(Number),
     });
     expect(state.counter?.nextVersionNumber).toBe(2);
     expect(state.audits).toHaveLength(1);
@@ -247,7 +248,7 @@ describe("governed original-file uploads", () => {
     expect(serializedAudit).not.toContain(String(storageId));
   });
 
-  it("records a protected immutable draft without creating a provider job", async () => {
+  it("records a protected immutable version ready for review without creating a provider job", async () => {
     const t = createBackend();
     await enablePanel(t);
     const manager = await asAdmin(t, "content_manager");
@@ -264,7 +265,7 @@ describe("governed original-file uploads", () => {
       jobs: await ctx.db.query("integrationJobs").take(1),
       locks: await ctx.db.query("documentLifecycleLocks").take(1),
     }));
-    expect(state.version).toMatchObject({ status: "draft", originalStorageId: storageId });
+    expect(state.version).toMatchObject({ status: "ready_for_review", originalStorageId: storageId, submittedAt: expect.any(Number) });
     expect(state.jobs).toHaveLength(0);
     expect(state.locks).toHaveLength(0);
   });
