@@ -1,6 +1,6 @@
 import { api } from "../../../../convex/_generated/api";
 import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
-import { JurisdictionEditor, JurisdictionLifecycleActions } from "@/components/admin/catalog-actions";
+import { JurisdictionEditor, JurisdictionLifecycleActions, JurisdictionSetupRefresh } from "@/components/admin/catalog-actions";
 import { DataTable, readAdminTableNavigation, type AdminTableSearchParams } from "@/components/admin/data-table";
 import { CatalogStatus } from "@/components/admin/resource-register";
 import { authorizeAdminPage } from "@/lib/admin/server";
@@ -80,8 +80,10 @@ export default async function JurisdictionsPage({ searchParams }: { searchParams
     } catch { failed = true; }
   }
   const rows = table?.page ?? [];
+  const hasPendingGeminiSetup = rows.some((row) => row.status === "draft" && row.provider.setupState === "setting_up");
 
   return <div className="mx-auto max-w-[88rem]">
+    <JurisdictionSetupRefresh pending={hasPendingGeminiSetup} />
     <header className="grid gap-5 border-b-2 border-[oklch(35%_0.055_252)] pb-7 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.42fr)] lg:items-end">
       <div><p className="text-xs font-semibold uppercase tracking-[0.2em] text-[oklch(43%_0.065_67)]">Unified geographic and organizational register</p><h1 className="mt-3 text-[clamp(2.25rem,6vw,4.75rem)] font-semibold leading-[0.96] tracking-[-0.05em] text-[oklch(23%_0.05_252)]">Jurisdictions</h1></div>
       <p className="max-w-[48ch] text-sm leading-6 text-[oklch(41%_0.035_252)]">Draft first, verify relationships, then enable. This register exposes operational readiness without revealing provider identifiers.</p>

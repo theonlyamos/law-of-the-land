@@ -267,6 +267,18 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
   );
 }
 
+export function JurisdictionSetupRefresh({ pending }: { pending: boolean }) {
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!pending) return;
+    const refresh = window.setInterval(() => router.refresh(), SETUP_REFRESH_MS);
+    return () => window.clearInterval(refresh);
+  }, [pending, router]);
+
+  return null;
+}
+
 export function JurisdictionLifecycleActions({
   jurisdiction,
   geographicOptions = [],
@@ -303,12 +315,6 @@ export function JurisdictionLifecycleActions({
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [deletingStore, setDeletingStore] = useState(false);
   const [deleteIdempotencyKey, setDeleteIdempotencyKey] = useState("");
-
-  useEffect(() => {
-    if (jurisdiction.provider.setupState !== "setting_up") return;
-    const refresh = window.setInterval(() => router.refresh(), SETUP_REFRESH_MS);
-    return () => window.clearInterval(refresh);
-  }, [jurisdiction.provider.setupState, router]);
 
   async function run(action: "enable" | "archive") {
     const auditReason = reason.trim();
