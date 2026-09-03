@@ -40,7 +40,7 @@ vi.mock("./geographic-place-picker", () => ({ GeographicPlacePicker: ({ onChange
   <button type="button" onClick={() => onChange(null)}>Expire verified Accra</button>
 </>) }));
 
-import { JurisdictionEditor, JurisdictionLifecycleActions, ResourceEditor } from "./catalog-actions";
+import { JurisdictionEditor, JurisdictionLifecycleActions, JurisdictionSetupRefresh, ResourceEditor } from "./catalog-actions";
 
 const organizations = [{ id: "org_1", name: "World Health Organization", slug: "who", class: "intergovernmental" as const }];
 const geographies = [{ id: "geo_1", name: "Ghana", level: "country" as const, parent: null }];
@@ -386,6 +386,27 @@ describe("jurisdiction lifecycle actions", () => {
     }} />);
 
     expect(screen.queryByRole("button", { name: "Set up Gemini search" })).toBeNull();
+  });
+
+  it("blocks enablement until Gemini search setup is ready", () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "pending", setupState: "setting_up", storeConfigured: false }, geographic: { level: "country", parent: null },
+    }} />);
+
+    expect(screen.getByRole("button", { name: "Enable Ghana" })).toBeDisabled();
+  });
+
+  it("refreshes the page while Gemini search setup is pending", () => {
+    vi.useFakeTimers();
+    try {
+      render(<JurisdictionSetupRefresh pending />);
+
+      vi.advanceTimersByTime(2_000);
+      expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("enables a draft jurisdiction with an auditable reason", async () => {

@@ -60,7 +60,7 @@ describe("document original upload", () => {
     );
     expect(screen.getByLabelText("Effective date")).toHaveValue("2012-10-16");
     expect(screen.getByText(/100 B maximum/i)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Upload draft version" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Upload version" })).toBeVisible();
   });
 
   it.each(["repealed", "archived"] as const)(
@@ -68,7 +68,7 @@ describe("document original upload", () => {
     (status) => {
       renderUpload(status);
       expect(screen.queryByRole("heading", { name: "Add an original" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Upload draft version" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Upload version" })).toBeNull();
     },
   );
 
@@ -80,7 +80,7 @@ describe("document original upload", () => {
     fireEvent.change(screen.getByLabelText("Original legal file"), {
       target: { files: [file] },
     });
-    fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Upload version" }).closest("form")!);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Choose a supported PDF, Office, text, image, CSV, TSV, or JSON file.",
@@ -106,7 +106,7 @@ describe("document original upload", () => {
     fireEvent.change(screen.getByLabelText("Original legal file"), {
       target: { files: [file] },
     });
-    fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Upload version" }).closest("form")!);
 
     await waitFor(() => expect(createDocumentVersion).toHaveBeenCalledTimes(1));
     expect(generateUploadUrl).toHaveBeenCalledWith({});
@@ -129,7 +129,7 @@ describe("document original upload", () => {
       effectiveAt: "2012-10-16",
     });
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "Draft version recorded. Submit it for review when the metadata is ready.",
+      "Version recorded and ready for review.",
     );
   });
 
@@ -137,7 +137,7 @@ describe("document original upload", () => {
     renderUpload();
     const file = new File([new Uint8Array(101)], "law.pdf", { type: "application/pdf" });
     fireEvent.change(screen.getByLabelText("Original legal file"), { target: { files: [file] } });
-    fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Upload version" }).closest("form")!);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Choose a file smaller than 100 B.");
     expect(generateUploadUrl).not.toHaveBeenCalled();
@@ -154,7 +154,7 @@ describe("document original upload", () => {
     fireEvent.change(screen.getByLabelText("Original legal file"), {
       target: { files: [file] },
     });
-    fireEvent.submit(screen.getByRole("button", { name: "Upload draft version" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Upload version" }).closest("form")!);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The original could not be uploaded",

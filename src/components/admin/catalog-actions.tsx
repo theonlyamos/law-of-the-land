@@ -13,6 +13,7 @@ const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[okl
 const labelClass = "grid gap-2 text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]";
 const buttonClass = "inline-flex min-h-11 items-center justify-center bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
 const secondaryButtonClass = "inline-flex min-h-11 items-center justify-center border border-[oklch(48%_0.045_252)] px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
+const SETUP_REFRESH_MS = 2_000;
 
 const GeographicPlacePicker = lazy(() => import("./geographic-place-picker").then((module) => ({ default: module.GeographicPlacePicker })));
 
@@ -266,6 +267,18 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
   );
 }
 
+export function JurisdictionSetupRefresh({ pending }: { pending: boolean }) {
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!pending) return;
+    const refresh = window.setInterval(() => router.refresh(), SETUP_REFRESH_MS);
+    return () => window.clearInterval(refresh);
+  }, [pending, router]);
+
+  return null;
+}
+
 export function JurisdictionLifecycleActions({
   jurisdiction,
   geographicOptions = [],
@@ -392,6 +405,7 @@ export function JurisdictionLifecycleActions({
   }
 
   const canRetrySetup = jurisdiction.status === "draft" && jurisdiction.provider.setupState === "setup_failed";
+  const canEnable = jurisdiction.provider.setupState === "ready";
   const canDeleteStore = jurisdiction.status !== "enabled" && jurisdiction.provider.storeConfigured;
 
   return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
@@ -400,7 +414,7 @@ export function JurisdictionLifecycleActions({
     </label>
     <div className="flex flex-wrap gap-2">
       {editable && jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
-      {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
+      {jurisdiction.status === "draft" ? <button type="button" disabled={pending || !canEnable} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
       {canRetrySetup ? <button type="button" disabled={pending} onClick={provisionGeminiStore} className={buttonClass}>Retry Gemini search setup</button> : null}
       {canDeleteStore ? <button type="button" disabled={pending} onClick={beginStoreDelete} className={secondaryButtonClass}>Delete Gemini store</button> : null}
       {jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button> : null}

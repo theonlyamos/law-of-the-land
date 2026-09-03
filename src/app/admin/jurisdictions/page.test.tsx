@@ -10,6 +10,7 @@ vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 vi.mock("@/components/admin/catalog-actions", () => ({
   JurisdictionEditor: (props: unknown) => <output data-testid="editor-props">{JSON.stringify(props)}</output>,
   JurisdictionLifecycleActions: (props: unknown) => <output data-testid="lifecycle-props">{JSON.stringify(props)}</output>,
+  JurisdictionSetupRefresh: (props: unknown) => <output data-testid="setup-refresh-props">{JSON.stringify(props)}</output>,
 }));
 import JurisdictionsPage from "./page";
 
@@ -73,7 +74,7 @@ describe("typed jurisdiction register", () => {
     mocks.fetchAuthQuery.mockImplementation((reference: Parameters<typeof getFunctionName>[0]) => {
       if (getFunctionName(reference) === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
         id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
-        provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, migrationState: "typed",
+        provider: { syncState: "pending", setupState: "setting_up", storeConfigured: false }, migrationState: "typed",
         geographic: { level: "country", parent: null }, organization: null, scopeMode: null,
       }], isDone: true, continueCursor: "" });
       return Promise.resolve({ page: [], isDone: true, continueCursor: "" });
@@ -84,6 +85,7 @@ describe("typed jurisdiction register", () => {
     expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"id":"geo_1"');
     expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"status":"draft"');
     expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"editable":true');
+    expect(screen.getByTestId("setup-refresh-props")).toHaveTextContent('"pending":true');
   });
 
   it("keeps legacy migration rows on lifecycle transitions without typed editing", async () => {

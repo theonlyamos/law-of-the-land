@@ -84,6 +84,11 @@ describe("admin E2E authorization matrix", () => {
     }
   });
 
+  it("labels a recorded document by its immediate review state", () => {
+    expect(E2E_PRIVILEGED_FUNCTIONS.find((entry) => entry.path === "admin/documents:createDocumentVersion"))
+      .toMatchObject({ success: "document_version_ready_for_review" });
+  });
+
   it("matches the canonical page gates for the overview and document detail", () => {
     expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin")?.allowed).toEqual(ADMIN_ROLES);
     expect(E2E_PROTECTED_ROUTES.find((entry) => entry.path === "/admin/documents/:resourceId")).toMatchObject({
