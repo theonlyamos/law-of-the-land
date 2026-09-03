@@ -392,6 +392,7 @@ export function JurisdictionLifecycleActions({
   }
 
   const canRetrySetup = jurisdiction.status === "draft" && jurisdiction.provider.setupState === "setup_failed";
+  const canEnable = jurisdiction.provider.setupState === "ready";
   const canDeleteStore = jurisdiction.status !== "enabled" && jurisdiction.provider.storeConfigured;
 
   return <div role="group" aria-label={`Lifecycle actions for ${jurisdiction.name}`} className="grid gap-2">
@@ -400,7 +401,7 @@ export function JurisdictionLifecycleActions({
     </label>
     <div className="flex flex-wrap gap-2">
       {editable && jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => setEditing((current) => !current)} className={secondaryButtonClass}>Edit {jurisdiction.kind} settings</button> : null}
-      {jurisdiction.status === "draft" ? <button type="button" disabled={pending} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
+      {jurisdiction.status === "draft" ? <button type="button" disabled={pending || !canEnable} onClick={() => run("enable")} aria-label={`Enable ${jurisdiction.name}`} className={buttonClass}>Enable</button> : null}
       {canRetrySetup ? <button type="button" disabled={pending} onClick={provisionGeminiStore} className={buttonClass}>Retry Gemini search setup</button> : null}
       {canDeleteStore ? <button type="button" disabled={pending} onClick={beginStoreDelete} className={secondaryButtonClass}>Delete Gemini store</button> : null}
       {jurisdiction.status !== "archived" ? <button type="button" disabled={pending} onClick={() => run("archive")} aria-label={`Archive ${jurisdiction.name}`} className={secondaryButtonClass}>Archive</button> : null}
