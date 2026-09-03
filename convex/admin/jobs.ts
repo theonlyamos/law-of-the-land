@@ -471,6 +471,38 @@ async function activeGeminiStoreJob(
   return jobs.flat()[0];
 }
 
+export async function queueGeminiStoreProvision(
+  ctx: MutationCtx,
+  jurisdiction: Doc<"jurisdictions">,
+  actor: { id: string; roles: AdminRole[] },
+  idempotencyKey: string,
+) {
+  if (jurisdiction.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
+  if (jurisdiction.geminiFileSearchStoreName !== undefined) {
+    throw new ConvexError("GEMINI_STORE_ALREADY_CONFIGURED");
+  }
+  const active = await activeGeminiStoreJob(ctx, jurisdiction._id, "gemini_create_store");
+  if (active) return { jobId: active._id, duplicate: true };
+
+  const queued = await persistJob(ctx, {
+    type: "gemini_create_store",
+    targetType: "jurisdictionGeminiStore",
+    targetId: jurisdiction._id,
+    payload: {
+      displayName: geminiDisplayName(jurisdiction.slug),
+      embeddingModel: GEMINI_EMBEDDING_MODEL,
+    },
+    idempotencyKey,
+  }, actor);
+  await ctx.db.patch(jurisdiction._id, {
+    geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+    providerSyncState: "pending",
+    updatedBy: actor.id,
+    updatedAt: Date.now(),
+  });
+  return queued;
+}
+
 async function resourceWithActiveVersion(
   ctx: MutationCtx | QueryCtx,
   jurisdictionId: Id<"jurisdictions">,
@@ -495,32 +527,15 @@ export const provisionJurisdictionGeminiStore = mutation({
     const reason = validateAuditReason(args.reason);
     const jurisdiction = await ctx.db.get(args.jurisdictionId);
     if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
-    if (jurisdiction.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
-    if (jurisdiction.geminiFileSearchStoreName !== undefined) {
-      throw new ConvexError("GEMINI_STORE_ALREADY_CONFIGURED");
-    }
-    const active = await activeGeminiStoreJob(ctx, jurisdiction._id, "gemini_create_store");
-    if (active) {
-      return { jobId: active._id, duplicate: true };
-    }
-    const queued = await persistJob(ctx, {
-      type: "gemini_create_store",
-      targetType: "jurisdictionGeminiStore",
-      targetId: jurisdiction._id,
-      payload: {
-        displayName: geminiDisplayName(jurisdiction.slug),
-        embeddingModel: GEMINI_EMBEDDING_MODEL,
-      },
-      idempotencyKey: args.idempotencyKey,
-    }, { id: actor.userId, roles: actor.roles });
+    const queued = await queueGeminiStoreProvision(
+      ctx,
+      jurisdiction,
+      { id: actor.userId, roles: actor.roles },
+      args.idempotencyKey,
+    );
+    if (queued.duplicate) return queued;
     const job = await ctx.db.get(queued.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
-    await ctx.db.patch(jurisdiction._id, {
-      geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
-      providerSyncState: "pending",
-      updatedBy: actor.userId,
-      updatedAt: Date.now(),
-    });
     await writeAudit(ctx, {
       actorId: actor.userId,
       actorRoles: actor.roles,

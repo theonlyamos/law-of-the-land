@@ -148,11 +148,29 @@ async function createGeo(
     reason: `Create ${input.name}`,
   });
   if (input.configureSearch) {
-    await admin.backend.run((ctx) => ctx.db.patch(jurisdictionId, {
-      geminiFileSearchStoreName: `fileSearchStores/${input.placeId.replace(/[^a-z0-9-]/g, "-")}`,
-      geminiEmbeddingModel: "models/gemini-embedding-2",
-      providerSyncState: "synced",
-    }));
+    await admin.backend.run(async (ctx) => {
+      const jobs = await ctx.db
+        .query("integrationJobs")
+        .withIndex("by_targetType_and_targetId", (q) => q
+          .eq("targetType", "jurisdictionGeminiStore")
+          .eq("targetId", jurisdictionId))
+        .collect();
+      const updatedAt = Date.now();
+      await Promise.all(jobs
+        .filter((job) => job.type === "gemini_create_store")
+        .map((job) => ctx.db.patch(job._id, {
+          status: "succeeded",
+          leaseToken: undefined,
+          leaseExpiresAt: undefined,
+          nextAttemptAt: undefined,
+          updatedAt,
+        })));
+      await ctx.db.patch(jurisdictionId, {
+        geminiFileSearchStoreName: `fileSearchStores/${input.placeId.replace(/[^a-z0-9-]/g, "-")}`,
+        geminiEmbeddingModel: "models/gemini-embedding-2",
+        providerSyncState: "synced",
+      });
+    });
   }
   return jurisdictionId;
 }
@@ -227,6 +245,69 @@ describe("typed jurisdiction administration", () => {
     expect(enabled).toMatchObject({ status: "enabled" });
     expect(enabled).not.toHaveProperty("geminiFileSearchStoreName");
     expect(enabled).not.toHaveProperty("geminiEmbeddingModel");
+  });
+
+  it("automatically queues Gemini store setup for new geographic and organizational jurisdictions", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t);
+    const geographicJurisdictionId = await createGeo(admin, {
+      name: "Ghana",
+      placeId: "place-ghana-auto-store",
+      level: "country",
+    });
+    const organizationId = await t.run((ctx) => {
+      const now = Date.now();
+      return ctx.db.insert("organizations", {
+        name: "Ghana Law Society",
+        slug: "ghana-law-society",
+        class: "professional_association",
+        status: "active",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    const organizationalJurisdictionId = await admin.client.mutation(
+      createOrganizationalJurisdiction,
+      {
+        organizationId,
+        visibility: "members",
+        scopeMode: "global",
+        geographicJurisdictionIds: [],
+        reason: "Create Ghana Law Society jurisdiction",
+      },
+    );
+
+    const created = await t.run(async (ctx) => ({
+      geographic: await ctx.db.get("jurisdictions", geographicJurisdictionId),
+      organizational: await ctx.db.get("jurisdictions", organizationalJurisdictionId),
+      jobs: await ctx.db.query("integrationJobs").take(4),
+    }));
+
+    expect(created.geographic).toMatchObject({
+      providerSyncState: "pending",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+    });
+    expect(created.organizational).toMatchObject({
+      providerSyncState: "pending",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+    });
+    expect(created.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "gemini_create_store",
+        targetType: "jurisdictionGeminiStore",
+        targetId: geographicJurisdictionId,
+        status: "queued",
+      }),
+      expect.objectContaining({
+        type: "gemini_create_store",
+        targetType: "jurisdictionGeminiStore",
+        targetId: organizationalJurisdictionId,
+        status: "queued",
+      }),
+    ]));
   });
 
   it("requires an enabled broader geographic parent and rejects cycles", async () => {
