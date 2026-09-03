@@ -289,13 +289,20 @@ export const runGeminiJob = internalAction({
         jobId: args.jobId,
         leaseToken,
       })) as GeminiExecutionTarget | null;
-    } catch (error) {
+    } catch {
       const deferred = await ctx.runMutation(deferUnstartedPublicationJobRef, {
         jobId: args.jobId,
         leaseToken,
       }) as boolean;
       if (deferred) return null;
-      throw error;
+      await ctx.runMutation(failureRef, {
+        jobId: args.jobId,
+        leaseToken,
+        kind: "invalid_response",
+        retryable: false,
+        sideEffectUncertain: false,
+      });
+      return null;
     }
     if (!target) return null;
     const executionJob: GeminiExecutionJob = {

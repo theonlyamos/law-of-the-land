@@ -1253,7 +1253,7 @@ export const recordProviderFailure = internalMutation({
       replacementDeleteWorkflow = workflow.kind === "delete" && workflow.payload.operation === "replace_delete";
     }
     const retryable = args.retryable ?? ["rate_limit", "timeout", "network"].includes(args.kind);
-    const ambiguousSideEffect = args.sideEffectUncertain === true || (
+    const ambiguousSideEffect = args.sideEffectUncertain ?? (
       job.providerOperationName === undefined &&
       ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"].includes(job.type) &&
       ["timeout", "network"].includes(args.kind)

@@ -1278,6 +1278,68 @@ describe("governed document publication", () => {
     });
   });
 
+  it("fails a pre-provider target error and releases its execution permit", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const { jurisdictionId, resourceId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    await addStepUp(t, publisher, "document_publish", ids[0], "missing-target-environment");
+    const queued = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish verified original", idempotencyKey: "missing-target-environment",
+    });
+    const lease = await t.mutation(claimJob, { jobId: queued.jobId });
+    if (!lease) throw new Error("expected publication lease");
+    const previousEnvironment = process.env.ADMIN_ENVIRONMENT;
+    delete process.env.ADMIN_ENVIRONMENT;
+    try {
+      await expect(t.action(runGeminiJob, { jobId: queued.jobId, leaseToken: lease.leaseToken })).resolves.toBeNull();
+    } finally {
+      if (previousEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
+      else process.env.ADMIN_ENVIRONMENT = previousEnvironment;
+    }
+
+    const final = await t.run(async (ctx) => ({
+      job: await ctx.db.get("integrationJobs", queued.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+      version: await ctx.db.get(ids[0]),
+      locks: await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId)).take(2),
+    }));
+    expect(final.job).toMatchObject({ status: "failed", lastErrorKind: "invalid_response" });
+    expect(final.jurisdiction?.geminiExecutionPermit).toBeUndefined();
+    expect(final.version).toMatchObject({ status: "approved" });
+    expect(final.locks).toHaveLength(0);
+  });
+
+  it("retries a known pre-upload network failure and releases its execution permit", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const { jurisdictionId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    await addStepUp(t, publisher, "document_publish", ids[0], "pre-upload-network-failure");
+    const queued = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish verified original", idempotencyKey: "pre-upload-network-failure",
+    });
+    const lease = await t.mutation(claimJob, { jobId: queued.jobId });
+    if (!lease) throw new Error("expected publication lease");
+
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: queued.jobId,
+      leaseToken: lease.leaseToken,
+      kind: "network",
+      retryable: true,
+      sideEffectUncertain: false,
+    })).resolves.toMatchObject({ status: "queued" });
+    const final = await t.run(async (ctx) => ({
+      job: await ctx.db.get("integrationJobs", queued.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+    }));
+    expect(final.job).toMatchObject({ status: "queued", attemptCount: 1 });
+    expect(final.job?.leaseToken).toBeUndefined();
+    expect(final.jurisdiction?.geminiExecutionPermit).toBeUndefined();
+  });
+
   it("reconciles a deleted document whose completion write failed by repeating only the exact delete", async () => {
     const t = createBackend();
     await enablePanel(t);
