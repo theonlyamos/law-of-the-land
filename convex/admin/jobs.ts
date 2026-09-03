@@ -229,6 +229,12 @@ async function releaseExpiredGeminiExecutionPermit(
   job: GeminiIntegrationJob,
   now: number,
 ) {
+  const noUnresolvedProviderMutation =
+    (job.recoveryKind === "apply_store_result" &&
+      job.knownStoreResult !== undefined &&
+      knownStoreResultMatchesJob(job, job.knownStoreResult)) ||
+    (job.type === "gemini_index_document" && job.providerOperationName !== undefined);
+  if (!noUnresolvedProviderMutation) return;
   const jurisdiction = await geminiJobJurisdiction(ctx, job);
   const permit = jurisdiction?.geminiExecutionPermit;
   if (
@@ -1066,7 +1072,12 @@ async function claimJobDocument(
     const leaseToken = `lease_${crypto.randomUUID().replaceAll("-", "")}`;
     const leaseExpiresAt = now + JOB_LEASE_MS;
     const jurisdiction = await geminiJobJurisdiction(ctx, job);
-    if (jurisdiction?.geminiExecutionPermit) {
+    const retainedDeleteRecovery =
+      jurisdiction?.geminiExecutionPermit?.jobId === job._id &&
+      allowUncertainManualReview &&
+      job.type === "gemini_delete_document" &&
+      job.recoveryKind === "delete_document";
+    if (jurisdiction?.geminiExecutionPermit && !retainedDeleteRecovery) {
       if (allowUncertainManualReview) throw new ConvexError("GEMINI_EXECUTION_BUSY");
       await deferJobForExecutionPermit(ctx, job, now);
       return null;
@@ -1287,7 +1298,12 @@ export const recordProviderFailure = internalMutation({
       const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
       if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "failed", updatedAt: now });
     }
-    await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
+    const unresolvedProviderMutation = ambiguousSideEffect &&
+      job.providerOperationName === undefined &&
+      job.knownStoreResult === undefined;
+    if (!unresolvedProviderMutation) {
+      await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
+    }
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");
     return { status, nextAttemptAt: null };
   },

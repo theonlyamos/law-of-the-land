@@ -63,7 +63,7 @@ async function enablePanel(t: Backend) {
 
 async function seedBoundGeminiIndexJob(
   t: Backend,
-  input: { suffix: string; status: "waiting_provider" | "manual_review"; providerSyncState: "synced" | "drifted"; lastErrorKind?: "provider" },
+  input: { suffix: string; status: "queued" | "waiting_provider" | "manual_review"; providerSyncState: "synced" | "drifted"; lastErrorKind?: "provider" },
 ) {
   const fixture = await t.run(async (ctx) => {
     const now = Date.now();
@@ -84,7 +84,7 @@ async function seedBoundGeminiIndexJob(
       byteSize: 3, sha256: "a".repeat(64), sourceUrl: "https://example.invalid/law", status: "publishing",
       submittedBy: "fixture", createdAt: now, updatedAt: now,
     });
-    return { storeName, resourceId, versionId };
+    return { jurisdictionId, storeName, resourceId, versionId };
   });
   const queued = await t.mutation(enqueueJob, {
     type: "gemini_index_document", targetType: "documentVersion", targetId: fixture.versionId,
@@ -97,15 +97,17 @@ async function seedBoundGeminiIndexJob(
       resourceId: fixture.resourceId, versionId: fixture.versionId, operation: "publish", actorId: "gemini_orchestrator",
       idempotencyKey: `job-${input.suffix}`, jobId: queued.jobId, expiresAt: now + 60_000, createdAt: now, updatedAt: now,
     });
-    await ctx.db.patch(queued.jobId, {
-      status: input.status,
-      providerOperationName: `${fixture.storeName}/upload/operations/${input.suffix}`,
-      recoveryKind: "poll_operation",
-      nextAttemptAt: input.status === "waiting_provider" ? now : undefined,
-      lastErrorKind: input.lastErrorKind,
-    });
+    if (input.status !== "queued") {
+      await ctx.db.patch(queued.jobId, {
+        status: input.status,
+        providerOperationName: `${fixture.storeName}/upload/operations/${input.suffix}`,
+        recoveryKind: "poll_operation",
+        nextAttemptAt: input.status === "waiting_provider" ? now : undefined,
+        lastErrorKind: input.lastErrorKind,
+      });
+    }
   });
-  return queued;
+  return { ...queued, ...fixture };
 }
 
 async function asAdmin(t: Backend, role: string) {
@@ -548,6 +550,45 @@ describe("durable Gemini jobs", () => {
     await expect(t.mutation(recordProviderFailure, {
       jobId: uncertain.jobId, leaseToken: uncertainLease, kind: "provider", retryable: true, sideEffectUncertain: true,
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
+  });
+
+  it("retains an expired permit for an unresolved provider mutation", async () => {
+    const t = createBackend();
+    const first = await seedBoundGeminiIndexJob(t, {
+      suffix: "expired-mutation",
+      status: "queued",
+      providerSyncState: "synced",
+    });
+    await claimLease(t, first.jobId);
+    const second = await t.mutation(enqueueJob, {
+      type: "gemini_index_document",
+      targetType: "documentVersion",
+      targetId: first.versionId,
+      payload: { operation: "publish", storeName: first.storeName, sha256: "a".repeat(64) },
+      idempotencyKey: "expired-mutation-second",
+      systemActor: "gemini_orchestrator",
+    });
+    const leaseExpiresAt = Date.now() - 1;
+    await t.run(async (ctx) => {
+      await ctx.db.patch(first.jobId, { leaseExpiresAt, nextAttemptAt: leaseExpiresAt });
+      await ctx.db.patch(first.jurisdictionId, {
+        geminiExecutionPermit: { jobId: first.jobId, leaseExpiresAt },
+      });
+    });
+
+    await expect(t.mutation(reconcileStaleJobs, {})).resolves.toMatchObject({ scheduled: 0 });
+    const state = await t.run(async (ctx) => ({
+      first: await ctx.db.get("integrationJobs", first.jobId),
+      second: await ctx.db.get("integrationJobs", second.jobId),
+      jurisdiction: await ctx.db.get("jurisdictions", first.jurisdictionId),
+    }));
+    expect(state.first?.status).toBe("manual_review");
+    expect(state.first?.recoveryKind).toBeUndefined();
+    expect(state.jurisdiction).toMatchObject({
+      providerSyncState: "drifted",
+      geminiExecutionPermit: { jobId: first.jobId, leaseExpiresAt },
+    });
+    await expect(t.mutation(claimJob, { jobId: second.jobId })).resolves.toBeNull();
   });
 
   it("permits an admin retry only for a Gemini manual-review poll with persisted recovery provenance", async () => {
