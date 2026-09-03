@@ -1234,7 +1234,7 @@ async function readMatrixOperation(ctx: MutationCtx, input: { tag: string; path:
     state = { audited: terminal };
   } else if (input.path === "admin/documents:createDocumentVersion") {
     const version = typeof result === "string" ? await ctx.db.get(result as Id<"documentVersions">) : null;
-    terminal = version?.status === "draft" && version.resourceId === args.resourceId && version.originalStorageId === args.storageId;
+    terminal = version?.status === "ready_for_review" && version.resourceId === args.resourceId && version.originalStorageId === args.storageId;
     state = { status: version?.status ?? null, resourceId: version?.resourceId ?? null };
   } else if (input.path.startsWith("admin/resources:")) {
     const id = typeof result === "string" ? result : String(args.id ?? (typeof result === "object" && result ? result._id : ""));

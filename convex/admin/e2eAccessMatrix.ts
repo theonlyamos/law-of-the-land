@@ -41,7 +41,7 @@ export const E2E_PRIVILEGED_FUNCTIONS = [
   { path: "admin/exports:queueConversationExport", resource: "conversation", action: "export", allowed: ["super_admin", "support_agent"], success: "conversation_export_ready" },
   { path: "admin/exports:issueConversationExportReference", resource: "conversation", action: "export", allowed: ["super_admin", "support_agent"], success: "export_reference_issued" },
   { path: "admin/documents:generateUploadUrl", resource: "document", action: "write", allowed: ["super_admin", "content_manager"], success: "upload_url_generated" },
-  { path: "admin/documents:createDocumentVersion", resource: "document", action: "write", allowed: ["super_admin", "content_manager"], success: "document_version_draft" },
+  { path: "admin/documents:createDocumentVersion", resource: "document", action: "write", allowed: ["super_admin", "content_manager"], success: "document_version_ready_for_review" },
   { path: "admin/resources:createJurisdiction", resource: "jurisdiction", action: "write", allowed: ["super_admin", "content_manager"], success: "jurisdiction_draft_created" },
   { path: "admin/resources:updateJurisdiction", resource: "jurisdiction", action: "write", allowed: ["super_admin", "content_manager"], success: "jurisdiction_updated" },
   { path: "admin/resources:enableJurisdiction", resource: "jurisdiction", action: "write", allowed: ["super_admin", "content_manager"], success: "jurisdiction_enabled" },

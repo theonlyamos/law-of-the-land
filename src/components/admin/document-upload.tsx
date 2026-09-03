@@ -94,7 +94,7 @@ export function DocumentUpload({
         return;
       }
 
-      setState({ kind: "busy", message: "Recording governed draft metadata..." });
+      setState({ kind: "busy", message: "Recording version for review..." });
       await createDocumentVersion({
         resourceId: resourceId as Id<"legalResources">,
         storageId: payload.storageId as Id<"_storage">,
@@ -114,7 +114,7 @@ export function DocumentUpload({
     } catch {
       setState({
         kind: "error",
-        message: "The draft could not be recorded. Review the file and try again.",
+        message: "The version could not be recorded. Review the file and try again.",
       });
     }
   }
