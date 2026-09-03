@@ -93,6 +93,7 @@ const jobDocumentValidator = v.object({
   recoveryKind: v.optional(v.union(
     v.literal("poll_operation"),
     v.literal("delete_document"),
+    v.literal("delete_store"),
     v.literal("apply_store_result"),
   )),
   leaseToken: v.optional(v.string()),
@@ -1075,8 +1076,8 @@ async function claimJobDocument(
     const retainedDeleteRecovery =
       jurisdiction?.geminiExecutionPermit?.jobId === job._id &&
       allowUncertainManualReview &&
-      job.type === "gemini_delete_document" &&
-      job.recoveryKind === "delete_document";
+      ((job.type === "gemini_delete_document" && job.recoveryKind === "delete_document") ||
+        (job.type === "gemini_delete_store" && job.recoveryKind === "delete_store"));
     if (jurisdiction?.geminiExecutionPermit && !retainedDeleteRecovery) {
       if (allowUncertainManualReview) throw new ConvexError("GEMINI_EXECUTION_BUSY");
       await deferJobForExecutionPermit(ctx, job, now);
@@ -1160,6 +1161,9 @@ export const reconcileManualReviewJob = internalMutation({
           ? job.recoveryKind === "poll_operation" && job.providerOperationName !== undefined
           : job.recoveryKind === "delete_document";
       } catch { geminiRecovery = false; }
+    }
+    if (!geminiRecovery && job?.type === "gemini_delete_store") {
+      geminiRecovery = job.recoveryKind === "delete_store";
     }
     if (
       !job ||
@@ -1247,6 +1251,10 @@ export const recordProviderFailure = internalMutation({
       await ctx.db.patch(job._id, { recoveryKind: "delete_document", updatedAt: now });
       job = { ...job, recoveryKind: "delete_document" };
     }
+    if (job.type === "gemini_delete_store" && args.sideEffectUncertain === true && job.recoveryKind === undefined) {
+      await ctx.db.patch(job._id, { recoveryKind: "delete_store", updatedAt: now });
+      job = { ...job, recoveryKind: "delete_store" };
+    }
     let replacementDeleteWorkflow = false;
     if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
       const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
@@ -1275,7 +1283,7 @@ export const recordProviderFailure = internalMutation({
       return { status: "queued" as const, nextAttemptAt };
     }
     const pollObservationUncertain = job.type === "gemini_index_document" && job.recoveryKind === "poll_operation";
-    const status: "manual_review" | "failed" = (pollObservationUncertain || replacementDeleteWorkflow || retryable || ambiguousSideEffect) ? "manual_review" : "failed";
+    const status: "manual_review" | "failed" = (pollObservationUncertain || replacementDeleteWorkflow || ambiguousSideEffect) ? "manual_review" : "failed";
     await ctx.db.patch(job._id, {
       status,
       attemptCount,
@@ -1511,6 +1519,9 @@ export const retryJob = mutation({
             ? job.recoveryKind === "poll_operation" && job.providerOperationName !== undefined
             : job.recoveryKind === "delete_document";
         } catch { hasGeminiRecoveryTarget = false; }
+      }
+      if (!hasGeminiRecoveryTarget && job.type === "gemini_delete_store") {
+        hasGeminiRecoveryTarget = job.recoveryKind === "delete_store";
       }
       if (!hasGeminiRecoveryTarget) {
         throw new ConvexError("Integration job is not retryable");

@@ -613,6 +613,77 @@ describe("durable Gemini jobs", () => {
     })).rejects.toThrow("Integration job is not retryable");
   });
 
+  it("retries an uncertain store deletion using its exact persisted target", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "super_admin");
+    const storeName = "fileSearchStores/delete-store-recovery";
+    const jurisdictionId = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert("jurisdictions", {
+        name: "Delete store recovery",
+        slug: "delete-store-recovery",
+        status: "draft",
+        isDefault: false,
+        geminiFileSearchStoreName: storeName,
+        geminiEmbeddingModel: "models/gemini-embedding-2",
+        providerSyncState: "drifted",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    const queued = await t.mutation(enqueueJob, {
+      type: "gemini_delete_store",
+      targetType: "jurisdictionGeminiStore",
+      targetId: jurisdictionId,
+      payload: { storeName },
+      idempotencyKey: "delete-store-recovery",
+      systemActor: "gemini_orchestrator",
+    });
+    const leaseToken = await claimLease(t, queued.jobId);
+    await expect(t.mutation(recordProviderFailure, {
+      jobId: queued.jobId,
+      leaseToken,
+      kind: "network",
+      retryable: true,
+      sideEffectUncertain: true,
+    })).resolves.toMatchObject({ status: "manual_review" });
+    const quarantined = await t.run(async (ctx) => ({
+      job: await ctx.db.get("integrationJobs", queued.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+    }));
+    expect(quarantined.job).toMatchObject({ status: "manual_review", recoveryKind: "delete_store" });
+    expect(quarantined.jurisdiction).toMatchObject({
+      geminiExecutionPermit: { jobId: queued.jobId },
+    });
+    await expect(admin.client.mutation(retryJob, {
+      jobId: queued.jobId,
+      reason: "Reconcile exact store deletion",
+      idempotencyKey: "retry-delete-store-recovery",
+    })).resolves.toMatchObject({ status: "running" });
+    const recovery = await t.run((ctx) => ctx.db.get("integrationJobs", queued.jobId));
+    if (!recovery?.leaseToken) throw new Error("expected recovery lease");
+    await expect(t.query(getGeminiJobTarget, {
+      jobId: queued.jobId,
+      leaseToken: recovery.leaseToken,
+    })).resolves.toMatchObject({ kind: "delete_store", storeName });
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: queued.jobId,
+      leaseToken: recovery.leaseToken,
+      result: { kind: "store_deleted", storeName },
+    });
+    const final = await t.run(async (ctx) => ({
+      job: await ctx.db.get("integrationJobs", queued.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+    }));
+    expect(final.job?.status).toBe("succeeded");
+    expect(final.jurisdiction).toMatchObject({ providerSyncState: "pending" });
+    expect(final.jurisdiction?.geminiExecutionPermit).toBeUndefined();
+    expect(final.jurisdiction).not.toHaveProperty("geminiFileSearchStoreName");
+  });
+
   it("fails store teardown closed across lifecycle, step-up, confirmation, and jurisdiction ownership", async () => {
     const t = createBackend();
     await enablePanel(t);

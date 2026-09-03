@@ -947,6 +947,46 @@ describe("governed document publication", () => {
     expect(state.locks).toHaveLength(1);
   });
 
+  it("fails a confirmed no-effect publish request after its retry budget", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const publisher = await asAdmin(t, "content_reviewer");
+    const { jurisdictionId, ids } = await seedCatalog(t, "manager", ["approved"]);
+    await addStepUp(t, publisher, "document_publish", ids[0], "confirmed-retry-exhaustion");
+    const queued = await publisher.client.mutation(publishVersion, {
+      versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`,
+      reason: "Publish verified original", idempotencyKey: "confirmed-retry-exhaustion",
+    });
+    let claim = await t.mutation(claimJob, { jobId: queued.jobId });
+    if (!claim) throw new Error("expected publication claim");
+
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const result = await t.mutation(recordProviderFailure, {
+        jobId: queued.jobId, leaseToken: claim.leaseToken,
+        kind: "rate_limit", retryable: true, sideEffectUncertain: false,
+      });
+      expect(result.status).toBe(attempt < 4 ? "queued" : "failed");
+      if (attempt < 4) {
+        await t.run((ctx) => ctx.db.patch(queued.jobId, { nextAttemptAt: Date.now() - 1 }));
+        const retry = await t.mutation(claimJob, { jobId: queued.jobId });
+        if (!retry) throw new Error("expected retry claim");
+        claim = retry;
+      }
+    }
+
+    const final = await t.run(async (ctx) => ({
+      job: await ctx.db.get("integrationJobs", queued.jobId),
+      jurisdiction: await ctx.db.get(jurisdictionId),
+      version: await ctx.db.get(ids[0]),
+      locks: await ctx.db.query("documentLifecycleLocks").take(2),
+    }));
+    expect(final.job).toMatchObject({ status: "failed", attemptCount: 4, lastErrorKind: "rate_limit" });
+    expect(final.jurisdiction?.providerSyncState).toBe("synced");
+    expect(final.jurisdiction?.geminiExecutionPermit).toBeUndefined();
+    expect(final.version?.status).toBe("approved");
+    expect(final.locks).toHaveLength(0);
+  });
+
   it("recovers an accepted upload without uploading twice or being blocked by legacy jobs", async () => {
     const t = createBackend();
     await enablePanel(t);

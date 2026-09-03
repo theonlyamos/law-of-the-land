@@ -471,6 +471,7 @@ export default defineSchema({
     recoveryKind: v.optional(v.union(
       v.literal("poll_operation"),
       v.literal("delete_document"),
+      v.literal("delete_store"),
       v.literal("apply_store_result"),
     )),
     leaseToken: v.optional(v.string()),
