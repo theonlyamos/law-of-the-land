@@ -13,6 +13,7 @@ const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[okl
 const labelClass = "grid gap-2 text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]";
 const buttonClass = "inline-flex min-h-11 items-center justify-center bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
 const secondaryButtonClass = "inline-flex min-h-11 items-center justify-center border border-[oklch(48%_0.045_252)] px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
+const SETUP_REFRESH_MS = 2_000;
 
 const GeographicPlacePicker = lazy(() => import("./geographic-place-picker").then((module) => ({ default: module.GeographicPlacePicker })));
 
@@ -302,6 +303,12 @@ export function JurisdictionLifecycleActions({
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [deletingStore, setDeletingStore] = useState(false);
   const [deleteIdempotencyKey, setDeleteIdempotencyKey] = useState("");
+
+  useEffect(() => {
+    if (jurisdiction.provider.setupState !== "setting_up") return;
+    const refresh = window.setInterval(() => router.refresh(), SETUP_REFRESH_MS);
+    return () => window.clearInterval(refresh);
+  }, [jurisdiction.provider.setupState, router]);
 
   async function run(action: "enable" | "archive") {
     const auditReason = reason.trim();

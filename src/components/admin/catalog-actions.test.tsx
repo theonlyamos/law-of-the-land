@@ -397,6 +397,21 @@ describe("jurisdiction lifecycle actions", () => {
     expect(screen.getByRole("button", { name: "Enable Ghana" })).toBeDisabled();
   });
 
+  it("refreshes while Gemini search setup is pending", () => {
+    vi.useFakeTimers();
+    try {
+      render(<JurisdictionLifecycleActions jurisdiction={{
+        id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+        provider: { syncState: "pending", setupState: "setting_up", storeConfigured: false }, geographic: { level: "country", parent: null },
+      }} />);
+
+      vi.advanceTimersByTime(2_000);
+      expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("enables a draft jurisdiction with an auditable reason", async () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
       id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
