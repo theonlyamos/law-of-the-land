@@ -416,16 +416,23 @@ describe("durable Gemini jobs", () => {
       reason: "Apply the known Gemini store result",
       idempotencyKey: "retry-known-store-result",
     })).resolves.toMatchObject({ status: "running" });
-    await t.run((ctx) => ctx.db.patch(created.jobId as Id<"integrationJobs">, {
-      leaseExpiresAt: Date.now() - 1,
-      nextAttemptAt: Date.now() - 1,
-    }));
+    await t.run(async (ctx) => {
+      const leaseExpiresAt = Date.now() - 1;
+      await ctx.db.patch(created.jobId as Id<"integrationJobs">, {
+        leaseExpiresAt,
+        nextAttemptAt: leaseExpiresAt,
+      });
+      await ctx.db.patch(jurisdictionId, {
+        geminiExecutionPermit: { jobId: created.jobId, leaseExpiresAt },
+      });
+    });
     await t.mutation(reconcileStaleJobs, {});
     await expect(t.run((ctx) => ctx.db.get("integrationJobs", created.jobId))).resolves.toMatchObject({
       status: "manual_review",
       recoveryKind: "apply_store_result",
       knownStoreResult,
     });
+    expect((await t.run((ctx) => ctx.db.get(jurisdictionId)))?.geminiExecutionPermit).toBeUndefined();
     await expect(admin.client.mutation(retryJob, {
       jobId: created.jobId,
       reason: "Apply the preserved Gemini store result",

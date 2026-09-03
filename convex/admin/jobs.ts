@@ -170,6 +170,79 @@ function isGeminiJobDocument(job: Doc<"integrationJobs">): job is GeminiIntegrat
   return isGeminiJobType(job.type) && currentStatus;
 }
 
+async function geminiJobJurisdiction(
+  ctx: MutationCtx | QueryCtx,
+  job: GeminiIntegrationJob,
+): Promise<Doc<"jurisdictions"> | null> {
+  if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
+    const jurisdictionId = ctx.db.normalizeId("jurisdictions", job.targetId);
+    return jurisdictionId ? await ctx.db.get(jurisdictionId) : null;
+  }
+  const versionId = ctx.db.normalizeId("documentVersions", job.targetId);
+  const version = versionId ? await ctx.db.get(versionId) : null;
+  const resource = version ? await ctx.db.get(version.resourceId) : null;
+  return resource ? await ctx.db.get(resource.jurisdictionId) : null;
+}
+
+async function assertGeminiExecutionPermit(
+  ctx: MutationCtx | QueryCtx,
+  job: GeminiIntegrationJob,
+  now: number,
+): Promise<Doc<"jurisdictions"> | null> {
+  const jurisdiction = await geminiJobJurisdiction(ctx, job);
+  if (!jurisdiction) return null;
+  const permit = jurisdiction.geminiExecutionPermit;
+  if (
+    job.leaseExpiresAt === undefined ||
+    !permit ||
+    permit.jobId !== job._id ||
+    permit.leaseExpiresAt !== job.leaseExpiresAt ||
+    permit.leaseExpiresAt <= now
+  ) {
+    throw new ConvexError("GEMINI_EXECUTION_PERMIT_INVALID");
+  }
+  return jurisdiction;
+}
+
+async function releaseGeminiExecutionPermit(
+  ctx: MutationCtx,
+  job: GeminiIntegrationJob,
+  jurisdiction: Doc<"jurisdictions"> | null,
+  now: number,
+) {
+  if (!jurisdiction) return;
+  const permit = jurisdiction.geminiExecutionPermit;
+  if (
+    job.leaseExpiresAt === undefined ||
+    !permit ||
+    permit.jobId !== job._id ||
+    permit.leaseExpiresAt !== job.leaseExpiresAt ||
+    permit.leaseExpiresAt <= now
+  ) {
+    throw new ConvexError("GEMINI_EXECUTION_PERMIT_INVALID");
+  }
+  await ctx.db.patch(jurisdiction._id, { geminiExecutionPermit: undefined });
+}
+
+async function releaseExpiredGeminiExecutionPermit(
+  ctx: MutationCtx,
+  job: GeminiIntegrationJob,
+  now: number,
+) {
+  const jurisdiction = await geminiJobJurisdiction(ctx, job);
+  const permit = jurisdiction?.geminiExecutionPermit;
+  if (
+    jurisdiction &&
+    permit &&
+    job.leaseExpiresAt !== undefined &&
+    permit.jobId === job._id &&
+    permit.leaseExpiresAt === job.leaseExpiresAt &&
+    permit.leaseExpiresAt <= now
+  ) {
+    await ctx.db.patch(jurisdiction._id, { geminiExecutionPermit: undefined });
+  }
+}
+
 function knownStoreResultMatchesJob(
   job: Doc<"integrationJobs">,
   result: KnownStoreResult,
@@ -509,6 +582,7 @@ export const deleteJurisdictionGeminiStore = mutation({
     }
     const activeResource = await resourceWithActiveVersion(ctx, jurisdiction._id);
     if (activeResource) throw new ConvexError("JURISDICTION_HAS_ACTIVE_PUBLISHED_RESOURCE");
+    if (jurisdiction.geminiExecutionPermit) throw new ConvexError("GEMINI_EXECUTION_BUSY");
     const references = await ctx.db
       .query("jurisdictions")
       .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
@@ -615,7 +689,10 @@ export const getGeminiJobTarget = internalQuery({
       job.leaseExpiresAt <= now ||
       !safeEqual(job.leaseToken, args.leaseToken)
     ) return null;
+    if (!isGeminiJobDocument(job)) return null;
+    const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     if (job.type === "gemini_create_store") {
+      if (!executionJurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
       let payload: { displayName?: unknown; embeddingModel?: unknown };
       try { payload = JSON.parse(job.payload) as typeof payload; }
       catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
@@ -626,7 +703,7 @@ export const getGeminiJobTarget = internalQuery({
       return { kind: "create_store" as const, displayName: payload.displayName, embeddingModel: GEMINI_EMBEDDING_MODEL };
     }
     if (job.type === "gemini_delete_store") {
-      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      const jurisdiction = executionJurisdiction;
       let payload: { storeName?: unknown };
       try { payload = JSON.parse(job.payload) as typeof payload; } catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
       const boundStore = typeof payload.storeName === "string" ? payload.storeName : undefined;
@@ -639,7 +716,7 @@ export const getGeminiJobTarget = internalQuery({
       if (!jurisdiction || jurisdiction.status === "enabled" || jurisdiction.providerSyncState !== "drifted" || activeResource || !boundStore || jurisdiction.geminiFileSearchStoreName !== boundStore || references.length !== 1 || references[0]._id !== jurisdiction._id) throw new ConvexError("GEMINI_STORE_DELETE_PRECONDITION_FAILED");
       return { kind: "delete_store" as const, storeName: boundStore };
     }
-    const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+    const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
     if (workflow.kind === "delete") return { kind: "delete_document" as const, documentName: workflow.payload.documentName };
     const metadata = await ctx.db.system.get("_storage", workflow.version.originalStorageId);
     if (!metadata || metadata.size !== workflow.version.byteSize || storedSha256Hex(metadata.sha256) !== workflow.version.sha256) throw new ConvexError("DOCUMENT_ORIGINAL_INVALID");
@@ -710,7 +787,12 @@ async function markGeminiJurisdictionDrifted(ctx: MutationCtx, job: Doc<"integra
   if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
 }
 
-async function succeedGeminiJob(ctx: MutationCtx, job: Doc<"integrationJobs">) {
+async function succeedGeminiJob(
+  ctx: MutationCtx,
+  job: GeminiIntegrationJob,
+  executionJurisdiction: Doc<"jurisdictions"> | null,
+  now: number,
+) {
   await ctx.db.patch(job._id, {
     status: "succeeded",
     leaseToken: undefined,
@@ -718,9 +800,10 @@ async function succeedGeminiJob(ctx: MutationCtx, job: Doc<"integrationJobs">) {
     nextAttemptAt: undefined,
     recoveryKind: undefined,
     knownStoreResult: undefined,
-    updatedAt: Date.now(),
+    updatedAt: now,
     retentionPending: true,
   });
+  await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
   await auditJob(ctx, job, "success", "integration.job_succeeded");
 }
 
@@ -733,15 +816,16 @@ export const applyGeminiProviderResult = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const job = await ctx.db.get(args.jobId);
-    if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    if (!job || !isGeminiJobDocument(job)) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     const now = Date.now();
     assertCurrentLease(job, args.leaseToken, now);
+    const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     if (args.result.kind === "store_created") {
       const storeName = args.result.storeName;
       if (job.type !== "gemini_create_store" || !isGeminiFileSearchStoreName(storeName) || args.result.embeddingModel !== GEMINI_EMBEDDING_MODEL) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
-      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      const jurisdiction = executionJurisdiction;
       if (!jurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
       const references = await ctx.db.query("jurisdictions")
         .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
@@ -757,7 +841,7 @@ export const applyGeminiProviderResult = internalMutation({
         updatedBy: job.actorId,
         updatedAt: now,
       });
-      await succeedGeminiJob(ctx, job);
+      await succeedGeminiJob(ctx, job, executionJurisdiction, now);
       return null;
     }
     if (args.result.kind === "store_deleted") {
@@ -765,7 +849,7 @@ export const applyGeminiProviderResult = internalMutation({
       if (job.type !== "gemini_delete_store" || !isGeminiFileSearchStoreName(storeName)) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
-      const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
+      const jurisdiction = executionJurisdiction;
       let payload: { storeName?: unknown };
       try { payload = JSON.parse(job.payload) as typeof payload; }
       catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
@@ -786,20 +870,20 @@ export const applyGeminiProviderResult = internalMutation({
         updatedBy: job.actorId,
         updatedAt: now,
       });
-      await succeedGeminiJob(ctx, job);
+      await succeedGeminiJob(ctx, job, executionJurisdiction, now);
       return null;
     }
     if (args.result.kind === "document_deleted") {
       if (job.type !== "gemini_delete_document") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       await applyGeminiDeleteCompletion(ctx, job, now);
-      await succeedGeminiJob(ctx, job);
+      await succeedGeminiJob(ctx, job, executionJurisdiction, now);
       return null;
     }
     if (args.result.kind === "index_accepted") {
       if (job.type !== "gemini_index_document" || parseGeminiUploadOperationName(args.result.operationName) === null || job.providerOperationName !== undefined) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
-      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.result.operationName }, now);
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.result.operationName, permitDrift: true }, now);
       if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       const nextAttemptAt = now + GEMINI_POLL_DELAYS_MS[0];
       await ctx.db.patch(job._id, {
@@ -812,6 +896,7 @@ export const applyGeminiProviderResult = internalMutation({
         nextAttemptAt,
         updatedAt: now,
       });
+      await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
       await ctx.scheduler.runAfter(GEMINI_POLL_DELAYS_MS[0], runGeminiJobRef, { jobId: job._id });
       return null;
     }
@@ -819,7 +904,7 @@ export const applyGeminiProviderResult = internalMutation({
       if (job.type !== "gemini_index_document" || !job.providerOperationName) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
-      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
       if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       if (now - job.createdAt >= GEMINI_INDEX_REVIEW_AFTER_MS) {
         await ctx.db.patch(job._id, {
@@ -831,6 +916,7 @@ export const applyGeminiProviderResult = internalMutation({
           updatedAt: now,
         });
         await markGeminiJurisdictionDrifted(ctx, job);
+        await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         return null;
       }
@@ -844,6 +930,7 @@ export const applyGeminiProviderResult = internalMutation({
         nextAttemptAt: now + delay,
         updatedAt: now,
       });
+      await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
       await ctx.scheduler.runAfter(delay, runGeminiJobRef, { jobId: job._id });
       return null;
     }
@@ -862,6 +949,7 @@ export const applyGeminiProviderResult = internalMutation({
         updatedAt: now,
         retentionPending: true,
       });
+      await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
       await auditJob(ctx, job, "failure", "integration.job_failed");
       return null;
     }
@@ -879,7 +967,7 @@ export const applyGeminiProviderResult = internalMutation({
       }, { id: job.actorId, roles: job.actorRoles });
       await transferPublicationLock(ctx, job, queued.jobId, args.result.documentName, now);
     }
-    await succeedGeminiJob(ctx, job);
+    await succeedGeminiJob(ctx, job, executionJurisdiction, now);
     return null;
   },
 });
@@ -939,6 +1027,19 @@ async function deferPublicationJobForDrift(
   await ctx.scheduler.runAfter(delay, jobRunner(job.type), { jobId: job._id });
 }
 
+async function deferJobForExecutionPermit(
+  ctx: MutationCtx,
+  job: GeminiIntegrationJob,
+  now: number,
+) {
+  if (job.status !== "queued" && job.status !== "waiting_provider") {
+    throw new ConvexError("GEMINI_EXECUTION_BUSY");
+  }
+  const delay = RETRY_DELAYS_MS[0];
+  await ctx.db.patch(job._id, { nextAttemptAt: now + delay, updatedAt: now });
+  await ctx.scheduler.runAfter(delay, jobRunner(job.type), { jobId: job._id });
+}
+
 async function claimJobDocument(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
@@ -964,6 +1065,12 @@ async function claimJobDocument(
     }
     const leaseToken = `lease_${crypto.randomUUID().replaceAll("-", "")}`;
     const leaseExpiresAt = now + JOB_LEASE_MS;
+    const jurisdiction = await geminiJobJurisdiction(ctx, job);
+    if (jurisdiction?.geminiExecutionPermit) {
+      if (allowUncertainManualReview) throw new ConvexError("GEMINI_EXECUTION_BUSY");
+      await deferJobForExecutionPermit(ctx, job, now);
+      return null;
+    }
     const claimedJob: GeminiIntegrationJob = {
       ...job,
       status: "running",
@@ -972,6 +1079,11 @@ async function claimJobDocument(
       nextAttemptAt: leaseExpiresAt,
       updatedAt: now,
     };
+    if (jurisdiction) {
+      await ctx.db.patch(jurisdiction._id, {
+        geminiExecutionPermit: { jobId: job._id, leaseExpiresAt },
+      });
+    }
     await ctx.db.patch(job._id, {
       status: "running",
       leaseToken,
@@ -1014,7 +1126,9 @@ export const deferUnstartedPublicationJob = internalMutation({
       !safeEqual(job.leaseToken, args.leaseToken) ||
       !(await unstartedPublicationBlockedByDrift(ctx, job, now))
     ) return false;
+    const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     await deferPublicationJobForDrift(ctx, job, now);
+    await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
     return true;
   },
 });
@@ -1078,15 +1192,17 @@ export const recordProviderFailure = internalMutation({
   },
   returns: failureResultValidator,
   handler: async (ctx, args) => {
-    let job = await ctx.db.get(args.jobId);
-    if (!job || !isGeminiJobDocument(job)) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    const storedJob = await ctx.db.get(args.jobId);
+    if (!storedJob || !isGeminiJobDocument(storedJob)) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
+    let job: GeminiIntegrationJob = storedJob;
     const now = Date.now();
     assertCurrentLease(job, args.leaseToken, now);
+    const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     if (args.providerOperationName !== undefined) {
       if (job.type !== "gemini_index_document" || job.providerOperationName !== undefined) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
-      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.providerOperationName }, now);
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", pendingOperationName: args.providerOperationName, permitDrift: true }, now);
       if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       await ctx.db.patch(job._id, {
         providerOperationName: args.providerOperationName,
@@ -1115,14 +1231,14 @@ export const recordProviderFailure = internalMutation({
       };
     }
     if (job.type === "gemini_delete_document" && args.sideEffectUncertain === true && job.recoveryKind === undefined) {
-      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
       if (workflow.kind !== "delete") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
       await ctx.db.patch(job._id, { recoveryKind: "delete_document", updatedAt: now });
       job = { ...job, recoveryKind: "delete_document" };
     }
     let replacementDeleteWorkflow = false;
     if (job.type === "gemini_index_document" || job.type === "gemini_delete_document") {
-      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
+      const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
       replacementDeleteWorkflow = workflow.kind === "delete" && workflow.payload.operation === "replace_delete";
     }
     const retryable = args.retryable ?? ["rate_limit", "timeout", "network"].includes(args.kind);
@@ -1143,6 +1259,7 @@ export const recordProviderFailure = internalMutation({
         lastErrorKind: args.kind,
         updatedAt: now,
       });
+      await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
       await ctx.scheduler.runAfter(RETRY_DELAYS_MS[attemptCount - 1], jobRunner(job.type), { jobId: job._id });
       return { status: "queued" as const, nextAttemptAt };
     }
@@ -1170,6 +1287,7 @@ export const recordProviderFailure = internalMutation({
       const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
       if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "failed", updatedAt: now });
     }
+    await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
     await auditJob(ctx, job, "failure", status === "manual_review" ? "integration.job_manual_review" : "integration.job_failed");
     return { status, nextAttemptAt: null };
   },
@@ -1231,6 +1349,7 @@ export const reconcileStaleJobs = internalMutation({
             recoveryKind: undefined,
             updatedAt: now,
           });
+          await releaseExpiredGeminiExecutionPermit(ctx, job, now);
           await auditJob(ctx, job, "failure", "integration.job_manual_review");
           continue;
         }
@@ -1244,6 +1363,7 @@ export const reconcileStaleJobs = internalMutation({
           updatedAt: now,
         });
         await markGeminiJurisdictionDrifted(ctx, job);
+        await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
       }
@@ -1266,6 +1386,7 @@ export const reconcileStaleJobs = internalMutation({
           updatedAt: now,
         });
         await markGeminiJurisdictionDrifted(ctx, job);
+        await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
       }

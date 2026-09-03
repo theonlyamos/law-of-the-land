@@ -28,6 +28,11 @@ export default defineSchema({
     productionBucketId: v.optional(v.string()),
     geminiFileSearchStoreName: v.optional(v.string()),
     geminiEmbeddingModel: v.optional(v.string()),
+    // Server-only provider serialization. Client projections deliberately omit it.
+    geminiExecutionPermit: v.optional(v.object({
+      jobId: v.id("integrationJobs"),
+      leaseExpiresAt: v.number(),
+    })),
     providerSyncState: v.union(
       v.literal("pending"),
       v.literal("synced"),

@@ -438,7 +438,7 @@ describe("governed document publication", () => {
     expect(state.locks).toHaveLength(1);
   });
 
-  it("fails a delete completion closed when jurisdiction readiness changes after target issuance", async () => {
+  it("records a delete completion when readiness drifts after target issuance", async () => {
     const t = createBackend();
     await enablePanel(t);
     const publisher = await asAdmin(t, "content_reviewer");
@@ -449,11 +449,12 @@ describe("governed document publication", () => {
     if (!claim) throw new Error("expected delete claim");
     await t.query(getGeminiJobTarget, { jobId: queued.jobId, leaseToken: claim.leaseToken });
     await t.run(async (ctx) => ctx.db.patch(jurisdictionId, { providerSyncState: "drifted" }));
-    await expect(t.mutation(applyGeminiProviderResult, { jobId: queued.jobId, leaseToken: claim.leaseToken, result: { kind: "document_deleted" } })).rejects.toThrow("DOCUMENT_PUBLICATION_STATE_INVALID");
-    const state = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), version: await ctx.db.get(ids[0]), locks: await ctx.db.query("documentLifecycleLocks").take(2) }));
-    expect(state.resource?.activeVersionId).toBe(ids[0]);
-    expect(state.version?.status).toBe("published");
-    expect(state.locks).toHaveLength(1);
+    await expect(t.mutation(applyGeminiProviderResult, { jobId: queued.jobId, leaseToken: claim.leaseToken, result: { kind: "document_deleted" } })).resolves.toBeNull();
+    const state = await t.run(async (ctx) => ({ jurisdiction: await ctx.db.get(jurisdictionId), resource: await ctx.db.get(resourceId), version: await ctx.db.get(ids[0]), locks: await ctx.db.query("documentLifecycleLocks").take(2) }));
+    expect(state.jurisdiction?.geminiExecutionPermit).toBeUndefined();
+    expect(state.resource?.activeVersionId).toBeUndefined();
+    expect(state.version?.status).toBe("unpublished");
+    expect(state.locks).toHaveLength(0);
   });
 
   it.each([
@@ -1039,13 +1040,32 @@ describe("governed document publication", () => {
       versionId: secondVersionId, confirmation: `PUBLISH ${secondVersionId}`,
       reason: "Publish second verified original", idempotencyKey: "concurrent-publish-2",
     });
-    const firstPoll = await claimAcceptedIndexPoll(t, first.jobId, "concurrent-first");
-    const secondPoll = await claimAcceptedIndexPoll(t, second.jobId, "concurrent-second");
+    const firstExecution = await t.mutation(claimJob, { jobId: first.jobId });
+    if (!firstExecution) throw new Error("expected first index execution claim");
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: first.jobId, leaseToken: firstExecution.leaseToken,
+      result: { kind: "index_accepted", operationName: "fileSearchStores/ghana-test/upload/operations/concurrent-first" },
+    });
+    const secondExecution = await t.mutation(claimJob, { jobId: second.jobId });
+    if (!secondExecution) throw new Error("expected second index execution claim");
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: second.jobId, leaseToken: secondExecution.leaseToken,
+      result: { kind: "index_accepted", operationName: "fileSearchStores/ghana-test/upload/operations/concurrent-second" },
+    });
+    await t.run(async (ctx) => {
+      const due = Date.now() - 1;
+      await ctx.db.patch(first.jobId, { nextAttemptAt: due });
+      await ctx.db.patch(second.jobId, { nextAttemptAt: due });
+    });
+    const firstPoll = await t.mutation(claimJob, { jobId: first.jobId });
+    if (!firstPoll) throw new Error("expected first index poll claim");
     await t.mutation(recordProviderFailure, {
       jobId: first.jobId, leaseToken: firstPoll.leaseToken,
       kind: "network", retryable: true, sideEffectUncertain: true,
     });
 
+    const secondPoll = await t.mutation(claimJob, { jobId: second.jobId });
+    if (!secondPoll) throw new Error("expected second index poll claim");
     await t.mutation(applyGeminiProviderResult, {
       jobId: second.jobId, leaseToken: secondPoll.leaseToken,
       result: { kind: "index_completed", documentName: "fileSearchStores/ghana-test/documents/concurrent-second" },
@@ -1096,15 +1116,48 @@ describe("governed document publication", () => {
       versionId: second.versionId, confirmation: `PUBLISH ${second.versionId}`,
       reason: "Publish second verified original", idempotencyKey: "defer-second-publication",
     });
-    const firstPoll = await claimAcceptedIndexPoll(t, first.jobId, "defer-first");
-    const racedLease = await t.mutation(claimJob, { jobId: deferred.jobId });
-    if (!racedLease) throw new Error("expected second publication lease before drift");
+    const firstExecution = await t.mutation(claimJob, { jobId: first.jobId });
+    if (!firstExecution) throw new Error("expected first publication lease");
+    await expect(t.query(getGeminiJobTarget, {
+      jobId: first.jobId,
+      leaseToken: firstExecution.leaseToken,
+    })).resolves.toMatchObject({ kind: "index_document", storeName: "fileSearchStores/ghana-test" });
+    await expect(t.run(async (ctx) => ctx.db.get(jurisdictionId))).resolves.toMatchObject({
+      geminiExecutionPermit: {
+        jobId: first.jobId,
+        leaseExpiresAt: firstExecution.job.leaseExpiresAt,
+      },
+    });
+    await expect(t.mutation(claimJob, { jobId: deferred.jobId })).resolves.toBeNull();
+    const permitBlocked = await t.run(async (ctx) => ctx.db.get(deferred.jobId as Id<"integrationJobs">));
+    expect(permitBlocked?.status).toBe("queued");
+    expect(permitBlocked?.leaseToken).toBeUndefined();
+    expect(permitBlocked?.nextAttemptAt).toBeGreaterThan(Date.now());
+
+    await t.run(async (ctx) => ctx.db.patch(jurisdictionId, { providerSyncState: "drifted" }));
+    await t.mutation(applyGeminiProviderResult, {
+      jobId: first.jobId,
+      leaseToken: firstExecution.leaseToken,
+      result: { kind: "index_accepted", operationName: "fileSearchStores/ghana-test/upload/operations/defer-first" },
+    });
+    const afterAccepted = await t.run(async (ctx) => ctx.db.get(jurisdictionId));
+    expect(afterAccepted?.providerSyncState).toBe("drifted");
+    expect(afterAccepted?.geminiExecutionPermit).toBeUndefined();
+    await t.run(async (ctx) => ctx.db.patch(first.jobId, { nextAttemptAt: Date.now() - 1 }));
+    const firstPoll = await t.mutation(claimJob, { jobId: first.jobId });
+    if (!firstPoll) throw new Error("expected first publication poll lease");
+    await expect(t.query(getGeminiJobTarget, {
+      jobId: first.jobId,
+      leaseToken: firstPoll.leaseToken,
+    })).resolves.toMatchObject({ kind: "index_document", storeName: "fileSearchStores/ghana-test" });
+    await t.run(async (ctx) => ctx.db.patch(deferred.jobId, { nextAttemptAt: Date.now() - 1 }));
+    await expect(t.mutation(claimJob, { jobId: deferred.jobId })).resolves.toBeNull();
     await t.mutation(recordProviderFailure, {
       jobId: first.jobId, leaseToken: firstPoll.leaseToken,
       kind: "network", retryable: true, sideEffectUncertain: true,
     });
 
-    await expect(t.action(runGeminiJob, { jobId: deferred.jobId, leaseToken: racedLease.leaseToken })).resolves.toBeNull();
+    await t.run(async (ctx) => ctx.db.patch(deferred.jobId, { nextAttemptAt: Date.now() - 1 }));
     await expect(t.mutation(claimJob, { jobId: deferred.jobId })).resolves.toBeNull();
     const waiting = await t.run(async (ctx) => ctx.db.get(deferred.jobId as Id<"integrationJobs">));
     expect(waiting?.status).toBe("queued");
