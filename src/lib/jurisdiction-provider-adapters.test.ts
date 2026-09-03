@@ -9,7 +9,7 @@ import {
   createPlacesProvider,
   createResearchProvider,
   createTopicProvider,
-  type ResearchCall,
+  type ResearchStore,
 } from "./jurisdiction-provider-adapters";
 
 const SHA = "a".repeat(40);
@@ -48,17 +48,25 @@ const topicRequest = {
   contents: [{ role: "user", parts: [{ text: "untrusted" }] }],
 } satisfies GenerateContentParameters;
 
-function researchCall(
-  query: string,
-  ordinal: 0 | 1 | 2 | 3 = 0,
-): ResearchCall {
-  return {
-    ordinal,
-    relation: ordinal === 0 ? "selected" : "geographic_ancestor",
-    bucketId: 100 + ordinal,
-    query,
-  };
+function researchStores(count = 1): ResearchStore[] {
+  return Array.from({ length: count }, (_, index) => ({
+    jurisdictionId: index === 0 ? "accra" : `ancestor-${index}`,
+    name: index === 0 ? "Accra" : `Ancestor ${index}`,
+    kind: "geographic",
+    relation: index === 0 ? "selected" : "geographic_ancestor",
+    storeName: `fileSearchStores/law-${index}`,
+    documents: [{
+      resourceId: `resource-${index}`,
+      versionId: `version-${index}`,
+      documentName: `fileSearchStores/law-${index}/documents/document-${index}`,
+    }],
+  }));
 }
+
+const retrievalOptions = {
+  timeoutMs: 10_000,
+  signal: new AbortController().signal,
+};
 
 describe("isolated jurisdiction provider adapters", () => {
   it("selects stub mode before provider keys, constructors, imports, or fetch", async () => {
@@ -66,70 +74,73 @@ describe("isolated jurisdiction provider adapters", () => {
     let keyReads = 0;
     Object.defineProperties(environment, {
       GOOGLE_AI_API_KEY: { get: () => { keyReads += 1; return "must-not-read"; } },
-      GROUNDX_API_KEY: { get: () => { keyReads += 1; return "must-not-read"; } },
     });
     const createGoogleClient = vi.fn();
-    const createGroundxClient = vi.fn();
+    const createProviderClient = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const topic = createTopicProvider(environment, { createGoogleClient });
-    const research = createResearchProvider(environment, { createGroundxClient });
+    const research = createResearchProvider(environment, { createProviderClient });
     await expect(topic.generate(E2E_JURISDICTION_QUESTIONS.complete, topicRequest))
       .resolves.toEqual({ text: '{"geographicHints":["Accra"],"ancestorDepth":3}' });
-    await expect(research.search(researchCall(E2E_JURISDICTION_QUESTIONS.complete)))
-      .resolves.toBe("Isolated Accra selected legal research evidence.");
+    await expect(research.search({
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      stores: researchStores(),
+    }, retrievalOptions)).resolves.toMatchObject({
+      sources: [{ spans: [{ content: "Isolated Accra selected legal research evidence." }] }],
+    });
 
     expect(keyReads).toBe(0);
     expect(createGoogleClient).not.toHaveBeenCalled();
-    expect(createGroundxClient).not.toHaveBeenCalled();
+    expect(createProviderClient).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 
   it("uses exact shared questions and rejects unknown input before real seams", async () => {
     const createGoogleClient = vi.fn();
-    const createGroundxClient = vi.fn();
+    const createProviderClient = vi.fn();
     const topic = createTopicProvider(stubEnvironment(), { createGoogleClient });
-    const research = createResearchProvider(stubEnvironment(), { createGroundxClient });
+    const research = createResearchProvider(stubEnvironment(), { createProviderClient });
 
     await expect(topic.generate(`${E2E_JURISDICTION_QUESTIONS.complete} `, topicRequest))
       .rejects.toThrow("E2E_JURISDICTION_PROVIDER_SCENARIO_INVALID");
-    await expect(research.search(researchCall("What rules apply?")))
+    await expect(research.search({ query: "What rules apply?", stores: researchStores() }, retrievalOptions))
       .rejects.toThrow("E2E_JURISDICTION_PROVIDER_SCENARIO_INVALID");
     expect(createGoogleClient).not.toHaveBeenCalled();
-    expect(createGroundxClient).not.toHaveBeenCalled();
+    expect(createProviderClient).not.toHaveBeenCalled();
   });
 
-  it("returns ordered selected and supplementary evidence and only rejects the requested call", async () => {
+  it("returns ordered evidence, omits a failed supplement, and rejects selected failure", async () => {
     const complete = createResearchProvider(stubEnvironment());
-    await expect(Promise.all([0, 1, 2, 3].map((ordinal) => complete.search(researchCall(
-      E2E_JURISDICTION_QUESTIONS.complete,
-      ordinal as 0 | 1 | 2 | 3,
-    ))))).resolves.toEqual([
-      "Isolated Accra selected legal research evidence.",
-      "Isolated Accra supplementary legal research evidence 1.",
-      "Isolated Accra supplementary legal research evidence 2.",
-      "Isolated Accra supplementary legal research evidence 3.",
-    ]);
+    await expect(complete.search({
+      query: E2E_JURISDICTION_QUESTIONS.complete,
+      stores: researchStores(4),
+    }, retrievalOptions)).resolves.toMatchObject({
+      sources: [
+        { spans: [{ content: "Isolated Accra selected legal research evidence." }] },
+        { spans: [{ content: "Isolated Accra supplementary legal research evidence 1." }] },
+        { spans: [{ content: "Isolated Accra supplementary legal research evidence 2." }] },
+        { spans: [{ content: "Isolated Accra supplementary legal research evidence 3." }] },
+      ],
+    });
 
     const supplementaryFailure = createResearchProvider(stubEnvironment());
-    await expect(supplementaryFailure.search(researchCall(
-      E2E_JURISDICTION_QUESTIONS.supplementary_failure,
-      1,
-    ))).rejects.toThrow("E2E_JURISDICTION_STUB_SUPPLEMENTARY_FAILURE");
-    await expect(supplementaryFailure.search(researchCall(
-      E2E_JURISDICTION_QUESTIONS.supplementary_failure,
-      2,
-    ))).resolves.toContain("evidence 2");
+    await expect(supplementaryFailure.search({
+      query: E2E_JURISDICTION_QUESTIONS.supplementary_failure,
+      stores: researchStores(3),
+    }, retrievalOptions)).resolves.toMatchObject({
+      sources: [
+        { jurisdictionId: "accra" },
+        { jurisdictionId: "ancestor-2" },
+      ],
+    });
 
     const selectedFailure = createResearchProvider(stubEnvironment());
-    await expect(selectedFailure.search(researchCall(
-      E2E_JURISDICTION_QUESTIONS.selected_failure,
-    ))).rejects.toThrow("E2E_JURISDICTION_STUB_SELECTED_FAILURE");
-    await expect(selectedFailure.search(researchCall(
-      E2E_JURISDICTION_QUESTIONS.selected_failure,
-      1,
-    ))).resolves.toContain("evidence 1");
+    await expect(selectedFailure.search({
+      query: E2E_JURISDICTION_QUESTIONS.selected_failure,
+      stores: researchStores(2),
+    }, retrievalOptions)).rejects.toThrow("E2E_JURISDICTION_STUB_SELECTED_FAILURE");
   });
 
   it.each(CHAT_STUB_CASES)(
@@ -244,17 +255,17 @@ describe("normal jurisdiction provider adapters", () => {
   });
 
   it("caches a synchronously rejected research factory initialization", async () => {
-    const createGroundxClient = vi.fn(() => {
+    const createProviderClient = vi.fn(() => {
       throw new Error("factory unavailable");
     });
     const research = createResearchProvider(
-      { GROUNDX_API_KEY: "groundx-key" },
-      { createGroundxClient },
+      { GOOGLE_AI_API_KEY: "google-key" },
+      { createProviderClient },
     );
 
     await expect(research.initialize()).rejects.toThrow("factory unavailable");
     await expect(research.initialize()).rejects.toThrow("factory unavailable");
-    expect(createGroundxClient).toHaveBeenCalledOnce();
+    expect(createProviderClient).toHaveBeenCalledOnce();
   });
 
   it("preserves topic and research provider call shapes through injected real factories", async () => {
@@ -263,49 +274,66 @@ describe("normal jurisdiction provider adapters", () => {
     const createGoogleClient = vi.fn().mockResolvedValue({
       models: { generateContent },
     });
-    const searchContent = vi.fn().mockResolvedValue({
-      data: { search: { text: "real projected evidence" } },
+    const evidence = "real projected evidence";
+    const create = vi.fn().mockResolvedValue({
+      steps: [{
+        type: "model_output",
+        content: [{
+          type: "text",
+          text: evidence,
+          annotations: [{
+            type: "file_citation",
+            custom_metadata: {
+              jurisdiction_id: "accra",
+              resource_id: "resource-0",
+              version_id: "version-0",
+            },
+            document_uri: "https://generativelanguage.googleapis.com/v1beta/files/provider-document",
+            source: "https://example.test/source-attribution",
+            start_index: 0,
+            end_index: evidence.length,
+          }],
+        }],
+      }],
     });
-    const createGroundxClient = vi.fn().mockResolvedValue({
-      search: { content: searchContent },
-    });
+    const createProviderClient = vi.fn().mockResolvedValue({ interactions: { create } });
     const environment = {
       GOOGLE_AI_API_KEY: "google-key",
-      GROUNDX_API_KEY: "groundx-key",
     };
     const topic = createTopicProvider(environment, { createGoogleClient });
-    const research = createResearchProvider(environment, { createGroundxClient });
+    const research = createResearchProvider(environment, { createProviderClient });
     const signal = new AbortController().signal;
-    const call = researchCall("normal query", 1);
 
     await expect(topic.generate("normal question", topicRequest)).resolves.toBe(topicResult);
-    await expect(research.search(call, { timeoutMs: 2_500, signal }))
-      .resolves.toBe("real projected evidence");
-    await expect(research.search(researchCall("legacy query"))).resolves.toBe("real projected evidence");
+    await expect(research.search({ query: "normal query", stores: researchStores() }, { timeoutMs: 2_500, signal }))
+      .resolves.toMatchObject({ sources: [{ jurisdictionId: "accra", spans: [{ content: "real projected evidence" }] }] });
 
     expect(createGoogleClient).toHaveBeenCalledOnce();
     expect(createGoogleClient).toHaveBeenCalledWith("google-key");
     expect(generateContent).toHaveBeenCalledWith(topicRequest);
-    expect(createGroundxClient).toHaveBeenCalledOnce();
-    expect(createGroundxClient).toHaveBeenCalledWith("groundx-key");
-    expect(searchContent.mock.calls).toEqual([
-      [{ id: call.bucketId, query: call.query }, { timeout: 2_500, signal }],
-      [{ id: 100, query: "legacy query" }],
-    ]);
+    expect(createProviderClient).toHaveBeenCalledOnce();
+    expect(createProviderClient).toHaveBeenCalledWith("google-key");
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gemini-3.5-flash-lite",
+      tools: [{ type: "file_search", file_search_store_names: ["fileSearchStores/law-0"] }],
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it("reports missing normal credentials without constructing a real client", async () => {
     const createGoogleClient = vi.fn();
-    const createGroundxClient = vi.fn();
+    const createProviderClient = vi.fn();
     const topic = createTopicProvider({}, { createGoogleClient });
-    const research = createResearchProvider({}, { createGroundxClient });
+    const research = createResearchProvider({}, { createProviderClient });
 
     await expect(topic.generate("normal question", topicRequest))
       .rejects.toThrow("TOPIC_PLANNER_NOT_CONFIGURED");
-    await expect(research.search(researchCall("normal question")))
+    await expect(research.search({ query: "normal question", stores: researchStores() }, {
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+    }))
       .rejects.toThrow("RESEARCH_PROVIDER_NOT_CONFIGURED");
     expect(createGoogleClient).not.toHaveBeenCalled();
-    expect(createGroundxClient).not.toHaveBeenCalled();
+    expect(createProviderClient).not.toHaveBeenCalled();
   });
 
   it("preserves normal chat and Places call shapes through injected real seams", async () => {

@@ -33,6 +33,9 @@ const MAX_PROVIDER_LATENCY_MS = 10 * 60_000;
 const MAX_RESULT_COUNT = 10_000;
 const MAX_SCOPE_SIZE = 9;
 const MAX_PLAN_SIZE = 4;
+// Governed evidence is capped at 120,000 UTF-16 code units; each retained code
+// unit can require at most three UTF-8 bytes.
+const MAX_EVIDENCE_BYTES = 360_000;
 const ROLLUP_BATCH = 500;
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const LATENCY_THRESHOLDS = [
@@ -48,6 +51,11 @@ const providerStatus = v.union(
   v.literal("failure"),
 );
 const generationStatus = v.union(v.literal("success"), v.literal("failure"));
+const jurisdictionCoverage = v.array(v.object({
+  ordinal: v.number(),
+  relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
+  coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+}));
 const phaseReturn = v.object({ status: v.union(v.literal("search_complete"), v.literal("finalized")), correlationId: v.string() });
 const terminalReturn = v.object({ status: v.literal("finalized"), correlationId: v.string() });
 
@@ -189,6 +197,12 @@ async function recordTerminal(
     ...(row.scopeSize !== undefined ? { scopeSize: row.scopeSize } : {}),
     ...(row.retrievalPlanSize !== undefined ? { retrievalPlanSize: row.retrievalPlanSize } : {}),
     ...(row.providerCallCount !== undefined ? { providerCallCount: row.providerCallCount } : {}),
+    ...(row.fileSearchCallCount !== undefined ? { fileSearchCallCount: row.fileSearchCallCount } : {}),
+    ...(row.fileSearchStoreCount !== undefined ? { fileSearchStoreCount: row.fileSearchStoreCount } : {}),
+    ...(row.fileSearchLatencyMs !== undefined ? { fileSearchLatencyMs: row.fileSearchLatencyMs } : {}),
+    ...(row.evidenceBytes !== undefined ? { evidenceBytes: row.evidenceBytes } : {}),
+    ...(row.citationCount !== undefined ? { citationCount: row.citationCount } : {}),
+    ...(row.jurisdictionCoverage !== undefined ? { jurisdictionCoverage: row.jurisdictionCoverage } : {}),
     ...(row.plannerStatus ? { plannerStatus: row.plannerStatus } : {}),
     ...(row.plannerLatencyMs !== undefined ? { plannerLatencyMs: row.plannerLatencyMs } : {}),
     ...(row.contextDigest ? { contextDigest: row.contextDigest } : {}),
@@ -308,45 +322,59 @@ export const issueCorrelation = mutation({
 
 export const recordSearchPhase = mutation({
   args: {
-    token: v.string(), providerStatus, latencyMs: v.number(), resultCount: v.number(),
+    token: v.string(), providerStatus, latencyMs: v.optional(v.number()), totalLatencyMs: v.optional(v.number()), resultCount: v.number(),
     scopeSize: v.optional(v.number()), retrievalPlanSize: v.optional(v.number()),
-    providerCallCount: v.optional(v.number()),
-    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
-    plannerLatencyMs: v.optional(v.number()), contextDigest: v.optional(v.string()),
+    fileSearchCallCount: v.optional(v.number()), fileSearchStoreCount: v.optional(v.number()),
+    fileSearchLatencyMs: v.optional(v.number()), evidenceBytes: v.optional(v.number()),
+    citationCount: v.optional(v.number()), jurisdictionCoverage: v.optional(jurisdictionCoverage),
+    contextDigest: v.optional(v.string()),
     partialCoverage: v.optional(v.boolean()),
-    configurationUnavailableCount: v.optional(v.number()),
-    supplementaryProviderFailureCount: v.optional(v.number()),
     serviceProof: v.string(),
   },
   returns: phaseReturn,
   handler: async (ctx, args) => {
-    const latencyMs = validateLatency(args.latencyMs);
     const resultCount = validateResultCount(args.resultCount);
     const owner = await requireOwner(ctx);
     const row = await correlationByToken(ctx, args.token);
     requireCorrelationOwner(row, owner);
     const unified = effectiveJurisdictionContract(row) === "unified";
+    const latencyMs = validateLatency(unified ? args.totalLatencyMs! : args.latencyMs!);
     const scopeSize = unified ? boundedCount(args.scopeSize!, MAX_SCOPE_SIZE) : undefined;
     const retrievalPlanSize = unified ? boundedCount(args.retrievalPlanSize!, MAX_PLAN_SIZE) : undefined;
-    const providerCallCount = unified ? boundedCount(args.providerCallCount!, MAX_PLAN_SIZE) : undefined;
-    const plannerLatencyMs = unified ? validateLatency(args.plannerLatencyMs!) : undefined;
+    const fileSearchCallCount = unified ? boundedCount(args.fileSearchCallCount!, 1) : undefined;
+    const fileSearchStoreCount = unified ? boundedCount(args.fileSearchStoreCount!, MAX_PLAN_SIZE) : undefined;
+    const fileSearchLatencyMs = unified ? validateLatency(args.fileSearchLatencyMs!) : undefined;
+    const evidenceBytes = unified ? boundedCount(args.evidenceBytes!, MAX_EVIDENCE_BYTES) : undefined;
+    const citationCount = unified ? boundedCount(args.citationCount!, 64) : undefined;
+    const coverage = unified ? args.jurisdictionCoverage : undefined;
     const contextDigest = validateDigest(args.contextDigest, unified && args.providerStatus !== "failure");
-    const configurationUnavailableCount = unified
-      ? boundedCount(args.configurationUnavailableCount!, MAX_PLAN_SIZE - 1)
-      : undefined;
-    const supplementaryProviderFailureCount = unified
-      ? boundedCount(args.supplementaryProviderFailureCount!, MAX_PLAN_SIZE - 1)
-      : undefined;
-    if (unified && (!args.plannerStatus || args.partialCoverage === undefined)) {
+    if (unified && (args.providerStatus === "no_result" || args.latencyMs !== undefined || args.partialCoverage === undefined || !coverage
+      || coverage.length !== retrievalPlanSize || coverage.some((item, index) => item.ordinal !== index)
+      || coverage[0]?.relation !== "selected" || coverage.slice(1).some((item) => item.relation === "selected")
+      || (fileSearchCallCount === 0) !== (fileSearchStoreCount === 0)
+      || (fileSearchCallCount === 0) !== (fileSearchLatencyMs === 0)
+      || latencyMs < fileSearchLatencyMs!
+      || fileSearchStoreCount! > retrievalPlanSize!
+      || fileSearchStoreCount! < coverage.filter((item) => item.coverage === "evidence").length
+      || resultCount > retrievalPlanSize!
+      || (coverage.some((item) => item.coverage === "evidence") !== (evidenceBytes! > 0))
+      || (coverage[0]?.coverage === "unavailable" && coverage.some((item) => item.coverage === "evidence"))
+      || citationCount! > coverage.filter((item) => item.coverage === "evidence").length * 16
+      || (fileSearchCallCount === 0 && (evidenceBytes !== 0 || citationCount !== 0))
+      || (args.providerStatus === "success" && (fileSearchCallCount !== 1 || coverage[0]?.coverage !== "evidence"
+        || resultCount !== coverage.filter((item) => item.coverage === "evidence").length))
+      || (args.providerStatus === "failure" && (contextDigest !== undefined || resultCount !== 0
+        || evidenceBytes !== 0 || citationCount !== 0 || coverage.some((item) => item.coverage === "evidence")))
+      || args.partialCoverage !== coverage.slice(1).some((item) => item.coverage !== "evidence"))) {
       throw new ConvexError("TELEMETRY_COUNT_INVALID");
     }
     await requireServiceProof(
       args.serviceProof,
       unified
-        ? ["search-jurisdiction-v1", args.token, args.providerStatus, latencyMs, resultCount,
-            scopeSize!, retrievalPlanSize!, providerCallCount!, args.plannerStatus!, plannerLatencyMs!,
-            contextDigest ?? "", args.partialCoverage ? 1 : 0,
-            configurationUnavailableCount!, supplementaryProviderFailureCount!]
+        ? ["search-jurisdiction-v2", args.token, args.providerStatus, latencyMs, resultCount,
+            scopeSize!, retrievalPlanSize!, fileSearchCallCount!, fileSearchStoreCount!, fileSearchLatencyMs!,
+            evidenceBytes!, citationCount!, contextDigest ?? "", args.partialCoverage ? 1 : 0,
+            coverage!.map((item) => `${item.ordinal}:${item.relation}:${item.coverage}`).join("|")]
         : ["search", args.token, args.providerStatus, latencyMs, resultCount],
     );
     if (row.status !== "issued") throw new ConvexError("TELEMETRY_CORRELATION_REPLAYED");
@@ -359,13 +387,14 @@ export const recordSearchPhase = mutation({
       ...(unified ? {
         scopeSize,
         retrievalPlanSize,
-        providerCallCount,
-        plannerStatus: args.plannerStatus,
-        plannerLatencyMs,
+        fileSearchCallCount,
+        fileSearchStoreCount,
+        fileSearchLatencyMs,
+        evidenceBytes,
+        citationCount,
+        jurisdictionCoverage: coverage,
         ...(contextDigest ? { contextDigest } : {}),
         partialCoverage: args.partialCoverage,
-        configurationUnavailableCount,
-        supplementaryProviderFailureCount,
       } : {}),
     });
     const updated = (await ctx.db.get(row._id))!;

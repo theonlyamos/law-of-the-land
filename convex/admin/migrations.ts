@@ -55,10 +55,8 @@ const authTables = ["user", "session", "account", "verification"] as const;
 
 const MAX_INITIAL_SUPER_ADMINS = 100;
 const GHANA_MIGRATION_ACTOR = "migration:seed-ghana-jurisdiction-v1";
-const GHANA_PRODUCTION_BUCKET_ID = "11833";
 const GHANA_V2_MIGRATION_ACTOR = "migration:seed-ghana-jurisdiction-v2";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
-
 type MigrationRow =
   | { target: "chatSessions"; row: Doc<"chatSessions"> }
   | { target: "telemetryCorrelations"; row: Doc<"telemetryCorrelations"> }
@@ -281,10 +279,9 @@ export const seedGhanaJurisdiction = internalMutation({
     }
 
     const alreadyGoverned =
-      existing?.status === "enabled" &&
+      existing?.status === "draft" &&
       existing.isDefault === true &&
-      existing.productionBucketId === GHANA_PRODUCTION_BUCKET_ID &&
-      existing.providerSyncState === "synced";
+      existing.providerSyncState === "pending";
     if (existing && alreadyGoverned) {
       return {
         jurisdictionId: existing._id,
@@ -300,10 +297,9 @@ export const seedGhanaJurisdiction = internalMutation({
           code: "GH",
           name: "Ghana",
           slug: "ghana",
-          status: "enabled",
+          status: "draft",
           isDefault: true,
-          productionBucketId: GHANA_PRODUCTION_BUCKET_ID,
-          providerSyncState: "synced",
+          providerSyncState: "pending",
           createdBy: GHANA_MIGRATION_ACTOR,
           updatedBy: GHANA_MIGRATION_ACTOR,
           createdAt: now,
@@ -312,10 +308,9 @@ export const seedGhanaJurisdiction = internalMutation({
 
     if (existing) {
       await ctx.db.patch("jurisdictions", existing._id, {
-        status: "enabled",
+        status: "draft",
         isDefault: true,
-        productionBucketId: GHANA_PRODUCTION_BUCKET_ID,
-        providerSyncState: "synced",
+        providerSyncState: "pending",
         updatedBy: GHANA_MIGRATION_ACTOR,
         updatedAt: now,
       });
@@ -356,7 +351,6 @@ export const seedGhanaJurisdictionV2 = internalMutation({
   returns: v.object({
     jurisdictionId: v.id("jurisdictions"),
     changed: v.boolean(),
-    preservedProductionBucket: v.literal("11833"),
   }),
   handler: async (ctx, args) => {
     const environment = requireMigrationEnvironment(args.environment);
@@ -382,11 +376,13 @@ export const seedGhanaJurisdictionV2 = internalMutation({
       }
       if (!rollout.ghanaSeedLastResult ||
           rollout.ghanaJurisdictionId !== rollout.ghanaSeedLastResult.jurisdictionId ||
-          rollout.ghanaProjectionFingerprint !== fingerprint ||
-          rollout.ghanaSeedLastResult.preservedProductionBucket !== "11833") {
+          rollout.ghanaProjectionFingerprint !== fingerprint) {
         throw new ConvexError("JURISDICTION_MIGRATION_STATE_INVALID");
       }
-      return rollout.ghanaSeedLastResult;
+      return {
+        jurisdictionId: rollout.ghanaSeedLastResult.jurisdictionId,
+        changed: rollout.ghanaSeedLastResult.changed,
+      };
     }
 
     const ghanaRows = await ctx.db
@@ -396,9 +392,6 @@ export const seedGhanaJurisdictionV2 = internalMutation({
     if (ghanaRows.length === 0) throw new ConvexError("GHANA_SEED_V2_NOT_FOUND");
     if (ghanaRows.length !== 1) throw new ConvexError("GHANA_SEED_V2_CODE_CONFLICT");
     const ghana = ghanaRows[0];
-    if (ghana.productionBucketId !== GHANA_PRODUCTION_BUCKET_ID) {
-      throw new ConvexError("GHANA_SEED_V2_BUCKET_MISMATCH");
-    }
     if ((ghana.kind !== undefined && ghana.kind !== "geographic") ||
         (ghana.visibility !== undefined && ghana.visibility !== "public") ||
         (ghana.legacyCountryCode !== undefined && ghana.legacyCountryCode !== "GH") ||
@@ -460,6 +453,11 @@ export const seedGhanaJurisdictionV2 = internalMutation({
       ...(ghana.kind === undefined ? { kind: "geographic" as const } : {}),
       ...(ghana.visibility === undefined ? { visibility: "public" as const } : {}),
       ...(ghana.legacyCountryCode === undefined ? { legacyCountryCode: "GH" } : {}),
+      ...(ghana.status === "draft" ? {} : { status: "draft" as const }),
+      ...(ghana.isDefault ? {} : { isDefault: true }),
+      ...(ghana.providerSyncState === "pending"
+        ? {}
+        : { providerSyncState: "pending" as const }),
     };
     const jurisdictionChanged = Object.keys(jurisdictionPatch).length > 0;
     if (jurisdictionChanged) {
@@ -485,7 +483,6 @@ export const seedGhanaJurisdictionV2 = internalMutation({
     const result = {
       jurisdictionId: ghana._id,
       changed: jurisdictionChanged || !profile,
-      preservedProductionBucket: "11833" as const,
     };
     const rolloutPatch = {
       ghanaJurisdictionId: ghana._id,
@@ -913,6 +910,7 @@ export const backfillJurisdictionReferences = internalMutation({
     return result;
   },
 });
+
 
 export const bootstrapSuperAdmins = internalMutation({
   args: {},

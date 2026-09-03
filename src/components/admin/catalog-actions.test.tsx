@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   updateOrganizational: vi.fn(),
   enableJurisdiction: vi.fn(),
   archiveJurisdiction: vi.fn(),
+  provisionGemini: vi.fn(),
+  deleteGemini: vi.fn(),
   queryResult: vi.fn(),
 }));
 
@@ -23,6 +25,8 @@ vi.mock("convex/react", () => ({ useQuery_experimental: (options: unknown) => mo
   if (name === "admin/jurisdictions:updateOrganizationalJurisdiction") return mocks.updateOrganizational;
   if (name === "admin/jurisdictions:enableJurisdiction") return mocks.enableJurisdiction;
   if (name === "admin/jurisdictions:archiveJurisdiction") return mocks.archiveJurisdiction;
+  if (name === "admin/jobs:provisionJurisdictionGeminiStore") return mocks.provisionGemini;
+  if (name === "admin/jobs:deleteJurisdictionGeminiStore") return mocks.deleteGemini;
   if (name === "admin/organizations:createOrganization") return mocks.createOrganization;
   return vi.fn();
 } }));
@@ -50,6 +54,8 @@ beforeEach(() => {
   mocks.updateOrganizational.mockResolvedValue({ status: "draft" });
   mocks.enableJurisdiction.mockResolvedValue({ status: "enabled" });
   mocks.archiveJurisdiction.mockResolvedValue({ status: "archived" });
+  mocks.provisionGemini.mockResolvedValue({ jobId: "job_1", duplicate: false });
+  mocks.deleteGemini.mockResolvedValue({ jobId: "job_2", duplicate: false });
   mocks.queryResult.mockReturnValue({ status: "pending" });
 });
 afterEach(cleanup);
@@ -62,6 +68,8 @@ describe("typed jurisdiction creation", () => {
     expect(screen.queryByLabelText("ISO country code")).toBeNull();
     expect(screen.queryByLabelText("URL slug")).toBeNull();
     expect(screen.queryByLabelText("Default jurisdiction")).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
+    expect(screen.queryByText(/bucket/i)).toBeNull();
   });
 
   it("creates a country draft from only a verified claim and shared fields", async () => {
@@ -358,10 +366,40 @@ describe("typed jurisdiction creation", () => {
 });
 
 describe("jurisdiction lifecycle actions", () => {
+  it("explains paused search and links a needs-review jurisdiction to provider jobs", () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "drifted", setupState: "needs_review", storeConfigured: true }, geographic: { level: "country", parent: null },
+    }} />);
+
+    expect(screen.getByText("Search is paused for Ghana because its index needs review.")).toBeVisible();
+    expect(screen.getByRole("link", { name: "View provider job" })).toHaveAttribute(
+      "href",
+      "/admin/operations?status=manual_review",
+    );
+  });
+
+  it("queues controlled Gemini setup for a draft jurisdiction", async () => {
+    render(<JurisdictionLifecycleActions jurisdiction={{
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, geographic: { level: "country", parent: null },
+    }} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for Ghana" }), { target: { value: "Set up legal search" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set up Gemini search" }));
+
+    await waitFor(() => expect(mocks.provisionGemini).toHaveBeenCalledWith({
+      jurisdictionId: "geo_1",
+      reason: "Set up legal search",
+      idempotencyKey: expect.stringMatching(/^provision-gemini-geo_1-/),
+    }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/being set up/i);
+  });
+
   it("enables a draft jurisdiction with an auditable reason", async () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
-      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
-      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "synced", setupState: "ready", storeConfigured: true, embeddingModel: "models/gemini-embedding-2" }, geographic: { level: "country", parent: null },
     }} />);
 
     expect(screen.getByRole("group", { name: "Lifecycle actions for Ghana" })).toBeVisible();
@@ -377,8 +415,8 @@ describe("jurisdiction lifecycle actions", () => {
 
   it("updates a geographic jurisdiction from a fresh verified place", async () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
-      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
-      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, geographic: { level: "country", parent: null },
     }} geographicOptions={geographies} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Edit geographic settings" }));
@@ -393,8 +431,8 @@ describe("jurisdiction lifecycle actions", () => {
 
   it("updates organizational scope only from an explicit replacement selection", async () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
-      id: "org_1", name: "World Health Organization", status: "draft", kind: "organizational", visibility: "members", scopeMode: "linked_geographies",
-      provider: { stagingConfigured: false, productionConfigured: false }, geographic: null,
+      id: "org_1", name: "World Health Organization", slug: "who", status: "draft", kind: "organizational", visibility: "members", scopeMode: "linked_geographies",
+      provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, geographic: null,
     }} geographicOptions={geographies} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Edit organizational settings" }));
@@ -407,19 +445,23 @@ describe("jurisdiction lifecycle actions", () => {
     }));
   });
 
-  it("keeps archived jurisdictions read-only", () => {
+  it("keeps archived jurisdiction settings read-only while offering controlled store teardown", () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
-      id: "geo_1", name: "Ghana", status: "archived", kind: "geographic", visibility: "public", scopeMode: null,
-      provider: { stagingConfigured: false, productionConfigured: false }, geographic: { level: "country", parent: null },
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "archived", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "synced", setupState: "ready", storeConfigured: true, embeddingModel: "models/gemini-embedding-2" }, geographic: { level: "country", parent: null },
     }} />);
 
-    expect(screen.queryByRole("group", { name: "Lifecycle actions for Ghana" })).toBeNull();
+    expect(screen.getByRole("group", { name: "Lifecycle actions for Ghana" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Edit geographic settings" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Delete Gemini store" }));
+    expect(screen.getByText("DELETE GEMINI STORE ghana")).toBeVisible();
+    expect(screen.getByLabelText("Exact confirmation")).toBeVisible();
   });
 
   it("keeps legacy migration rows on transitions without typed edit controls", () => {
     render(<JurisdictionLifecycleActions jurisdiction={{
-      id: "geo_1", name: "Ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
-      provider: { stagingConfigured: false, productionConfigured: true }, geographic: null,
+      id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public", scopeMode: null,
+      provider: { syncState: "synced", setupState: "ready", storeConfigured: true, embeddingModel: "models/gemini-embedding-2" }, geographic: null,
     }} editable={false} />);
 
     expect(screen.getByRole("group", { name: "Lifecycle actions for Ghana" })).toBeVisible();

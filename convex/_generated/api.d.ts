@@ -19,8 +19,8 @@ import type * as admin_e2eProviderIsolation from "../admin/e2eProviderIsolation.
 import type * as admin_exportActions from "../admin/exportActions.js";
 import type * as admin_exports from "../admin/exports.js";
 import type * as admin_featureFlags from "../admin/featureFlags.js";
-import type * as admin_groundxActions from "../admin/groundxActions.js";
-import type * as admin_integrations_groundx from "../admin/integrations/groundx.js";
+import type * as admin_geminiActions from "../admin/geminiActions.js";
+import type * as admin_integrations_geminiFileSearch from "../admin/integrations/geminiFileSearch.js";
 import type * as admin_jobs from "../admin/jobs.js";
 import type * as admin_jurisdictions from "../admin/jurisdictions.js";
 import type * as admin_migrations from "../admin/migrations.js";
@@ -44,6 +44,7 @@ import type * as lib_adminStepUp from "../lib/adminStepUp.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_chatCitationClaim from "../lib/chatCitationClaim.js";
 import type * as lib_email from "../lib/email.js";
+import type * as lib_geminiFileSearchNames from "../lib/geminiFileSearchNames.js";
 import type * as lib_jurisdictionAccess from "../lib/jurisdictionAccess.js";
 import type * as lib_jurisdictionDomain from "../lib/jurisdictionDomain.js";
 import type * as lib_jurisdictionEligibility from "../lib/jurisdictionEligibility.js";
@@ -51,6 +52,7 @@ import type * as lib_legacyJurisdictionCompatibility from "../lib/legacyJurisdic
 import type * as lib_placeClaim from "../lib/placeClaim.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
+import type * as lib_researchManifestProof from "../lib/researchManifestProof.js";
 import type * as lib_researchScope from "../lib/researchScope.js";
 import type * as lib_telemetryProof from "../lib/telemetryProof.js";
 import type * as lib_unifiedJurisdictionRollout from "../lib/unifiedJurisdictionRollout.js";
@@ -77,8 +79,8 @@ declare const fullApi: ApiFromModules<{
   "admin/exportActions": typeof admin_exportActions;
   "admin/exports": typeof admin_exports;
   "admin/featureFlags": typeof admin_featureFlags;
-  "admin/groundxActions": typeof admin_groundxActions;
-  "admin/integrations/groundx": typeof admin_integrations_groundx;
+  "admin/geminiActions": typeof admin_geminiActions;
+  "admin/integrations/geminiFileSearch": typeof admin_integrations_geminiFileSearch;
   "admin/jobs": typeof admin_jobs;
   "admin/jurisdictions": typeof admin_jurisdictions;
   "admin/migrations": typeof admin_migrations;
@@ -102,6 +104,7 @@ declare const fullApi: ApiFromModules<{
   "lib/audit": typeof lib_audit;
   "lib/chatCitationClaim": typeof lib_chatCitationClaim;
   "lib/email": typeof lib_email;
+  "lib/geminiFileSearchNames": typeof lib_geminiFileSearchNames;
   "lib/jurisdictionAccess": typeof lib_jurisdictionAccess;
   "lib/jurisdictionDomain": typeof lib_jurisdictionDomain;
   "lib/jurisdictionEligibility": typeof lib_jurisdictionEligibility;
@@ -109,6 +112,7 @@ declare const fullApi: ApiFromModules<{
   "lib/placeClaim": typeof lib_placeClaim;
   "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;
+  "lib/researchManifestProof": typeof lib_researchManifestProof;
   "lib/researchScope": typeof lib_researchScope;
   "lib/telemetryProof": typeof lib_telemetryProof;
   "lib/unifiedJurisdictionRollout": typeof lib_unifiedJurisdictionRollout;

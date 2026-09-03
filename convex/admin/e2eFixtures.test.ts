@@ -36,7 +36,7 @@ const addIncidentNote = makeFunctionReference<"mutation">("admin/operations:addI
 const createJurisdiction = makeFunctionReference<"mutation">("admin/resources:createJurisdiction");
 const updateJurisdiction = makeFunctionReference<"mutation">("admin/resources:updateJurisdiction");
 const publishVersion = makeFunctionReference<"mutation">("admin/publication:publishVersion");
-const runGroundxJob = makeFunctionReference<"action">("admin/groundxActions:runGroundxJob");
+const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGeminiJob");
 const original = { ...process.env };
 const fixtureCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 
@@ -162,12 +162,16 @@ describe("isolated admin E2E fixture control plane", () => {
       formerMember: { userId: expect.any(String), sessionToken: expect.any(String) },
     });
     expect(result.records).toMatchObject({
-      chatId: expect.any(String), resourceId: expect.any(String), stagingBucketId: expect.stringMatching(/^\d+$/),
-      productionBucketId: expect.stringMatching(/^\d+$/), callbackToken: expect.stringMatching(/^gx_[a-f0-9]{64}$/),
+      chatId: expect.any(String), resourceId: expect.any(String),
+      geminiStoreName: expect.stringMatching(/^fileSearchStores\/[a-z0-9-]{1,40}$/),
+      geminiDocumentName: expect.stringMatching(/^fileSearchStores\/[a-z0-9-]{1,40}\/documents\/[a-z0-9-]{1,40}$/),
+      geminiOperationName: expect.stringMatching(/^fileSearchStores\/[a-z0-9-]{1,40}\/upload\/operations\/[A-Za-z0-9._~-]+$/),
+      providerJobId: expect.any(String),
       jurisdictionCountryId: expect.any(String), jurisdictionTownId: expect.any(String),
       publicOrganizationJurisdictionId: expect.any(String), jurisdictionMemberOnlyId: expect.any(String),
       jurisdictionMemberId: expect.any(String), jurisdictionFormerMemberId: expect.any(String),
     });
+    expect(result.records).not.toHaveProperty("callbackToken");
     expect(JSON.stringify(result)).not.toContain("ADMIN_E2E");
     const jobs = await t.run((ctx) => ctx.db.query("integrationJobs").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", "e2e_contractfixture1")).take(10));
     expect(jobs).toHaveLength(1);
@@ -696,14 +700,14 @@ describe("isolated admin E2E fixture control plane", () => {
     };
 
     const failed = await queuePublish("e2e-publish-fail");
-    await t.action(runGroundxJob, { jobId: failed.jobId });
+    await t.action(runGeminiJob, { jobId: failed.jobId });
     await expect(t.run(async (ctx) => ({
       job: await ctx.db.get(failed.jobId),
       version: await ctx.db.get(fixture.records.reviewVersionId),
       resource: await ctx.db.get(fixture.records.resourceId),
     }))).resolves.toMatchObject({
       job: { status: "failed", lastErrorKind: "provider" },
-      version: { status: "approved", failureSummary: "Production copy failed" },
+      version: { status: "approved", failureSummary: "Publishing failed. The previous published version is still active." },
       resource: { activeVersionId: fixture.records.publishedVersionId },
     });
 
@@ -712,7 +716,18 @@ describe("isolated admin E2E fixture control plane", () => {
       versionId: fixture.records.reviewVersionId, publicationOperation: "publish", providerOutcome: "succeeded",
     });
     const succeeded = await queuePublish("e2e-publish-retry");
-    await t.action(runGroundxJob, { jobId: succeeded.jobId });
+    await t.action(runGeminiJob, { jobId: succeeded.jobId });
+    await t.run((ctx) => ctx.db.patch(succeeded.jobId, { nextAttemptAt: Date.now() - 1 }));
+    await t.action(runGeminiJob, { jobId: succeeded.jobId });
+    const replacementDeleteJobId = await t.run(async (ctx) => {
+      const jobs = await ctx.db.query("integrationJobs")
+        .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", fixture.records.publishedVersionId))
+        .take(10);
+      const job = jobs.find((row) => row.type === "gemini_delete_document" && row.status === "queued");
+      if (!job) throw new Error("replacement delete fixture job missing");
+      return job._id;
+    });
+    await t.action(runGeminiJob, { jobId: replacementDeleteJobId });
     await expect(t.run(async (ctx) => ({
       job: await ctx.db.get(succeeded.jobId),
       version: await ctx.db.get(fixture.records.reviewVersionId),
@@ -1017,7 +1032,7 @@ describe("isolated admin E2E fixture control plane", () => {
       ];
       const ownedJobControlResultId = await ctx.db.insert("jobControlResults", {
         operationId: grantedOverride.grantOperationId,
-        jobId: fixture.records.callbackJobId,
+        jobId: fixture.records.providerJobId,
         status: "queued",
         correlationId: "owned-cleanup-control-result",
         createdAt: Date.now(),
@@ -1140,7 +1155,7 @@ describe("isolated admin E2E fixture control plane", () => {
     await t.run((ctx) => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
     await t.action(bootstrap, { tag: "e2e_retentionfixture1" });
     const result = await t.action(control, { tag: "e2e_retentionfixture1", operation: "run_retention" });
-    expect(result.callbackJob).toMatchObject({ payload: "{}", retentionRedactedAt: expect.any(Number) });
+    expect(result.providerJob).toMatchObject({ payload: "{}", retentionRedactedAt: expect.any(Number) });
     await expect(t.run((ctx) => ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique())).resolves.toBeNull();
   });
 

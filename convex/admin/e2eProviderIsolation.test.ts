@@ -35,7 +35,7 @@ function nonEnumerableEnvironment(
 
 describe("admin E2E provider isolation gate", () => {
   it("leaves the normal production transport path unchanged when no E2E variable exists", () => {
-    expect(resolveE2EProviderIsolation({ GROUNDX_API_KEY: "production-key" })).toBe("normal");
+    expect(resolveE2EProviderIsolation({ GOOGLE_AI_API_KEY: "production-key" })).toBe("normal");
   });
 
   it.each([

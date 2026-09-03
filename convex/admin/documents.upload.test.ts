@@ -28,11 +28,6 @@ const generateUploadUrl = makeFunctionReference<"mutation">(
 const createDocumentVersion = makeFunctionReference<"mutation">(
   "admin/documents:createDocumentVersion",
 );
-const stageDocumentVersion = makeFunctionReference<"mutation">(
-  "admin/documents:stageDocumentVersion",
-);
-const claimJob = makeFunctionReference<"mutation">("admin/jobs:claimJob");
-const applyProviderResult = makeFunctionReference<"mutation">("admin/jobs:applyProviderResult");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -108,8 +103,8 @@ async function seedResource(
       slug: `ghana-${crypto.randomUUID()}`,
       status: "enabled",
       isDefault: false,
-      stagingBucketId: "staging-gh",
-      productionBucketId: "production-gh",
+      geminiFileSearchStoreName: "fileSearchStores/ghana-upload-test",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
       providerSyncState: "synced",
       createdBy: "fixture",
       updatedBy: "fixture",
@@ -252,15 +247,11 @@ describe("governed original-file uploads", () => {
     expect(serializedAudit).not.toContain(String(storageId));
   });
 
-  it("queues staging from authoritative version, storage, and jurisdiction state", async () => {
+  it("records a protected immutable draft without creating a provider job", async () => {
     const t = createBackend();
     await enablePanel(t);
     const manager = await asAdmin(t, "content_manager");
     const resourceId = await seedResource(t);
-    await t.run(async (ctx) => {
-      const resource = await ctx.db.get(resourceId);
-      await ctx.db.patch(resource!.jurisdictionId, { stagingBucketId: "11833", productionBucketId: "11834" });
-    });
     const storageId = await storeFile(t);
     const versionId = await manager.client.mutation(createDocumentVersion, {
       resourceId, storageId, filename: "Act-843.pdf", mimeType: "application/pdf", byteSize: 3,
@@ -268,28 +259,14 @@ describe("governed original-file uploads", () => {
       sourceUrl: "https://laws.example.gov/files/act-843.pdf", effectiveAt: "2012-10-16",
     });
 
-    const queued = await manager.client.mutation(stageDocumentVersion, {
-      versionId, reason: "Prepare the governed draft for review", idempotencyKey: "stage-version-1",
-    });
-    const replay = await manager.client.mutation(stageDocumentVersion, {
-      versionId, reason: "Prepare the governed draft for review", idempotencyKey: "stage-version-1",
-    });
-    expect(replay).toEqual({ jobId: queued.jobId, duplicate: true });
-    const state = await t.run(async (ctx) => ({ version: await ctx.db.get(versionId as Id<"documentVersions">), job: await ctx.db.get(queued.jobId as Id<"integrationJobs">), locks: await ctx.db.query("documentLifecycleLocks").collect() }));
-    expect(state.version?.status).toBe("staging_processing");
-    expect(state.locks).toHaveLength(1);
-    const payload = JSON.parse(state.job!.payload);
-    expect(payload).toMatchObject({ operation: "stage", documents: [{ bucketId: 11833, fileName: "Act-843.pdf", fileType: "pdf" }] });
-    expect(payload.documents[0].sourceUrl).toMatch(/^https?:\/\//);
-    const claim = await t.mutation(claimJob, { jobId: queued.jobId });
-    if (!claim) throw new Error("expected staging job claim");
-    await t.mutation(applyProviderResult, {
-      jobId: queued.jobId, leaseToken: claim.leaseToken, processId: "stage-process-1", status: "complete",
-      documentEvidence: { documentId: "stage-document-1", bucketId: 11833, status: "complete", fileType: "pdf", fileSize: 3 },
-    });
-    const completed = await t.run(async (ctx) => ({ version: await ctx.db.get(versionId as Id<"documentVersions">), locks: await ctx.db.query("documentLifecycleLocks").collect() }));
-    expect(completed.version).toMatchObject({ status: "draft", groundxStagingDocumentId: "stage-document-1", groundxStagingProcessId: "stage-process-1" });
-    expect(completed.locks).toHaveLength(0);
+    const state = await t.run(async (ctx) => ({
+      version: await ctx.db.get(versionId as Id<"documentVersions">),
+      jobs: await ctx.db.query("integrationJobs").take(1),
+      locks: await ctx.db.query("documentLifecycleLocks").take(1),
+    }));
+    expect(state.version).toMatchObject({ status: "draft", originalStorageId: storageId });
+    expect(state.jobs).toHaveLength(0);
+    expect(state.locks).toHaveLength(0);
   });
 
   it("rejects metadata that disagrees with the stored original", async () => {

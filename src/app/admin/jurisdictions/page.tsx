@@ -20,7 +20,7 @@ type Status = (typeof STATUSES)[number];
 type Kind = (typeof KINDS)[number];
 type TableRow = {
   id: string; name: string; slug: string; status: Status; kind: Kind; visibility: "public" | "members";
-  provider: { syncState: "pending" | "synced" | "drifted" | "failed"; stagingConfigured: boolean; productionConfigured: boolean };
+  provider: { syncState: "pending" | "synced" | "drifted" | "failed"; setupState: "not_set_up" | "setting_up" | "ready" | "needs_review" | "setup_failed"; storeConfigured: boolean; embeddingModel?: string };
   migrationState: "typed" | "legacy";
   geographic: null | { level: GeographicLevel; parent: null | { id: string; name: string; level: GeographicLevel } };
   organization: null | { id: string; name: string; slug: string; class: string; status: string };
@@ -94,8 +94,8 @@ export default async function JurisdictionsPage({ searchParams }: { searchParams
         identity: <span className="grid gap-1"><strong>{row.name}</strong><span className="text-xs uppercase tracking-[0.12em]">{title(row.kind)} / {row.migrationState === "legacy" ? "Legacy migration" : `Typed / ${row.slug}`}</span></span>,
         access: <span className="grid gap-1"><CatalogStatus status={row.status} /><span className="text-xs">{row.visibility === "members" ? "Active members" : "Public"}</span></span>,
         context: row.geographic ? <span className="grid gap-1"><strong>{title(row.geographic.level)}</strong><span className="text-xs">{row.geographic.parent ? `Within ${row.geographic.parent.name} (${title(row.geographic.parent.level)})` : "Root geography"}</span></span> : row.organization ? <span className="grid gap-1"><strong>{row.organization.name}</strong><span className="text-xs">{title(row.organization.class)} / {title(row.organization.status)} / {title(row.scopeMode ?? "global")}</span></span> : <span>Awaiting typed migration</span>,
-        provider: <span className="grid gap-1 text-xs"><strong>{title(row.provider.syncState)}</strong><span>Staging: {row.provider.stagingConfigured ? "Configured" : "Not configured"}</span><span>Production: {row.provider.productionConfigured ? "Configured" : "Not configured"}</span></span>,
-        ...(canWrite ? { lifecycle: <JurisdictionLifecycleActions jurisdiction={{ id: row.id, name: row.name, status: row.status, kind: row.kind, visibility: row.visibility, scopeMode: row.scopeMode, provider: row.provider, geographic: row.geographic }} geographicOptions={geographies?.page} geographicPage={geographies ? { nextCursor: geographies.continueCursor, isDone: geographies.isDone } : undefined} editable={row.migrationState === "typed"} /> } : {}),
+        provider: <span className="grid gap-1 text-xs"><strong>{title(row.provider.setupState)}</strong><span>{row.provider.storeConfigured ? "Gemini search configured" : "Gemini search not set up"}</span>{row.provider.embeddingModel ? <span>{row.provider.embeddingModel}</span> : null}</span>,
+        ...(canWrite ? { lifecycle: <JurisdictionLifecycleActions jurisdiction={{ id: row.id, name: row.name, slug: row.slug, status: row.status, kind: row.kind, visibility: row.visibility, scopeMode: row.scopeMode, provider: row.provider, geographic: row.geographic }} geographicOptions={geographies?.page} geographicPage={geographies ? { nextCursor: geographies.continueCursor, isDone: geographies.isDone } : undefined} editable={row.migrationState === "typed"} /> } : {}),
       } }))}
       filters={[
         { name: "status", label: "Lifecycle state", value: statusValue, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: title(value) }))] },

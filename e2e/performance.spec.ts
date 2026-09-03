@@ -4,7 +4,7 @@ import path from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { E2E_JURISDICTION_QUESTIONS } from "../shared/e2e-jurisdiction-provider-contract";
 import { readPerformanceArtifact, removePerformanceArtifacts, writePerformanceArtifact } from "../scripts/admin-performance-artifact.mjs";
-import { adminOnlyScriptBytes, buildAdminSliceArtifact, buildJurisdictionPerformanceSections, collectPacedRetrievalObservations, collectRetrievalObservation, percentile95 } from "../scripts/admin-performance-collector.mjs";
+import { adminOnlyScriptBytes, buildAdminSliceArtifact, buildJurisdictionPerformanceSections, collectPacedRetrievalObservations, collectRetrievalObservation, percentile95, validatePerformanceCalibration } from "../scripts/admin-performance-collector.mjs";
 import { controlBrowserFixtures, installSessionCookie, loadBrowserFixtureManifest, type BrowserFixtureManifest } from "./admin/fixtures";
 
 type ScriptResource = { url: string; encodedBodySize: number };
@@ -14,7 +14,7 @@ type CalibrationInput = {
   selectorP95LimitsMs: [number, number, number, number];
   autocompleteP95LimitMs: number;
   detailsP95LimitMs: number;
-  plannerP95LimitMs: number;
+  fileSearchP95LimitMs: number;
   totalP95LimitMs: number;
 };
 
@@ -196,15 +196,7 @@ function approvedCalibration(): CalibrationInput | null {
   if (fs.statSync(calibrationPath).size > 16_384) {
     throw new Error("Approved performance calibration file exceeds its bounded size.");
   }
-  const value = JSON.parse(fs.readFileSync(calibrationPath, "utf8")) as CalibrationInput;
-  const numbers = [...(Array.isArray(value.selectorP95LimitsMs) ? value.selectorP95LimitsMs : []), value.autocompleteP95LimitMs, value.detailsP95LimitMs, value.plannerP95LimitMs, value.totalP95LimitMs];
-  if (typeof value.reference !== "string" || !value.reference.trim() || value.reference.length > 200
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(value.reference)
-    || !Array.isArray(value.selectorP95LimitsMs) || value.selectorP95LimitsMs.length !== 4
-    || numbers.some((entry) => !Number.isFinite(entry) || entry < 0)) {
-    throw new Error("Approved performance calibration file is invalid.");
-  }
-  return value;
+  return validatePerformanceCalibration(JSON.parse(fs.readFileSync(calibrationPath, "utf8"))) as CalibrationInput;
 }
 
 function applyCalibration(sections: ReturnType<typeof buildJurisdictionPerformanceSections>, calibration: CalibrationInput | null) {
@@ -218,9 +210,9 @@ function applyCalibration(sections: ReturnType<typeof buildJurisdictionPerforman
   const autocompleteOutcome = sections.geographicPlacePicker.autocomplete.p95Ms <= calibration.autocompleteP95LimitMs ? "pass" : "fail";
   const detailsOutcome = sections.geographicPlacePicker.details.p95Ms <= calibration.detailsP95LimitMs ? "pass" : "fail";
   Object.assign(sections.geographicPlacePicker.calibration, { status: "approved", reference: calibration.reference, autocompleteP95LimitMs: calibration.autocompleteP95LimitMs, detailsP95LimitMs: calibration.detailsP95LimitMs, autocompleteOutcome, detailsOutcome, outcome: autocompleteOutcome === "pass" && detailsOutcome === "pass" ? "pass" : "fail" });
-  const plannerOutcome = sections.retrievalPlan.planner.p95Ms <= calibration.plannerP95LimitMs ? "pass" : "fail";
+  const fileSearchOutcome = sections.retrievalPlan.fileSearch.p95Ms <= calibration.fileSearchP95LimitMs ? "pass" : "fail";
   const totalOutcome = sections.retrievalPlan.total.p95Ms <= calibration.totalP95LimitMs ? "pass" : "fail";
-  Object.assign(sections.retrievalPlan.calibration, { status: "approved", reference: calibration.reference, plannerP95LimitMs: calibration.plannerP95LimitMs, totalP95LimitMs: calibration.totalP95LimitMs, plannerOutcome, totalOutcome, outcome: plannerOutcome === "pass" && totalOutcome === "pass" ? "pass" : "fail" });
+  Object.assign(sections.retrievalPlan.calibration, { status: "approved", reference: calibration.reference, fileSearchP95LimitMs: calibration.fileSearchP95LimitMs, totalP95LimitMs: calibration.totalP95LimitMs, fileSearchOutcome, totalOutcome, outcome: fileSearchOutcome === "pass" && totalOutcome === "pass" ? "pass" : "fail" });
   return sections;
 }
 

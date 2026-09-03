@@ -50,6 +50,17 @@ function validateEvaluation(value: string): string {
   return value;
 }
 
+function storedSha256Hex(value: string): string {
+  if (/^[a-f0-9]{64}$/i.test(value)) return value.toLowerCase();
+  try {
+    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    if (bytes.length !== 32) throw new Error("invalid digest length");
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    throw new ConvexError("DOCUMENT_STORAGE_CHECKSUM_INVALID");
+  }
+}
+
 function fingerprint(payload: Record<string, unknown>): string {
   return JSON.stringify(Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b))));
 }
@@ -142,8 +153,16 @@ export const submitForReview = mutation({
     if (operation.replay) return operation.result;
     const version = await ctx.db.get(args.versionId);
     if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
-    if (version.status !== "draft" || !version.groundxStagingDocumentId) {
+    if (version.status !== "draft") {
       throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
+    }
+    const resource = await ctx.db.get(version.resourceId);
+    if (!resource || resource.status !== "active") throw new ConvexError("RESOURCE_NOT_ACTIVE");
+    const original = await ctx.db.system.get("_storage", version.originalStorageId);
+    if (!original) throw new ConvexError("DOCUMENT_STORAGE_NOT_FOUND");
+    if (original.size !== version.byteSize) throw new ConvexError("DOCUMENT_SIZE_MISMATCH");
+    if (storedSha256Hex(original.sha256) !== version.sha256) {
+      throw new ConvexError("DOCUMENT_CHECKSUM_MISMATCH");
     }
     const now = Date.now();
     await ctx.db.patch(version._id, { status: "ready_for_review", submittedBy: actor.userId, submittedAt: now, updatedAt: now });
@@ -169,7 +188,9 @@ async function decide(
   const version = await ctx.db.get(args.versionId);
   if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
   if (version.status !== "ready_for_review") throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
-  if (version.submittedBy === actor.userId) throw new ConvexError("Document must be approved by a different reviewer");
+  if (version.submittedBy === actor.userId && !actor.roles.includes("super_admin")) {
+    throw new ConvexError("Document must be approved by a different reviewer");
+  }
   if (decision === "approve" && Object.values(args.checklistAnswers).some((answer) => !answer)) {
     throw new ConvexError("DOCUMENT_CHECKLIST_INCOMPLETE");
   }
@@ -224,26 +245,6 @@ const queueRowValidator = v.object({
   effectiveDate: v.optional(v.string()),
   repealDate: v.optional(v.string()),
   status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("published"), v.literal("superseded")),
-  stagingDocumentId: v.optional(v.string()),
-  stagingProcessId: v.optional(v.string()),
-  xrayEvidence: v.union(
-    v.object({ status: v.literal("unavailable") }),
-    v.object({
-      status: v.union(
-        v.literal("queued"), v.literal("training"), v.literal("processing"), v.literal("complete"),
-        v.literal("error"), v.literal("cancelled"),
-      ),
-      documentId: v.string(),
-      processId: v.string(),
-      fileType: v.optional(v.union(
-        v.literal("txt"), v.literal("docx"), v.literal("pptx"),
-        v.literal("xlsx"), v.literal("pdf"), v.literal("png"),
-        v.literal("jpg"), v.literal("csv"), v.literal("tsv"),
-        v.literal("json"),
-      )),
-      fileSize: v.optional(v.number()),
-    }),
-  ),
   submittedBy: v.string(),
   submittedAt: v.optional(v.number()),
   previousVersion: v.optional(v.object({
@@ -290,17 +291,6 @@ export const listReviewQueue = query({
         sourceHost: new URL(version.sourceUrl).host,
         effectiveDate: version.effectiveDate,
         status,
-        stagingDocumentId: version.groundxStagingDocumentId,
-        stagingProcessId: version.groundxStagingProcessId,
-        xrayEvidence: version.xrayEvidence
-          ? {
-              status: version.xrayEvidence.status,
-              documentId: version.xrayEvidence.documentId,
-              processId: version.xrayEvidence.processId,
-              ...(version.xrayEvidence.fileType === undefined ? {} : { fileType: version.xrayEvidence.fileType }),
-              ...(version.xrayEvidence.fileSize === undefined ? {} : { fileSize: version.xrayEvidence.fileSize }),
-            }
-          : { status: "unavailable" as const },
         submittedBy: version.submittedBy,
         submittedAt: version.submittedAt,
         ...(previous ? { previousVersion: { versionNumber: previous.versionNumber, filename: previous.filename, sha256: previous.sha256, effectiveDate: previous.effectiveDate } } : {}),

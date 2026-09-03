@@ -22,8 +22,17 @@ export default defineSchema({
       v.literal("archived"),
     ),
     isDefault: v.boolean(),
+    // Inert compatibility fields for GroundX-era rows. New code never writes
+    // or reads these values; keep them optional until legacy data is purged.
     stagingBucketId: v.optional(v.string()),
     productionBucketId: v.optional(v.string()),
+    geminiFileSearchStoreName: v.optional(v.string()),
+    geminiEmbeddingModel: v.optional(v.string()),
+    // Server-only provider serialization. Client projections deliberately omit it.
+    geminiExecutionPermit: v.optional(v.object({
+      jobId: v.id("integrationJobs"),
+      leaseExpiresAt: v.number(),
+    })),
     providerSyncState: v.union(
       v.literal("pending"),
       v.literal("synced"),
@@ -57,6 +66,7 @@ export default defineSchema({
     .index("by_isDefault", ["isDefault"])
     .index("by_isDefault_and_status", ["isDefault", "status"])
     .index("by_organizationId", ["organizationId"])
+    .index("by_gemini_store_name", ["geminiFileSearchStoreName"])
     .searchIndex("search_name", {
       searchField: "name",
       filterFields: ["kind", "status", "visibility"],
@@ -174,7 +184,11 @@ export default defineSchema({
       "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
-    .index("by_activeVersionId", ["activeVersionId"]),
+    .index("by_activeVersionId", ["activeVersionId"])
+    .index("by_jurisdictionId_and_activeVersionId", [
+      "jurisdictionId",
+      "activeVersionId",
+    ]),
   documentVersions: defineTable({
     resourceId: v.id("legalResources"),
     versionNumber: v.number(),
@@ -200,6 +214,8 @@ export default defineSchema({
       v.literal("unpublished"),
       v.literal("archived"),
     ),
+    // Inert compatibility fields for immutable versions created before the
+    // Gemini cutover. GroundX execution paths remain removed.
     groundxStagingDocumentId: v.optional(v.string()),
     groundxStagingProcessId: v.optional(v.string()),
     xrayEvidence: v.optional(v.object({
@@ -224,6 +240,8 @@ export default defineSchema({
     })),
     groundxProductionDocumentId: v.optional(v.string()),
     groundxProductionProcessId: v.optional(v.string()),
+    geminiDocumentName: v.optional(v.string()),
+    geminiIndexedAt: v.optional(v.number()),
     submittedBy: v.string(),
     reviewedBy: v.optional(v.string()),
     submittedAt: v.optional(v.number()),
@@ -270,7 +288,9 @@ export default defineSchema({
     expiresAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_resourceId", ["resourceId"]),
+  })
+    .index("by_resourceId", ["resourceId"])
+    .index("by_jobId", ["jobId"]),
   resourceVersionCounters: defineTable({
     resourceId: v.id("legalResources"),
     nextVersionNumber: v.number(),
@@ -413,6 +433,10 @@ export default defineSchema({
       v.literal("copy_documents"),
       v.literal("delete_documents"),
       v.literal("poll_process"),
+      v.literal("gemini_create_store"),
+      v.literal("gemini_index_document"),
+      v.literal("gemini_delete_document"),
+      v.literal("gemini_delete_store"),
     ),
     targetType: v.string(),
     targetId: v.string(),
@@ -431,14 +455,32 @@ export default defineSchema({
     idempotencyKey: v.string(),
     requestFingerprint: v.string(),
     correlationId: v.string(),
-    callbackTokenHash: v.string(),
+    // Optional only for GroundX-era jobs retained as operational history.
+    callbackTokenHash: v.optional(v.string()),
     processId: v.optional(v.string()),
+    providerOperationName: v.optional(v.string()),
+    providerPollCount: v.optional(v.number()),
+    knownStoreResult: v.optional(v.union(
+      v.object({
+        kind: v.literal("store_created"),
+        storeName: v.string(),
+        embeddingModel: v.string(),
+      }),
+      v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
+    )),
+    recoveryKind: v.optional(v.union(
+      v.literal("poll_operation"),
+      v.literal("delete_document"),
+      v.literal("delete_store"),
+      v.literal("apply_store_result"),
+    )),
     leaseToken: v.optional(v.string()),
     leaseExpiresAt: v.optional(v.number()),
     status: v.union(
       v.literal("queued"),
       v.literal("running"),
       v.literal("waiting_callback"),
+      v.literal("waiting_provider"),
       v.literal("succeeded"),
       v.literal("failed"),
       v.literal("cancelled"),
@@ -465,15 +507,16 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_actorId_and_idempotencyKey", ["actorId", "idempotencyKey"])
-    .index("by_callbackTokenHash", ["callbackTokenHash"])
-    .index("by_processId", ["processId"])
+    .index("by_providerOperationName", ["providerOperationName"])
     .index("by_status_and_nextAttemptAt", ["status", "nextAttemptAt"])
+    .index("by_status_and_type_and_nextAttemptAt", ["status", "type", "nextAttemptAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
-    .index("by_targetType_and_targetId", ["targetType", "targetId"]),
+    .index("by_targetType_and_targetId", ["targetType", "targetId"])
+    .index("by_targetType_and_targetId_and_type_and_status", ["targetType", "targetId", "type", "status"]),
   e2eFixtureOwnership: defineTable({
     tag: v.string(),
     kind: v.union(
@@ -668,7 +711,7 @@ export default defineSchema({
       v.object({
         jurisdictionId: v.id("jurisdictions"),
         changed: v.boolean(),
-        preservedProductionBucket: v.literal("11833"),
+        preservedProductionBucket: v.optional(v.literal("11833")),
       }),
     ),
     legacyObservationGeneration: v.number(),
@@ -746,6 +789,11 @@ export default defineSchema({
     .index("by_expiresAt", ["expiresAt"])
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
+  researchManifestNonces: defineTable({
+    nonceHash: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("by_nonceHash", ["nonceHash"]),
   telemetryCorrelations: defineTable({
     tokenHash: v.string(),
     ownerBinding: v.string(),
@@ -774,6 +822,16 @@ export default defineSchema({
     scopeSize: v.optional(v.number()),
     retrievalPlanSize: v.optional(v.number()),
     providerCallCount: v.optional(v.number()),
+    fileSearchCallCount: v.optional(v.number()),
+    fileSearchStoreCount: v.optional(v.number()),
+    fileSearchLatencyMs: v.optional(v.number()),
+    evidenceBytes: v.optional(v.number()),
+    citationCount: v.optional(v.number()),
+    jurisdictionCoverage: v.optional(v.array(v.object({
+      ordinal: v.number(),
+      relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
+      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+    }))),
     plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),
@@ -817,6 +875,16 @@ export default defineSchema({
     scopeSize: v.optional(v.number()),
     retrievalPlanSize: v.optional(v.number()),
     providerCallCount: v.optional(v.number()),
+    fileSearchCallCount: v.optional(v.number()),
+    fileSearchStoreCount: v.optional(v.number()),
+    fileSearchLatencyMs: v.optional(v.number()),
+    evidenceBytes: v.optional(v.number()),
+    citationCount: v.optional(v.number()),
+    jurisdictionCoverage: v.optional(v.array(v.object({
+      ordinal: v.number(),
+      relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
+      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+    }))),
     plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
     plannerLatencyMs: v.optional(v.number()),
     contextDigest: v.optional(v.string()),

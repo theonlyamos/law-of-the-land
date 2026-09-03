@@ -1,208 +1,118 @@
-export const E2E_JURISDICTION_SCENARIOS = [
-  "complete",
-  "supplementary_failure",
-  "selected_failure",
-] as const;
-
+export const E2E_JURISDICTION_SCENARIOS = ["complete", "supplementary_failure", "selected_failure"] as const;
 export type E2EProviderScenario = (typeof E2E_JURISDICTION_SCENARIOS)[number];
-
 export const E2E_JURISDICTION_QUESTIONS = {
   complete: "What permits are required to operate a small business in Accra?",
   supplementary_failure: "What permits and national rules apply to a small business in Accra?",
   selected_failure: "What local permits apply to a small business in Accra?",
 } as const satisfies Record<E2EProviderScenario, string>;
-
 export const E2E_FIXTURE_TOWN_ALIAS = "Accra";
 
-export type RetrievalObservationV1 = {
-  version: 1;
-  planner: { status: "planned" | "fallback"; latencyMs: number };
+export type RetrievalObservationV2 = {
+  version: 2;
   authorizedScopeSize: number;
   planSize: number;
-  peakConcurrency: number;
+  fileSearchCallCount: 0 | 1;
+  fileSearchStoreCount: number;
+  fileSearchLatencyMs: number;
   totalLatencyMs: number;
-  libraries: Array<{
+  evidenceBytes: number;
+  citationCount: number;
+  partialCoverage: boolean;
+  jurisdictions: Array<{
     ordinal: 0 | 1 | 2 | 3;
     relation: "selected" | "geographic_ancestor" | "organizational_geography";
-    status: "fulfilled" | "rejected" | "not_started" | "unconfigured";
-    latencyMs: number;
+    coverage: "evidence" | "no_evidence" | "unavailable";
   }>;
-  failureCount: number;
-  coverageState: "complete" | "supplementary_incomplete" | "selected_unavailable";
-  providerCallCount: number;
   unexpectedRealProviderCallCount: 0;
 };
 
 export const MAX_RETRIEVAL_OBSERVATION_ENCODED_BYTES = 4_096;
 export const MAX_RETRIEVAL_OBSERVATION_LATENCY_MS = 120_000;
+// Mirrors the 120,000 UTF-16-code-unit governed-context ceiling at the maximum
+// three UTF-8 bytes per retained code unit.
+export const MAX_RETRIEVAL_OBSERVATION_EVIDENCE_BYTES = 360_000;
+const TOP_LEVEL_KEYS = ["authorizedScopeSize", "citationCount", "evidenceBytes", "fileSearchCallCount", "fileSearchLatencyMs", "fileSearchStoreCount", "jurisdictions", "partialCoverage", "planSize", "totalLatencyMs", "unexpectedRealProviderCallCount", "version"] as const;
+const JURISDICTION_KEYS = ["coverage", "ordinal", "relation"] as const;
+const RELATIONS = ["selected", "geographic_ancestor", "organizational_geography"] as const;
+const COVERAGE = ["evidence", "no_evidence", "unavailable"] as const;
 
-const TOP_LEVEL_KEYS = [
-  "authorizedScopeSize",
-  "coverageState",
-  "failureCount",
-  "libraries",
-  "peakConcurrency",
-  "planSize",
-  "planner",
-  "providerCallCount",
-  "totalLatencyMs",
-  "unexpectedRealProviderCallCount",
-  "version",
-] as const;
-const PLANNER_KEYS = ["latencyMs", "status"] as const;
-const LIBRARY_KEYS = ["latencyMs", "ordinal", "relation", "status"] as const;
-const PLANNER_STATUSES = ["planned", "fallback"] as const;
-const LIBRARY_RELATIONS = ["selected", "geographic_ancestor", "organizational_geography"] as const;
-const LIBRARY_STATUSES = ["fulfilled", "rejected", "not_started", "unconfigured"] as const;
-const COVERAGE_STATES = ["complete", "supplementary_incomplete", "selected_unavailable"] as const;
-const MAX_AUTHORIZED_SCOPE_SIZE = 9;
-const MAX_LIBRARY_COUNT = 4;
-const MAX_PEAK_CONCURRENCY = 3;
-
-function invalid(): never {
-  throw new Error("E2E_RETRIEVAL_OBSERVATION_INVALID");
-}
-
+function invalid(): never { throw new Error("E2E_RETRIEVAL_OBSERVATION_INVALID"); }
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]) {
   const actual = Object.keys(value).sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
 }
-
-function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
-  return typeof value === "string" && allowed.includes(value as T);
-}
-
-function isBoundedLatency(value: unknown): value is number {
-  return typeof value === "number"
-    && Number.isFinite(value)
-    && value >= 0
-    && value <= MAX_RETRIEVAL_OBSERVATION_LATENCY_MS;
-}
-
-function isBoundedInteger(value: unknown, maximum: number): value is number {
+function boundedInteger(value: unknown, maximum: number): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
 }
+function boundedLatency(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_RETRIEVAL_OBSERVATION_LATENCY_MS;
+}
+function oneOf<T extends string>(value: unknown, values: readonly T[]): value is T {
+  return typeof value === "string" && values.includes(value as T);
+}
 
-function validateObservation(value: unknown): RetrievalObservationV1 {
-  if (!isRecord(value) || !hasExactKeys(value, TOP_LEVEL_KEYS)) invalid();
-  if (value.version !== 1) invalid();
-
-  const planner = value.planner;
-  if (!isRecord(planner) || !hasExactKeys(planner, PLANNER_KEYS)) invalid();
-  if (!isOneOf(planner.status, PLANNER_STATUSES) || !isBoundedLatency(planner.latencyMs)) invalid();
-
-  if (!isBoundedInteger(value.authorizedScopeSize, MAX_AUTHORIZED_SCOPE_SIZE)) invalid();
-  if (!isBoundedInteger(value.planSize, MAX_LIBRARY_COUNT)) invalid();
-  if (!isBoundedInteger(value.peakConcurrency, MAX_PEAK_CONCURRENCY)) invalid();
-  if (!isBoundedLatency(value.totalLatencyMs)) invalid();
-  const totalLatencyMs = value.totalLatencyMs;
-  if (!Array.isArray(value.libraries) || value.libraries.length > MAX_LIBRARY_COUNT) invalid();
-
-  const libraries = value.libraries.map((entry, index) => {
-    if (!isRecord(entry) || !hasExactKeys(entry, LIBRARY_KEYS)) invalid();
-    if (entry.ordinal !== index || !isBoundedInteger(entry.ordinal, MAX_LIBRARY_COUNT - 1)) invalid();
-    if (!isOneOf(entry.relation, LIBRARY_RELATIONS)) invalid();
-    if (!isOneOf(entry.status, LIBRARY_STATUSES)) invalid();
-    if (!isBoundedLatency(entry.latencyMs)) invalid();
-    return {
-      ordinal: entry.ordinal as 0 | 1 | 2 | 3,
-      relation: entry.relation,
-      status: entry.status,
-      latencyMs: entry.latencyMs,
-    };
+function validateObservation(value: unknown): RetrievalObservationV2 {
+  if (!isRecord(value) || !hasExactKeys(value, TOP_LEVEL_KEYS) || value.version !== 2
+    || !boundedInteger(value.authorizedScopeSize, 9) || !boundedInteger(value.planSize, 4)
+    || !boundedInteger(value.fileSearchCallCount, 1) || !boundedInteger(value.fileSearchStoreCount, 4)
+    || !boundedLatency(value.fileSearchLatencyMs) || !boundedLatency(value.totalLatencyMs)
+    || !boundedInteger(value.evidenceBytes, MAX_RETRIEVAL_OBSERVATION_EVIDENCE_BYTES) || !boundedInteger(value.citationCount, 64)
+    || typeof value.partialCoverage !== "boolean" || value.unexpectedRealProviderCallCount !== 0
+    || !Array.isArray(value.jurisdictions) || value.jurisdictions.length > 4) invalid();
+  const jurisdictions = value.jurisdictions.map((entry, index) => {
+    if (!isRecord(entry) || !hasExactKeys(entry, JURISDICTION_KEYS) || entry.ordinal !== index
+      || !boundedInteger(entry.ordinal, 3) || !oneOf(entry.relation, RELATIONS)
+      || !oneOf(entry.coverage, COVERAGE)) invalid();
+    return { ordinal: entry.ordinal as 0 | 1 | 2 | 3, relation: entry.relation, coverage: entry.coverage };
   });
-
-  if (value.planSize !== libraries.length) invalid();
-  if ((value.authorizedScopeSize as number) < libraries.length) invalid();
-  if (!isBoundedInteger(value.failureCount, MAX_LIBRARY_COUNT)) invalid();
-  if (!isOneOf(value.coverageState, COVERAGE_STATES)) invalid();
-  if (!isBoundedInteger(value.providerCallCount, MAX_LIBRARY_COUNT)) invalid();
-  if ((value.failureCount as number) > (value.providerCallCount as number)) invalid();
-  if ((value.providerCallCount as number) > libraries.length) invalid();
-  if ((value.peakConcurrency as number) > (value.providerCallCount as number)) invalid();
-  if (value.unexpectedRealProviderCallCount !== 0) invalid();
-
-  const calledLibraries = libraries.filter(({ status }) => status === "fulfilled" || status === "rejected");
-  const rejectedLibraries = libraries.filter(({ status }) => status === "rejected");
-  if ((value.providerCallCount as number) !== calledLibraries.length) invalid();
-  if ((value.failureCount as number) !== rejectedLibraries.length) invalid();
-  if (((value.providerCallCount as number) === 0) !== ((value.peakConcurrency as number) === 0)) invalid();
-  if (libraries.some(({ status, latencyMs }) => (status === "not_started" || status === "unconfigured") && latencyMs !== 0)) invalid();
-  if (libraries.length > 0 && libraries[0].relation !== "selected") invalid();
-  if (libraries.slice(1).some(({ relation }) => relation === "selected")) invalid();
-  if (totalLatencyMs < planner.latencyMs
-    || libraries.some(({ latencyMs }) => totalLatencyMs < latencyMs)) invalid();
-
-  const selectedStatus = libraries[0]?.status;
-  if (value.coverageState === "complete"
-    && libraries.some(({ status }) => status !== "fulfilled")) invalid();
-  if (value.coverageState === "supplementary_incomplete"
-    && (selectedStatus !== "fulfilled"
-      || !libraries.slice(1).some(({ status }) => status !== "fulfilled"))) invalid();
-  if (value.coverageState === "selected_unavailable"
-    && (selectedStatus === undefined || selectedStatus === "fulfilled")) invalid();
-
+  if (value.planSize !== jurisdictions.length || (value.authorizedScopeSize as number) < jurisdictions.length
+    || ((value.fileSearchCallCount as number) === 0) !== ((value.fileSearchStoreCount as number) === 0)
+    || ((value.fileSearchCallCount as number) === 0) !== ((value.fileSearchLatencyMs as number) === 0)
+    || (value.fileSearchStoreCount as number) > jurisdictions.length
+    || (value.fileSearchStoreCount as number) < jurisdictions.filter(({ coverage }) => coverage === "evidence").length
+    || value.totalLatencyMs < (value.fileSearchLatencyMs as number)
+    || (jurisdictions.length > 0 && jurisdictions[0].relation !== "selected")
+    || jurisdictions.slice(1).some(({ relation }) => relation === "selected")
+    || (jurisdictions.some(({ coverage }) => coverage === "evidence") !== ((value.evidenceBytes as number) > 0))
+    || (jurisdictions[0]?.coverage === "unavailable" && jurisdictions.some(({ coverage }) => coverage === "evidence"))
+    || (value.citationCount as number) > jurisdictions.filter(({ coverage }) => coverage === "evidence").length * 16
+    || value.partialCoverage !== jurisdictions.slice(1).some(({ coverage }) => coverage !== "evidence")) invalid();
   return {
-    version: 1,
-    planner: { status: planner.status, latencyMs: planner.latencyMs },
-    authorizedScopeSize: value.authorizedScopeSize as number,
-    planSize: value.planSize as number,
-    peakConcurrency: value.peakConcurrency as number,
-    totalLatencyMs,
-    libraries,
-    failureCount: value.failureCount as number,
-    coverageState: value.coverageState,
-    providerCallCount: value.providerCallCount as number,
-    unexpectedRealProviderCallCount: 0,
+    version: 2, authorizedScopeSize: value.authorizedScopeSize as number, planSize: value.planSize as number,
+    fileSearchCallCount: value.fileSearchCallCount as 0 | 1, fileSearchStoreCount: value.fileSearchStoreCount as number,
+    fileSearchLatencyMs: value.fileSearchLatencyMs as number, totalLatencyMs: value.totalLatencyMs as number,
+    evidenceBytes: value.evidenceBytes as number, citationCount: value.citationCount as number,
+    partialCoverage: value.partialCoverage, jurisdictions, unexpectedRealProviderCallCount: 0,
   };
 }
 
 function bytesToBase64url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
-
 function base64urlToBytes(encoded: string): Uint8Array {
-  if (!encoded
-    || encoded.length > MAX_RETRIEVAL_OBSERVATION_ENCODED_BYTES
-    || !/^[A-Za-z0-9_-]+$/.test(encoded)) invalid();
-  if (encoded.length % 4 === 1) invalid();
-  const base64 = encoded.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  if (!encoded || encoded.length > MAX_RETRIEVAL_OBSERVATION_ENCODED_BYTES || !/^[A-Za-z0-9_-]+$/u.test(encoded) || encoded.length % 4 === 1) invalid();
+  const padded = encoded.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
   let binary: string;
-  try {
-    binary = atob(padded);
-  } catch {
-    invalid();
-  }
+  try { binary = atob(padded); } catch { invalid(); }
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   if (bytesToBase64url(bytes) !== encoded) invalid();
   return bytes;
 }
-
-export function decodeRetrievalObservationV1(encoded: string): RetrievalObservationV1 {
-  if (typeof encoded !== "string") invalid();
+export function decodeRetrievalObservationV2(encoded: string): RetrievalObservationV2 {
   let value: unknown;
-  try {
-    const json = new TextDecoder("utf-8", { fatal: true }).decode(base64urlToBytes(encoded));
-    value = JSON.parse(json);
-  } catch {
-    invalid();
-  }
+  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(base64urlToBytes(encoded))); } catch { invalid(); }
   return validateObservation(value);
 }
-
-export function encodeRetrievalObservationV1Value(value: RetrievalObservationV1): string {
-  const validated = validateObservation(value);
-  const bytes = new TextEncoder().encode(JSON.stringify(validated));
-  const encoded = bytesToBase64url(bytes);
+export function encodeRetrievalObservationV2Value(value: RetrievalObservationV2): string {
+  const encoded = bytesToBase64url(new TextEncoder().encode(JSON.stringify(validateObservation(value))));
   if (encoded.length > MAX_RETRIEVAL_OBSERVATION_ENCODED_BYTES) invalid();
   return encoded;
 }

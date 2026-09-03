@@ -12,7 +12,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 
 ## Features
 
-- **RAG-powered Search**: GroundX retrieves relevant passages from the legal document library; Gemini generates plain-language answers grounded in them.
+- **RAG-powered Search**: Gemini File Search retrieves relevant passages from the legal document library; Gemini generates plain-language answers grounded in them.
 - **Accounts & Saved Chats**: Better Auth (email/password, GitHub, Google) with chat history stored in Convex and synced across devices.
 - **Session Management**: Review and revoke active sessions per device.
 - **User-friendly Interface**: Simple, Stripe/Linear-inspired design for easy navigation and querying.
@@ -21,7 +21,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
 
 - **Frontend**: Next.js 16 (App Router), React 19, TypeScript
 - **Styling**: Tailwind CSS 4, Radix UI
-- **AI Integration**: Google Gemini (answers), GroundX (RAG document search)
+- **AI Integration**: Google Gemini (File Search retrieval, indexing, and answer generation)
 - **Database & Auth**: Convex + Better Auth
 - **Runtime**: Bun
 - **Deployment**: Vercel (frontend) + Convex (backend) — https://lawoftheland.vercel.app/
@@ -36,7 +36,7 @@ Law of the Land is a legal information app that leverages Retrieval-Augmented Ge
    ```
 2. Install dependencies: `bun install`
 3. Create a Convex project: `bunx convex dev` (fills in `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL`)
-4. Copy `.env.example` to `.env.local` and fill in the remaining values (GroundX, Google AI, Google Places when geographic jurisdiction verification is used, Better Auth secret, optional OAuth credentials)
+4. Copy `.env.example` to `.env.local` and fill in the remaining values (Google AI, Google Places when geographic jurisdiction verification is used, Better Auth secret, optional OAuth credentials)
 5. Run the Convex dev server and the app together: `bun run dev:all` (or `bun run dev` if Convex is already running)
 
 The app will be available at `http://localhost:3000`. Never commit `.env.local` to version control.

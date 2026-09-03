@@ -67,7 +67,7 @@ async function validateLegacyGeographicJurisdiction(
       !profile || profile.level !== "country" || profile.countryCode !== country ||
       profile.parentJurisdictionId !== undefined) return null;
   } else if (country !== "GH" || row.code !== "GH" || row.status !== "enabled" ||
-    row.isDefault !== true || row.productionBucketId !== "11833" ||
+    row.isDefault !== true ||
     row.providerSyncState !== "synced" ||
     (row.legacyCountryCode !== undefined && row.legacyCountryCode !== "GH") ||
     (row.visibility !== undefined && row.visibility !== "public")) {

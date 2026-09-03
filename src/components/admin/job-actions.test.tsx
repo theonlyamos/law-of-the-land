@@ -5,6 +5,12 @@ vi.mock("convex/react", () => ({ useMutation: () => mocks.mutate }));
 import { JobActions } from "./job-actions";
 afterEach(() => { cleanup(); mocks.mutate.mockReset(); });
 describe("authoritative job controls", () => {
+  it("keeps a waiting Gemini poll read-only", () => {
+    render(<JobActions jobId={"job-waiting" as never} status="waiting_provider" canRetry canCancel />);
+    expect(screen.getByText("No safe transition")).toBeVisible();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("shows only legal state controls and sends a reason with an opaque idempotency key", async () => {
     mocks.mutate.mockResolvedValue({ status: "queued" });
     render(<JobActions jobId={"job-1" as never} status="failed" canRetry canCancel />);

@@ -250,7 +250,7 @@ export async function readRolloutStateRow(
       JURISDICTION_MIGRATION_IDEMPOTENCY_KEY.test(row.ghanaSeedLastIdempotencyKey!) &&
       /^[a-f0-9]{64}$/.test(row.ghanaSeedLastRequestFingerprint!) &&
       row.ghanaSeedLastResult!.jurisdictionId === row.ghanaJurisdictionId &&
-      row.ghanaSeedLastResult!.preservedProductionBucket === "11833");
+      typeof row.ghanaSeedLastResult!.changed === "boolean");
   if (!Number.isSafeInteger(row.legacyObservationGeneration) ||
       row.legacyObservationGeneration < 0 ||
       !Number.isSafeInteger(row.legacyAcceptedSinceStart) ||
@@ -334,8 +334,7 @@ async function readGhanaReadiness(
       !rollout.ghanaSeedLastIdempotencyKey ||
       !/^[a-f0-9]{64}$/.test(rollout.ghanaSeedLastRequestFingerprint ?? "") ||
       !rollout.ghanaSeedLastResult ||
-      rollout.ghanaSeedLastResult.jurisdictionId !== rollout.ghanaJurisdictionId ||
-      rollout.ghanaSeedLastResult.preservedProductionBucket !== "11833") {
+      rollout.ghanaSeedLastResult.jurisdictionId !== rollout.ghanaJurisdictionId) {
     reasons.push("GHANA_SEED_STATE_MISSING");
   }
   if (!ghana || !rollout || ghana._id !== rollout.ghanaJurisdictionId ||
@@ -343,7 +342,6 @@ async function readGhanaReadiness(
       ghana.kind !== "geographic" || ghana.visibility !== "public" ||
       ghana.organizationId !== undefined ||
       ghana.legacyCountryCode !== "GH" ||
-      ghana.productionBucketId !== "11833" ||
       ghana.providerSyncState !== "synced") {
     reasons.push("GHANA_JURISDICTION_INVALID");
   }

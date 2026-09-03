@@ -8,7 +8,7 @@ import {
   type QueryCtx,
 } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
-import { normalizePositiveSafeIntegerBucketId } from "../lib/jurisdictionEligibility";
+import { isGeminiFileSearchStoreName } from "../lib/geminiFileSearchNames";
 import {
   MAX_GEOGRAPHIC_DEPTH,
   allowedParentLevelsByLevel,
@@ -53,6 +53,13 @@ const providerSyncStateValidator = v.union(
   v.literal("drifted"),
   v.literal("failed"),
 );
+const geminiSetupStateValidator = v.union(
+  v.literal("not_set_up"),
+  v.literal("setting_up"),
+  v.literal("ready"),
+  v.literal("needs_review"),
+  v.literal("setup_failed"),
+);
 const safeParentValidator = v.object({
   id: v.id("jurisdictions"),
   name: v.string(),
@@ -73,8 +80,9 @@ const adminJurisdictionValidator = v.object({
   visibility: jurisdictionVisibilityValidator,
   provider: v.object({
     syncState: providerSyncStateValidator,
-    stagingConfigured: v.boolean(),
-    productionConfigured: v.boolean(),
+    setupState: geminiSetupStateValidator,
+    storeConfigured: v.boolean(),
+    embeddingModel: v.optional(v.string()),
   }),
   migrationState: v.union(v.literal("typed"), v.literal("legacy")),
   geographic: v.union(v.null(), v.object({
@@ -105,18 +113,6 @@ export const assertCanManageJurisdictions = query({
 function requiredText(value: string, code: string): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > MAX_TEXT_LENGTH) throw new ConvexError(code);
-  return normalized;
-}
-
-function optionalBucket(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredText(value, "INVALID_BUCKET_ID");
-}
-
-function optionalProductionBucket(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const normalized = normalizePositiveSafeIntegerBucketId(value);
-  if (normalized === null) throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
   return normalized;
 }
 
@@ -386,6 +382,28 @@ async function auditJurisdiction(
   });
 }
 
+/** The sole client-return projection: provider identities remain server-only. */
+function projectClientJurisdiction(row: Doc<"jurisdictions">) {
+  return {
+    _id: row._id,
+    _creationTime: row._creationTime,
+    ...(row.code === undefined ? {} : { code: row.code }),
+    name: row.name,
+    slug: row.slug,
+    status: row.status,
+    isDefault: row.isDefault,
+    providerSyncState: row.providerSyncState,
+    ...(row.kind === undefined ? {} : { kind: row.kind }),
+    ...(row.visibility === undefined ? {} : { visibility: row.visibility }),
+    ...(row.organizationId === undefined ? {} : { organizationId: row.organizationId }),
+    ...(row.legacyCountryCode === undefined ? {} : { legacyCountryCode: row.legacyCountryCode }),
+    createdBy: row.createdBy,
+    updatedBy: row.updatedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
 function jurisdictionSnapshot(row: Doc<"jurisdictions"> | Omit<Doc<"jurisdictions">, "_id" | "_creationTime">) {
   return {
     code: row.code ?? null,
@@ -393,8 +411,8 @@ function jurisdictionSnapshot(row: Doc<"jurisdictions"> | Omit<Doc<"jurisdiction
     slug: row.slug,
     status: row.status,
     isDefault: row.isDefault,
-    stagingBucketId: row.stagingBucketId ?? null,
-    productionBucketId: row.productionBucketId ?? null,
+    geminiFileSearchStoreName: row.geminiFileSearchStoreName ?? null,
+    geminiEmbeddingModel: row.geminiEmbeddingModel ?? null,
     providerSyncState: row.providerSyncState,
     kind: row.kind ?? null,
     visibility: row.visibility ?? null,
@@ -534,8 +552,6 @@ export async function createLegacyJurisdictionForActor(
     code: string;
     name: string;
     slug: string;
-    stagingBucketId?: string;
-    productionBucketId?: string;
     isDefault: boolean;
   },
   reason: string,
@@ -555,8 +571,6 @@ export async function createLegacyJurisdictionForActor(
     slug,
     status: "draft" as const,
     isDefault: args.isDefault,
-    stagingBucketId: optionalBucket(args.stagingBucketId),
-    productionBucketId: optionalProductionBucket(args.productionBucketId),
     providerSyncState: "pending" as const,
     createdBy: actor.userId,
     updatedBy: actor.userId,
@@ -580,8 +594,6 @@ export async function updateLegacyJurisdictionForActor(
     id: Id<"jurisdictions">;
     name: string;
     slug: string;
-    stagingBucketId?: string;
-    productionBucketId?: string;
     isDefault: boolean;
   },
   reason: string,
@@ -594,17 +606,10 @@ export async function updateLegacyJurisdictionForActor(
   const slug = normalizeJurisdictionSlug(args.slug);
   await assertUniqueSlug(ctx, slug, row._id);
   if (args.isDefault) await assertDefaultAvailable(ctx, row._id);
-  const productionBucketId = optionalProductionBucket(args.productionBucketId);
-  if (row.status === "enabled" && productionBucketId === undefined) {
-    throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-  }
   const patch = {
     name: requiredText(args.name, "INVALID_JURISDICTION_NAME"),
     slug,
-    stagingBucketId: optionalBucket(args.stagingBucketId),
-    productionBucketId,
     isDefault: args.isDefault,
-    providerSyncState: "pending" as const,
     updatedBy: actor.userId,
     updatedAt: Date.now(),
   };
@@ -619,16 +624,10 @@ export async function updateLegacyJurisdictionForActor(
   return { ...row, ...patch };
 }
 
-const bucketArgs = {
-  stagingBucketId: v.optional(v.string()),
-  productionBucketId: v.optional(v.string()),
-} as const;
-
 const geographicMutationArgs = {
   verifiedPlaceClaim: v.string(),
   level: geographicLevelValidator,
   parentJurisdictionId: v.optional(v.id("jurisdictions")),
-  ...bucketArgs,
   reason: v.string(),
 } as const;
 
@@ -650,6 +649,18 @@ function normalizeCatalogSearch(value: string | undefined): string | undefined {
 
 function invalidAdminJurisdictionProjection(): never {
   throw new ConvexError("ADMIN_JURISDICTION_PROJECTION_INVALID");
+}
+
+function geminiSetupState(row: Doc<"jurisdictions">) {
+  if (row.providerSyncState === "drifted") return "needs_review" as const;
+  if (row.providerSyncState === "failed") return "setup_failed" as const;
+  if (
+    row.providerSyncState === "synced" &&
+    row.geminiFileSearchStoreName !== undefined &&
+    isGeminiFileSearchStoreName(row.geminiFileSearchStoreName)
+  ) return "ready" as const;
+  if (row.geminiEmbeddingModel !== undefined) return "setting_up" as const;
+  return "not_set_up" as const;
 }
 
 function assertTypedGeographicCommon(row: Doc<"jurisdictions">): void {
@@ -945,8 +956,13 @@ export const listAdminJurisdictions = query({
           visibility: projectJurisdictionVisibility(row),
           provider: {
             syncState: row.providerSyncState,
-            stagingConfigured: Boolean(row.stagingBucketId),
-            productionConfigured: Boolean(row.productionBucketId),
+            setupState: geminiSetupState(row),
+            storeConfigured: Boolean(
+              row.geminiFileSearchStoreName && isGeminiFileSearchStoreName(row.geminiFileSearchStoreName),
+            ),
+            ...(row.geminiEmbeddingModel === undefined
+              ? {}
+              : { embeddingModel: row.geminiEmbeddingModel }),
           },
         };
         if (row.kind === undefined) {
@@ -1015,8 +1031,6 @@ export const createGeographicJurisdiction = mutation({
       slug,
       status: "draft",
       isDefault: false,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId: optionalProductionBucket(args.productionBucketId),
       providerSyncState: "pending",
       kind: "geographic",
       visibility: "public",
@@ -1113,16 +1127,10 @@ export const updateGeographicJurisdiction = mutation({
     const patch = {
       name: place.name,
       slug,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId: optionalProductionBucket(args.productionBucketId),
-      providerSyncState: "pending" as const,
       legacyCountryCode: args.level === "country" ? place.countryCode : undefined,
       updatedBy: actor.userId,
       updatedAt: now,
     };
-    if (row.status === "enabled" && !patch.productionBucketId) {
-      throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-    }
     await ctx.db.patch(row._id, patch);
     await ctx.db.patch(profile._id, {
       googlePlaceId: placeId,
@@ -1159,7 +1167,7 @@ export const updateGeographicJurisdiction = mutation({
         place.aliases,
       ),
     });
-    return { ...row, ...patch };
+    return projectClientJurisdiction({ ...row, ...patch });
   },
 });
 
@@ -1167,7 +1175,6 @@ const organizationalMutationArgs = {
   visibility: jurisdictionVisibilityValidator,
   scopeMode: organizationScopeModeValidator,
   geographicJurisdictionIds: v.array(v.id("jurisdictions")),
-  ...bucketArgs,
   reason: v.string(),
 } as const;
 
@@ -1198,8 +1205,6 @@ export const createOrganizationalJurisdiction = mutation({
       slug: organization.slug,
       status: "draft",
       isDefault: false,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId: optionalProductionBucket(args.productionBucketId),
       providerSyncState: "pending",
       kind: "organizational",
       visibility: args.visibility,
@@ -1269,16 +1274,9 @@ export const updateOrganizationalJurisdiction = mutation({
       profile,
       previousProfiles,
     );
-    const productionBucketId = optionalProductionBucket(args.productionBucketId);
-    if (row.status === "enabled" && !productionBucketId) {
-      throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-    }
     const now = Date.now();
     const patch = {
       visibility: args.visibility,
-      stagingBucketId: optionalBucket(args.stagingBucketId),
-      productionBucketId,
-      providerSyncState: "pending" as const,
       updatedBy: actor.userId,
       updatedAt: now,
     };
@@ -1303,7 +1301,7 @@ export const updateOrganizationalJurisdiction = mutation({
         profiles,
       ),
     });
-    return { ...row, ...patch };
+    return projectClientJurisdiction({ ...row, ...patch });
   },
 });
 
@@ -1316,9 +1314,12 @@ export async function enableJurisdictionForActor(
   const row = await ctx.db.get("jurisdictions", id);
   if (!row) throw new ConvexError("JURISDICTION_NOT_FOUND");
   if (row.status !== "draft") throw new ConvexError("INVALID_JURISDICTION_TRANSITION");
-  if (!row.productionBucketId) throw new ConvexError("PRODUCTION_BUCKET_REQUIRED");
-  if (normalizePositiveSafeIntegerBucketId(row.productionBucketId) === null) {
-    throw new ConvexError("INVALID_PRODUCTION_BUCKET_ID");
+  if (
+    row.providerSyncState !== "synced" ||
+    row.geminiFileSearchStoreName === undefined ||
+    !isGeminiFileSearchStoreName(row.geminiFileSearchStoreName)
+  ) {
+    throw new ConvexError("GEMINI_STORE_NOT_READY");
   }
   if (projectJurisdictionKind(row) === "geographic") {
     const profile = await geographicProfile(ctx, row._id);
@@ -1350,7 +1351,7 @@ export const enableJurisdiction = mutation({
   returns: jurisdictionDocumentValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
-    return await enableJurisdictionForActor(ctx, actor, args.id, validateAuditReason(args.reason));
+    return projectClientJurisdiction(await enableJurisdictionForActor(ctx, actor, args.id, validateAuditReason(args.reason)));
   },
 });
 
@@ -1446,6 +1447,6 @@ export const archiveJurisdiction = mutation({
   returns: jurisdictionDocumentValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
-    return await archiveJurisdictionForActor(ctx, actor, args.id, validateAuditReason(args.reason));
+    return projectClientJurisdiction(await archiveJurisdictionForActor(ctx, actor, args.id, validateAuditReason(args.reason)));
   },
 });

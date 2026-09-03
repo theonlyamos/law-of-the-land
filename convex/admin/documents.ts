@@ -1,43 +1,16 @@
 import { ConvexError, v } from "convex/values";
 import type { Doc } from "../_generated/dataModel";
-import { internalQuery, mutation } from "../_generated/server";
-import { persistJob } from "./jobs";
-import { validateAuditReason, writeAudit } from "./audit";
+import { mutation } from "../_generated/server";
+import {
+  GEMINI_DOCUMENT_TYPES,
+  GEMINI_MAX_DOCUMENT_BYTES,
+  type GeminiDocumentExtension,
+} from "../../shared/gemini-file-types";
+import { writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 
 const MAX_FILENAME_LENGTH = 180;
 const MAX_SOURCE_URL_LENGTH = 500;
-
-export const getStagingEvidenceTarget = internalQuery({
-  args: { versionId: v.id("documentVersions") },
-  returns: v.union(v.null(), v.object({ documentId: v.string() })),
-  handler: async (ctx, args) => {
-    const version = await ctx.db.get(args.versionId);
-    return version?.groundxStagingDocumentId
-      ? { documentId: version.groundxStagingDocumentId }
-      : null;
-  },
-});
-
-// GroundX SDK 1.3.x DocumentType, narrowed to exact browser MIME pairings.
-const DOCUMENT_TYPES = {
-  txt: ["text/plain"],
-  docx: [
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ],
-  pptx: [
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  ],
-  xlsx: [
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ],
-  pdf: ["application/pdf"],
-  png: ["image/png"],
-  jpg: ["image/jpeg"],
-  csv: ["text/csv"],
-  tsv: ["text/tab-separated-values"],
-  json: ["application/json"],
-} as const;
 
 function uploadLimit(): number {
   const raw = process.env.ADMIN_MAX_DOCUMENT_BYTES;
@@ -48,12 +21,12 @@ function uploadLimit(): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new ConvexError("DOCUMENT_UPLOAD_NOT_CONFIGURED");
   }
-  return value;
+  return Math.min(value, GEMINI_MAX_DOCUMENT_BYTES);
 }
 
 function validatedFilename(value: string): {
   filename: string;
-  extension: keyof typeof DOCUMENT_TYPES;
+  extension: GeminiDocumentExtension;
 } {
   const filename = value.trim().normalize("NFKC");
   if (
@@ -67,22 +40,22 @@ function validatedFilename(value: string): {
   const extension = filename.slice(separator + 1).toLowerCase();
   if (
     separator < 1 ||
-    !(extension in DOCUMENT_TYPES)
+    !(extension in GEMINI_DOCUMENT_TYPES)
   ) {
     throw new ConvexError("UNSUPPORTED_DOCUMENT_TYPE");
   }
   return {
     filename,
-    extension: extension as keyof typeof DOCUMENT_TYPES,
+    extension: extension as GeminiDocumentExtension,
   };
 }
 
 function validatedMime(
   value: string,
-  extension: keyof typeof DOCUMENT_TYPES,
+  extension: GeminiDocumentExtension,
 ): string {
   const mimeType = value.trim().toLowerCase();
-  const allowed = DOCUMENT_TYPES[extension] as readonly string[];
+  const allowed = GEMINI_DOCUMENT_TYPES[extension] as readonly string[];
   if (!allowed.includes(mimeType)) {
     throw new ConvexError("DOCUMENT_MIME_MISMATCH");
   }
@@ -292,49 +265,5 @@ export const createDocumentVersion = mutation({
       outcome: "success",
     });
     return versionId;
-  },
-});
-
-export const stageDocumentVersion = mutation({
-  args: { versionId: v.id("documentVersions"), reason: v.string(), idempotencyKey: v.string() },
-  returns: v.object({ jobId: v.id("integrationJobs"), duplicate: v.boolean() }),
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "document", "write");
-    validateAuditReason(args.reason);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(args.idempotencyKey)) {
-      throw new ConvexError("INVALID_IDEMPOTENCY_KEY");
-    }
-    const version = await ctx.db.get(args.versionId);
-    if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
-    const resource = await ctx.db.get(version.resourceId);
-    if (!resource || resource.status !== "active") throw new ConvexError("RESOURCE_NOT_ACTIVE");
-    const jurisdiction = await ctx.db.get(resource.jurisdictionId);
-    const stagingBucketId = Number(jurisdiction?.stagingBucketId);
-    if (!jurisdiction || jurisdiction.status !== "enabled" || !Number.isSafeInteger(stagingBucketId) || stagingBucketId < 1) {
-      throw new ConvexError("GROUNDX_STAGING_NOT_CONFIGURED");
-    }
-    const existing = await ctx.db.query("integrationJobs")
-      .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", version._id))
-      .order("desc").take(20);
-    const replay = existing.find((job) => job.actorId === actor.userId && job.idempotencyKey === args.idempotencyKey);
-    if (replay) return { jobId: replay._id, duplicate: true };
-    if (version.status !== "draft" || version.groundxStagingDocumentId) throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
-    const locks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).take(2);
-    if (locks.length > 0) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
-    const sourceUrl = await ctx.storage.getUrl(version.originalStorageId);
-    if (!sourceUrl) throw new ConvexError("DOCUMENT_STORAGE_NOT_FOUND");
-    const extension = version.filename.slice(version.filename.lastIndexOf(".") + 1).toLowerCase();
-    const queued = await persistJob(ctx, {
-      type: "ingest_remote",
-      targetType: "documentVersion",
-      targetId: version._id,
-      payload: { operation: "stage", documents: [{ bucketId: stagingBucketId, sourceUrl, fileName: version.filename, fileType: extension, searchData: { jurisdictionId: resource.jurisdictionId, resourceId: resource._id, versionId: version._id } }] },
-      idempotencyKey: args.idempotencyKey,
-    }, { id: actor.userId, roles: actor.roles });
-    const now = Date.now();
-    await ctx.db.insert("documentLifecycleLocks", { resourceId: resource._id, versionId: version._id, operation: "stage", actorId: actor.userId, idempotencyKey: args.idempotencyKey, jobId: queued.jobId, expiresAt: now + 30 * 60_000, createdAt: now, updatedAt: now });
-    await ctx.db.patch(version._id, { status: "staging_processing", failureSummary: undefined, updatedAt: now });
-    await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: "document.stage.queued", targetType: "documentVersion", targetId: version._id, reason: args.reason, correlationId: correlationId(), outcome: "success" });
-    return { jobId: queued.jobId, duplicate: queued.duplicate };
   },
 });

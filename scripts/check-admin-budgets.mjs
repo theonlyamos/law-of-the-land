@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const FORBIDDEN_KEY = /(?:cookie|token|secret|api.?key|claim|question|provider.?body|user.?id|place.?id|address)/i;
+const MAX_RETRIEVAL_EVIDENCE_BYTES = 360_000;
 
 /**
  * @param {unknown} metrics
@@ -78,11 +79,15 @@ function percentile(values, fraction) {
   return ordered[Math.ceil(ordered.length * fraction) - 1];
 }
 
-function distributionFailures(value, label) {
+function distributionFailures(value, label, exactShape = false) {
   const failures = [];
+  if (exactShape && !hasExactKeys(value, ["p50Ms", "p95Ms", "samplesMs"])) {
+    failures.push(`${label} distribution schema is invalid`);
+  }
   if (!value || !Array.isArray(value.samplesMs) || value.samplesMs.length !== 20
     || value.samplesMs.some((sample) => !Number.isFinite(sample) || sample < 0)) {
-    return [`${label} must contain exactly 20 finite non-negative samples`];
+    failures.push(`${label} must contain exactly 20 finite non-negative samples`);
+    return failures;
   }
   if (value.p50Ms !== percentile(value.samplesMs, 0.5) || value.p95Ms !== percentile(value.samplesMs, 0.95)) {
     failures.push(`${label} p50/p95 must match its samples`);
@@ -98,7 +103,15 @@ function secretBearing(value, depth = 0) {
   return Object.entries(value).some(([key, entry]) => FORBIDDEN_KEY.test(key) || secretBearing(entry, depth + 1));
 }
 
-function checkCalibration(calibration, label, limits) {
+function hasExactKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).sort().join("|") === [...keys].sort().join("|");
+}
+
+function checkCalibration(calibration, label, limits, outcomeKeys = []) {
+  if (!hasExactKeys(calibration, ["status", "reference", "outcome", ...limits, ...outcomeKeys])) {
+    return [`${label} calibration schema is invalid`];
+  }
   if (!calibration || calibration.status !== "approved" || typeof calibration.reference !== "string" || !calibration.reference.trim()) {
     return [`${label} calibration is incomplete`];
   }
@@ -191,7 +204,7 @@ export function checkBudgets(m) {
   const picker = m.geographicPlacePicker;
   if (!picker || picker.sampleCount !== 20) failures.push("geographicPlacePicker sampleCount must be exactly 20");
   else {
-    failures.push(...checkCalibration(picker.calibration, "geographicPlacePicker", ["autocompleteP95LimitMs", "detailsP95LimitMs"]));
+    failures.push(...checkCalibration(picker.calibration, "geographicPlacePicker", ["autocompleteP95LimitMs", "detailsP95LimitMs"], ["autocompleteOutcome", "detailsOutcome"]));
     failures.push(...distributionFailures(picker.autocomplete, "geographicPlacePicker autocomplete"));
     failures.push(...distributionFailures(picker.details, "geographicPlacePicker details"));
     if (!Number.isSafeInteger(picker.resultCount) || picker.resultCount < 0 || picker.resultCount > 20) failures.push("geographicPlacePicker result count must be within 20");
@@ -211,101 +224,90 @@ export function checkBudgets(m) {
   if (!retrieval || retrieval.sampleCount !== 20 || !Array.isArray(retrieval.samples) || retrieval.samples.length !== 20) {
     failures.push("retrievalPlan must contain exactly 20 observations");
   } else {
-    failures.push(...checkCalibration(retrieval.calibration, "retrievalPlan", ["plannerP95LimitMs", "totalP95LimitMs"]));
-    failures.push(...distributionFailures(retrieval.planner, "retrievalPlan planner"));
-    failures.push(...distributionFailures(retrieval.total, "retrievalPlan total"));
+    const retrievalKeys = ["calibration", "citationCount", "evidenceBytes", "fileSearch", "fileSearchCallCount", "partialCoverageCount", "planSizeMax", "sampleCount", "samples", "scopeSizeMax", "storeCountMax", "total", "unexpectedRealProviderCallCount"];
+    const sampleKeys = ["authorizedScopeSize", "citationCount", "evidenceBytes", "fileSearchCallCount", "fileSearchLatencyMs", "fileSearchStoreCount", "jurisdictions", "partialCoverage", "planSize", "totalLatencyMs", "unexpectedRealProviderCallCount"];
+    const jurisdictionKeys = ["coverage", "ordinal", "relation"];
+    if (!hasExactKeys(retrieval, retrievalKeys)) failures.push("retrievalPlan schema is invalid");
+    failures.push(...checkCalibration(retrieval.calibration, "retrievalPlan", ["fileSearchP95LimitMs", "totalP95LimitMs"], ["fileSearchOutcome", "totalOutcome"]));
+    failures.push(...distributionFailures(retrieval.fileSearch, "retrievalPlan File Search", true));
+    failures.push(...distributionFailures(retrieval.total, "retrievalPlan total", true));
     if (!boundedInteger(retrieval.scopeSizeMax, 9)) failures.push("retrievalPlan scope must be non-negative and not exceed 9");
     if (!boundedInteger(retrieval.planSizeMax, 4)) failures.push("retrievalPlan plan must be non-negative and not exceed 4 libraries");
-    if (!boundedInteger(retrieval.concurrencyPeak, 3)) failures.push("retrievalPlan concurrency must be non-negative and not exceed 3");
+    if (!boundedInteger(retrieval.storeCountMax, 4)) failures.push("retrievalPlan store count must be non-negative and not exceed 4");
+    if (!boundedInteger(retrieval.fileSearchCallCount, 20)) failures.push("retrievalPlan File Search call count must be bounded to 20");
+    if (!boundedInteger(retrieval.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES * 20)) failures.push("retrievalPlan evidence bytes must be bounded");
+    if (!boundedInteger(retrieval.citationCount, 1_280)) failures.push("retrievalPlan citation count must be bounded");
+    if (!boundedInteger(retrieval.partialCoverageCount, 20)) failures.push("retrievalPlan partial coverage count must be bounded to 20");
     if (retrieval.unexpectedRealProviderCallCount !== 0) failures.push("retrievalPlan has an unexpected provider call in stub mode");
-    let aggregateFailureCount = 0;
-    let aggregateProviderCallCount = 0;
+    let aggregateFileSearchCallCount = 0;
+    let aggregateEvidenceBytes = 0;
+    let aggregateCitationCount = 0;
+    let aggregatePartialCoverageCount = 0;
     let aggregateUnexpectedCount = 0;
     let aggregateScopeMax = 0;
     let aggregatePlanMax = 0;
-    let aggregateConcurrencyPeak = 0;
-    const aggregatePlanner = { planned: 0, fallback: 0 };
-    const aggregateCoverage = { complete: 0, supplementary_incomplete: 0, selected_unavailable: 0 };
+    let aggregateStoreMax = 0;
     for (const sample of retrieval.samples) {
-      const exactKeys = ["authorizedScopeSize", "coverageState", "failureCount", "libraries", "peakConcurrency", "planSize", "plannerLatencyMs", "plannerStatus", "providerCallCount", "totalLatencyMs", "unexpectedRealProviderCallCount"];
-      if (!sample || Object.keys(sample).sort().join("|") !== exactKeys.sort().join("|")) { failures.push("retrievalPlan sample schema is invalid"); continue; }
+      if (!hasExactKeys(sample, sampleKeys)) { failures.push("retrievalPlan sample schema is invalid"); continue; }
       if (!boundedInteger(sample.authorizedScopeSize, 9)
         || !boundedInteger(sample.planSize, 4)
-        || !boundedInteger(sample.peakConcurrency, 3)
-        || !boundedInteger(sample.failureCount, 4)
-        || !boundedInteger(sample.providerCallCount, 4)
-        || !Number.isFinite(sample.plannerLatencyMs) || sample.plannerLatencyMs < 0
-        || !Number.isFinite(sample.totalLatencyMs) || sample.totalLatencyMs < 0
-        || !["planned", "fallback"].includes(sample.plannerStatus)
-        || !["complete", "supplementary_incomplete", "selected_unavailable"].includes(sample.coverageState)
+        || !boundedInteger(sample.fileSearchCallCount, 1)
+        || !boundedInteger(sample.fileSearchStoreCount, 4)
+        || !Number.isFinite(sample.fileSearchLatencyMs) || sample.fileSearchLatencyMs < 0 || sample.fileSearchLatencyMs > 120_000
+        || !Number.isFinite(sample.totalLatencyMs) || sample.totalLatencyMs < 0 || sample.totalLatencyMs > 120_000
+        || !boundedInteger(sample.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES)
+        || !boundedInteger(sample.citationCount, 64)
+        || typeof sample.partialCoverage !== "boolean"
         || sample.unexpectedRealProviderCallCount !== 0
-        || !Array.isArray(sample.libraries) || sample.libraries.length !== sample.planSize) {
+        || !Array.isArray(sample.jurisdictions) || sample.jurisdictions.length !== sample.planSize) {
         failures.push("retrievalPlan sample exceeds structural bounds");
       }
-      if (Array.isArray(sample.libraries) && sample.libraries.some((library, index) => {
-        const keys = ["latencyMs", "ordinal", "relation", "status"];
-        return !library || Object.keys(library).sort().join("|") !== keys.sort().join("|")
-          || library.ordinal !== index
-          || !["selected", "geographic_ancestor", "organizational_geography"].includes(library.relation)
-          || !["fulfilled", "rejected", "not_started", "unconfigured"].includes(library.status)
-          || !Number.isFinite(library.latencyMs) || library.latencyMs < 0;
-      })) failures.push("retrievalPlan library schema is invalid");
-      if (Array.isArray(sample.libraries)) {
-        const invokedCount = sample.libraries.filter((library) => ["fulfilled", "rejected"].includes(library.status)).length;
-        const rejectedCount = sample.libraries.filter((library) => library.status === "rejected").length;
-        const selected = sample.libraries[0];
-        if (sample.providerCallCount !== invokedCount) failures.push("retrievalPlan sample provider call count must match each invoked library outcome");
-        if (sample.failureCount !== rejectedCount) failures.push("retrievalPlan sample failure count must match rejected libraries");
-        if (sample.authorizedScopeSize < sample.planSize) failures.push("retrievalPlan authorized scope must contain every planned library");
-        if ((sample.providerCallCount === 0 && sample.peakConcurrency !== 0)
-          || (sample.providerCallCount > 0 && (sample.peakConcurrency < 1 || sample.peakConcurrency > sample.providerCallCount))) {
-          failures.push("retrievalPlan peak concurrency must agree with provider call count");
-        }
-        if (sample.totalLatencyMs < sample.plannerLatencyMs
-          || sample.libraries.some((library) => sample.totalLatencyMs < library.latencyMs)) {
-          failures.push("retrievalPlan total latency must cover planner and library latency");
-        }
-        if (sample.libraries.some((library) => ["not_started", "unconfigured"].includes(library.status) && library.latencyMs !== 0)) {
-          failures.push("retrievalPlan not_started and unconfigured libraries must have zero latency");
-        }
-        if (!selected || selected.relation !== "selected"
-          || sample.libraries.slice(1).some((library) => library.relation === "selected")) {
-          failures.push("retrievalPlan selected library provenance must be first and unique");
-        }
-        const coverageConsistent = sample.coverageState === "complete"
-          ? sample.libraries.length > 0 && sample.libraries.every((library) => library.status === "fulfilled")
-          : sample.coverageState === "supplementary_incomplete"
-            ? selected?.status === "fulfilled" && sample.libraries.slice(1).some((library) => library.status !== "fulfilled")
-            : selected?.status !== "fulfilled";
-        if (!coverageConsistent) failures.push("retrievalPlan coverage state must match selected and supplementary library outcomes");
+      if (Array.isArray(sample.jurisdictions)) {
+        const invalidJurisdiction = sample.jurisdictions.some((jurisdiction, index) => !hasExactKeys(jurisdiction, jurisdictionKeys)
+          || jurisdiction.ordinal !== index
+          || !boundedInteger(jurisdiction.ordinal, 3)
+          || !["selected", "geographic_ancestor", "organizational_geography"].includes(jurisdiction.relation)
+          || !["evidence", "no_evidence", "unavailable"].includes(jurisdiction.coverage));
+        if (invalidJurisdiction) failures.push("retrievalPlan jurisdiction schema is invalid");
+        const evidenceCount = sample.jurisdictions.filter((jurisdiction) => jurisdiction?.coverage === "evidence").length;
+        const selected = sample.jurisdictions[0];
+        if (sample.authorizedScopeSize < sample.planSize) failures.push("retrievalPlan authorized scope must contain every planned jurisdiction");
+        if ((sample.fileSearchCallCount === 0) !== (sample.fileSearchStoreCount === 0)) failures.push("retrievalPlan sample File Search call count and store count must agree");
+        if ((sample.fileSearchCallCount === 0) !== (sample.fileSearchLatencyMs === 0)) failures.push("retrievalPlan sample File Search call count and latency must agree");
+        if (sample.fileSearchStoreCount > sample.planSize || sample.fileSearchStoreCount < evidenceCount) failures.push("retrievalPlan sample store count must cover only planned evidence jurisdictions");
+        if (sample.totalLatencyMs < sample.fileSearchLatencyMs) failures.push("retrievalPlan sample total latency must cover File Search latency");
+        if (!selected || selected.relation !== "selected" || sample.jurisdictions.slice(1).some((jurisdiction) => jurisdiction?.relation === "selected")) failures.push("retrievalPlan sample selected coverage must be first and unique");
+        if ((evidenceCount > 0) !== (sample.evidenceBytes > 0)) failures.push("retrievalPlan sample evidence bytes must agree with governed evidence coverage");
+        if (selected?.coverage === "unavailable" && evidenceCount > 0) failures.push("retrievalPlan sample unavailable selected coverage cannot retain evidence");
+        if (sample.citationCount > evidenceCount * 16) failures.push("retrievalPlan sample citation count exceeds governed evidence bounds");
+        if (sample.partialCoverage !== sample.jurisdictions.slice(1).some((jurisdiction) => jurisdiction?.coverage !== "evidence")) failures.push("retrievalPlan sample partial coverage must match final jurisdiction usability");
       }
-      aggregateFailureCount += Number.isSafeInteger(sample.failureCount) ? sample.failureCount : 0;
-      aggregateProviderCallCount += Number.isSafeInteger(sample.providerCallCount) ? sample.providerCallCount : 0;
+      aggregateFileSearchCallCount += Number.isSafeInteger(sample.fileSearchCallCount) ? sample.fileSearchCallCount : 0;
+      aggregateEvidenceBytes += Number.isSafeInteger(sample.evidenceBytes) ? sample.evidenceBytes : 0;
+      aggregateCitationCount += Number.isSafeInteger(sample.citationCount) ? sample.citationCount : 0;
+      aggregatePartialCoverageCount += sample.partialCoverage === true ? 1 : 0;
       aggregateUnexpectedCount += Number.isSafeInteger(sample.unexpectedRealProviderCallCount) ? sample.unexpectedRealProviderCallCount : 0;
       aggregateScopeMax = Math.max(aggregateScopeMax, Number.isFinite(sample.authorizedScopeSize) ? sample.authorizedScopeSize : 0);
       aggregatePlanMax = Math.max(aggregatePlanMax, Number.isFinite(sample.planSize) ? sample.planSize : 0);
-      aggregateConcurrencyPeak = Math.max(aggregateConcurrencyPeak, Number.isFinite(sample.peakConcurrency) ? sample.peakConcurrency : 0);
-      if (sample.plannerStatus in aggregatePlanner) aggregatePlanner[sample.plannerStatus] += 1;
-      if (sample.coverageState in aggregateCoverage) aggregateCoverage[sample.coverageState] += 1;
+      aggregateStoreMax = Math.max(aggregateStoreMax, Number.isFinite(sample.fileSearchStoreCount) ? sample.fileSearchStoreCount : 0);
     }
-    if (retrieval.failureCount !== aggregateFailureCount
-      || retrieval.providerCallCount !== aggregateProviderCallCount
+    if (retrieval.fileSearchCallCount !== aggregateFileSearchCallCount
+      || retrieval.evidenceBytes !== aggregateEvidenceBytes
+      || retrieval.citationCount !== aggregateCitationCount
+      || retrieval.partialCoverageCount !== aggregatePartialCoverageCount
       || retrieval.unexpectedRealProviderCallCount !== aggregateUnexpectedCount
       || retrieval.scopeSizeMax !== aggregateScopeMax
       || retrieval.planSizeMax !== aggregatePlanMax
-      || retrieval.concurrencyPeak !== aggregateConcurrencyPeak
-      || retrieval.planner?.plannedCount !== aggregatePlanner.planned
-      || retrieval.planner?.fallbackCount !== aggregatePlanner.fallback
-      || JSON.stringify(retrieval.coverageStates) !== JSON.stringify(aggregateCoverage)
-      || !sameNumbers(retrieval.planner?.samplesMs, retrieval.samples.map((sample) => sample.plannerLatencyMs))
+      || retrieval.storeCountMax !== aggregateStoreMax
+      || !sameNumbers(retrieval.fileSearch?.samplesMs, retrieval.samples.map((sample) => sample.fileSearchLatencyMs))
       || !sameNumbers(retrieval.total?.samplesMs, retrieval.samples.map((sample) => sample.totalLatencyMs))) {
       failures.push("retrievalPlan aggregate evidence must match its exact samples");
     }
-    if (Number.isFinite(retrieval.planner?.p95Ms) && Number.isFinite(retrieval.calibration?.plannerP95LimitMs) && retrieval.planner.p95Ms > retrieval.calibration.plannerP95LimitMs) failures.push("retrievalPlan planner p95 exceeds calibration");
+    if (Number.isFinite(retrieval.fileSearch?.p95Ms) && Number.isFinite(retrieval.calibration?.fileSearchP95LimitMs) && retrieval.fileSearch.p95Ms > retrieval.calibration.fileSearchP95LimitMs) failures.push("retrievalPlan File Search p95 exceeds calibration");
     if (Number.isFinite(retrieval.total?.p95Ms) && Number.isFinite(retrieval.calibration?.totalP95LimitMs) && retrieval.total.p95Ms > retrieval.calibration.totalP95LimitMs) failures.push("retrievalPlan total p95 exceeds calibration");
-    const plannerOutcome = Number.isFinite(retrieval.planner?.p95Ms) && Number.isFinite(retrieval.calibration?.plannerP95LimitMs) && retrieval.planner.p95Ms <= retrieval.calibration.plannerP95LimitMs ? "pass" : "fail";
+    const fileSearchOutcome = Number.isFinite(retrieval.fileSearch?.p95Ms) && Number.isFinite(retrieval.calibration?.fileSearchP95LimitMs) && retrieval.fileSearch.p95Ms <= retrieval.calibration.fileSearchP95LimitMs ? "pass" : "fail";
     const totalOutcome = Number.isFinite(retrieval.total?.p95Ms) && Number.isFinite(retrieval.calibration?.totalP95LimitMs) && retrieval.total.p95Ms <= retrieval.calibration.totalP95LimitMs ? "pass" : "fail";
-    if (retrieval.calibration?.plannerOutcome !== plannerOutcome || retrieval.calibration?.plannerOutcome !== "pass") failures.push("retrievalPlan planner outcome must match its calibrated pass/fail result");
+    if (retrieval.calibration?.fileSearchOutcome !== fileSearchOutcome || retrieval.calibration?.fileSearchOutcome !== "pass") failures.push("retrievalPlan File Search outcome must match its calibrated pass/fail result");
     if (retrieval.calibration?.totalOutcome !== totalOutcome || retrieval.calibration?.totalOutcome !== "pass") failures.push("retrievalPlan total outcome must match its calibrated pass/fail result");
   }
   return failures.filter((failure) => typeof failure === "string");

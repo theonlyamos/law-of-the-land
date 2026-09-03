@@ -43,11 +43,9 @@ async function insertGhana(t: ReturnType<typeof convexTest>) {
       code: "GH",
       name: "Republic of Ghana",
       slug: "ghana-law",
-      status: "enabled",
+      status: "draft",
       isDefault: true,
-      stagingBucketId: "ghana-staging",
-      productionBucketId: "11833",
-      providerSyncState: "synced",
+      providerSyncState: "pending",
       createdBy: "operator-1",
       updatedBy: "operator-1",
       createdAt: 1,
@@ -73,8 +71,22 @@ async function insertGhana(t: ReturnType<typeof convexTest>) {
   });
 }
 
+async function enableGhanaSearch(
+  t: ReturnType<typeof convexTest>,
+  jurisdictionId: Awaited<ReturnType<typeof insertGhana>>["jurisdictionId"],
+) {
+  await t.run((ctx) =>
+    ctx.db.patch("jurisdictions", jurisdictionId, {
+      status: "enabled",
+      providerSyncState: "synced",
+      geminiFileSearchStoreName: "fileSearchStores/ghana-migration",
+      geminiEmbeddingModel: "models/gemini-embedding-2",
+    }),
+  );
+}
+
 describe("safe unified-jurisdiction migration", () => {
-  it("adds Ghana V2 typing without replacing the jurisdiction, resource, or production bucket", async () => {
+  it("adds Ghana V2 typing without replacing the draft jurisdiction or catalog resource", async () => {
     const t = convexTest(schema, modules);
     const before = await insertGhana(t);
 
@@ -89,7 +101,6 @@ describe("safe unified-jurisdiction migration", () => {
     ).resolves.toEqual({
       jurisdictionId: before.jurisdictionId,
       changed: true,
-      preservedProductionBucket: "11833",
     });
 
     const after = await t.run(async (ctx) => ({
@@ -109,8 +120,8 @@ describe("safe unified-jurisdiction migration", () => {
       kind: "geographic",
       visibility: "public",
       legacyCountryCode: "GH",
-      stagingBucketId: "ghana-staging",
-      productionBucketId: "11833",
+      status: "draft",
+      providerSyncState: "pending",
       createdBy: "operator-1",
       createdAt: 1,
     });
@@ -176,6 +187,36 @@ describe("safe unified-jurisdiction migration", () => {
     fetchSpy.mockRestore();
   });
 
+  it("projects a legacy stored Ghana seed result during idempotent replay", async () => {
+    const t = convexTest(schema, modules);
+    await insertGhana(t);
+    const args = {
+      environment: "test",
+      place,
+      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
+      reason: "Adopt the reviewed Ghana country projection",
+      idempotencyKey: "ghana-seed-legacy-result-replay",
+    };
+    const first = await t.mutation(seedGhanaJurisdictionV2, args);
+    await t.run(async (ctx) => {
+      const rollout = await ctx.db
+        .query("unifiedJurisdictionRolloutStates")
+        .withIndex("by_environment_and_migrationVersion", (q) =>
+          q.eq("environment", "test").eq("migrationVersion", "jurisdiction_ids_v1"),
+        )
+        .unique();
+      if (!rollout?.ghanaSeedLastResult) throw new Error("missing rollout fixture");
+      await ctx.db.patch(rollout._id, {
+        ghanaSeedLastResult: {
+          ...rollout.ghanaSeedLastResult,
+          preservedProductionBucket: "11833",
+        },
+      });
+    });
+
+    await expect(t.mutation(seedGhanaJurisdictionV2, args)).resolves.toEqual(first);
+  });
+
   it.each([[-90, -180], [90, 180]])(
     "accepts inclusive Ghana coordinate boundary %s,%s",
     async (latitude, longitude) => {
@@ -186,7 +227,7 @@ describe("safe unified-jurisdiction migration", () => {
         confirmation: "SEED_GHANA_JURISDICTION_V2 test",
         reason: "Validate inclusive Ghana projection boundaries",
         idempotencyKey: `ghana-boundary-${latitude}-${longitude}`,
-      })).resolves.toMatchObject({ preservedProductionBucket: "11833" });
+      })).resolves.toMatchObject({ changed: true });
     },
   );
 
@@ -195,8 +236,8 @@ describe("safe unified-jurisdiction migration", () => {
     await insertGhana(duplicate);
     await duplicate.run((ctx) => ctx.db.insert("jurisdictions", {
       code: "GH", name: "Duplicate Ghana", slug: "ghana-duplicate",
-      status: "enabled", isDefault: false, productionBucketId: "11833",
-      providerSyncState: "synced", createdBy: "fixture", updatedBy: "fixture",
+      status: "draft", isDefault: false,
+      providerSyncState: "pending", createdBy: "fixture", updatedBy: "fixture",
       createdAt: 1, updatedAt: 1,
     }));
     await expect(duplicate.mutation(seedGhanaJurisdictionV2, {
@@ -237,6 +278,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-v2-before-backfill",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       for (let index = 0; index < 150; index += 1) {
         await ctx.db.insert("chatSessions", {
@@ -402,7 +444,7 @@ describe("safe unified-jurisdiction migration", () => {
 
   it("fails Ghana readiness when the persisted profile drifts from the seeded projection", async () => {
     const t = convexTest(schema, modules);
-    await insertGhana(t);
+    const { jurisdictionId } = await insertGhana(t);
     await t.mutation(seedGhanaJurisdictionV2, {
       environment: "test",
       place,
@@ -410,6 +452,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-readiness-drift",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       const profile = await ctx.db
         .query("geographicJurisdictions")
@@ -514,6 +557,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-before-name-fill",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     const runId = await t.run((ctx) =>
       ctx.db.insert("queryRuns", {
         correlationId: "blank-name-run",
@@ -657,6 +701,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-daily-collision",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     const legacyId = await t.run(async (ctx) => {
       const base = {
         day: "2026-08-15", totalQuestions: 1, successCount: 1,
@@ -693,6 +738,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-id-duplicate",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       for (const updatedAt of [1, 2]) {
         await ctx.db.insert("dailyMetrics", {
@@ -717,13 +763,14 @@ describe("safe unified-jurisdiction migration", () => {
 
   it("keeps cross-page duplicate daily candidates mismatched in dry-run and execute", async () => {
     const t = convexTest(schema, modules);
-    await insertGhana(t);
+    const { jurisdictionId } = await insertGhana(t);
     await t.mutation(seedGhanaJurisdictionV2, {
       environment: "test", place,
       confirmation: "SEED_GHANA_JURISDICTION_V2 test",
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-cross-page-daily",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       for (const updatedAt of [1, 2]) {
         await ctx.db.insert("dailyMetrics", {
@@ -758,7 +805,14 @@ describe("safe unified-jurisdiction migration", () => {
 
   it("keeps dry-run source rows unchanged and makes page replay audit-idempotent", async () => {
     const t = convexTest(schema, modules);
-    await insertGhana(t);
+    const { jurisdictionId } = await insertGhana(t);
+    await t.mutation(seedGhanaJurisdictionV2, {
+      environment: "test", place,
+      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
+      reason: "Adopt the reviewed Ghana country projection",
+      idempotencyKey: "ghana-dry-run-replay",
+    });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       for (const externalId of ["dry-one", "dry-two"]) {
         await ctx.db.insert("chatSessions", {
@@ -895,6 +949,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-contract-classification",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     await t.run(async (ctx) => {
       const base = { userId: "contract-owner", title: "Chat", lastMessage: "Question",
         messageCount: 1, updatedAt: 1 };
@@ -935,6 +990,7 @@ describe("safe unified-jurisdiction migration", () => {
       reason: "Adopt the reviewed Ghana country projection",
       idempotencyKey: "ghana-all-targets",
     });
+    await enableGhanaSearch(t, jurisdictionId);
     const ids = await t.run(async (ctx) => ({
       correlation: await ctx.db.insert("telemetryCorrelations", {
         tokenHash: "opaque-correlation",

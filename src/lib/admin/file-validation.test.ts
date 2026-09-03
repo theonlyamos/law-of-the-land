@@ -6,14 +6,14 @@ import {
 } from "./file-validation";
 
 describe("document file validation", () => {
-  it("rejects an extension and MIME pair that GroundX does not support", () => {
+  it("rejects an extension and MIME pair that Gemini File Search does not support", () => {
     expect(
       validateDocumentFile({
         name: "law.exe",
         type: "application/octet-stream",
         size: 10,
       }),
-    ).toEqual({ ok: false, reason: "Unsupported file type" });
+    ).toEqual({ ok: false, reason: "Choose a supported PDF, Office, text, image, CSV, TSV, or JSON file." });
   });
 
   it("rejects a supported file larger than the configured limit", () => {
@@ -22,10 +22,10 @@ describe("document file validation", () => {
         { name: "law.pdf", type: "application/pdf", size: 101 },
         100,
       ),
-    ).toEqual({ ok: false, reason: "File is too large" });
+    ).toEqual({ ok: false, reason: "Choose a file smaller than 100 B." });
   });
 
-  it("accepts the GroundX SDK file types only when extension and MIME agree", () => {
+  it("accepts the retained Gemini file types only when extension and MIME agree", () => {
     const validFiles = [
       ["law.txt", "text/plain"],
       ["law.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
@@ -44,14 +44,23 @@ describe("document file validation", () => {
     }
     expect(
       validateDocumentFile({ name: "law.pdf", type: "image/png", size: 1 }),
-    ).toEqual({ ok: false, reason: "Unsupported file type" });
+    ).toEqual({ ok: false, reason: "Choose a supported PDF, Office, text, image, CSV, TSV, or JSON file." });
     expect(
       validateDocumentFile({
         name: "law.pdf",
         type: "application/pdf",
         size: ADMIN_DOCUMENT_DEFAULT_MAX_BYTES + 1,
       }),
-    ).toEqual({ ok: false, reason: "File is too large" });
+    ).toEqual({ ok: false, reason: "Choose a file smaller than 50.0 MB." });
+  });
+
+  it("caps a larger configured policy at Gemini's 100,000,000 byte ceiling", () => {
+    expect(
+      validateDocumentFile(
+        { name: "law.pdf", type: "application/pdf", size: 100_000_001 },
+        200_000_000,
+      ),
+    ).toEqual({ ok: false, reason: "Choose a file smaller than 95.4 MB." });
   });
 
   it("computes a lowercase Web Crypto SHA-256 digest of the file bytes", async () => {

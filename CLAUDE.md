@@ -53,7 +53,7 @@ Users are often in a **research context** — they need clear, reliable answers 
 - **Framework**: Next.js 16 (App Router), React 19, TypeScript
 - **Styling**: Tailwind CSS 4 (CSS-first config with `@theme`), Radix UI components
 - **Fonts**: Geist Sans, Geist Mono (local fonts)
-- **AI Integration**: Gemini 3.1 Flash Lite (primary), OpenAI, GroundX for RAG
+- **AI Integration**: Gemini for chat, File Search retrieval, and document indexing; OpenAI where configured
 - **Real-time**: Socket.io for bidirectional communication
 
 <!-- convex-ai-start -->

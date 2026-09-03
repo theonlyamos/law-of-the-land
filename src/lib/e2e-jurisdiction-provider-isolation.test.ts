@@ -6,12 +6,12 @@ import {
   E2E_FIXTURE_TOWN_ALIAS,
   E2E_JURISDICTION_QUESTIONS,
   E2E_JURISDICTION_SCENARIOS,
-  decodeRetrievalObservationV1,
-  type RetrievalObservationV1,
+  decodeRetrievalObservationV2,
+  type RetrievalObservationV2,
 } from "../../shared/e2e-jurisdiction-provider-contract";
 import {
   authorizedObservationSecret,
-  encodeRetrievalObservationV1,
+  encodeRetrievalObservationV2,
   resolveJurisdictionProviderMode,
 } from "./e2e-jurisdiction-provider-isolation";
 
@@ -47,47 +47,23 @@ function remoteBoundary(
   });
 }
 
-const validObservation: RetrievalObservationV1 = {
-  version: 1,
-  planner: { status: "planned", latencyMs: 12.5 },
+const validObservation: RetrievalObservationV2 = {
+  version: 2,
   authorizedScopeSize: 3,
   planSize: 3,
-  peakConcurrency: 2,
+  fileSearchCallCount: 1,
+  fileSearchStoreCount: 2,
+  fileSearchLatencyMs: 21,
   totalLatencyMs: 41.25,
-  libraries: [
-    { ordinal: 0, relation: "selected", status: "fulfilled", latencyMs: 10 },
-    { ordinal: 1, relation: "geographic_ancestor", status: "rejected", latencyMs: 11 },
-    { ordinal: 2, relation: "organizational_geography", status: "unconfigured", latencyMs: 0 },
+  evidenceBytes: 1_024,
+  citationCount: 2,
+  partialCoverage: true,
+  jurisdictions: [
+    { ordinal: 0, relation: "selected", coverage: "evidence" },
+    { ordinal: 1, relation: "geographic_ancestor", coverage: "no_evidence" },
+    { ordinal: 2, relation: "organizational_geography", coverage: "unavailable" },
   ],
-  failureCount: 1,
-  coverageState: "supplementary_incomplete",
-  providerCallCount: 2,
   unexpectedRealProviderCallCount: 0,
-};
-
-const completeObservation: RetrievalObservationV1 = {
-  ...validObservation,
-  libraries: validObservation.libraries.map((library) => ({
-    ...library,
-    status: "fulfilled" as const,
-    latencyMs: 10,
-  })),
-  failureCount: 0,
-  coverageState: "complete",
-  providerCallCount: 3,
-};
-
-const selectedUnavailableObservation: RetrievalObservationV1 = {
-  ...validObservation,
-  peakConcurrency: 1,
-  libraries: [
-    { ...validObservation.libraries[0], status: "rejected", latencyMs: 10 },
-    { ...validObservation.libraries[1], status: "not_started", latencyMs: 0 },
-    validObservation.libraries[2],
-  ],
-  failureCount: 1,
-  coverageState: "selected_unavailable",
-  providerCallCount: 1,
 };
 
 function encodeJsonText(json: string): string {
@@ -236,68 +212,72 @@ describe("jurisdiction provider isolation boundary", () => {
 });
 
 describe("retrieval observation codec", () => {
-  it("round-trips the exact safe version-one shape through base64url", () => {
-    const encoded = encodeRetrievalObservationV1(validObservation);
+  it("round-trips the exact safe version-two shape through base64url", () => {
+    const encoded = encodeRetrievalObservationV2(validObservation);
     expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(encoded).not.toContain("=");
     expect(encoded.length).toBeLessThanOrEqual(4_096);
     expect(new TextEncoder().encode(encoded).byteLength).toBeLessThanOrEqual(4_096);
-    expect(decodeRetrievalObservationV1(encoded)).toEqual(validObservation);
+    expect(decodeRetrievalObservationV2(encoded)).toEqual(validObservation);
+  });
+
+  it("round-trips the governed context's maximum UTF-8 evidence size", () => {
+    const maximumUtf8Observation = { ...validObservation, evidenceBytes: 360_000 };
+    expect(decodeRetrievalObservationV2(encodeRetrievalObservationV2(maximumUtf8Observation)))
+      .toEqual(maximumUtf8Observation);
   });
 
   it.each([
-    ["complete", completeObservation],
-    ["supplementary_incomplete", validObservation],
-    ["selected_unavailable", selectedUnavailableObservation],
-  ])("round-trips a consistent %s coverage state", (_state, observation) => {
-    expect(decodeRetrievalObservationV1(encodeRetrievalObservationV1(observation))).toEqual(observation);
-  });
-
-  it.each([
-    ["unknown version", { ...validObservation, version: 2 }],
+    ["version one", { ...validObservation, version: 1 }],
     ["top-level extra key", { ...validObservation, query: "must not be serialized" }],
-    ["planner extra key", { ...validObservation, planner: { ...validObservation.planner, provider: "gemini" } }],
-    ["library extra key", { ...validObservation, libraries: [{ ...validObservation.libraries[0], bucketId: 11833 }, ...validObservation.libraries.slice(1) ] }],
+    ["provider identity", { ...validObservation, storeName: "fileSearchStores/secret" }],
+    ["jurisdiction identity", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], jurisdictionId: "secret" }, ...validObservation.jurisdictions.slice(1) ] }],
     ["negative latency", { ...validObservation, totalLatencyMs: -1 }],
     ["nonfinite latency", { ...validObservation, totalLatencyMs: Number.POSITIVE_INFINITY }],
     ["latency above the bound", { ...validObservation, totalLatencyMs: 120_001 }],
-    ["more than four libraries", { ...validObservation, planSize: 5, libraries: [...validObservation.libraries, { ordinal: 3, relation: "geographic_ancestor", status: "not_started", latencyMs: 0 }, { ordinal: 4, relation: "geographic_ancestor", status: "not_started", latencyMs: 0 }] }],
-    ["invalid ordinal", { ...validObservation, libraries: [{ ...validObservation.libraries[0], ordinal: 4 }, ...validObservation.libraries.slice(1) ] }],
-    ["duplicate ordinal", { ...validObservation, libraries: [validObservation.libraries[0], { ...validObservation.libraries[1], ordinal: 0 }, validObservation.libraries[2]] }],
-    ["out-of-order ordinal", { ...validObservation, libraries: [validObservation.libraries[1], validObservation.libraries[0], validObservation.libraries[2]] }],
-    ["concurrency above three", { ...validObservation, peakConcurrency: 4 }],
-    ["unknown planner enum", { ...validObservation, planner: { status: "retried", latencyMs: 1 } }],
-    ["unknown relation enum", { ...validObservation, libraries: [{ ...validObservation.libraries[0], relation: "country" }, ...validObservation.libraries.slice(1) ] }],
-    ["unknown library status enum", { ...validObservation, libraries: [{ ...validObservation.libraries[0], status: "timeout" }, ...validObservation.libraries.slice(1) ] }],
-    ["unknown coverage enum", { ...validObservation, coverageState: "partial" }],
+    ["more than four stores", { ...validObservation, fileSearchStoreCount: 5 }],
+    ["more than one File Search call", { ...validObservation, fileSearchCallCount: 2 }],
+    ["evidence bytes above the governed-context bound", { ...validObservation, evidenceBytes: 360_001 }],
+    ["zero stores with a call", { ...validObservation, fileSearchStoreCount: 0 }],
+    ["nonzero latency without a call", { ...validObservation, fileSearchCallCount: 0, fileSearchStoreCount: 0 }],
+    ["invalid ordinal", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], ordinal: 4 }, ...validObservation.jurisdictions.slice(1) ] }],
+    ["out-of-order ordinal", { ...validObservation, jurisdictions: [validObservation.jurisdictions[1], validObservation.jurisdictions[0], validObservation.jurisdictions[2]] }],
+    ["unknown relation", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], relation: "country" }, ...validObservation.jurisdictions.slice(1) ] }],
+    ["unknown coverage", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], coverage: "timeout" }, ...validObservation.jurisdictions.slice(1) ] }],
+    ["selected marked unavailable after provider call", { ...validObservation, jurisdictions: [{ ...validObservation.jurisdictions[0], coverage: "unavailable" }, ...validObservation.jurisdictions.slice(1) ] }],
+    ["plan count mismatch", { ...validObservation, planSize: 2 }],
+    ["fewer stores than evidence jurisdictions", { ...validObservation, fileSearchStoreCount: 1, jurisdictions: [validObservation.jurisdictions[0], { ...validObservation.jurisdictions[1], coverage: "evidence" }, validObservation.jurisdictions[2]] }],
+    ["evidence coverage with zero evidence bytes", { ...validObservation, evidenceBytes: 0, citationCount: 0 }],
+    ["false partial coverage", { ...validObservation, partialCoverage: false }],
     ["nonzero real-provider calls", { ...validObservation, unexpectedRealProviderCallCount: 1 }],
-    ["call count inconsistent with statuses", { ...validObservation, providerCallCount: 1 }],
-    ["failure count inconsistent with statuses", { ...validObservation, failureCount: 0 }],
-    ["zero concurrency despite calls", { ...validObservation, peakConcurrency: 0 }],
-    ["latency for an uncalled library", { ...validObservation, libraries: [validObservation.libraries[0], validObservation.libraries[1], { ...validObservation.libraries[2], latencyMs: 1 }] }],
-    ["total latency below a component", { ...validObservation, totalLatencyMs: 5 }],
-    ["first library is not selected", { ...validObservation, libraries: [{ ...validObservation.libraries[0], relation: "geographic_ancestor" }, ...validObservation.libraries.slice(1) ] }],
-    ["complete coverage with a rejected library", { ...validObservation, coverageState: "complete" }],
-    ["complete coverage with an unconfigured library", { ...validObservation, libraries: [validObservation.libraries[0], { ...validObservation.libraries[1], status: "fulfilled" }, validObservation.libraries[2]], failureCount: 0, coverageState: "complete" }],
-    ["complete coverage with a not-started library", { ...validObservation, libraries: [validObservation.libraries[0], { ...validObservation.libraries[1], status: "fulfilled" }, { ...validObservation.libraries[2], status: "not_started" }], failureCount: 0, coverageState: "complete" }],
-    ["supplementary-incomplete coverage without an incomplete supplementary library", { ...completeObservation, coverageState: "supplementary_incomplete" }],
-    ["supplementary-incomplete coverage with an unavailable selected library", { ...selectedUnavailableObservation, coverageState: "supplementary_incomplete" }],
-    ["selected-unavailable coverage with a fulfilled selected library", { ...validObservation, coverageState: "selected_unavailable" }],
   ])("rejects %s", (_label, value) => {
-    expect(() => decodeRetrievalObservationV1(encodeUnchecked(value))).toThrow(
+    expect(() => decodeRetrievalObservationV2(encodeUnchecked(value))).toThrow(
       "E2E_RETRIEVAL_OBSERVATION_INVALID",
     );
   });
 
+  it("accepts historical store count with final postflight unavailability only when discarded evidence metrics are zero", () => {
+    const postflightFailure: RetrievalObservationV2 = {
+      ...validObservation,
+      evidenceBytes: 0,
+      citationCount: 0,
+      jurisdictions: validObservation.jurisdictions.map((item, index) => ({
+        ...item,
+        coverage: index === 0 ? "unavailable" : "no_evidence",
+      })),
+    };
+    expect(decodeRetrievalObservationV2(encodeRetrievalObservationV2(postflightFailure))).toEqual(postflightFailure);
+  });
+
   it("rejects malformed, noncanonical, and over-cap inputs before returning data", () => {
-    expect(() => decodeRetrievalObservationV1("not+base64")).toThrow("E2E_RETRIEVAL_OBSERVATION_INVALID");
-    expect(() => decodeRetrievalObservationV1(`${encodeUnchecked(validObservation)}=`)).toThrow(
+    expect(() => decodeRetrievalObservationV2("not+base64")).toThrow("E2E_RETRIEVAL_OBSERVATION_INVALID");
+    expect(() => decodeRetrievalObservationV2(`${encodeUnchecked(validObservation)}=`)).toThrow(
       "E2E_RETRIEVAL_OBSERVATION_INVALID",
     );
-    expect(() => decodeRetrievalObservationV1("A".repeat(6_000))).toThrow(
+    expect(() => decodeRetrievalObservationV2("A".repeat(6_000))).toThrow(
       "E2E_RETRIEVAL_OBSERVATION_INVALID",
     );
-    expect(() => encodeRetrievalObservationV1({
+    expect(() => encodeRetrievalObservationV2({
       ...validObservation,
       padding: "x".repeat(5_000),
     } as never)).toThrow("E2E_RETRIEVAL_OBSERVATION_INVALID");
@@ -309,6 +289,6 @@ describe("retrieval observation codec", () => {
     const encoded = encodeJsonText(paddedJson);
     expect(encoded.length).toBeGreaterThan(4_096);
     expect(encoded.length).toBeLessThanOrEqual(5_462);
-    expect(() => decodeRetrievalObservationV1(encoded)).toThrow("E2E_RETRIEVAL_OBSERVATION_INVALID");
+    expect(() => decodeRetrievalObservationV2(encoded)).toThrow("E2E_RETRIEVAL_OBSERVATION_INVALID");
   });
 });

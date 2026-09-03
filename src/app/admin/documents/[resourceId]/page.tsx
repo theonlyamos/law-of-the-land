@@ -1,5 +1,6 @@
 import { api } from "../../../../../convex/_generated/api";
 import type { Doc, Id } from "../../../../../convex/_generated/dataModel";
+import { GEMINI_MAX_DOCUMENT_BYTES } from "../../../../../shared/gemini-file-types";
 import { hasRolePermission } from "../../../../../convex/lib/adminPermissions";
 import { CatalogStatus, VersionHistory } from "@/components/admin/resource-register";
 import { ResourceEditor } from "@/components/admin/catalog-actions";
@@ -21,7 +22,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
   const canUpload = hasRolePermission(access.currentAdmin.roles, "document", "write");
   const configuredUploadLimit = Number(process.env.ADMIN_MAX_DOCUMENT_BYTES);
   const uploadLimit = Number.isSafeInteger(configuredUploadLimit) && configuredUploadLimit > 0
-    ? configuredUploadLimit
+    ? Math.min(configuredUploadLimit, GEMINI_MAX_DOCUMENT_BYTES)
     : null;
   const resourceId = rawResourceId as Id<"legalResources">;
   let resource: Awaited<ReturnType<typeof fetchAuthQuery>>;
@@ -57,7 +58,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
         <section className="mt-10" aria-label="Original document upload">
           {uploadLimit === null ? (
             <p role="alert" className="border-y border-[oklch(64%_0.09_45)] bg-[oklch(95%_0.035_55)] px-5 py-5 text-sm font-medium text-[oklch(34%_0.08_35)]">
-              Original uploads are unavailable until the document size policy is configured.
+              Document uploads are unavailable because the file-size limit is not configured.
             </p>
           ) : (
             <DocumentUpload
@@ -72,7 +73,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
       ) : null}
       <section className="mt-10" aria-labelledby="version-history-heading">
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.065_67)]">Immutable originals</p><h2 id="version-history-heading" className="mt-2 text-2xl font-semibold tracking-[-0.03em]">Version and review history</h2></div><p className="max-w-[42ch] text-sm text-[oklch(42%_0.035_252)]">Metadata only. Original file bodies are never downloaded by this register.</p></div>
-        <VersionHistory versions={(versions.page as Doc<"documentVersions">[]).map((version) => ({ id: version._id, versionNumber: version.versionNumber, filename: version.filename, mimeType: version.mimeType, byteSize: version.byteSize, sha256: version.sha256, status: version.status, createdAt: version.createdAt }))} />
+        <VersionHistory versions={(versions.page as Doc<"documentVersions">[]).map((version) => ({ id: version._id, versionNumber: version.versionNumber, filename: version.filename, mimeType: version.mimeType, byteSize: version.byteSize, sha256: version.sha256, status: version.status, failureSummary: version.failureSummary, createdAt: version.createdAt }))} />
       </section>
     </article>
   );

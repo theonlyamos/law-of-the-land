@@ -115,6 +115,29 @@ describe("governed research limits", () => {
     expect(context.digest).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("keeps only bounded server-authorized citation metadata in governed context", async () => {
+    const context = await buildGovernedContext([{
+      ...selected,
+      content: "The Constitution applies.",
+      citations: [{
+        title: "Constitution of Ghana",
+        officialCitation: "1992 Constitution",
+        sourceUrl: "https://judicial.gov.gh/constitution",
+        pageNumber: 4,
+      }],
+    }]);
+
+    expect(parseGovernedContext(context.serialized).sources[0]).toMatchObject({
+      sourceRef: "J1",
+      citations: [{
+        title: "Constitution of Ghana",
+        officialCitation: "1992 Constitution",
+        sourceUrl: "https://judicial.gov.gh/constitution",
+        pageNumber: 4,
+      }],
+    });
+  });
+
   it("hashes JS UTF-16 code units injectively for replacement characters and lone surrogates", async () => {
     const replacement = "\uFFFD";
     const loneSurrogate = "\uD800";

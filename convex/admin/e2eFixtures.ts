@@ -5,7 +5,6 @@ import { components } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { internalAction, internalMutation, internalQuery } from "../_generated/server";
-import { hashCallbackToken } from "./jobs";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import { E2E_PRIVILEGED_FUNCTIONS } from "./e2eAccessMatrix";
 import { verifyVerifiedPlaceClaim } from "../lib/placeClaim";
@@ -16,19 +15,16 @@ const TAG_RE = /^e2e_[a-z0-9]{12,48}$/;
 const FIXED_ROLES = [
   "super_admin", "content_manager", "content_reviewer", "support_agent", "billing_manager", "auditor",
 ] as const;
-// These are intentionally numeric because production publication validates
-// GroundX bucket identifiers before it queues work. They are only fixture
-// payload values; no provider call is made by this control plane.
-const FIXTURE_STAGING_BUCKET_ID = "910001";
-const FIXTURE_PRODUCTION_BUCKET_ID = "910002";
-const FIXTURE_COUNTRY_STAGING_BUCKET_ID = "910011";
-const FIXTURE_COUNTRY_PRODUCTION_BUCKET_ID = "910012";
-const FIXTURE_TOWN_STAGING_BUCKET_ID = "910021";
-const FIXTURE_TOWN_PRODUCTION_BUCKET_ID = "910022";
-const FIXTURE_PUBLIC_ORGANIZATION_STAGING_BUCKET_ID = "910031";
-const FIXTURE_PUBLIC_ORGANIZATION_PRODUCTION_BUCKET_ID = "910032";
-const FIXTURE_MEMBER_ORGANIZATION_STAGING_BUCKET_ID = "910041";
-const FIXTURE_MEMBER_ORGANIZATION_PRODUCTION_BUCKET_ID = "910042";
+// These names obey the same validators as provider responses, but fixture
+// isolation guarantees no Gemini client is constructed and no provider call is made.
+const FIXTURE_GEMINI_STORE_NAME = "fileSearchStores/e2e-fixture";
+const FIXTURE_COUNTRY_GEMINI_STORE_NAME = "fileSearchStores/e2e-ghana";
+const FIXTURE_TOWN_GEMINI_STORE_NAME = "fileSearchStores/e2e-accra";
+const FIXTURE_PUBLIC_ORGANIZATION_GEMINI_STORE_NAME = "fileSearchStores/e2e-public-org";
+const FIXTURE_MEMBER_ORGANIZATION_GEMINI_STORE_NAME = "fileSearchStores/e2e-member-org";
+const FIXTURE_GEMINI_DOCUMENT_NAME = `${FIXTURE_GEMINI_STORE_NAME}/documents/published`;
+const FIXTURE_GEMINI_OPERATION_NAME = `${FIXTURE_GEMINI_STORE_NAME}/upload/operations/index`;
+const GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-2";
 const SHA_RE = /^[a-f0-9]{40}$/;
 const TELEMETRY_SECRET_PROOF_DOMAIN = "admin-e2e-telemetry-ingest-secret-v1";
 
@@ -40,6 +36,12 @@ function requireFixtureEnvironment() {
 
 async function sha256(value: string) {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+}
+
+function storageSha256Hex(value: string): string {
+  return /^[a-f0-9]{64}$/i.test(value)
+    ? value.toLowerCase()
+    : Array.from(Uint8Array.from(atob(value), (character) => character.charCodeAt(0)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export async function authorizeFixtureRequest(request: Request) {
@@ -464,8 +466,8 @@ const bootstrapResultValidator = v.object({
     chatId: v.id("chatSessions"), resourceId: v.id("legalResources"), publishedVersionId: v.id("documentVersions"),
     reviewVersionId: v.id("documentVersions"), conversationGrantId: v.id("adminAccessGrants"), jurisdictionId: v.id("jurisdictions"),
     separationVersionId: v.id("documentVersions"),
-    userId: v.string(), stagingBucketId: v.string(), productionBucketId: v.string(),
-    callbackToken: v.string(), callbackJobId: v.id("integrationJobs"), usageUserId: v.string(),
+    userId: v.string(), geminiStoreName: v.string(), geminiDocumentName: v.string(),
+    geminiOperationName: v.string(), providerJobId: v.id("integrationJobs"), usageUserId: v.string(),
     jurisdictionCountryId: v.id("jurisdictions"), jurisdictionTownId: v.id("jurisdictions"),
     publicOrganizationJurisdictionId: v.id("jurisdictions"), jurisdictionMemberOnlyId: v.id("jurisdictions"),
     jurisdictionMemberId: v.id("organizationMemberships"), jurisdictionFormerMemberId: v.id("organizationMemberships"),
@@ -495,6 +497,12 @@ export const bootstrapRecords = internalMutation({
     if (conflictingGhana.length !== 0) throw new ConvexError("E2E_FIXTURE_SHARED_TARGET");
 
     const now = Date.now();
+    const [publishedMetadata, reviewMetadata, separationMetadata] = await Promise.all([
+      ctx.db.system.get("_storage", publishedStorageId),
+      ctx.db.system.get("_storage", reviewStorageId),
+      ctx.db.system.get("_storage", separationStorageId),
+    ]);
+    if (!publishedMetadata || !reviewMetadata || !separationMetadata) throw new ConvexError("E2E_FIXTURE_STORAGE_MISSING");
     const flagRows = await ctx.db.query("featureFlags")
       .withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", environment)).take(2);
     if (flagRows.length > 1) throw new ConvexError("E2E_FIXTURE_SHARED_TARGET");
@@ -554,7 +562,7 @@ export const bootstrapRecords = internalMutation({
 
     const jurisdictionCountryId = await ctx.db.insert("jurisdictions", {
       code: "GH", name: `${tag} Ghana`, slug: fixtureSlug(tag, "ghana"), status: "enabled", isDefault: true,
-      stagingBucketId: FIXTURE_COUNTRY_STAGING_BUCKET_ID, productionBucketId: FIXTURE_COUNTRY_PRODUCTION_BUCKET_ID,
+      geminiFileSearchStoreName: FIXTURE_COUNTRY_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
       providerSyncState: "synced", kind: "geographic", visibility: "public", legacyCountryCode: "GH",
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
@@ -564,7 +572,7 @@ export const bootstrapRecords = internalMutation({
     });
     const jurisdictionTownId = await ctx.db.insert("jurisdictions", {
       name: `${tag} Accra`, slug: fixtureSlug(tag, "accra"), status: "enabled", isDefault: false,
-      stagingBucketId: FIXTURE_TOWN_STAGING_BUCKET_ID, productionBucketId: FIXTURE_TOWN_PRODUCTION_BUCKET_ID,
+      geminiFileSearchStoreName: FIXTURE_TOWN_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
       providerSyncState: "synced", kind: "geographic", visibility: "public",
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
@@ -583,7 +591,7 @@ export const bootstrapRecords = internalMutation({
     });
     const publicOrganizationJurisdictionId = await ctx.db.insert("jurisdictions", {
       name: `${tag} Public Organization`, slug: fixtureSlug(tag, "public-organization"), status: "enabled", isDefault: false,
-      stagingBucketId: FIXTURE_PUBLIC_ORGANIZATION_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PUBLIC_ORGANIZATION_PRODUCTION_BUCKET_ID,
+      geminiFileSearchStoreName: FIXTURE_PUBLIC_ORGANIZATION_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
       providerSyncState: "synced", kind: "organizational", visibility: "public", organizationId: publicOrganizationId,
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
@@ -600,7 +608,7 @@ export const bootstrapRecords = internalMutation({
     });
     const jurisdictionMemberOnlyId = await ctx.db.insert("jurisdictions", {
       name: `${tag} Member Organization`, slug: fixtureSlug(tag, "member-organization"), status: "enabled", isDefault: false,
-      stagingBucketId: FIXTURE_MEMBER_ORGANIZATION_STAGING_BUCKET_ID, productionBucketId: FIXTURE_MEMBER_ORGANIZATION_PRODUCTION_BUCKET_ID,
+      geminiFileSearchStoreName: FIXTURE_MEMBER_ORGANIZATION_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
       providerSyncState: "synced", kind: "organizational", visibility: "members", organizationId: memberOrganizationId,
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
@@ -619,7 +627,7 @@ export const bootstrapRecords = internalMutation({
 
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
       code: "ZZ", name: `${tag} jurisdiction`, slug: tag, status: "enabled", isDefault: false,
-      stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced",
+      geminiFileSearchStoreName: FIXTURE_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL, providerSyncState: "synced",
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
     const resourceId = await ctx.db.insert("legalResources", {
@@ -630,21 +638,21 @@ export const bootstrapRecords = internalMutation({
     });
     const publishedVersionId = await ctx.db.insert("documentVersions", {
       resourceId, versionNumber: 1, originalStorageId: publishedStorageId, filename: `${tag}-published.pdf`, mimeType: "application/pdf",
-      byteSize: 17, sha256: "a".repeat(64), sourceUrl: "https://example.invalid/e2e-v1", effectiveDate: "2026-01-01",
-      status: "published", groundxStagingDocumentId: `${tag}-stage-doc-1`, groundxProductionDocumentId: `${tag}-prod-doc-1`,
+      byteSize: publishedMetadata.size, sha256: storageSha256Hex(publishedMetadata.sha256), sourceUrl: "https://example.invalid/e2e-v1", effectiveDate: "2026-01-01",
+      status: "published", geminiDocumentName: FIXTURE_GEMINI_DOCUMENT_NAME,
       submittedBy: sessions.content_manager.userId, reviewedBy: sessions.content_reviewer.userId,
       submittedAt: now, reviewedAt: now, publishedAt: now, createdAt: now, updatedAt: now,
     });
     const reviewVersionId = await ctx.db.insert("documentVersions", {
       resourceId, versionNumber: 2, originalStorageId: reviewStorageId, filename: `${tag}-review.pdf`, mimeType: "application/pdf",
-      byteSize: 14, sha256: "b".repeat(64), sourceUrl: "https://example.invalid/e2e-v2", effectiveDate: "2026-02-01",
-      status: "ready_for_review", groundxStagingDocumentId: `${tag}-stage-doc-2`, submittedBy: sessions.content_manager.userId,
+      byteSize: reviewMetadata.size, sha256: storageSha256Hex(reviewMetadata.sha256), sourceUrl: "https://example.invalid/e2e-v2", effectiveDate: "2026-02-01",
+      status: "ready_for_review", submittedBy: sessions.content_manager.userId,
       submittedAt: now, createdAt: now + 1, updatedAt: now + 1,
     });
     const separationVersionId = await ctx.db.insert("documentVersions", {
       resourceId, versionNumber: 3, originalStorageId: separationStorageId, filename: `${tag}-reviewer-submitted.pdf`, mimeType: "application/pdf",
-      byteSize: 18, sha256: "c".repeat(64), sourceUrl: "https://example.invalid/e2e-v3", effectiveDate: "2026-03-01",
-      status: "ready_for_review", groundxStagingDocumentId: `${tag}-stage-doc-3`, submittedBy: sessions.content_reviewer.userId,
+      byteSize: separationMetadata.size, sha256: storageSha256Hex(separationMetadata.sha256), sourceUrl: "https://example.invalid/e2e-v3", effectiveDate: "2026-03-01",
+      status: "ready_for_review", submittedBy: sessions.content_reviewer.userId,
       submittedAt: now, createdAt: now + 2, updatedAt: now + 2,
     });
     await ctx.db.patch(resourceId, { activeVersionId: publishedVersionId });
@@ -661,11 +669,10 @@ export const bootstrapRecords = internalMutation({
     });
     await ctx.db.insert("dailyUsage", { userId: `fixture:${tag}`, day: tag, count: 3 });
 
-    const callbackToken = `gx_${Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-    const callbackJobId = await ctx.db.insert("integrationJobs", {
-      type: "poll_process", targetType: "e2e_fixture", targetId: tag, payload: "{}", actorId: "system", actorRoles: [],
-      idempotencyKey: `${tag}-callback`, requestFingerprint: "{}", correlationId: `${tag}-callback`,
-      callbackTokenHash: await hashCallbackToken(callbackToken), processId: `${tag}-process`, status: "waiting_callback",
+    const providerJobId = await ctx.db.insert("integrationJobs", {
+      type: "gemini_index_document", targetType: "e2e_fixture", targetId: tag, payload: "{}", actorId: "system", actorRoles: [],
+      idempotencyKey: `${tag}-provider`, requestFingerprint: "{}", correlationId: `${tag}-provider`,
+      providerOperationName: FIXTURE_GEMINI_OPERATION_NAME, recoveryKind: "poll_operation", status: "waiting_provider",
       attemptCount: 1, createdAt: now - 100 * 24 * 60 * 60_000, updatedAt: now,
     });
 
@@ -676,7 +683,8 @@ export const bootstrapRecords = internalMutation({
       jurisdictionUsers: { member, formerMember },
       records: {
         chatId, resourceId, publishedVersionId, reviewVersionId, separationVersionId, conversationGrantId, jurisdictionId, userId: normal.userId,
-        stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, callbackToken, callbackJobId,
+        geminiStoreName: FIXTURE_GEMINI_STORE_NAME, geminiDocumentName: FIXTURE_GEMINI_DOCUMENT_NAME,
+        geminiOperationName: FIXTURE_GEMINI_OPERATION_NAME, providerJobId,
         usageUserId: `fixture:${tag}`,
         jurisdictionCountryId, jurisdictionTownId, publicOrganizationJurisdictionId, jurisdictionMemberOnlyId,
         jurisdictionMemberId, jurisdictionFormerMemberId,
@@ -710,8 +718,8 @@ export const bootstrap = internalAction({
         records: {
           chatId: Id<"chatSessions">; resourceId: Id<"legalResources">; publishedVersionId: Id<"documentVersions">;
           reviewVersionId: Id<"documentVersions">; separationVersionId: Id<"documentVersions">; conversationGrantId: Id<"adminAccessGrants">; jurisdictionId: Id<"jurisdictions">;
-          userId: string; stagingBucketId: string; productionBucketId: string;
-          callbackToken: string; callbackJobId: Id<"integrationJobs">; usageUserId: string;
+          userId: string; geminiStoreName: string; geminiDocumentName: string;
+          geminiOperationName: string; providerJobId: Id<"integrationJobs">; usageUserId: string;
           jurisdictionCountryId: Id<"jurisdictions">; jurisdictionTownId: Id<"jurisdictions">;
           publicOrganizationJurisdictionId: Id<"jurisdictions">; jurisdictionMemberOnlyId: Id<"jurisdictions">;
           jurisdictionMemberId: Id<"organizationMemberships">; jurisdictionFormerMemberId: Id<"organizationMemberships">;
@@ -931,9 +939,7 @@ async function mainFixtureRecords(ctx: MutationCtx, tag: string) {
   if (!storageId) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
   const metadata = await ctx.db.system.get("_storage", storageId);
   if (!metadata) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-  const sha256Hex = /^[a-f0-9]{64}$/i.test(metadata.sha256)
-    ? metadata.sha256.toLowerCase()
-    : Array.from(Uint8Array.from(atob(metadata.sha256), (character) => character.charCodeAt(0)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const sha256Hex = storageSha256Hex(metadata.sha256);
   return { jurisdiction, resource, storageId, byteSize: metadata.size, sha256Hex };
 }
 
@@ -945,7 +951,9 @@ function publicationOperationFromPayload(payload: string): StubPublicationOperat
   try { value = JSON.parse(payload); } catch { return null; }
   if (!value || typeof value !== "object") return null;
   const operation = (value as { operation?: unknown }).operation;
-  return operation === "publish" || operation === "rollback" || operation === "unpublish" ? operation : null;
+  if (operation === "publish" || operation === "replace_index") return "publish";
+  if (operation === "rollback" || operation === "rollback_index") return "rollback";
+  return operation === "unpublish" ? operation : null;
 }
 
 async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id<"documentVersions">) {
@@ -988,6 +996,7 @@ export const consumeProviderOutcome = internalMutation({
     requireFixtureEnvironment();
     const job = await ctx.db.get(args.jobId);
     if (!job || job.status !== "running") throw new ConvexError("E2E_PROVIDER_JOB_STATE_INVALID");
+    if (job.providerOperationName !== undefined) return "succeeded" as const;
     const operation = publicationOperationFromPayload(job.payload);
     if (job.targetType !== "documentVersion" || operation === null) return "succeeded" as const;
     const rows = await ctx.db.query("e2eProviderStubOutcomes")
@@ -1048,8 +1057,9 @@ async function createMatrixVersion(
     sourceUrl: "https://example.invalid/matrix.pdf",
     effectiveDate: "2026-02-01",
     status,
-    groundxStagingDocumentId: `${tag}-${key}-${suffix}-stage`,
-    ...(status === "published" || status === "superseded" ? { groundxProductionDocumentId: `${tag}-${key}-${suffix}-prod` } : {}),
+    ...(status === "published" || status === "superseded"
+      ? { geminiDocumentName: `${FIXTURE_GEMINI_STORE_NAME}/documents/${suffix}` }
+      : {}),
     submittedBy,
     ...(status === "ready_for_review" || status === "approved" || status === "published" || status === "superseded" ? { submittedAt: now } : {}),
     createdAt: now,
@@ -1114,10 +1124,10 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/exports:issueConversationExportReference": { const { chatId, grantId } = await chatAndGrant(); const { storageId } = await mainFixtureRecords(ctx, input.tag); const correlationId = `${marker}-export`; await ctx.db.insert("adminExports", { correlationId, requesterId: actor.userId, requesterSessionId: actor.sessionId, chatSessionId: chatId, accessGrantId: grantId, status: "ready", storageId, expiresAt: Date.now() + 10 * 60_000, createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { correlationId, grantId }); break; }
     case "admin/documents:generateUploadUrl": break;
     case "admin/documents:createDocumentVersion": { const resourceId = await createMatrixResource(ctx, input.tag, input.key, "create-version"); const stored = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { resourceId, storageId: stored.storageId, filename: `${marker}.pdf`, mimeType: "application/pdf", byteSize: stored.byteSize, sha256: stored.sha256Hex, sourceUrl: "https://example.invalid/matrix", effectiveAt: "2026-02-01" }); break; }
-    case "admin/resources:createJurisdiction": Object.assign(args, { code: await allocateMatrixJurisdictionCode(ctx, input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason }); break;
+    case "admin/resources:createJurisdiction": Object.assign(args, { code: await allocateMatrixJurisdictionCode(ctx, input.path, input.role), name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, isDefault: false, reason }); break;
     case "admin/resources:updateJurisdiction":
     case "admin/resources:enableJurisdiction":
-    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const code = await allocateMatrixJurisdictionCode(ctx, input.path, input.role); const id = await ctx.db.insert("jurisdictions", { code, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, stagingBucketId: FIXTURE_STAGING_BUCKET_ID, productionBucketId: FIXTURE_PRODUCTION_BUCKET_ID, isDefault: false, reason } : { id, reason }); break; }
+    case "admin/resources:archiveJurisdiction": { const now = Date.now(); const code = await allocateMatrixJurisdictionCode(ctx, input.path, input.role); const id = await ctx.db.insert("jurisdictions", { code, name: `${marker} jurisdiction`, slug: `m-${crypto.randomUUID().slice(0, 12)}`, status: input.path.endsWith("enableJurisdiction") ? "draft" : "enabled", isDefault: false, ...(input.path.endsWith("enableJurisdiction") ? {} : { geminiFileSearchStoreName: `${FIXTURE_GEMINI_STORE_NAME}-${code.toLowerCase()}`, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL }), providerSyncState: "synced", createdBy: `fixture:${input.tag}`, updatedBy: `fixture:${input.tag}`, createdAt: now, updatedAt: now }); Object.assign(args, input.path.endsWith("updateJurisdiction") ? { id, name: `${marker} updated`, slug: `u-${crypto.randomUUID().slice(0, 12)}`, isDefault: false, reason } : { id, reason }); break; }
     case "admin/resources:createResource": { const { jurisdiction } = await mainFixtureRecords(ctx, input.tag); Object.assign(args, { jurisdictionId: jurisdiction._id, type: "act", title: `${marker} resource`, issuer: "E2E fixture", officialCitation: `${marker}-create`, sourceUrl: "https://example.invalid/matrix", topics: ["fixture"], effectiveDate: "2026-01-01", reason }); break; }
     case "admin/resources:updateResource":
     case "admin/resources:archiveResource":
@@ -1127,7 +1137,7 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/reviews:rejectVersion": { const submitter = (await fixtureActor(ctx, input.tag, "content_manager")).userId; const item = await createMatrixVersion(ctx, input.tag, input.key, input.path.endsWith("approveVersion") ? "approve" : "reject", "ready_for_review", submitter); Object.assign(args, { versionId: item.versionId, checklistAnswers: { sourceAuthentic: true, metadataAccurate: true, extractionReviewed: true, citationsVerified: true, evaluationPassed: true }, evaluationRunId: `${input.key}.evaluation`, reason, idempotencyKey: input.key }); break; }
     case "admin/publication:publishVersion":
     case "admin/publication:unpublishVersion":
-    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await ctx.db.insert("documentVersions", { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", groundxStagingDocumentId: `${marker}-active-stage`, groundxProductionDocumentId: `${marker}-active-prod`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
+    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await ctx.db.insert("documentVersions", { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", geminiDocumentName: `${FIXTURE_GEMINI_STORE_NAME}/documents/${input.key}-active`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
     case "admin/billing:grantQuotaOverride": {
       const target = await user("quota_grant");
       Object.assign(args, { userId: target.userId, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, reason, confirmation: "", idempotencyKey: input.key });
@@ -1142,9 +1152,9 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
       Object.assign(args, { overrideId, reason, idempotencyKey: input.key });
       break;
     }
-    case "admin/jobs:enqueueJob": Object.assign(args, { type: "poll_process", targetType: "e2e_fixture", targetId: marker, payload: { processId: `${marker}-process` }, idempotencyKey: input.key }); break;
+    case "admin/jobs:enqueueJob": Object.assign(args, { type: "gemini_index_document", targetType: "e2e_fixture", targetId: marker, payload: { operation: "publish", storeName: FIXTURE_GEMINI_STORE_NAME, sha256: "a".repeat(64) }, idempotencyKey: input.key }); break;
     case "admin/jobs:retryJob":
-    case "admin/jobs:cancelJob": { const retry = input.path.endsWith("retryJob"); const jobId = await ctx.db.insert("integrationJobs", { type: "poll_process", targetType: "e2e_fixture", targetId: marker, payload: JSON.stringify({ processId: `${marker}-process` }), actorId: actor.userId, actorRoles: [input.role], idempotencyKey: `${input.key}.seed`, requestFingerprint: "{}", correlationId: `${marker}-seed`, callbackTokenHash: "0".repeat(64), status: retry ? "failed" : "queued", attemptCount: retry ? 1 : 0, ...(retry ? { lastErrorKind: "network" as const } : { nextAttemptAt: Date.now() }), createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { jobId, reason, idempotencyKey: input.key }); break; }
+    case "admin/jobs:cancelJob": { const retry = input.path.endsWith("retryJob"); const jobId = await ctx.db.insert("integrationJobs", { type: "gemini_index_document", targetType: "e2e_fixture", targetId: marker, payload: JSON.stringify({ operation: "publish", storeName: FIXTURE_GEMINI_STORE_NAME, sha256: "a".repeat(64) }), actorId: actor.userId, actorRoles: [input.role], idempotencyKey: `${input.key}.seed`, requestFingerprint: "{}", correlationId: `${marker}-seed`, status: retry ? "manual_review" : "queued", attemptCount: retry ? 1 : 0, ...(retry ? { lastErrorKind: "network" as const, providerOperationName: FIXTURE_GEMINI_OPERATION_NAME, recoveryKind: "poll_operation" as const } : { nextAttemptAt: Date.now() }), createdAt: Date.now(), updatedAt: Date.now() }); Object.assign(args, { jobId, reason, idempotencyKey: input.key }); break; }
     case "admin/operations:createIncident": Object.assign(args, { title: `${marker} incident`, severity: "low", reason, idempotencyKey: input.key }); break;
     case "admin/operations:addIncidentNote":
     case "admin/operations:updateIncident": {
@@ -1432,11 +1442,11 @@ export const applyControl = internalMutation({
 
     if (args.operation === "run_retention") {
       // Never call the global retention engine from fixtures. This boundary
-      // touches only the tagged callback job and reports its own state.
-      const callbackJob = await ctx.db.query("integrationJobs")
+      // touches only the tagged provider job and reports its own state.
+      const providerJob = await ctx.db.query("integrationJobs")
         .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", args.tag)).unique();
-      if (!callbackJob) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
-      await ctx.db.patch(callbackJob._id, {
+      if (!providerJob) throw new ConvexError("E2E_FIXTURE_NOT_FOUND");
+      await ctx.db.patch(providerJob._id, {
         payload: "{}", lastErrorKind: undefined, retentionPending: false,
         retentionRedactedAt: Date.now(), updatedAt: Date.now(),
       });
@@ -1456,7 +1466,7 @@ export const applyControl = internalMutation({
     const chat = await ctx.db.query("chatSessions")
       .withIndex("by_user_externalId", (q) => q.eq("userId", `fixture:${args.tag}`).eq("externalId", args.tag)).unique();
     const grants = chat ? await ctx.db.query("adminAccessGrants").withIndex("by_expiresAt").take(500) : [];
-    const callbackJob = await ctx.db.query("integrationJobs")
+    const providerJob = await ctx.db.query("integrationJobs")
       .withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", args.tag)).unique();
     const publicationJobs = args.versionId
       ? await ctx.db.query("integrationJobs").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "documentVersion").eq("targetId", args.versionId!)).take(20)
@@ -1466,9 +1476,9 @@ export const applyControl = internalMutation({
       activeVersionId: resource.activeVersionId ?? null,
       versions: versions.map((row) => ({ id: row._id, versionNumber: row.versionNumber, status: row.status, failureSummary: row.failureSummary ?? null })),
       grantActive: grants.some((row) => row.chatSessionId === chat?._id && row.correlationId === `${args.tag}-grant` && row.expiresAt > Date.now() && row.revokedAt === undefined),
-      retention: { deletedTotal: callbackJob?.retentionRedactedAt ? 1 : 0, lastSuccessfulAt: callbackJob?.retentionRedactedAt ?? null },
-      callbackJob: callbackJob ? { status: callbackJob.status, payload: callbackJob.payload, retentionRedactedAt: callbackJob.retentionRedactedAt ?? null } : null,
-      publicationJob: latestPublicationJob ? { id: latestPublicationJob._id, status: latestPublicationJob.status, processId: latestPublicationJob.processId ?? null, lastErrorKind: latestPublicationJob.lastErrorKind ?? null } : null,
+      retention: { deletedTotal: providerJob?.retentionRedactedAt ? 1 : 0, lastSuccessfulAt: providerJob?.retentionRedactedAt ?? null },
+      providerJob: providerJob ? { status: providerJob.status, payload: providerJob.payload, retentionRedactedAt: providerJob.retentionRedactedAt ?? null } : null,
+      publicationJob: latestPublicationJob ? { id: latestPublicationJob._id, status: latestPublicationJob.status, providerOperationName: latestPublicationJob.providerOperationName ?? null, lastErrorKind: latestPublicationJob.lastErrorKind ?? null } : null,
     };
   },
 });

@@ -3,9 +3,9 @@ import "server-only";
 import { timingSafeEqual } from "node:crypto";
 import {
   E2E_JURISDICTION_QUESTIONS,
-  encodeRetrievalObservationV1Value,
+  encodeRetrievalObservationV2Value,
   type E2EProviderScenario,
-  type RetrievalObservationV1,
+  type RetrievalObservationV2,
 } from "../../shared/e2e-jurisdiction-provider-contract";
 
 type Environment = Record<string, string | undefined>;
@@ -192,6 +192,6 @@ export function authorizedObservationSecret(
     && timingSafeEqual(expectedBytes, candidateBytes);
 }
 
-export function encodeRetrievalObservationV1(value: RetrievalObservationV1): string {
-  return encodeRetrievalObservationV1Value(value);
+export function encodeRetrievalObservationV2(value: RetrievalObservationV2): string {
+  return encodeRetrievalObservationV2Value(value);
 }

@@ -115,7 +115,7 @@ async function createUser(
 
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
-const previousGroundxApiKey = process.env.GROUNDX_API_KEY;
+const previousGoogleAiApiKey = process.env.GOOGLE_AI_API_KEY;
 const previousPolarOrganizationToken = process.env.POLAR_ORGANIZATION_TOKEN;
 
 afterEach(() => {
@@ -129,10 +129,10 @@ afterEach(() => {
   } else {
     process.env.ADMIN_ENVIRONMENT = previousAdminEnvironment;
   }
-  if (previousGroundxApiKey === undefined) {
-    delete process.env.GROUNDX_API_KEY;
+  if (previousGoogleAiApiKey === undefined) {
+    delete process.env.GOOGLE_AI_API_KEY;
   } else {
-    process.env.GROUNDX_API_KEY = previousGroundxApiKey;
+    process.env.GOOGLE_AI_API_KEY = previousGoogleAiApiKey;
   }
   if (previousPolarOrganizationToken === undefined) {
     delete process.env.POLAR_ORGANIZATION_TOKEN;
@@ -413,7 +413,7 @@ describe("read-only admin query behavior", () => {
     await enablePanel(t);
     const asAuditor = await createAdmin(t, "auditor");
     const asSupport = await createAdmin(t, "support_agent");
-    process.env.GROUNDX_API_KEY = "groundx-secret-value";
+    process.env.GOOGLE_AI_API_KEY = "google-secret-value";
     process.env.POLAR_ORGANIZATION_TOKEN = "polar-secret-value";
 
     const health = await asAuditor.query(
@@ -437,9 +437,10 @@ describe("read-only admin query behavior", () => {
     );
     expect(fullHealth.page.find((row) => row.id === "billing")).toMatchObject({
       configured: true,
-      status: "ready",
+      status: "configured",
     });
     expect(JSON.stringify(fullHealth)).not.toContain("polar-secret-value");
+    expect(JSON.stringify(fullHealth)).not.toContain("google-secret-value");
 
     await expect(
       asAuditor.query(api.admin.users.list, {
@@ -453,5 +454,9 @@ describe("read-only admin query behavior", () => {
         userId: " target-user ",
       }),
     ).rejects.toThrow("INVALID_ADMIN_FILTER");
+  });
+
+  it("does not inherit the Google AI key from earlier integration coverage", () => {
+    expect(process.env.GOOGLE_AI_API_KEY).toBe(previousGoogleAiApiKey);
   });
 });

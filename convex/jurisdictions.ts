@@ -1,5 +1,6 @@
 import { ConvexError, v } from "convex/values";
-import { internalQuery, query } from "./_generated/server";
+import { internalMutation, internalQuery, query } from "./_generated/server";
+import { makeFunctionReference } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import {
@@ -10,15 +11,17 @@ import {
   MAX_RETRIEVAL_LIBRARIES,
   MAX_SELECTOR_PAGE_SIZE,
   normalizeUniqueJurisdictionIds,
-  productionLibraryRequestValidator,
-  productionLibraryResolutionValidator,
+  researchLibraryRequestValidator,
+  researchLibraryResolutionValidator,
   researchScopeValidator,
-  type ProductionLibraryAvailability,
-  type ProductionLibraryResolution,
+  type ResearchLibraryAvailability,
+  type ResearchLibraryResolution,
+  type ResearchCitationKey,
+  type ResearchDocumentManifest,
   type JurisdictionKind,
 } from "./lib/jurisdictionDomain";
 import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
-import { normalizePositiveSafeIntegerBucketId } from "./lib/jurisdictionEligibility";
+import { isGeminiDocumentName, isGeminiFileSearchStoreName } from "./lib/geminiFileSearchNames";
 import {
   activeOrganizationIdsForUser,
   assertJurisdictionAccess,
@@ -37,6 +40,50 @@ const accessibleJurisdictionValidator = v.object({
   visibility: v.union(v.literal("public"), v.literal("members")),
 });
 
+const expireResearchManifestNonceRef = makeFunctionReference<"mutation">(
+  "jurisdictions:expireResearchManifestNonce",
+);
+
+export const consumeResearchManifestNonce = internalMutation({
+  args: { nonceHash: v.string(), expiresAt: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    if (!/^[A-Za-z0-9_-]{43}$/u.test(args.nonceHash)
+      || !Number.isSafeInteger(args.expiresAt)
+      || args.expiresAt <= now
+      || args.expiresAt > now + 60_000) {
+      throw new ConvexError("RESEARCH_MANIFEST_PROOF_INVALID");
+    }
+    const existing = await ctx.db.query("researchManifestNonces")
+      .withIndex("by_nonceHash", (q) => q.eq("nonceHash", args.nonceHash))
+      .unique();
+    if (existing) throw new ConvexError("RESEARCH_MANIFEST_REPLAY");
+    const nonceId = await ctx.db.insert("researchManifestNonces", {
+      nonceHash: args.nonceHash,
+      expiresAt: args.expiresAt,
+      createdAt: now,
+    });
+    await ctx.scheduler.runAt(args.expiresAt, expireResearchManifestNonceRef, { nonceId });
+    return null;
+  },
+});
+
+export const expireResearchManifestNonce = internalMutation({
+  args: { nonceId: v.id("researchManifestNonces") },
+  returns: v.null(),
+  handler: async (ctx, { nonceId }) => {
+    const row = await ctx.db.get(nonceId);
+    if (!row) return null;
+    if (row.expiresAt > Date.now()) {
+      await ctx.scheduler.runAt(row.expiresAt, expireResearchManifestNonceRef, { nonceId });
+      return null;
+    }
+    await ctx.db.delete(nonceId);
+    return null;
+  },
+});
+
 const searchJurisdictionValidator = v.union(
   v.null(),
   v.object({
@@ -45,7 +92,7 @@ const searchJurisdictionValidator = v.union(
     slug: v.string(),
     enabled: v.literal(true),
     isDefault: v.boolean(),
-    productionBucketId: v.string(),
+    searchReady: v.literal(true),
   }),
 );
 
@@ -336,7 +383,7 @@ function normalizeCode(code: string): string {
   return normalized;
 }
 
-/** Returns provider configuration only to protected server-side callers. */
+/** Returns readiness without provider identity to protected server-side callers. */
 export const getPublicByCode = internalQuery({
   args: { code: v.string() },
   returns: searchJurisdictionValidator,
@@ -357,15 +404,13 @@ export const getPublicByCode = internalQuery({
       return null;
     }
     const jurisdiction = rows[0];
-    const productionBucketId = jurisdiction.productionBucketId;
-    if (!productionBucketId) return null;
     return {
       code,
       name: jurisdiction.name,
       slug: jurisdiction.slug,
       enabled: true as const,
       isDefault: jurisdiction.isDefault,
-      productionBucketId,
+      searchReady: true as const,
     };
   },
 });
@@ -574,28 +619,156 @@ export const resolveResearchScope = query({
     ),
 });
 
-function productionAvailability(
+// This bounds the trusted citation manifest, not the jurisdiction's store health.
+const MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION = 64;
+const MAX_RESEARCH_CITATION_KEYS = 64;
+const MAX_RESEARCH_REFERENCE_ID_LENGTH = 128;
+
+function boundedResearchReference(value: string) {
+  return value.length > 0
+    && value.length <= MAX_RESEARCH_REFERENCE_ID_LENGTH
+    && value === value.trim();
+}
+
+async function authorizeResearchCitation(
+  ctx: QueryCtx,
   row: Doc<"jurisdictions">,
-): ProductionLibraryAvailability {
-  const productionBucketId = row.productionBucketId === undefined
-    ? null
-    : normalizePositiveSafeIntegerBucketId(row.productionBucketId);
-  return productionBucketId === null
-    ? { jurisdictionId: row._id, status: "unconfigured" }
-    : { jurisdictionId: row._id, status: "ready", productionBucketId };
+  storeName: string,
+  key: ResearchCitationKey,
+): Promise<ResearchDocumentManifest | null> {
+  const resourceId = ctx.db.normalizeId("legalResources", key.resourceId);
+  const versionId = ctx.db.normalizeId("documentVersions", key.versionId);
+  if (!resourceId || !versionId) return null;
+  const [resource, version] = await Promise.all([
+    ctx.db.get(resourceId),
+    ctx.db.get(versionId),
+  ]);
+  const documentName = version?.geminiDocumentName;
+  if (
+    !resource ||
+    resource.jurisdictionId !== row._id ||
+    resource.status !== "active" ||
+    resource.activeVersionId !== versionId ||
+    !version ||
+    version.resourceId !== resourceId ||
+    version.status !== "published" ||
+    !documentName ||
+    !isGeminiDocumentName(documentName) ||
+    !documentName.startsWith(`${storeName}/documents/`)
+  ) return null;
+  const lock = await ctx.db.query("documentLifecycleLocks")
+    .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+    .take(1);
+  if (lock.length > 0) return null;
+  return {
+    resourceId,
+    versionId,
+    documentName,
+    title: resource.title,
+    officialCitation: resource.officialCitation,
+    sourceUrl: resource.sourceUrl,
+  };
+}
+
+async function researchAvailability(
+  ctx: QueryCtx,
+  row: Doc<"jurisdictions">,
+  citationKeys?: readonly ResearchCitationKey[],
+): Promise<ResearchLibraryAvailability> {
+  if (row.providerSyncState === "pending") {
+    return { jurisdictionId: row._id, status: "provisioning" };
+  }
+  if (row.providerSyncState === "failed") {
+    return { jurisdictionId: row._id, status: "unconfigured" };
+  }
+  if (row.providerSyncState !== "synced") {
+    return { jurisdictionId: row._id, status: "needs_review" };
+  }
+  const storeName = row.geminiFileSearchStoreName;
+  if (!storeName) return { jurisdictionId: row._id, status: "unconfigured" };
+  if (!isGeminiFileSearchStoreName(storeName)) {
+    return { jurisdictionId: row._id, status: "needs_review" };
+  }
+  const owners = await ctx.db
+    .query("jurisdictions")
+    .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
+    .take(2);
+  if (owners.length !== 1 || owners[0]._id !== row._id) {
+    return { jurisdictionId: row._id, status: "needs_review" };
+  }
+  if (citationKeys !== undefined) {
+    const documents = await Promise.all(citationKeys.map(async (key) =>
+      await authorizeResearchCitation(ctx, row, storeName, key)));
+    return {
+      jurisdictionId: row._id,
+      status: "ready",
+      storeName,
+      documents: documents.filter((document): document is ResearchDocumentManifest => document !== null),
+    };
+  }
+  const resources = await ctx.db
+    .query("legalResources")
+    .withIndex("by_jurisdictionId_and_activeVersionId", (q) =>
+      q.eq("jurisdictionId", row._id).gt("activeVersionId", undefined))
+    .take(MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION);
+  const lifecycleLocks = await Promise.all(resources.map(async (resource) =>
+    await ctx.db.query("documentLifecycleLocks")
+      .withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id))
+      .take(1)));
+  if (lifecycleLocks.some((locks) => locks.length > 0)) {
+    return { jurisdictionId: row._id, status: "needs_review" };
+  }
+  const versions = await Promise.all(resources.map(async (resource) =>
+    resource.activeVersionId ? await ctx.db.get(resource.activeVersionId) : null));
+  const documents = resources.map((resource, index) => {
+    const version = versions[index];
+    const documentName = version?.geminiDocumentName;
+    if (
+      resource.status !== "active" ||
+      !version ||
+      version.resourceId !== resource._id ||
+      version.status !== "published" ||
+      !documentName ||
+      !isGeminiDocumentName(documentName) ||
+      !documentName.startsWith(`${storeName}/documents/`)
+    ) return null;
+    return {
+      resourceId: resource._id,
+      versionId: version._id,
+      documentName,
+      title: resource.title,
+      officialCitation: resource.officialCitation,
+      sourceUrl: resource.sourceUrl,
+    };
+  });
+  if (documents.some((document) => document === null)) {
+    return { jurisdictionId: row._id, status: "needs_review" };
+  }
+  return {
+    jurisdictionId: row._id,
+    status: "ready",
+    storeName,
+    documents: documents as ResearchDocumentManifest[],
+  };
 }
 
 /** Resolves only provider availability for a transport-authenticated server route. */
-export const getProductionLibraryAvailability = internalQuery({
-  args: productionLibraryRequestValidator.fields,
-  returns: productionLibraryResolutionValidator,
-  handler: async (ctx, args): Promise<ProductionLibraryResolution> => {
+export const getResearchManifestAvailability = internalQuery({
+  args: researchLibraryRequestValidator.fields,
+  returns: researchLibraryResolutionValidator,
+  handler: async (ctx, args): Promise<ResearchLibraryResolution> => {
     const rawIds = [args.selectedJurisdictionId, ...args.supplementaryJurisdictionIds];
     if (
       args.supplementaryJurisdictionIds.length > MAX_RETRIEVAL_LIBRARIES - 1 ||
-      new Set(rawIds).size !== rawIds.length
+      new Set(rawIds).size !== rawIds.length ||
+      rawIds.some((id) => !boundedResearchReference(id)) ||
+      (args.citationKeys?.length ?? 0) > MAX_RESEARCH_CITATION_KEYS ||
+      args.citationKeys?.some((key) =>
+        !boundedResearchReference(key.jurisdictionId) ||
+        !boundedResearchReference(key.resourceId) ||
+        !boundedResearchReference(key.versionId))
     ) {
-      throw new ConvexError("PRODUCTION_LIBRARY_REQUEST_INVALID");
+      throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
     }
     const ids = normalizeUniqueJurisdictionIds(
       rawIds,
@@ -603,9 +776,29 @@ export const getProductionLibraryAvailability = internalQuery({
     );
     const rows = await Promise.all(ids.map((id) => ctx.db.get("jurisdictions", id)));
     if (rows.some((row) => !row || row.status !== "enabled")) {
-      throw new ConvexError("PRODUCTION_LIBRARY_NOT_FOUND");
+      throw new ConvexError("RESEARCH_MANIFEST_NOT_FOUND");
     }
-    const availability = (rows as Doc<"jurisdictions">[]).map(productionAvailability);
+    const allowedJurisdictionIds = new Set(ids);
+    const citationKeysByJurisdiction = new Map<Id<"jurisdictions">, ResearchCitationKey[]>();
+    const seenCitationKeys = new Set<string>();
+    for (const key of args.citationKeys ?? []) {
+      const jurisdictionId = ctx.db.normalizeId("jurisdictions", key.jurisdictionId);
+      const uniqueKey = `${key.jurisdictionId}\u0000${key.resourceId}\u0000${key.versionId}`;
+      if (!jurisdictionId || !allowedJurisdictionIds.has(jurisdictionId) || seenCitationKeys.has(uniqueKey)) {
+        throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
+      }
+      seenCitationKeys.add(uniqueKey);
+      const existing = citationKeysByJurisdiction.get(jurisdictionId) ?? [];
+      existing.push(key);
+      citationKeysByJurisdiction.set(jurisdictionId, existing);
+    }
+    const availability = await Promise.all(
+      (rows as Doc<"jurisdictions">[]).map(async (row) => await researchAvailability(
+        ctx,
+        row,
+        args.citationKeys === undefined ? undefined : citationKeysByJurisdiction.get(row._id) ?? [],
+      )),
+    );
     return { selected: availability[0], supplementary: availability.slice(1) };
   },
 });

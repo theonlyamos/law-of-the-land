@@ -6,10 +6,27 @@ import {
   collectPacedRetrievalObservations,
   collectRetrievalObservation,
   percentile95,
+  validatePerformanceCalibration,
 } from "../../../scripts/admin-performance-collector.mjs";
-import { encodeRetrievalObservationV1Value } from "../../../shared/e2e-jurisdiction-provider-contract";
+import { encodeRetrievalObservationV2Value } from "../../../shared/e2e-jurisdiction-provider-contract";
 
 describe("admin performance collector", () => {
+  it("requires a separately approved File Search p95 calibration and rejects the retired planner field", () => {
+    const approved = {
+      reference: "approved-change-42",
+      selectorP95LimitsMs: [10, 20, 30, 40],
+      autocompleteP95LimitMs: 50,
+      detailsP95LimitMs: 60,
+      fileSearchP95LimitMs: 70,
+      totalP95LimitMs: 80,
+    };
+    expect(validatePerformanceCalibration(approved)).toEqual(approved);
+    expect(() => validatePerformanceCalibration({
+      ...approved,
+      fileSearchP95LimitMs: undefined,
+      plannerP95LimitMs: 70,
+    })).toThrow(/calibration/i);
+  });
   it("opens a clean process rate window before collecting exactly twenty paced retrieval samples", async () => {
     const waits: number[] = [];
     const calls: number[] = [];
@@ -100,20 +117,21 @@ describe("admin performance collector", () => {
   it("builds bounded selector, picker, and retrieval distributions from exactly twenty samples", () => {
     const durations = Array.from({ length: 20 }, (_value, index) => index + 1);
     const observation = {
-      version: 1 as const,
-      planner: { status: "planned" as const, latencyMs: 2 },
+      version: 2 as const,
       authorizedScopeSize: 3,
       planSize: 3,
-      peakConcurrency: 2,
+      fileSearchCallCount: 1 as const,
+      fileSearchStoreCount: 3,
+      fileSearchLatencyMs: 4,
       totalLatencyMs: 7,
-      libraries: [
-        { ordinal: 0 as const, relation: "selected" as const, status: "fulfilled" as const, latencyMs: 3 },
-        { ordinal: 1 as const, relation: "organizational_geography" as const, status: "fulfilled" as const, latencyMs: 4 },
-        { ordinal: 2 as const, relation: "geographic_ancestor" as const, status: "fulfilled" as const, latencyMs: 3 },
+      evidenceBytes: 100,
+      citationCount: 2,
+      partialCoverage: false,
+      jurisdictions: [
+        { ordinal: 0 as const, relation: "selected" as const, coverage: "evidence" as const },
+        { ordinal: 1 as const, relation: "organizational_geography" as const, coverage: "evidence" as const },
+        { ordinal: 2 as const, relation: "geographic_ancestor" as const, coverage: "evidence" as const },
       ],
-      failureCount: 0,
-      coverageState: "complete" as const,
-      providerCallCount: 3,
       unexpectedRealProviderCallCount: 0 as const,
     };
 
@@ -139,23 +157,24 @@ describe("admin performance collector", () => {
     expect(sections).toMatchObject({
       jurisdictionSelector: { sampleCount: 20 },
       geographicPlacePicker: { sampleCount: 20, sameSessionCorrelation: true },
-      retrievalPlan: { sampleCount: 20, scopeSizeMax: 3, planSizeMax: 3, concurrencyPeak: 2 },
+      retrievalPlan: { sampleCount: 20, scopeSizeMax: 3, planSizeMax: 3, storeCountMax: 3, fileSearchCallCount: 20 },
     });
     expect(sections.jurisdictionSelector.profiles[0]).toMatchObject({ p50Ms: 10, p95Ms: 19 });
   });
 
   it("collects and strictly decodes the parent-only observation header", async () => {
-    const encoded = encodeRetrievalObservationV1Value({
-      version: 1,
-      planner: { status: "planned", latencyMs: 1 },
+    const encoded = encodeRetrievalObservationV2Value({
+      version: 2,
       authorizedScopeSize: 1,
       planSize: 1,
-      peakConcurrency: 1,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 1,
+      fileSearchLatencyMs: 1,
       totalLatencyMs: 2,
-      libraries: [{ ordinal: 0, relation: "selected", status: "fulfilled", latencyMs: 1 }],
-      failureCount: 0,
-      coverageState: "complete",
-      providerCallCount: 1,
+      evidenceBytes: 7,
+      citationCount: 0,
+      partialCoverage: false,
+      jurisdictions: [{ ordinal: 0, relation: "selected", coverage: "evidence" }],
       unexpectedRealProviderCallCount: 0,
     });
     const request = async (_url: string | URL | Request, init?: RequestInit) => {
@@ -167,7 +186,7 @@ describe("admin performance collector", () => {
       });
       return new Response(JSON.stringify({ result: "bounded" }), {
         status: 200,
-        headers: { "x-admin-e2e-retrieval-plan-v1": encoded },
+        headers: { "x-admin-e2e-retrieval-plan-v2": encoded },
       });
     };
     await expect(collectRetrievalObservation({
@@ -176,7 +195,7 @@ describe("admin performance collector", () => {
       observationSecret: "parent-only-secret",
       body: { query: "exact", jurisdictionId: "opaque" },
       request,
-    })).resolves.toEqual(expect.objectContaining({ version: 1, planSize: 1 }));
+    })).resolves.toEqual(expect.objectContaining({ version: 2, planSize: 1 }));
     await expect(collectRetrievalObservation({
       url: "http://127.0.0.1:3000/api/search",
       cookie: "better-auth.session_token=signed",
@@ -191,7 +210,7 @@ describe("admin performance collector", () => {
       body: {},
       request: async () => new Response("quota", {
         status: 429,
-        headers: { "x-admin-e2e-retrieval-plan-v1": encoded },
+        headers: { "x-admin-e2e-retrieval-plan-v2": encoded },
       }),
     })).rejects.toThrow(/status 429/i);
   });

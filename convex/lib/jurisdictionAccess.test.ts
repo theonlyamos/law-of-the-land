@@ -199,8 +199,8 @@ describe("jurisdiction membership access", () => {
         kind: "organizational",
         visibility: "members",
         organizationId,
-        stagingBucketId: "provider-config-must-not-leak",
-        productionBucketId: "4242",
+        geminiFileSearchStoreName: "fileSearchStores/example-university-rules",
+        geminiEmbeddingModel: "models/gemini-embedding-2",
         createdBy: "fixture",
         updatedBy: "fixture",
         createdAt: now,
@@ -214,7 +214,6 @@ describe("jurisdiction membership access", () => {
       name: "Example University Rules",
       visibility: "members",
     });
-    await expect(member.client.query(getAccessibleById, { id: membersJurisdictionId })).resolves.not.toHaveProperty("productionBucketId");
     await admin.client.mutation(setOrganizationMemberStatus, {
       organizationId,
       userId: member.userId,

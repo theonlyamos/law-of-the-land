@@ -1260,6 +1260,15 @@ export const recordAdminStepUpProof = internalMutation({
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
       }
+    } else if (args.action === "jurisdiction_store_delete") {
+      const jurisdiction = await ctx.db.get(args.targetId as Id<"jurisdictions">);
+      if (
+        typeof session.impersonatedBy === "string" ||
+        !hasRolePermission(parseAdminRoles(actor.role), "jurisdiction", "write") ||
+        !jurisdiction
+      ) {
+        throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
+      }
     } else if (!(await authComponent.getAnyUserById(ctx, args.targetId))) {
       throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     }

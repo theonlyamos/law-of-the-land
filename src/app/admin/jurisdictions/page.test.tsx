@@ -56,14 +56,14 @@ describe("typed jurisdiction register", () => {
     mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor", roles: ["auditor"] } });
     mocks.fetchAuthQuery.mockResolvedValue({ page: [{
       id: "geo_1", name: "Ghana", slug: "ghana", status: "enabled", kind: "geographic", visibility: "public",
-      provider: { syncState: "synced", stagingConfigured: true, productionConfigured: true }, migrationState: "typed",
+      provider: { syncState: "synced", setupState: "ready", storeConfigured: true, embeddingModel: "models/gemini-embedding-2" }, migrationState: "typed",
       geographic: { level: "country", parent: null }, organization: null, scopeMode: null,
     }], isDone: true, continueCursor: "" });
     render(await JurisdictionsPage({ searchParams: Promise.resolve({}) }));
     expect(mocks.fetchAuthQuery).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("editor-props")).toBeNull();
-    expect(screen.getByText("Staging: Configured")).toBeVisible();
-    expect(screen.getByText("Production: Configured")).toBeVisible();
+    expect(screen.getByText("Ready")).toBeVisible();
+    expect(screen.getByText("models/gemini-embedding-2")).toBeVisible();
     expect(screen.queryByText(/bucket/i)).toBeNull();
     expect(screen.queryByText(/place/i)).toBeNull();
   });
@@ -73,7 +73,7 @@ describe("typed jurisdiction register", () => {
     mocks.fetchAuthQuery.mockImplementation((reference: Parameters<typeof getFunctionName>[0]) => {
       if (getFunctionName(reference) === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
         id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
-        provider: { syncState: "pending", stagingConfigured: false, productionConfigured: false }, migrationState: "typed",
+        provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, migrationState: "typed",
         geographic: { level: "country", parent: null }, organization: null, scopeMode: null,
       }], isDone: true, continueCursor: "" });
       return Promise.resolve({ page: [], isDone: true, continueCursor: "" });
@@ -91,7 +91,7 @@ describe("typed jurisdiction register", () => {
     mocks.fetchAuthQuery.mockImplementation((reference: Parameters<typeof getFunctionName>[0]) => {
       if (getFunctionName(reference) === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
         id: "legacy_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
-        provider: { syncState: "pending", stagingConfigured: false, productionConfigured: true }, migrationState: "legacy",
+        provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, migrationState: "legacy",
         geographic: null, organization: null, scopeMode: null,
       }], isDone: true, continueCursor: "" });
       return Promise.resolve({ page: [], isDone: true, continueCursor: "" });
@@ -109,7 +109,7 @@ describe("typed jurisdiction register", () => {
       const name = getFunctionName(reference);
       if (name === "admin/jurisdictions:listAdminJurisdictions") return Promise.resolve({ page: [{
         id: "geo_1", name: "Ghana", slug: "ghana", status: "draft", kind: "geographic", visibility: "public",
-        provider: { syncState: "pending", stagingConfigured: false, productionConfigured: false }, migrationState: "typed",
+        provider: { syncState: "pending", setupState: "not_set_up", storeConfigured: false }, migrationState: "typed",
         geographic: { level: "country", parent: null }, organization: null, scopeMode: null,
       }], isDone: true, continueCursor: "" });
       if (name === "admin/organizations:listActiveOrganizationOptions") return Promise.reject(new Error("outage"));

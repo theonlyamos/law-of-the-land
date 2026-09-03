@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   E2E_JURISDICTION_QUESTIONS,
-  decodeRetrievalObservationV1,
+  decodeRetrievalObservationV2,
   type E2EProviderScenario,
 } from "../shared/e2e-jurisdiction-provider-contract";
 import {
@@ -57,10 +57,10 @@ async function parentObservedSearch(
       jurisdictionId: input.jurisdictionId,
     }),
   });
-  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v1");
+  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v2");
   if (!encoded) throw new Error("Authorized retrieval response omitted its bounded observation.");
   const body = await response.json() as Record<string, unknown>;
-  return { response, body, observation: decodeRetrievalObservationV1(encoded) };
+  return { response, body, observation: decodeRetrievalObservationV2(encoded) };
 }
 
 test.describe.serial("unified jurisdiction rollout evidence", () => {
@@ -142,11 +142,13 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
     expect(observed.observation).toMatchObject({
       authorizedScopeSize: 3,
       planSize: 3,
-      coverageState: "complete",
-      libraries: [
-        { ordinal: 0, relation: "selected", status: "fulfilled" },
-        { ordinal: 1, relation: "organizational_geography", status: "fulfilled" },
-        { ordinal: 2, relation: "geographic_ancestor", status: "fulfilled" },
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 3,
+      partialCoverage: false,
+      jurisdictions: [
+        { ordinal: 0, relation: "selected", coverage: "evidence" },
+        { ordinal: 1, relation: "organizational_geography", coverage: "evidence" },
+        { ordinal: 2, relation: "geographic_ancestor", coverage: "evidence" },
       ],
       unexpectedRealProviderCallCount: 0,
     });
@@ -169,15 +171,15 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
       jurisdictionId: fixture.records.jurisdictionMemberOnlyId,
     });
     expect(partial.response.status).toBe(200);
-    expect(partial.observation.coverageState).toBe("supplementary_incomplete");
+    expect(partial.observation.partialCoverage).toBe(true);
     expect(partial.body).toMatchObject({
       jurisdictionId: fixture.records.jurisdictionMemberOnlyId,
       partialCoverage: expect.any(Array),
     });
-    expect(partial.observation.libraries).toEqual([
-      expect.objectContaining({ ordinal: 0, relation: "selected", status: "fulfilled" }),
-      expect.objectContaining({ ordinal: 1, relation: "organizational_geography", status: "rejected" }),
-      expect.objectContaining({ ordinal: 2, relation: "geographic_ancestor", status: "fulfilled" }),
+    expect(partial.observation.jurisdictions).toEqual([
+      expect.objectContaining({ ordinal: 0, relation: "selected", coverage: "evidence" }),
+      expect.objectContaining({ ordinal: 1, relation: "organizational_geography", coverage: "no_evidence" }),
+      expect.objectContaining({ ordinal: 2, relation: "geographic_ancestor", coverage: "evidence" }),
     ]);
     const partialContext = JSON.parse(String(partial.body.result)) as {
       sources: Array<{ jurisdictionId: string; relation: string }>;
@@ -196,7 +198,7 @@ test.describe.serial("unified jurisdiction rollout evidence", () => {
       jurisdictionId: fixture.records.jurisdictionMemberOnlyId,
     });
     expect(selected.response.status).toBe(500);
-    expect(selected.observation.coverageState).toBe("selected_unavailable");
+    expect(selected.observation.jurisdictions[0]).toMatchObject({ relation: "selected", coverage: "no_evidence" });
     expect(selected.body).toEqual({ error: "We couldn't find relevant legal information for your question." });
     expect(JSON.stringify(selected.body)).not.toMatch(/bucket|membership|provider|organization/i);
   });

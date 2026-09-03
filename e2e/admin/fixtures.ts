@@ -19,9 +19,9 @@ export const ROLE_FIXTURES = [
 ] as const;
 
 export const RESOURCE_FIXTURES = {
-  stagingBucketId: `${FIXTURE_TAG}-staging`,
-  productionBucketId: `${FIXTURE_TAG}-production`,
-  callbackProcessId: `${FIXTURE_TAG}-callback`,
+  geminiStoreName: "fileSearchStores/e2e-fixture",
+  geminiDocumentName: "fileSearchStores/e2e-fixture/documents/published",
+  geminiOperationName: "fileSearchStores/e2e-fixture/upload/operations/index",
   chatExternalId: `${FIXTURE_TAG}-chat`,
   usageUserId: `${FIXTURE_TAG}-usage`,
   jobTargetId: `${FIXTURE_TAG}-job`,
@@ -39,7 +39,7 @@ export type BrowserFixtureManifest = {
   records: {
     chatId: string; resourceId: string; publishedVersionId: string; reviewVersionId: string;
     separationVersionId: string; conversationGrantId: string; jurisdictionId: string; userId: string;
-    stagingBucketId: string; productionBucketId: string; callbackToken: string; callbackJobId: string;
+    geminiStoreName: string; geminiDocumentName: string; geminiOperationName: string; providerJobId: string;
     usageUserId: string; jurisdictionCountryId: string; jurisdictionTownId: string;
     publicOrganizationJurisdictionId: string; jurisdictionMemberOnlyId: string;
     jurisdictionMemberId: string; jurisdictionFormerMemberId: string;
@@ -96,10 +96,10 @@ export async function controlBrowserFixtures(
     };
     activeVersionId: string | null;
     versions: Array<{ id: string; versionNumber: number; status: string; failureSummary: string | null }>;
-    publicationJob: { id: string; status: string; processId: string | null; lastErrorKind: string | null } | null;
+    publicationJob: { id: string; status: string; providerOperationName: string | null; lastErrorKind: string | null } | null;
     grantActive: boolean;
     retention: { deletedTotal: number; lastSuccessfulAt: number | null };
-    callbackJob: null | { status: string; payload: string; retentionRedactedAt: number | null };
+    providerJob: null | { status: string; payload: string; retentionRedactedAt: number | null };
   };
   if (result.cleanupConflict === true) {
     throw new Error("Guarded fixture control reported an ownership conflict; recovery cleanup remains required.");
@@ -182,9 +182,9 @@ export async function runAcceptanceSlice(
     "super_admin",
     "super_admin",
   ]);
-  expect(RESOURCE_FIXTURES.stagingBucketId).not.toBe(
-    RESOURCE_FIXTURES.productionBucketId,
-  );
+  expect(RESOURCE_FIXTURES.geminiStoreName).toMatch(/^fileSearchStores\/[a-z0-9-]{1,40}$/);
+  expect(RESOURCE_FIXTURES.geminiDocumentName).toMatch(/^fileSearchStores\/[a-z0-9-]{1,40}\/documents\/[a-z0-9-]{1,40}$/);
+  expect(RESOURCE_FIXTURES.geminiOperationName).toMatch(/^fileSearchStores\/[a-z0-9-]{1,40}\/upload\/operations\/[A-Za-z0-9._~-]+$/);
 
   const files = [...slice.convex, ...(slice.ui ?? [])];
   const vitest = path.resolve("node_modules/vitest/vitest.mjs");

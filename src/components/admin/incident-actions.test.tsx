@@ -29,14 +29,14 @@ afterEach(cleanup);
 describe("incident administration controls", () => {
   it("creates a new incident through the permission-gated form", async () => {
     render(<IncidentCreateForm canWrite />);
-    fireEvent.change(screen.getByLabelText("Incident title"), { target: { value: "GroundX callback backlog" } });
+    fireEvent.change(screen.getByLabelText("Incident title"), { target: { value: "Gemini indexing backlog" } });
     fireEvent.change(screen.getByLabelText("Initial severity"), { target: { value: "high" } });
     fireEvent.change(screen.getByLabelText("Reason for opening incident"), { target: { value: "Callbacks exceeded the operational threshold" } });
     fireEvent.click(screen.getByRole("button", { name: "Open incident" }));
 
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
     expect(mocks.create).toHaveBeenCalledWith({
-      title: "GroundX callback backlog",
+      title: "Gemini indexing backlog",
       severity: "high",
       reason: "Callbacks exceeded the operational threshold",
       idempotencyKey: expect.stringMatching(/^incident_create_/),

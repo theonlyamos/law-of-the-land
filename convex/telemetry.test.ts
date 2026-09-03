@@ -146,7 +146,8 @@ async function jurisdiction(t: Backend, code = "GH") {
       slug: code.toLowerCase(),
       status: "enabled",
       isDefault: code === "GH",
-      productionBucketId: "11833",
+      geminiFileSearchStoreName: `fileSearchStores/${code.toLowerCase()}`,
+      geminiEmbeddingModel: "models/gemini-embedding-2",
       providerSyncState: "synced",
       kind: "geographic",
       visibility: "public",
@@ -406,7 +407,8 @@ describe("privacy-bounded query telemetry", () => {
       const now = Date.now();
       return ctx.db.insert("jurisdictions", {
         code: "GH", name: "Ghana", slug: "ghana-v1", status: "enabled",
-        isDefault: true, productionBucketId: "11833", providerSyncState: "synced",
+        isDefault: true, geminiFileSearchStoreName: "fileSearchStores/ghana-v1",
+        geminiEmbeddingModel: "models/gemini-embedding-2", providerSyncState: "synced",
         createdBy: "migration:seed-ghana-jurisdiction-v1",
         updatedBy: "migration:seed-ghana-jurisdiction-v1", createdAt: now, updatedAt: now,
       });
@@ -444,17 +446,18 @@ describe("privacy-bounded query telemetry", () => {
     });
     const digest = "b".repeat(64);
     await owner.client.mutation(searchPhase, {
-      token, providerStatus: "success", latencyMs: 1, resultCount: 1,
-      scopeSize: 1, retrievalPlanSize: 1, providerCallCount: 1,
-      plannerStatus: "planned", plannerLatencyMs: 1, contextDigest: digest,
-      partialCoverage: false, configurationUnavailableCount: 0,
-      supplementaryProviderFailureCount: 0,
+      token, providerStatus: "success", totalLatencyMs: 1, resultCount: 1,
+      scopeSize: 1, retrievalPlanSize: 1, fileSearchCallCount: 1,
+      fileSearchStoreCount: 1, fileSearchLatencyMs: 1, evidenceBytes: 10,
+      citationCount: 0, contextDigest: digest, partialCoverage: false,
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "evidence" }],
       serviceProof: await proof([
-        "search-jurisdiction-v1", token, "success", 1, 1, 1, 1, 1,
-        "planned", 1, digest, 0, 0, 0,
+        "search-jurisdiction-v2", token, "success", 1, 1, 1, 1, 1, 1, 1,
+        10, 0, digest, 0,
+        "0:selected:evidence",
       ]),
     });
-    await expect(recordSearch(owner.client, token)).rejects.toThrow("TELEMETRY_COUNT_INVALID");
+    await expect(recordSearch(owner.client, token)).rejects.toThrow("TELEMETRY_LATENCY_INVALID");
   });
 
   it("rejects a corrupt unified correlation without an ID before every phase or terminal write", async () => {
@@ -586,23 +589,29 @@ describe("privacy-bounded query telemetry", () => {
     const searchArgs = {
       token,
       providerStatus: "success" as const,
-      latencyMs: 125,
+      totalLatencyMs: 125,
       resultCount: 2,
       scopeSize: 4,
       retrievalPlanSize: 3,
-      providerCallCount: 2,
-      plannerStatus: "planned" as const,
-      plannerLatencyMs: 25,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 2,
+      fileSearchLatencyMs: 100,
+      evidenceBytes: 2_048,
+      citationCount: 3,
       contextDigest: replacementCharacterDigest,
       partialCoverage: true,
-      configurationUnavailableCount: 1,
-      supplementaryProviderFailureCount: 0,
+      jurisdictionCoverage: [
+        { ordinal: 0, relation: "selected" as const, coverage: "evidence" as const },
+        { ordinal: 1, relation: "geographic_ancestor" as const, coverage: "evidence" as const },
+        { ordinal: 2, relation: "organizational_geography" as const, coverage: "unavailable" as const },
+      ],
     };
     await owner.client.mutation(searchPhase, {
       ...searchArgs,
       serviceProof: await proof([
-        "search-jurisdiction-v1", token, "success", 125, 2, 4, 3, 2,
-        "planned", 25, replacementCharacterDigest, 1, 1, 0,
+        "search-jurisdiction-v2", token, "success", 125, 2, 4, 3, 1, 2,
+        100, 2_048, 3, replacementCharacterDigest, 1,
+        "0:selected:evidence|1:geographic_ancestor:evidence|2:organizational_geography:unavailable",
       ]),
     });
     await expect(owner.client.mutation(claim, {
@@ -637,11 +646,15 @@ describe("privacy-bounded query telemetry", () => {
       jurisdictionName: "World Health Organization",
       jurisdictionKind: "organizational",
       contextDigest: replacementCharacterDigest,
-      configurationUnavailableCount: 1,
-      supplementaryProviderFailureCount: 0,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 2,
+      fileSearchLatencyMs: 100,
+      evidenceBytes: 2_048,
+      citationCount: 3,
+      partialCoverage: true,
     });
     expect(runs[0]).not.toHaveProperty("jurisdictionCode");
-    for (const forbidden of ["question", "context", "answer", "citations", "sourceRefs", "providerError"]) {
+    for (const forbidden of ["question", "query", "context", "answer", "citations", "sourceRefs", "providerError", "storeName", "documentName", "operationName"]) {
       expect(runs[0]).not.toHaveProperty(forbidden);
     }
     await t.mutation(rollup, { cursor: null });
@@ -651,10 +664,134 @@ describe("privacy-bounded query telemetry", () => {
       jurisdictionId,
       jurisdictionName: "World Health Organization",
       jurisdictionKind: "organizational",
-      configurationUnavailableCount: 1,
-      supplementaryProviderFailureCount: 0,
     });
     expect(metrics[0]).not.toHaveProperty("jurisdictionCode");
+  });
+
+  it("accepts the maximum UTF-8 evidence size allowed by the governed context", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, "utf8-evidence-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    const digest = "f".repeat(64);
+    const evidenceBytes = 360_000;
+    const coverage = [
+      { ordinal: 0, relation: "selected" as const, coverage: "evidence" as const },
+      { ordinal: 1, relation: "geographic_ancestor" as const, coverage: "evidence" as const },
+    ];
+
+    await owner.client.mutation(issue, {
+      token,
+      jurisdictionId,
+      legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
+    });
+
+    await expect(owner.client.mutation(searchPhase, {
+      token,
+      providerStatus: "success",
+      totalLatencyMs: 10,
+      resultCount: 2,
+      scopeSize: 2,
+      retrievalPlanSize: 2,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 2,
+      fileSearchLatencyMs: 5,
+      evidenceBytes,
+      citationCount: 0,
+      contextDigest: digest,
+      partialCoverage: false,
+      jurisdictionCoverage: coverage,
+      serviceProof: await proof([
+        "search-jurisdiction-v2", token, "success", 10, 2, 2, 2, 1, 2,
+        5, evidenceBytes, 0, digest, 0,
+        "0:selected:evidence|1:geographic_ancestor:evidence",
+      ]),
+    })).resolves.toEqual(expect.objectContaining({ status: "search_complete" }));
+  });
+
+  it("rejects the retired unified search telemetry V1 shape", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, "retired-v1-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token, jurisdictionId, legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
+    });
+    await expect(owner.client.mutation(searchPhase, {
+      token, providerStatus: "success", latencyMs: 1, resultCount: 1,
+      scopeSize: 1, retrievalPlanSize: 1, providerCallCount: 1,
+      plannerStatus: "planned", plannerLatencyMs: 1, contextDigest: "a".repeat(64),
+      partialCoverage: false, configurationUnavailableCount: 0,
+      supplementaryProviderFailureCount: 0,
+      serviceProof: await proof(["search-jurisdiction-v1", token]),
+    } as never)).rejects.toThrow();
+  });
+
+  it.each([
+    ["evidence coverage with zero evidence bytes", {
+      providerStatus: "success" as const, resultCount: 1, evidenceBytes: 0, citationCount: 0,
+      contextDigest: "a".repeat(64),
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected" as const, coverage: "evidence" as const }],
+    }],
+    ["discarded evidence counted on a terminal failure", {
+      providerStatus: "failure" as const, resultCount: 1, evidenceBytes: 12, citationCount: 1,
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected" as const, coverage: "evidence" as const }],
+    }],
+  ])("rejects unified V2 telemetry with %s", async (_label, invalid) => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, `invalid-v2-${crypto.randomUUID()}`);
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token, jurisdictionId, legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
+    });
+    const args = {
+      token,
+      ...invalid,
+      totalLatencyMs: 10,
+      scopeSize: 1,
+      retrievalPlanSize: 1,
+      fileSearchCallCount: 1,
+      fileSearchStoreCount: 1,
+      fileSearchLatencyMs: 5,
+      partialCoverage: false,
+    };
+    await expect(owner.client.mutation(searchPhase, {
+      ...args,
+      serviceProof: await proof([
+        "search-jurisdiction-v2", token, args.providerStatus, 10, args.resultCount,
+        1, 1, 1, 1, 5, args.evidenceBytes, args.citationCount,
+        ("contextDigest" in args ? args.contextDigest : undefined) ?? "", 0, "0:selected:evidence",
+      ]),
+    })).rejects.toThrow("TELEMETRY_COUNT_INVALID");
+  });
+
+  it("accepts postflight selected unavailability with historical File Search stores and zero discarded metrics", async () => {
+    const t = backend();
+    const jurisdictionId = await typedJurisdiction(t, { name: "African Union", kind: "organizational" });
+    const owner = await user(t, "postflight-unavailable-owner");
+    const token = b64url(crypto.getRandomValues(new Uint8Array(32)).buffer);
+    await owner.client.mutation(issue, {
+      token, jurisdictionId, legacyResolutionUsed: false,
+      serviceProof: await proof(["issue-jurisdiction-v1", token, jurisdictionId, "", 0]),
+    });
+    const coverage = [
+      { ordinal: 0, relation: "selected" as const, coverage: "unavailable" as const },
+      { ordinal: 1, relation: "geographic_ancestor" as const, coverage: "no_evidence" as const },
+    ];
+    await expect(owner.client.mutation(searchPhase, {
+      token, providerStatus: "failure", totalLatencyMs: 10, resultCount: 0,
+      scopeSize: 2, retrievalPlanSize: 2, fileSearchCallCount: 1,
+      fileSearchStoreCount: 2, fileSearchLatencyMs: 5, evidenceBytes: 0,
+      citationCount: 0, partialCoverage: true, jurisdictionCoverage: coverage,
+      serviceProof: await proof([
+        "search-jurisdiction-v2", token, "failure", 10, 0, 2, 2, 1, 2,
+        5, 0, 0, "", 1, "0:selected:unavailable|1:geographic_ancestor:no_evidence",
+      ]),
+    })).resolves.toEqual(expect.objectContaining({ status: "finalized" }));
   });
 
   it("stores only a compact terminal outcome and no question, context, answer, token, or provider error", async () => {
