@@ -346,7 +346,7 @@ describe("governed document publication", () => {
     expect(failure.status).toBe("manual_review");
     const state = await t.run(async (ctx) => ({ jurisdiction: await ctx.db.get(jurisdictionId), version: await ctx.db.get(ids[0]) }));
     expect(state.jurisdiction?.providerSyncState).toBe("drifted");
-    expect(state.version).toMatchObject({ status: "publishing", failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job." });
+    expect(state.version).toMatchObject({ status: "publishing", failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job." });
   });
 
   it("rollback reindexes the immutable original, and unpublish deletes before clearing state", async () => {
@@ -1498,7 +1498,7 @@ describe("governed document publication", () => {
     const claim = await t.mutation(claimJob, { jobId: queued.jobId });
     if (!claim) throw new Error("expected delete claim");
     await t.mutation(recordProviderFailure, { jobId: queued.jobId, leaseToken: claim.leaseToken, kind: "network", retryable: true, sideEffectUncertain: true });
-    expect(await t.run(async (ctx) => ctx.db.get(ids[0]))).toMatchObject({ status: "published", failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job." });
+    expect(await t.run(async (ctx) => ctx.db.get(ids[0]))).toMatchObject({ status: "published", failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job." });
     await operator.client.mutation(retryJob, { jobId: queued.jobId, reason: "Reconcile the exact document deletion", idempotencyKey: "retry-recover-unpublish" });
     const recovery = await t.run(async (ctx) => ctx.db.get(queued.jobId as Id<"integrationJobs">));
     if (!recovery?.leaseToken) throw new Error("expected recovery lease");
@@ -1584,7 +1584,7 @@ describe("governed document publication", () => {
     expect(quarantined.previous?.status).toBe("published");
     expect(quarantined.candidate).toMatchObject({
       status: "publishing",
-      failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.",
+      failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.",
     });
     expect(quarantined.locks).toHaveLength(1);
 
@@ -1627,7 +1627,7 @@ describe("governed document publication", () => {
     const claim = await t.mutation(claimJob, { jobId: deletion._id });
     if (!claim) throw new Error("expected replacement delete claim");
     await t.mutation(recordProviderFailure, { jobId: deletion._id, leaseToken: claim.leaseToken, kind: "network", retryable: true, sideEffectUncertain: true });
-    expect(await t.run(async (ctx) => ctx.db.get(ids[1]))).toMatchObject({ status: "publishing", failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job." });
+    expect(await t.run(async (ctx) => ctx.db.get(ids[1]))).toMatchObject({ status: "publishing", failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job." });
     await operator.client.mutation(retryJob, { jobId: deletion._id, reason: "Reconcile replacement deletion", idempotencyKey: "retry-recover-replacement" });
     const recovery = await t.run(async (ctx) => ctx.db.get(deletion._id as Id<"integrationJobs">));
     if (!recovery?.leaseToken) throw new Error("expected recovery lease");

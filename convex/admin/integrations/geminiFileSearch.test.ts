@@ -53,7 +53,7 @@ describe("GeminiFileSearchAdapter", () => {
     const client = sdk();
     vi.mocked(client.fileSearchStores.uploadToFileSearchStore).mockResolvedValue({ name: OPERATION });
     vi.mocked(client.operations.get)
-      .mockResolvedValueOnce({ name: OPERATION, done: false })
+      .mockResolvedValueOnce({ name: OPERATION })
       .mockResolvedValueOnce({ name: OPERATION, done: true, response: { documentName: DOCUMENT } })
       .mockResolvedValueOnce({ name: OPERATION, done: true, error: { code: 8, message: "Quota exhausted" } });
     const adapter = new GeminiFileSearchAdapter({ apiKey: "test-key", sdk: client });
@@ -174,13 +174,22 @@ describe("GeminiFileSearchAdapter", () => {
 
   it("rejects malformed and mismatched operation poll responses", async () => {
     const client = sdk();
+    const contradictoryPendingResponse = {
+      name: OPERATION,
+      done: false,
+      response: { documentName: DOCUMENT },
+    };
     vi.mocked(client.operations.get)
-      .mockResolvedValueOnce({ name: OPERATION })
-      .mockResolvedValueOnce({ name: "operations/other", done: false });
+      .mockResolvedValueOnce({ name: "operations/other", done: false })
+      .mockResolvedValueOnce(contradictoryPendingResponse);
     const adapter = new GeminiFileSearchAdapter({ apiKey: "test-key", sdk: client });
 
     await expect(adapter.getIndexOperation(OPERATION)).rejects.toMatchObject({ kind: "invalid_response" });
-    await expect(adapter.getIndexOperation(OPERATION)).rejects.toMatchObject({ kind: "invalid_response" });
+    await expect(adapter.getIndexOperation(OPERATION)).rejects.toMatchObject({
+      kind: "invalid_response",
+      operation: "operation_poll",
+      rawResponse: JSON.stringify(contradictoryPendingResponse),
+    });
   });
 
   it.each([

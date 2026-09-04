@@ -60,7 +60,6 @@ export type VersionHistoryItem = {
   createdAt: number;
 };
 
-const INDEX_REVIEW_MESSAGE = "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.";
 const INDEXING_MESSAGE = "Gemini is indexing this document. You can leave this page; the status updates automatically.";
 
 function formatBytes(bytes: number): string {
@@ -100,7 +99,7 @@ export function VersionHistory({ versions }: { versions: readonly VersionHistory
               </td>
               <td className="px-4 py-4 align-top">
                 <CatalogStatus status={version.status} />
-                {version.status === "publishing" && version.failureSummary === INDEX_REVIEW_MESSAGE ? (
+                {version.status === "publishing" && version.failureSummary ? (
                   <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[oklch(40%_0.11_45)]">Indexing needs review</p>
                 ) : null}
                 {version.failureSummary ? (

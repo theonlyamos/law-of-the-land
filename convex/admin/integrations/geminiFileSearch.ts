@@ -121,8 +121,20 @@ function invalidRequest(): ProviderError {
   return new ProviderError("invalid_request", false, null, "Invalid Gemini File Search request");
 }
 
-function invalidResponse(sideEffectUncertain = false): ProviderError {
-  return new ProviderError("invalid_response", false, null, "Gemini returned an invalid response", sideEffectUncertain);
+function invalidResponse(
+  sideEffectUncertain = false,
+  operation?: ProviderOperation,
+  rawResponse?: string,
+): ProviderError {
+  return new ProviderError(
+    "invalid_response",
+    false,
+    null,
+    "Gemini returned an invalid response",
+    sideEffectUncertain,
+    operation,
+    rawResponse,
+  );
 }
 
 function errorForStatus(status: number): ProviderError {
@@ -251,17 +263,22 @@ export class GeminiFileSearchAdapter {
       const operation = new UploadToFileSearchStoreOperation();
       operation.name = name;
       const response = await this.sdk.operations.get({ operation });
-      if (response.name !== name || typeof response.done !== "boolean") throw invalidResponse();
-      if (!response.done) return { done: false };
+      const done = (response as { done?: unknown }).done;
+      const malformed = () => invalidResponse(false, "operation_poll", rawProviderResponse(response));
+      if (response.name !== name || (done !== undefined && typeof done !== "boolean")) throw malformed();
+      if (done !== true) {
+        if (response.error !== undefined || response.response !== undefined) throw malformed();
+        return { done: false };
+      }
       if (response.error !== undefined) {
-        if (response.response !== undefined) throw invalidResponse();
+        if (response.response !== undefined) throw malformed();
         const parsed = completedOperationErrorSchema.safeParse(response.error);
-        if (!parsed.success) throw invalidResponse();
+        if (!parsed.success) throw malformed();
         const error = errorForRpcCode(parsed.data.code);
         return { done: true, error: { kind: error.kind, retryable: error.retryable, message: error.message } };
       }
       const documentName = documentNameSchema.safeParse(response.response?.documentName);
-      if (!documentName.success) throw invalidResponse();
+      if (!documentName.success) throw malformed();
       return { done: true, documentName: documentName.data };
     } catch (error) {
       throw translateError(error, false, "operation_poll");
