@@ -7,7 +7,7 @@
 - [ ] Run the exact isolated Bun sequence in [bootstrap](bootstrap.md), in order: frozen install; validated and typed-confirmed `CONVEX_DEPLOYMENT=dev:<deployment-name>` binding; `bunx convex dev --once`; Ghana seed; Super Admin bootstrap; `bun run test`; `bun run build`. Abort if any command resolves a target other than the pre-approved isolated deployment. Verify Ghana remains the default jurisdiction in `draft` with provider state `pending` and no Gemini search store, the seed is idempotent, and `INITIAL_SUPER_ADMIN_IDS` is cleared. Store creation and readiness belong to the later controlled setup and Task 7's separately approved smoke.
 - [ ] Run `bun run lint`. Run `bun run test:budgets` only with an authenticated isolated browser session and `bun run test:e2e` only against the guarded fixture target. npm or direct Windows Node commands are troubleshooting only; after using them, rerun the required Bun release sequence from the beginning.
 - [ ] Verify every privileged server path has a permission test, every high-risk success has one immutable audit/correlation, non-Super-Admin submitters cannot self-approve, and exports download only through `/api/admin/exports/download` within 10 minutes.
-- [ ] Verify document upload creates `ready_for_review` with no Gemini job, and approval still creates no Gemini job. Publish one approved version and observe `Index document` move through `Waiting for Gemini` to `Published`; accepted publication polls after 5, 10, 20, 30, then at most 60 seconds, and requires manual review after 30 minutes.
+- [ ] Verify document upload creates `ready_for_review` with no Gemini job, and approval still creates no Gemini job. Publish one approved version and observe `Index document` move through `Waiting for Gemini` to `Published`; accepted publication polls after 5, 10, 20, 30, then at most 60 seconds, and requires manual review after 1 hour.
 - [ ] Verify legal research issues exactly one File Search call across the full server-authorized store set. Do not report provider health or release completion until Task 7's separately authorized real-provider smoke passes.
 - [ ] Exercise failed publication, document rollback, stuck-job recovery, retention continuation, full rollback, and compromised-admin ban/session revocation in isolated preview using each runbook's exact arguments and fresh UUID keys.
 - [ ] As an assured different Super Admin, open `/admin-recovery`, verify environment `preview`, choose **Enable persisted flag**, enter a reason, type `ADMIN_PANEL preview ENABLE`, confirm the password, and require a correlation ID. Abort on any mismatch.
@@ -19,7 +19,7 @@ Do not execute this sequence without separate approval for real provider and dep
 
 1. Set up one jurisdiction search store and confirm the UI reports `Ready` without exposing its provider resource name.
 2. Upload a small PDF and confirm the draft creates no provider job.
-3. Submit, approve, and publish; observe `Waiting for Gemini`, then `Published` within 30 minutes.
+3. Submit, approve, and publish; observe `Waiting for Gemini`, then `Published` within 1 hour.
 4. Ask a document-specific question and verify exactly one File Search call, grounded evidence, and an authorized citation/page when supplied.
 5. Add one authorized supplementary jurisdiction and verify the same single File Search call covers both stores.
 6. Replace, roll back, and unpublish; verify the expected indexed-document deletion or reindexing after each action.
