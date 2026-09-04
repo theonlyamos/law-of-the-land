@@ -88,6 +88,11 @@ function parseEndpoint(value: string): URL {
   return url;
 }
 
+function hasExplicitPort(value: string): boolean {
+  const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+  return /:\d+$/.test(authority);
+}
+
 function remoteDeployment(url: URL, suffix: string): { name: string; region: string } | null {
   if (!url.hostname.endsWith(suffix)) return null;
   const labels = url.hostname.slice(0, -suffix.length).split(".");
@@ -108,8 +113,10 @@ function isIsolated(environment: Environment): boolean {
     || isProductionLooking(environment.CONVEX_DEPLOYMENT ?? "")) {
     invalidIsolation();
   }
-  const backend = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_URL"));
-  const site = parseEndpoint(exact(environment, "ADMIN_E2E_CONVEX_SITE_URL"));
+  const backendValue = exact(environment, "ADMIN_E2E_CONVEX_URL");
+  const siteValue = exact(environment, "ADMIN_E2E_CONVEX_SITE_URL");
+  const backend = parseEndpoint(backendValue);
+  const site = parseEndpoint(siteValue);
   const localBackend = isLocalhost(backend.hostname);
   if (localBackend !== isLocalhost(site.hostname)
     || (localBackend && backend.hostname !== site.hostname)) {
@@ -125,6 +132,8 @@ function isIsolated(environment: Environment): boolean {
       || site.protocol !== "https:"
       || backend.port
       || site.port
+      || hasExplicitPort(backendValue)
+      || hasExplicitPort(siteValue)
       || !backendDeployment
       || !siteDeployment
       || backendDeployment.name !== siteDeployment.name

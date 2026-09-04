@@ -3,7 +3,6 @@ import { internalQuery, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import {
-  isLegacyCountryCode,
   jurisdictionKindValidator,
   jurisdictionSearchPageValidator,
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
@@ -11,7 +10,6 @@ import {
   type JurisdictionKind,
   type ResearchScopeItem,
 } from "./lib/jurisdictionDomain";
-import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
 import { isGeminiFileSearchStoreName } from "./lib/geminiFileSearchNames";
 import {
   activeOrganizationIdsForUser,
@@ -19,7 +17,6 @@ import {
   getAccessibleJurisdictionById,
 } from "./lib/jurisdictionAccess";
 import { optionalUserId } from "./lib/requireUser";
-import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
 import { resolveResearchScopeForJurisdiction } from "./lib/researchScope";
 
 const accessibleJurisdictionValidator = v.object({
@@ -31,27 +28,6 @@ const accessibleJurisdictionValidator = v.object({
   visibility: v.union(v.literal("public"), v.literal("members")),
 });
 
-const searchJurisdictionValidator = v.union(
-  v.null(),
-  v.object({
-    code: v.string(),
-    name: v.string(),
-    slug: v.string(),
-    enabled: v.literal(true),
-    isDefault: v.boolean(),
-    searchReady: v.literal(true),
-  }),
-);
-
-const publicJurisdictionListItemValidator = v.object({
-  code: v.string(),
-  name: v.string(),
-  slug: v.string(),
-  isDefault: v.boolean(),
-});
-
-// Admin validation currently accepts any two-letter code (26 × 26).
-const MAX_PUBLIC_JURISDICTIONS = 26 * 26;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const MAX_RESEARCH_JURISDICTION_ID_LENGTH = 200;
 const MAX_CURSOR_LENGTH = 4096;
@@ -73,7 +49,6 @@ type ResearchJurisdiction = {
   slug: string;
   kind: JurisdictionKind;
   isDefault: boolean;
-  legacyCountryCode?: string;
 };
 
 function invalidCursor(): never {
@@ -177,17 +152,13 @@ function decodeCursor(
 }
 
 function projectResearchJurisdiction(row: Doc<"jurisdictions">): ResearchJurisdiction {
-  const projected: ResearchJurisdiction = {
+  return {
     id: row._id,
     name: row.name,
     slug: row.slug,
     kind: row.kind as JurisdictionKind,
     isDefault: row.isDefault,
   };
-  if (isLegacyCountryCode(row.legacyCountryCode)) {
-    projected.legacyCountryCode = row.legacyCountryCode;
-  }
-  return projected;
 }
 
 async function assertTypedRelationship(
@@ -322,84 +293,6 @@ async function memberOrganizationMatches(
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-function normalizeCode(code: string): string {
-  const normalized = code.trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(normalized)) {
-    throw new ConvexError("INVALID_JURISDICTION_CODE");
-  }
-  return normalized;
-}
-
-/** Returns readiness without provider identity to protected server-side callers. */
-export const getPublicByCode = internalQuery({
-  args: { code: v.string() },
-  returns: searchJurisdictionValidator,
-  handler: async (ctx, args) => {
-    const code = normalizeCode(args.code);
-    const rows = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_code_and_status", (q) =>
-        q.eq("code", code).eq("status", "enabled"),
-      )
-      .take(2);
-    if (
-      rows.length !== 1 ||
-      !isLegacyCountryCode(rows[0].code) ||
-      rows[0].code !== code ||
-      !isPublicJurisdictionEligible(rows[0])
-    ) {
-      return null;
-    }
-    const jurisdiction = rows[0];
-    return {
-      code,
-      name: jurisdiction.name,
-      slug: jurisdiction.slug,
-      enabled: true as const,
-      isDefault: jurisdiction.isDefault,
-      searchReady: true as const,
-    };
-  },
-});
-
-/** Lists the complete enabled ISO catalog used by public jurisdiction selectors. */
-export const listPublicEnabled = query({
-  args: {},
-  returns: v.array(publicJurisdictionListItemValidator),
-  handler: async (ctx) => {
-    const rows = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_status_and_code", (q) =>
-        q.eq("status", "enabled").gte("code", "AA").lte("code", "ZZ"),
-      )
-      .take(MAX_PUBLIC_JURISDICTIONS + 1);
-
-    const legacyRows = rows.filter(
-      (row): row is typeof row & { code: string } => isLegacyCountryCode(row.code),
-    );
-    // More legacy rows than possible two-letter codes proves corruption.
-    // Code-less unified rows are intentionally invisible to this flag-off path.
-    if (legacyRows.length > MAX_PUBLIC_JURISDICTIONS) return [];
-    const enabledRowsByCode = new Map<string, number>();
-    for (const row of legacyRows) {
-      enabledRowsByCode.set(row.code, (enabledRowsByCode.get(row.code) ?? 0) + 1);
-    }
-
-    return legacyRows
-      .filter(
-        (row) =>
-          enabledRowsByCode.get(row.code) === 1 &&
-          isPublicJurisdictionEligible(row),
-      )
-      .map(({ code, name, slug, isDefault }) => ({ code, name, slug, isDefault }))
-      .sort((left, right) =>
-        Number(right.isDefault) - Number(left.isDefault) ||
-        left.name.localeCompare(right.name) ||
-        left.code.localeCompare(right.code),
-      );
-  },
-});
-
 const researchJurisdictionValidator = v.union(
   v.null(),
   v.object({
@@ -408,7 +301,6 @@ const researchJurisdictionValidator = v.union(
     slug: v.string(),
     kind: jurisdictionKindValidator,
     isDefault: v.boolean(),
-    legacyCountryCode: v.optional(v.string()),
   }),
 );
 
@@ -419,52 +311,27 @@ export const getAccessibleById = query({
   handler: async (ctx, args) => await getAccessibleJurisdictionById(ctx, args.id),
 });
 
-/** Resolves the compatibility selector pair without exposing provider configuration. */
+/** Resolves a stable browser selection without exposing provider configuration. */
 export const resolveResearchSelection = query({
-  args: {
-    jurisdictionId: v.optional(v.string()),
-    country: v.optional(v.string()),
-  },
+  args: { jurisdictionId: v.string() },
   returns: researchJurisdictionValidator,
   handler: async (ctx, args) => {
-    if (args.jurisdictionId === undefined && args.country === undefined) return null;
     if (
-      args.jurisdictionId !== undefined
-      && (args.jurisdictionId.length === 0
-        || args.jurisdictionId.length > MAX_RESEARCH_JURISDICTION_ID_LENGTH)
-    ) return null;
-    let country: string | undefined;
-    if (args.country !== undefined) {
-      const normalized = args.country.trim().toUpperCase();
-      if (!isLegacyCountryCode(normalized)) return null;
-      country = normalized;
+      args.jurisdictionId.length === 0
+      || args.jurisdictionId.length > MAX_RESEARCH_JURISDICTION_ID_LENGTH
+    ) {
+      return null;
     }
     try {
-      const jurisdictionId = args.jurisdictionId === undefined
-        ? null
-        : ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
-      if (args.jurisdictionId !== undefined && !jurisdictionId) return null;
-      const byId = jurisdictionId
-        ? await ctx.db.get("jurisdictions", jurisdictionId)
-        : null;
-      const codeRows = country
-        ? await ctx.db
-            .query("jurisdictions")
-            .withIndex("by_legacyCountryCode_and_status", (q) =>
-              q.eq("legacyCountryCode", country).eq("status", "enabled"),
-            )
-            .take(2)
-        : [];
-      if ((jurisdictionId && !byId) || (country && codeRows.length !== 1)) return null;
-      const selected = byId ?? codeRows[0];
-      if (!selected || (byId && country && codeRows[0]?._id !== byId._id)) return null;
+      const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
+      if (!jurisdictionId) return null;
+      const selected = await ctx.db.get("jurisdictions", jurisdictionId);
+      if (!selected) return null;
       await assertJurisdictionAccess(ctx, selected);
       const kind = selected.kind;
       if (kind !== "geographic" && kind !== "organizational") return null;
       await assertTypedRelationship(ctx, selected, kind);
-      const projected = projectResearchJurisdiction(selected);
-      if (country && projected.legacyCountryCode !== country) return null;
-      return projected;
+      return projectResearchJurisdiction(selected);
     } catch {
       return null;
     }
@@ -543,13 +410,6 @@ export const searchAccessible = query({
       fingerprint,
     );
   },
-});
-
-/** Exposes rollout readiness without revealing environment or flag records. */
-export const isUnifiedJurisdictionsEnabled = query({
-  args: {},
-  returns: v.boolean(),
-  handler: async (ctx) => await readUnifiedJurisdictionsEnabled(ctx),
 });
 
 const chatResearchStoreValidator = v.object({

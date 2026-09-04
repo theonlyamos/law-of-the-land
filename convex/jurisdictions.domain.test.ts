@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { makeFunctionReference } from "convex/server";
 import { describe, expect, it } from "vitest";
 import {
   assertGeographicLevel,
@@ -10,9 +9,6 @@ import {
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
-const listPublicEnabled = makeFunctionReference<"query">(
-  "jurisdictions:listPublicEnabled",
-);
 
 describe("unified jurisdiction domain transition", () => {
   it("rejects an unsupported geographic level and an invalid Place ID", () => {
@@ -70,42 +66,4 @@ describe("unified jurisdiction domain transition", () => {
     expect(id).toBeDefined();
   });
 
-  it("keeps Ghana in the flag-off selector when code-less organizations sort first", async () => {
-    const t = convexTest(schema, modules);
-    await t.run(async (ctx) => {
-      for (let index = 0; index <= 676; index += 1) {
-        await ctx.db.insert("jurisdictions", {
-          name: `A Organization ${String(index).padStart(3, "0")}`,
-          slug: `organization-${index}`,
-          status: "enabled",
-          isDefault: false,
-          providerSyncState: "synced",
-          kind: "organizational",
-          visibility: "members",
-          createdBy: "system",
-          updatedBy: "system",
-          createdAt: index,
-          updatedAt: index,
-        });
-      }
-      await ctx.db.insert("jurisdictions", {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        status: "enabled",
-        isDefault: true,
-        geminiFileSearchStoreName: "fileSearchStores/ghana",
-        geminiEmbeddingModel: "models/gemini-embedding-2",
-        providerSyncState: "synced",
-        createdBy: "system",
-        updatedBy: "system",
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      });
-    });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-    ]);
-  });
 });

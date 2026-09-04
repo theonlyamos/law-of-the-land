@@ -16,16 +16,6 @@ const authModules = Object.fromEntries(
 );
 type Backend = TestConvex<typeof schema>;
 
-const listPublicEnabled = makeFunctionReference<"query">(
-  "jurisdictions:listPublicEnabled",
-);
-const getPublicByCode = makeFunctionReference<"query">(
-  "jurisdictions:getPublicByCode",
-);
-const getAccessibleById = makeFunctionReference<"query">(
-  "jurisdictions:getAccessibleById",
-);
-
 function createBackend() {
   const t = convexTest(schema, modules);
   t.registerComponent("betterAuth", authSchema, authModules);
@@ -68,38 +58,6 @@ async function asUser(t: Backend, label: string) {
     userId: identity.userId,
     client: t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId }),
   };
-}
-
-async function insertJurisdiction(
-  t: Backend,
-  input: {
-    code: string;
-    name: string;
-    slug: string;
-    status: "draft" | "enabled";
-    geminiFileSearchStoreName?: string | null;
-    providerSyncState?: "pending" | "synced" | "drifted" | "failed";
-    isDefault?: boolean;
-  },
-) {
-  return await t.run(async (ctx) => {
-    const now = Date.now();
-    return await ctx.db.insert("jurisdictions", {
-      code: input.code,
-      name: input.name,
-      slug: input.slug,
-      status: input.status,
-      isDefault: input.isDefault ?? false,
-      geminiFileSearchStoreName: input.geminiFileSearchStoreName === null
-        ? undefined
-        : input.geminiFileSearchStoreName ?? `fileSearchStores/${input.slug}`,
-      providerSyncState: input.providerSyncState ?? "synced",
-      createdBy: "fixture",
-      updatedBy: "fixture",
-      createdAt: now,
-      updatedAt: now,
-    });
-  });
 }
 
 async function insertGeographic(
@@ -192,72 +150,6 @@ async function post(client: Pick<Backend, "fetch">, body: string) {
     body,
   });
 }
-
-describe("public jurisdiction eligibility", () => {
-  it.each([
-    ["missing", null],
-    ["empty", ""],
-    ["malformed", "stores/ghana"],
-    ["cross-resource", "fileSearchStores/UPPERCASE"],
-  ] as const)("excludes an enabled jurisdiction with a %s Gemini store", async (_label, storeName) => {
-    const t = createBackend();
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      geminiFileSearchStoreName: storeName,
-      isDefault: true,
-    });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([]);
-    await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toBeNull();
-  });
-
-  it("keeps provider store names out of browser-facing jurisdiction queries", async () => {
-    const t = createBackend();
-    const jurisdictionId = await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      geminiFileSearchStoreName: "fileSearchStores/private-ghana",
-      isDefault: true,
-    });
-
-    const publicRows = await t.query(listPublicEnabled, {});
-    const publicByCode = await t.query(getPublicByCode, { code: "GH" });
-    const accessible = await t.query(getAccessibleById, { id: jurisdictionId });
-
-    expect(JSON.stringify({ publicRows, publicByCode, accessible })).not.toContain("fileSearchStores/");
-  });
-
-  it("excludes duplicate enabled codes while retaining an unrelated eligible code", async () => {
-    const t = createBackend();
-    await insertJurisdiction(t, { code: "GH", name: "Ghana", slug: "ghana", status: "enabled", isDefault: true });
-    await insertJurisdiction(t, { code: "GH", name: "Duplicate Ghana", slug: "duplicate-ghana", status: "enabled" });
-    await insertJurisdiction(t, { code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled" });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "NG", name: "Nigeria", slug: "nigeria", isDefault: false },
-    ]);
-    await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toBeNull();
-  });
-
-  it("retains an eligible enabled code when another row is a draft", async () => {
-    const t = createBackend();
-    await insertJurisdiction(t, { code: "GH", name: "Ghana", slug: "ghana", status: "enabled", isDefault: true });
-    await insertJurisdiction(t, { code: "GH", name: "Draft Ghana", slug: "draft-ghana", status: "draft" });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-    ]);
-    await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toMatchObject({
-      code: "GH",
-      searchReady: true,
-    });
-  });
-});
 
 describe("authenticated private chat research manifest", () => {
   it("requires authentication before parsing or resolving a selection", async () => {

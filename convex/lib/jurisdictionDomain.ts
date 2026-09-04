@@ -112,7 +112,6 @@ export const jurisdictionSearchPageValidator = v.object({
       slug: v.string(),
       kind: jurisdictionKindValidator,
       isDefault: v.boolean(),
-      legacyCountryCode: v.optional(v.string()),
     }),
   ),
   group: v.union(
