@@ -877,16 +877,25 @@ export const completeGovernedInteraction = mutation({
       return { status: "replayed" as const, outcome: clientRows[0].outcome };
     }
 
-    const authority = await resolveGovernedCompletionAuthority(
-      ctx,
-      session,
-      jurisdictionId,
-      args.citations,
-    );
-    if (!matchesCurrentScope(input, authority)) {
-      throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    let authority: GovernedCompletionAuthority | null = null;
+    if (args.outcome === "success") {
+      authority = await resolveGovernedCompletionAuthority(
+        ctx,
+        session,
+        jurisdictionId,
+        args.citations,
+      );
+      if (!matchesCurrentScope(input, authority)) {
+        throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+      }
     }
-    const { publicCitations } = authority;
+    const publicCitations = authority?.publicCitations ?? [];
+    const terminalScope = authority ?? {
+      authorizedScopeSize: args.authorizedScopeSize,
+      readyStoreCount: args.readyStoreCount,
+      partialCoverage: args.partialCoverage,
+      jurisdictionCoverage: args.jurisdictionCoverage,
+    };
     const now = Date.now();
     let claim: { citationClaim: string; expiresAt: number } | null = null;
     if (publicCitations.length > 0) {
@@ -927,11 +936,11 @@ export const completeGovernedInteraction = mutation({
       ...(args.failureCategory ? { failureCategory: args.failureCategory } : {}),
       model: args.model,
       totalLatencyMs: args.elapsedMs,
-      authorizedScopeSize: authority.authorizedScopeSize,
-      readyStoreCount: authority.readyStoreCount,
+      authorizedScopeSize: terminalScope.authorizedScopeSize,
+      readyStoreCount: terminalScope.readyStoreCount,
       citationCount: publicCitations.length,
-      partialCoverage: authority.partialCoverage,
-      jurisdictionCoverage: authority.jurisdictionCoverage,
+      partialCoverage: terminalScope.partialCoverage,
+      jurisdictionCoverage: terminalScope.jurisdictionCoverage,
       completedAt: now,
       rollupStatus: "pending",
     });
@@ -943,7 +952,7 @@ export const completeGovernedInteraction = mutation({
       status: "completed" as const,
       outcome: "success" as const,
       citations: publicCitations,
-      partialCoverage: authority.partialCoverage,
+      partialCoverage: terminalScope.partialCoverage,
       ...claim,
     };
   },

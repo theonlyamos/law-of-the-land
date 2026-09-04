@@ -578,4 +578,48 @@ describe("completeGovernedInteraction", () => {
     if (failureCategory) expect(state.runs[0]).toHaveProperty("failureCategory", failureCategory);
     else expect(state.runs[0]).not.toHaveProperty("failureCategory");
   });
+
+  it.each([
+    ["failure", "network"],
+    ["aborted", undefined],
+  ] as const)("records claim-free %s telemetry after the ready-store manifest drifts", async (outcome, failureCategory) => {
+    const { t, owner, selection, base } = await fixture();
+    await t.run((ctx) => ctx.db.patch(selection.jurisdictionId, {
+      providerSyncState: "drifted",
+      updatedAt: Date.now(),
+    }));
+    if (outcome === "failure") {
+      await expect(complete(owner.client, base)).rejects.toThrow(
+        "CHAT_RESEARCH_STORE_NOT_READY",
+      );
+    }
+    const input: CompletionInput = {
+      ...base,
+      finalAnswer: undefined,
+      citations: [],
+      outcome,
+      ...(failureCategory ? { failureCategory } : {}),
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "no_evidence" }],
+    };
+
+    await expect(complete(owner.client, input)).resolves.toEqual({
+      status: "completed",
+      outcome,
+    });
+    const state = await terminalState(t);
+    expect(state.claims).toEqual([]);
+    expect(state.runs).toHaveLength(1);
+    expect(state.runs[0]).toMatchObject({
+      outcome,
+      authorizedScopeSize: 1,
+      readyStoreCount: 1,
+      citationCount: 0,
+      partialCoverage: false,
+      jurisdictionCoverage: [
+        { ordinal: 0, relation: "selected", coverage: "no_evidence" },
+      ],
+    });
+    if (failureCategory) expect(state.runs[0]).toHaveProperty("failureCategory", failureCategory);
+    else expect(state.runs[0]).not.toHaveProperty("failureCategory");
+  });
 });
