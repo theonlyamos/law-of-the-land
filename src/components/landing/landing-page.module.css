@@ -102,11 +102,6 @@
   text-decoration: underline;
 }
 
-.researchNavLink {
-  border: 1px solid var(--ink-soft);
-  color: var(--ink) !important;
-}
-
 .accountControls {
   flex: none;
 }
@@ -1079,8 +1074,7 @@
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  .page {
+:global(.dark) .page {
     --paper: oklch(20% 0.02 145);
     --paper-light: oklch(24% 0.022 145);
     --paper-deep: oklch(28% 0.025 145);
@@ -1093,15 +1087,14 @@
     --shadow-brass: oklch(34% 0.045 72);
   }
 
-  .brand img {
+  :global(.dark) .brand img {
     filter: brightness(0) invert(1) sepia(0.2) saturate(0.7) opacity(0.9);
   }
 
-  .researchSheet,
-  .workspacePreview {
+  :global(.dark) .researchSheet,
+  :global(.dark) .workspacePreview {
     box-shadow: 0.55rem 0.65rem 0 var(--shadow-brass);
   }
-}
 
 @media (prefers-reduced-motion: no-preference) {
   .heroCopy,

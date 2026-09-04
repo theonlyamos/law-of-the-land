@@ -331,6 +331,33 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("issues a bound claim for the fixed no-evidence answer and persists it", async () => {
+    const { owner, base } = await fixture();
+    const finalAnswer = "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.";
+    const result = await complete(owner.client, {
+      ...base, finalAnswer, citations: [],
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "no_evidence" }],
+    });
+    expect(result).toMatchObject({ outcome: "success", citations: [], citationClaim: expect.any(String) });
+    await owner.client.mutation(api.chats.appendMessages, {
+      externalId: base.externalId, lastMessage: finalAnswer,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: finalAnswer,
+        citations: [], citationClaim: (result as { citationClaim: string }).citationClaim }],
+    });
+    const page = await owner.client.query(api.chats.listMessages, {
+      externalId: base.externalId, paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page[0]).toMatchObject({ completedAt: expect.any(Number), durationMs: base.elapsedMs });
+  });
+
+  it("rejects arbitrary uncited model answers even with a valid service proof", async () => {
+    const { owner, base } = await fixture();
+    await expect(complete(owner.client, {
+      ...base, citations: [],
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "no_evidence" }],
+    })).rejects.toThrow("INVALID_GOVERNED_INTERACTION");
+  });
+
   it("atomically validates a published document, derives its label, records safe telemetry, and issues one claim", async () => {
     const { t, owner, selection, base } = await fixture();
 

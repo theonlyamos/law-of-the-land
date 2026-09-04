@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: var(--font-geist-sans);
@@ -68,8 +69,7 @@
   --radius: 0.5rem;
 }
 
-/* Dark theme follows the system preference; the .dark class is kept so a
-   manual toggle can opt in later without retheming. */
+/* The theme provider resolves Light, Dark, or System to the root class. */
 .dark {
   color-scheme: dark;
   --brand: 40 55% 64%;
@@ -100,7 +100,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     color-scheme: dark;
     --brand: 40 55% 64%;
     --background: 224 71.4% 4.1%;

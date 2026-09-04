@@ -69,7 +69,7 @@ export function LandingPage({
                 </li>
               ))}
               <li>
-                <Link href="#research" className={styles.researchNavLink}>
+                <Link href="#research">
                   Research
                 </Link>
               </li>

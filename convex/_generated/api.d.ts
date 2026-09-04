@@ -43,6 +43,7 @@ import type * as lib_adminPermissions from "../lib/adminPermissions.js";
 import type * as lib_adminStepUp from "../lib/adminStepUp.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_chatCitationClaim from "../lib/chatCitationClaim.js";
+import type * as lib_chatNoEvidence from "../lib/chatNoEvidence.js";
 import type * as lib_email from "../lib/email.js";
 import type * as lib_geminiFileSearchNames from "../lib/geminiFileSearchNames.js";
 import type * as lib_jurisdictionAccess from "../lib/jurisdictionAccess.js";
@@ -101,6 +102,7 @@ declare const fullApi: ApiFromModules<{
   "lib/adminStepUp": typeof lib_adminStepUp;
   "lib/audit": typeof lib_audit;
   "lib/chatCitationClaim": typeof lib_chatCitationClaim;
+  "lib/chatNoEvidence": typeof lib_chatNoEvidence;
   "lib/email": typeof lib_email;
   "lib/geminiFileSearchNames": typeof lib_geminiFileSearchNames;
   "lib/jurisdictionAccess": typeof lib_jurisdictionAccess;

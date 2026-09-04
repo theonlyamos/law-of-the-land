@@ -41,7 +41,8 @@ export function UserNav() {
       </Button>
       <Button
         size="sm"
-        variant="outline"
+        variant="ghost"
+        className="border-0 bg-transparent text-red-700 shadow-none hover:bg-transparent hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
         onClick={() => {
           void authClient
             .signOut()

@@ -263,6 +263,27 @@ describe("unified chat client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("persists the fixed no-evidence answer with its claim instead of showing Failed", async () => {
+    const answer = "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "done", result: answer, citations: [], citationClaim, partialCoverage: false },
+    ])));
+    render(<ChatWorkspace chatId="no-evidence-chat" initialQuery="hello" initialJurisdiction={jurisdiction.id} />);
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([expect.objectContaining({ content: answer, citations: [], citationClaim })]),
+    })));
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+  });
+
+  it("handles the deployment's nested 504 error without rendering an object", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({
+      error: { code: "504", message: "An error occurred with your deployment" },
+    }, { status: 504 })));
+    render(<ChatWorkspace chatId="timeout-chat" initialQuery="hello" initialJurisdiction={jurisdiction.id} />);
+    expect(await screen.findByText("The answer took too long to finish. Please try again.")).toBeVisible();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
   it("rejects done without citations and a one-use claim", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
       { type: "done", result: "No supported citation was returned.", citations: [], partialCoverage: false },
