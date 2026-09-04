@@ -565,12 +565,14 @@ const chatResearchStoreValidator = v.object({
 });
 
 const chatResearchStoresValidator = v.object({
+  authorizedScopeSize: v.number(),
   stores: v.array(chatResearchStoreValidator),
   partialCoverage: v.boolean(),
 });
 
 export type ChatResearchStore = ResearchScopeItem & { storeName: string };
 export type ChatResearchStores = {
+  authorizedScopeSize: number;
   stores: ChatResearchStore[];
   partialCoverage: boolean;
 };
@@ -609,6 +611,7 @@ export async function resolveChatResearchStoresForJurisdiction(
     return storeName ? [{ ...item, storeName }] : [];
   });
   return {
+    authorizedScopeSize: scope.items.length,
     stores,
     partialCoverage: stores.length !== scope.items.length,
   };

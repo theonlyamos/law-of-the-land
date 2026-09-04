@@ -675,12 +675,20 @@ const chatMessageValidator = v.object({
   citations: v.optional(v.array(chatCitationValidator)),
 });
 
-async function authorizeGovernedCitations(
+type GovernedCompletionAuthority = {
+  publicCitations: ChatCitation[];
+  authorizedScopeSize: number;
+  readyStoreCount: number;
+  partialCoverage: boolean;
+  jurisdictionCoverage: GovernedJurisdictionCoverage[];
+};
+
+async function resolveGovernedCompletionAuthority(
   ctx: MutationCtx,
   session: Doc<"chatSessions">,
   jurisdictionId: Id<"jurisdictions">,
   citations: readonly GovernedCitationIdentity[],
-): Promise<ChatCitation[]> {
+): Promise<GovernedCompletionAuthority> {
   const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
   const stores = new Map(resolution.stores.map((store) => [store.jurisdictionId, store]));
   const seen = new Set<string>();
@@ -731,11 +739,45 @@ async function authorizeGovernedCitations(
       relation: store.relation,
     });
   }
-  if (!publicCitations.some((citation) => citation.jurisdictionId === jurisdictionId)) {
-    throw new ConvexError("INVALID_CHAT_CITATIONS");
+  if (citations.length > 0) {
+    if (!publicCitations.some((citation) => citation.jurisdictionId === jurisdictionId)) {
+      throw new ConvexError("INVALID_CHAT_CITATIONS");
+    }
+    await validateCitations(ctx, session, [{ role: "assistant", citations: publicCitations }]);
   }
-  await validateCitations(ctx, session, [{ role: "assistant", citations: publicCitations }]);
-  return publicCitations;
+  const citedJurisdictionIds = new Set(
+    publicCitations.map((citation) => citation.jurisdictionId),
+  );
+  return {
+    publicCitations,
+    authorizedScopeSize: resolution.authorizedScopeSize,
+    readyStoreCount: resolution.stores.length,
+    partialCoverage: resolution.partialCoverage,
+    jurisdictionCoverage: resolution.stores.map((store, ordinal) => ({
+      ordinal,
+      relation: store.relation,
+      coverage: citedJurisdictionIds.has(store.jurisdictionId)
+        ? "evidence" as const
+        : "no_evidence" as const,
+    })),
+  };
+}
+
+function matchesCurrentScope(
+  input: GovernedCompletionProofInput,
+  authority: GovernedCompletionAuthority,
+): boolean {
+  return input.authorizedScopeSize === authority.authorizedScopeSize
+    && input.readyStoreCount === authority.readyStoreCount
+    && input.partialCoverage === authority.partialCoverage
+    && input.jurisdictionCoverage.length === authority.jurisdictionCoverage.length
+    && input.jurisdictionCoverage.every((item, index) => {
+      const current = authority.jurisdictionCoverage[index];
+      return current !== undefined
+        && item.ordinal === current.ordinal
+        && item.relation === current.relation
+        && item.coverage === current.coverage;
+    });
 }
 
 const completionResultValidator = v.union(
@@ -835,9 +877,16 @@ export const completeGovernedInteraction = mutation({
       return { status: "replayed" as const, outcome: clientRows[0].outcome };
     }
 
-    const publicCitations = args.outcome === "success"
-      ? await authorizeGovernedCitations(ctx, session, jurisdictionId, args.citations)
-      : [];
+    const authority = await resolveGovernedCompletionAuthority(
+      ctx,
+      session,
+      jurisdictionId,
+      args.citations,
+    );
+    if (!matchesCurrentScope(input, authority)) {
+      throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    }
+    const { publicCitations } = authority;
     const now = Date.now();
     let claim: { citationClaim: string; expiresAt: number } | null = null;
     if (publicCitations.length > 0) {
@@ -878,11 +927,11 @@ export const completeGovernedInteraction = mutation({
       ...(args.failureCategory ? { failureCategory: args.failureCategory } : {}),
       model: args.model,
       totalLatencyMs: args.elapsedMs,
-      authorizedScopeSize: args.authorizedScopeSize,
-      readyStoreCount: args.readyStoreCount,
+      authorizedScopeSize: authority.authorizedScopeSize,
+      readyStoreCount: authority.readyStoreCount,
       citationCount: publicCitations.length,
-      partialCoverage: args.partialCoverage,
-      jurisdictionCoverage: args.jurisdictionCoverage,
+      partialCoverage: authority.partialCoverage,
+      jurisdictionCoverage: authority.jurisdictionCoverage,
       completedAt: now,
       rollupStatus: "pending",
     });
@@ -894,7 +943,7 @@ export const completeGovernedInteraction = mutation({
       status: "completed" as const,
       outcome: "success" as const,
       citations: publicCitations,
-      partialCoverage: args.partialCoverage,
+      partialCoverage: authority.partialCoverage,
       ...claim,
     };
   },

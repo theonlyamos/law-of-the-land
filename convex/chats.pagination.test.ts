@@ -108,8 +108,14 @@ async function issueClaim(
         versionId,
       });
     }
-    return { identities, readyStoreCount: uniqueJurisdictionIds.size };
+    return { identities };
   });
+  const currentScope = await t.query(internal.jurisdictions.resolveChatResearchStores, {
+    jurisdictionId: input.jurisdictionId,
+  });
+  const citedJurisdictionIds = new Set(
+    input.citations.map((citation) => citation.jurisdictionId),
+  );
   const completion = {
     routeNonce,
     externalId: input.externalId,
@@ -120,13 +126,15 @@ async function issueClaim(
     model: "gemini-3.5-flash-lite",
     elapsedMs: 1,
     outcome: "success" as const,
-    authorizedScopeSize: citationIds.readyStoreCount,
-    readyStoreCount: citationIds.readyStoreCount,
-    partialCoverage: false,
-    jurisdictionCoverage: Array.from({ length: citationIds.readyStoreCount }, (_, ordinal) => ({
+    authorizedScopeSize: currentScope.authorizedScopeSize,
+    readyStoreCount: currentScope.stores.length,
+    partialCoverage: currentScope.partialCoverage,
+    jurisdictionCoverage: currentScope.stores.map((store, ordinal) => ({
       ordinal,
-      relation: ordinal === 0 ? "selected" as const : "geographic_ancestor" as const,
-      coverage: "evidence" as const,
+      relation: store.relation,
+      coverage: ordinal === 0 || citedJurisdictionIds.has(store.jurisdictionId)
+        ? "evidence" as const
+        : "no_evidence" as const,
     })),
   };
   const result = await client.mutation(completeGovernedInteraction, {

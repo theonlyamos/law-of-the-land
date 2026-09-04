@@ -149,6 +149,27 @@ async function geographicJurisdiction(t: Backend, name: string) {
   });
 }
 
+async function attachReadyParent(
+  t: Backend,
+  selectedJurisdictionId: Id<"jurisdictions">,
+) {
+  const parent = await geographicJurisdiction(t, "West Africa");
+  await t.run(async (ctx) => {
+    const selectedProfiles = await ctx.db
+      .query("geographicJurisdictions")
+      .withIndex("by_jurisdictionId", (q) =>
+        q.eq("jurisdictionId", selectedJurisdictionId))
+      .take(2);
+    if (selectedProfiles.length !== 1) throw new Error("Invalid selected fixture");
+    await ctx.db.patch(selectedProfiles[0]._id, {
+      level: "city",
+      parentJurisdictionId: parent.jurisdictionId,
+      updatedAt: Date.now(),
+    });
+  });
+  return parent;
+}
+
 async function publishedDocument(
   t: Backend,
   jurisdictionId: Id<"jurisdictions">,
@@ -351,6 +372,66 @@ describe("completeGovernedInteraction", () => {
       "claimNonceHash",
     ]) expect(state.runs[0]).not.toHaveProperty(key);
   }, 30_000);
+
+  it("rejects proof-bound counters that disagree with the current scope", async () => {
+    const { t, owner, base } = await fixture();
+    const input: CompletionInput = {
+      ...base,
+      authorizedScopeSize: 2,
+      readyStoreCount: 2,
+      jurisdictionCoverage: [
+        { ordinal: 0, relation: "selected", coverage: "evidence" },
+        { ordinal: 1, relation: "geographic_ancestor", coverage: "no_evidence" },
+      ],
+    };
+
+    await expect(complete(owner.client, input)).rejects.toThrow(
+      "INVALID_GOVERNED_INTERACTION",
+    );
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it("rejects scope metadata after a supplementary store becomes unready", async () => {
+    const { t, owner, selection, base } = await fixture();
+    const parent = await attachReadyParent(t, selection.jurisdictionId);
+    const input: CompletionInput = {
+      ...base,
+      authorizedScopeSize: 2,
+      readyStoreCount: 2,
+      jurisdictionCoverage: [
+        { ordinal: 0, relation: "selected", coverage: "evidence" },
+        { ordinal: 1, relation: "geographic_ancestor", coverage: "no_evidence" },
+      ],
+    };
+    await t.run((ctx) => ctx.db.patch(parent.jurisdictionId, {
+      providerSyncState: "drifted",
+      updatedAt: Date.now(),
+    }));
+
+    await expect(complete(owner.client, input)).rejects.toThrow(
+      "INVALID_GOVERNED_INTERACTION",
+    );
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it("rejects a proof-bound coverage relation that disagrees with current store order", async () => {
+    const { t, owner, selection, base } = await fixture();
+    await attachReadyParent(t, selection.jurisdictionId);
+    const input: CompletionInput = {
+      ...base,
+      authorizedScopeSize: 2,
+      readyStoreCount: 2,
+      jurisdictionCoverage: [
+        { ordinal: 0, relation: "selected", coverage: "evidence" },
+        { ordinal: 1, relation: "organizational_geography", coverage: "no_evidence" },
+      ],
+    };
+
+    await expect(complete(owner.client, input)).rejects.toThrow(
+      "INVALID_GOVERNED_INTERACTION",
+    );
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
 
   it("makes nonce and exact assistant-client retries write-idempotent without reissuing a claim", async () => {
     const { t, owner, base } = await fixture();

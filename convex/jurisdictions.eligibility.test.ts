@@ -336,6 +336,7 @@ describe("authenticated private chat research manifest", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const payload = await response.json();
     expect(payload).toEqual({
+      authorizedScopeSize: 3,
       stores: [
         { jurisdictionId: city.jurisdictionId, name: "City", kind: "geographic", relation: "selected", storeName: city.storeName },
         { jurisdictionId: region.jurisdictionId, name: "Region", kind: "geographic", relation: "geographic_ancestor", storeName: region.storeName },
@@ -424,6 +425,7 @@ describe("authenticated private chat research manifest", () => {
 
     const partial = await post(user.client, JSON.stringify({ jurisdictionId: city.jurisdictionId }));
     await expect(partial.json()).resolves.toEqual({
+      authorizedScopeSize: 2,
       stores: [{ jurisdictionId: city.jurisdictionId, name: "Ready city", kind: "geographic", relation: "selected", storeName: "fileSearchStores/unique-city" }],
       partialCoverage: true,
     });
