@@ -15,7 +15,6 @@ const E2E_BOUNDARY_KEYS = [
   "ADMIN_E2E_CONVEX_SITE_URL",
   "ADMIN_E2E_APPROVED_COMMIT_SHA",
   "ADMIN_E2E_LOCAL_HEAD_SHA",
-  "ADMIN_E2E_PROVIDER_OBSERVATION_SECRET",
 ] as const;
 
 function enableStubBoundary() {
@@ -29,7 +28,6 @@ function enableStubBoundary() {
     ADMIN_E2E_CONVEX_SITE_URL: "http://127.0.0.1:3211",
     ADMIN_E2E_APPROVED_COMMIT_SHA: sha,
     ADMIN_E2E_LOCAL_HEAD_SHA: sha,
-    ADMIN_E2E_PROVIDER_OBSERVATION_SECRET: "c3R1Yi1vYnNlcnZhdGlvbi1zZWNyZXQtMzItYnl0ZXM",
   });
 }
 

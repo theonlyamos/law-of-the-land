@@ -7,7 +7,6 @@ import { optionalUserId, requireUserId } from "./lib/requireUser";
 import {
   chatCitationValidator,
   allowedParentLevelsByLevel,
-  isLegacyCountryCode,
   jurisdictionKindValidator,
   MAX_GEOGRAPHIC_DEPTH,
   type ChatCitation,
@@ -17,7 +16,6 @@ import {
   activeOrganizationIdsForUser,
   assertJurisdictionAccess,
 } from "./lib/jurisdictionAccess";
-import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
 import {
   createCitationClaimBindings,
   type ClaimCitation,
@@ -31,12 +29,6 @@ import {
 } from "./lib/telemetryProof";
 import { isGeminiDocumentName } from "./lib/geminiFileSearchNames";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
-import {
-  effectiveJurisdictionContract,
-  hasCoherentJurisdictionContractIdentity,
-  resolveLegacyJurisdictionSnapshot,
-  type LegacyJurisdictionSnapshot,
-} from "./lib/legacyJurisdictionCompatibility";
 
 const messageValidator = v.union(
   v.object({
@@ -55,20 +47,6 @@ const messageValidator = v.union(
   }),
 );
 
-const legacyLocalMessageValidator = v.union(
-  v.object({
-    role: v.literal("user"),
-    content: v.string(),
-    clientId: v.optional(v.string()),
-    createdAt: v.optional(v.number()),
-  }),
-  v.object({
-    role: v.literal("assistant"),
-    content: v.string(),
-    clientId: v.optional(v.string()),
-    createdAt: v.optional(v.number()),
-  }),
-);
 
 const MAX_SESSION_PAGE_SIZE = 30;
 const MAX_MESSAGE_PAGE_SIZE = 50;
@@ -172,7 +150,6 @@ const governedJurisdictionCoverageValidator = v.object({
     v.literal("unavailable"),
   ),
 });
-
 function boundedIdentifier(value: string, maximum: number): boolean {
   return value.length > 0 && value.length <= maximum && value === value.trim();
 }
@@ -355,30 +332,6 @@ async function assertTypedJurisdiction(ctx: ChatCtx, row: Doc<"jurisdictions">):
   return kind;
 }
 
-async function resolveLegacyJurisdiction(
-  ctx: ChatCtx,
-  suppliedCountry?: string,
-): Promise<LegacyJurisdictionSnapshot> {
-  const resolved = await resolveLegacyJurisdictionSnapshot(ctx, suppliedCountry);
-  if (!resolved) unavailable();
-  return resolved;
-}
-
-async function historicalJurisdiction(ctx: ChatCtx, country: string): Promise<Doc<"jurisdictions"> | null> {
-  const normalized = country.trim().toUpperCase();
-  if (!isLegacyCountryCode(normalized)) return null;
-  const rows = await ctx.db.query("jurisdictions")
-    .withIndex("by_legacyCountryCode_and_status", (q) => q.eq("legacyCountryCode", normalized).eq("status", "enabled"))
-    .take(2);
-  return rows.length === 1 ? rows[0] : null;
-}
-
-async function sessionJurisdiction(ctx: ChatCtx, session: Doc<"chatSessions">): Promise<Doc<"jurisdictions"> | null | undefined> {
-  if (session.jurisdictionId) return await ctx.db.get("jurisdictions", session.jurisdictionId);
-  if (session.country) return await historicalJurisdiction(ctx, session.country);
-  return undefined;
-}
-
 async function geographicProfile(
   ctx: ChatCtx,
   jurisdictionId: Id<"jurisdictions">,
@@ -483,43 +436,22 @@ async function canAccessSession(
   session: Doc<"chatSessions">,
   activeOrganizationIds?: Set<Id<"organizations">> | null,
   cache?: Map<string, Promise<boolean>>,
-  legacyCompatibility = false,
 ): Promise<boolean> {
-  if (!hasCoherentJurisdictionContractIdentity(session)) return false;
+  if (!session.jurisdictionId || !session.jurisdictionName?.trim() ||
+    !session.jurisdictionKind || session.jurisdictionContract !== "unified") return false;
   if (cache) {
-    const key = session.jurisdictionId
-      ? `id:${session.jurisdictionId}:${session.jurisdictionName ?? ""}:${session.jurisdictionKind ?? ""}:${session.country ?? ""}`
-      : session.country ? `code:${session.country}` : "legacy:none";
-    const cacheKey = `${legacyCompatibility ? "legacy" : "strict"}:${key}`;
+    const cacheKey = `${session.jurisdictionId}:${session.jurisdictionName}:${session.jurisdictionKind}`;
     const cached = cache.get(cacheKey);
     if (cached) return await cached;
-    const pending = canAccessSession(ctx, session, activeOrganizationIds, undefined, legacyCompatibility);
+    const pending = canAccessSession(ctx, session, activeOrganizationIds);
     cache.set(cacheKey, pending);
     return await pending;
   }
-  if (legacyCompatibility) {
-    if (!session.jurisdictionId || !session.country ||
-      !session.jurisdictionName?.trim() || session.jurisdictionKind !== "geographic") {
-      return false;
-    }
-    try {
-      const resolved = await resolveLegacyJurisdiction(ctx, session.country);
-      return resolved.jurisdictionId === session.jurisdictionId &&
-        resolved.jurisdictionKind === session.jurisdictionKind;
-    } catch {
-      return false;
-    }
-  }
-  const row = await sessionJurisdiction(ctx, session);
-  if (row === undefined) return true;
+  const row = await ctx.db.get("jurisdictions", session.jurisdictionId);
   if (!row) return false;
   try {
     const kind = await assertTypedJurisdiction(ctx, row);
-    if (
-      session.jurisdictionId &&
-      (!session.jurisdictionName || session.jurisdictionKind !== kind ||
-        !session.jurisdictionName.trim())
-    ) return false;
+    if (session.jurisdictionKind !== kind) return false;
     if ((row.visibility ?? "public") === "public") return true;
     if (activeOrganizationIds !== undefined) {
       return Boolean(row.organizationId && activeOrganizationIds?.has(row.organizationId));
@@ -531,24 +463,14 @@ async function canAccessSession(
   }
 }
 
-function requiresSessionAccessValidation(
-  session: Doc<"chatSessions">,
-  unifiedEnabled: boolean,
-): boolean {
-  return unifiedEnabled || session.jurisdictionId !== undefined ||
-    session.jurisdictionContract !== undefined;
-}
-
 function assertSelectionMatches(session: Doc<"chatSessions">, args: {
   jurisdictionId?: Id<"jurisdictions">;
   jurisdictionName?: string;
   jurisdictionKind?: JurisdictionKind;
-  country?: string;
 }) {
   if (args.jurisdictionId !== undefined && args.jurisdictionId !== session.jurisdictionId) unavailable();
   if (args.jurisdictionName !== undefined && args.jurisdictionName !== session.jurisdictionName) unavailable();
   if (args.jurisdictionKind !== undefined && args.jurisdictionKind !== session.jurisdictionKind) unavailable();
-  if (args.country !== undefined && args.country.trim().toUpperCase() !== session.country) unavailable();
 }
 
 async function validateCitations(
@@ -658,11 +580,9 @@ const chatSessionMetadataValidator = v.object({
   lastMessage: v.string(),
   timestamp: v.number(),
   messageCount: v.number(),
-  country: v.union(v.string(), v.null()),
   jurisdictionId: v.union(v.id("jurisdictions"), v.null()),
   jurisdictionName: v.union(v.string(), v.null()),
   jurisdictionKind: v.union(jurisdictionKindValidator, v.null()),
-  jurisdictionContract: v.union(v.literal("legacy"), v.literal("unified")),
 });
 
 const chatMessageValidator = v.object({
@@ -1020,24 +940,12 @@ export const list = query({
         numItems: normalizePageSize(args.paginationOpts.numItems, MAX_SESSION_PAGE_SIZE),
       });
 
-    let visible = result.page;
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
-    if (result.page.some((session) => requiresSessionAccessValidation(session, unified))) {
-      let memberships: Set<Id<"organizations">> | null = null;
-      try { memberships = await activeOrganizationIdsForUser(ctx, userId); } catch { memberships = null; }
-      const cache = new Map<string, Promise<boolean>>();
-      const access = await Promise.all(result.page.map((session) =>
-        requiresSessionAccessValidation(session, unified)
-          ? canAccessSession(
-              ctx,
-              session,
-              memberships,
-              cache,
-              !unified && effectiveJurisdictionContract(session) === "legacy",
-            )
-          : Promise.resolve(true)));
-      visible = result.page.filter((_, index) => access[index]);
-    }
+    let memberships: Set<Id<"organizations">> | null = null;
+    try { memberships = await activeOrganizationIdsForUser(ctx, userId); } catch { memberships = null; }
+    const cache = new Map<string, Promise<boolean>>();
+    const access = await Promise.all(result.page.map((session) =>
+      canAccessSession(ctx, session, memberships, cache)));
+    const visible = result.page.filter((_, index) => access[index]);
     return {
       page: visible.map((session) => ({
         id: session.externalId,
@@ -1069,15 +977,7 @@ export const getByExternalId = query({
       .unique();
 
     if (!session) return null;
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
-    if (requiresSessionAccessValidation(session, unified) &&
-      !(await canAccessSession(
-        ctx,
-        session,
-        undefined,
-        undefined,
-        !unified && effectiveJurisdictionContract(session) === "legacy",
-      ))) return null;
+    if (!(await canAccessSession(ctx, session))) return null;
 
     return {
       id: session.externalId,
@@ -1085,11 +985,9 @@ export const getByExternalId = query({
       lastMessage: session.lastMessage,
       timestamp: session.updatedAt,
       messageCount: session.messageCount,
-      country: session.country ?? null,
       jurisdictionId: session.jurisdictionId ?? null,
       jurisdictionName: session.jurisdictionName ?? null,
       jurisdictionKind: session.jurisdictionKind ?? null,
-      jurisdictionContract: effectiveJurisdictionContract(session),
     };
   },
 });
@@ -1115,15 +1013,7 @@ export const listMessages = query({
       )
       .unique();
     if (!session) return { page: [], isDone: true, continueCursor: "" };
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
-    if (requiresSessionAccessValidation(session, unified) &&
-      !(await canAccessSession(
-        ctx,
-        session,
-        undefined,
-        undefined,
-        !unified && effectiveJurisdictionContract(session) === "legacy",
-      ))) {
+    if (!(await canAccessSession(ctx, session))) {
       return { page: [], isDone: true, continueCursor: "" };
     }
 
@@ -1157,7 +1047,6 @@ export const listMessages = query({
 export const ensure = mutation({
   args: {
     externalId: v.string(),
-    country: v.optional(v.string()),
     jurisdictionId: v.optional(v.string()),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
@@ -1165,7 +1054,6 @@ export const ensure = mutation({
   returns: v.object({ id: v.string() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
     const jurisdictionId = args.jurisdictionId === undefined
       ? undefined
       : ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
@@ -1180,42 +1068,18 @@ export const ensure = mutation({
       .unique();
 
     if (existing) {
-      const governed = requiresSessionAccessValidation(existing, unified);
-      if (governed && !(await canAccessSession(
-        ctx,
-        existing,
-        undefined,
-        undefined,
-        !unified && effectiveJurisdictionContract(existing) === "legacy",
-      ))) unavailable();
-      if (governed) assertSelectionMatches(existing, selectionArgs);
+      if (!(await canAccessSession(ctx, existing))) unavailable();
+      assertSelectionMatches(existing, selectionArgs);
       return { id: existing.externalId };
     }
 
-    if (!unified && args.jurisdictionId !== undefined) unavailable();
-
-    let stableSnapshot: Pick<Doc<"chatSessions">, "jurisdictionId" | "jurisdictionName" | "jurisdictionKind" | "jurisdictionContract" | "country">;
-    if (unified) {
-      if (!jurisdictionId) unavailable();
-      const row = await ctx.db.get("jurisdictions", jurisdictionId);
-      if (!row) unavailable();
-      const kind = await assertTypedJurisdiction(ctx, row);
-      try { await assertJurisdictionAccess(ctx, row); } catch { unavailable(); }
-      const country = isLegacyCountryCode(row.legacyCountryCode) ? row.legacyCountryCode : undefined;
-      if (args.jurisdictionName !== undefined && args.jurisdictionName !== row.name) unavailable();
-      if (args.jurisdictionKind !== undefined && args.jurisdictionKind !== kind) unavailable();
-      if (args.country !== undefined && args.country.trim().toUpperCase() !== country) unavailable();
-      stableSnapshot = {
-        jurisdictionId: row._id,
-        jurisdictionName: row.name,
-        jurisdictionKind: kind,
-        jurisdictionContract: "unified",
-        ...(country ? { country } : {}),
-      };
-    } else {
-      const legacy = await resolveLegacyJurisdiction(ctx, args.country);
-      stableSnapshot = { ...legacy, jurisdictionContract: "legacy" };
-    }
+    if (!jurisdictionId) unavailable();
+    const row = await ctx.db.get("jurisdictions", jurisdictionId);
+    if (!row) unavailable();
+    const kind = await assertTypedJurisdiction(ctx, row);
+    try { await assertJurisdictionAccess(ctx, row); } catch { unavailable(); }
+    if (args.jurisdictionName !== undefined && args.jurisdictionName !== row.name) unavailable();
+    if (args.jurisdictionKind !== undefined && args.jurisdictionKind !== kind) unavailable();
 
     await ctx.db.insert("chatSessions", {
       userId,
@@ -1224,7 +1088,10 @@ export const ensure = mutation({
       lastMessage: "",
       messageCount: 0,
       updatedAt: Date.now(),
-      ...stableSnapshot,
+      jurisdictionId: row._id,
+      jurisdictionName: row.name,
+      jurisdictionKind: kind,
+      jurisdictionContract: "unified",
     });
 
     return { id: args.externalId };
@@ -1244,7 +1111,6 @@ export const appendMessages = mutation({
   returns: v.object({ id: v.string() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
     const jurisdictionId = args.jurisdictionId === undefined
       ? undefined
       : ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
@@ -1258,20 +1124,8 @@ export const appendMessages = mutation({
       )
       .unique();
 
-    if (!session) {
-      if (unified || args.jurisdictionId !== undefined) unavailable();
-      throw new ConvexError("Chat session not found.");
-    }
-    if (requiresSessionAccessValidation(session, unified)) {
-      if (!(await canAccessSession(
-        ctx,
-        session,
-        undefined,
-        undefined,
-        !unified && effectiveJurisdictionContract(session) === "legacy",
-      ))) unavailable();
-      assertSelectionMatches(session, selectionArgs);
-    }
+    if (!session || !(await canAccessSession(ctx, session))) unavailable();
+    assertSelectionMatches(session, selectionArgs);
     // Resolve every retry before any write or one-use claim consumption.
     const unsavedMessages: typeof args.messages = [];
     const pendingByClientId = new Map<string, (typeof args.messages)[number]>();
@@ -1304,8 +1158,6 @@ export const appendMessages = mutation({
     }
 
     if (unsavedMessages.length === 0) return { id: session.externalId };
-    if (!unified && effectiveJurisdictionContract(session) !== "legacy") unavailable();
-
     for (const message of unsavedMessages) {
       await validateCitations(ctx, session, [message]);
       if (message.role === "assistant" && message.citations !== undefined) {
@@ -1347,7 +1199,6 @@ export const remove = mutation({
   returns: v.object({ deleted: v.boolean() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const unified = await readUnifiedJurisdictionsEnabled(ctx);
 
     const session = await ctx.db
       .query("chatSessions")
@@ -1356,17 +1207,8 @@ export const remove = mutation({
       )
       .unique();
 
-    if (!session) {
-      if (unified) unavailable();
-      return { deleted: false };
-    }
-    if (requiresSessionAccessValidation(session, unified) && !(await canAccessSession(
-      ctx,
-      session,
-      undefined,
-      undefined,
-      !unified && effectiveJurisdictionContract(session) === "legacy",
-    ))) unavailable();
+    if (!session) return { deleted: false };
+    if (!(await canAccessSession(ctx, session))) unavailable();
 
     await ctx.db.delete(session._id);
     await ctx.scheduler.runAfter(0, internal.chats.deleteMessageBatch, {
@@ -1393,64 +1235,5 @@ export const deleteMessageBatch = internalMutation({
       });
     }
     return { deletedCount: messages.length, hasMore };
-  },
-});
-
-export const migrateFromLocal = mutation({
-  args: {
-    sessions: v.array(
-      v.object({
-        externalId: v.string(),
-        title: v.string(),
-        lastMessage: v.string(),
-        messageCount: v.number(),
-        updatedAt: v.number(),
-        messages: v.array(legacyLocalMessageValidator),
-      })
-    ),
-  },
-  returns: v.object({ migratedCount: v.number() }),
-  handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
-    let migratedCount = 0;
-    let legacySnapshot: Awaited<ReturnType<typeof resolveLegacyJurisdiction>> | undefined;
-
-    for (const localSession of args.sessions) {
-      const existing = await ctx.db
-        .query("chatSessions")
-        .withIndex("by_user_externalId", (q) =>
-          q.eq("userId", userId).eq("externalId", localSession.externalId)
-        )
-        .unique();
-
-      if (existing) continue;
-
-      legacySnapshot ??= await resolveLegacyJurisdiction(ctx);
-
-      const sessionId = await ctx.db.insert("chatSessions", {
-        userId,
-        externalId: localSession.externalId,
-        title: localSession.title,
-        lastMessage: localSession.lastMessage,
-        messageCount: localSession.messageCount,
-        updatedAt: localSession.updatedAt,
-        ...legacySnapshot,
-        jurisdictionContract: "legacy",
-      });
-
-      for (const message of localSession.messages) {
-        await ctx.db.insert("messages", {
-          sessionId: sessionId as Id<"chatSessions">,
-          role: message.role,
-          content: message.content,
-          clientId: message.clientId,
-          createdAt: message.createdAt ?? localSession.updatedAt,
-        });
-      }
-
-      migratedCount += 1;
-    }
-
-    return { migratedCount };
   },
 });

@@ -7,9 +7,6 @@ export const JURISDICTION_MIGRATION_IDEMPOTENCY_KEY =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 export const JURISDICTION_MIGRATION_TARGETS = [
   "chatSessions",
-  "telemetryCorrelations",
-  "queryRuns",
-  "dailyMetrics",
 ] as const;
 
 export type JurisdictionMigrationTarget =
@@ -37,12 +34,7 @@ export async function ghanaProjectionFingerprint(projection: {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export const jurisdictionMigrationTargetValidator = v.union(
-  v.literal("chatSessions"),
-  v.literal("telemetryCorrelations"),
-  v.literal("queryRuns"),
-  v.literal("dailyMetrics"),
-);
+export const jurisdictionMigrationTargetValidator = v.literal("chatSessions");
 
 export const migrationPageResultValidator = v.object({
   processed: v.number(),
@@ -304,12 +296,6 @@ function targetBlocker(target: JurisdictionMigrationTarget): string {
   switch (target) {
     case "chatSessions":
       return "CHAT_SESSIONS_NOT_VERIFIED";
-    case "telemetryCorrelations":
-      return "TELEMETRY_CORRELATIONS_NOT_VERIFIED";
-    case "queryRuns":
-      return "QUERY_RUNS_NOT_VERIFIED";
-    case "dailyMetrics":
-      return "DAILY_METRICS_NOT_VERIFIED";
   }
 }
 

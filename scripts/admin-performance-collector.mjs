@@ -1,14 +1,11 @@
 import { assertFiniteMetrics } from "./admin-performance-artifact.mjs";
-import { decodeRetrievalObservationV2 } from "../shared/e2e-jurisdiction-provider-contract.ts";
 
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
 const CALIBRATION_KEYS = [
   "autocompleteP95LimitMs",
   "detailsP95LimitMs",
-  "fileSearchP95LimitMs",
   "reference",
   "selectorP95LimitsMs",
-  "totalP95LimitMs",
 ];
 
 export function validatePerformanceCalibration(value) {
@@ -17,8 +14,7 @@ export function validatePerformanceCalibration(value) {
     : [];
   const numbers = value && typeof value === "object"
     ? [...(Array.isArray(value.selectorP95LimitsMs) ? value.selectorP95LimitsMs : []),
-      value.autocompleteP95LimitMs, value.detailsP95LimitMs,
-      value.fileSearchP95LimitMs, value.totalP95LimitMs]
+      value.autocompleteP95LimitMs, value.detailsP95LimitMs]
     : [];
   if (!value || typeof value !== "object" || Array.isArray(value)
     || keys.join("|") !== [...CALIBRATION_KEYS].sort().join("|")
@@ -64,40 +60,6 @@ function distribution(values, label) {
   return { samplesMs, p50Ms: percentile50(samplesMs), p95Ms: percentile95(samplesMs) };
 }
 
-export async function collectRetrievalObservation({ url, cookie, observationSecret, body, request = fetch }) {
-  const response = await request(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie,
-      "x-admin-e2e-provider-observation": observationSecret,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(`Authorized collection failed with status ${response.status}; no sample was recorded.`);
-  }
-  const encoded = response.headers.get("x-admin-e2e-retrieval-plan-v2");
-  if (!encoded) throw new Error("Authorized collection response omitted its retrieval observation.");
-  return decodeRetrievalObservationV2(encoded);
-}
-
-export async function collectPacedRetrievalObservations({
-  collect,
-  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-}) {
-  if (typeof collect !== "function" || typeof wait !== "function") {
-    throw new TypeError("Paced retrieval collection requires collect and wait functions.");
-  }
-  await wait(60_000);
-  const observations = [];
-  for (let index = 0; index < 20; index += 1) {
-    if (index > 0) await wait(4_100);
-    observations.push(await collect(index));
-  }
-  return observations;
-}
-
 export function buildJurisdictionPerformanceSections(input) {
   if (!Array.isArray(input.selectorProfiles) || input.selectorProfiles.length !== 4) {
     throw new TypeError("Jurisdiction selector requires the four approved collection profiles.");
@@ -118,12 +80,6 @@ export function buildJurisdictionPerformanceSections(input) {
   });
   const autocomplete = distribution(input.placePicker.autocompleteSamplesMs, "Places autocomplete");
   const details = distribution(input.placePicker.detailsSamplesMs, "Places details");
-  const observations = input.retrievalObservations;
-  if (!Array.isArray(observations) || observations.length !== 20) {
-    throw new TypeError("Retrieval planning requires exactly 20 decoded observations.");
-  }
-  const fileSearchSamples = observations.map((entry) => entry.fileSearchLatencyMs);
-  const totalSamples = observations.map((entry) => entry.totalLatencyMs);
   return {
     jurisdictionSelector: {
       sampleCount: 20,
@@ -141,33 +97,6 @@ export function buildJurisdictionPerformanceSections(input) {
       sameSessionCorrelation: input.placePicker.sameSessionCorrelation,
       placesInvocationCount: input.placePicker.placesInvocationCount,
       organizationalPlacesInvocationCount: input.organizationalPlacesInvocationCount,
-    },
-    retrievalPlan: {
-      sampleCount: 20,
-      calibration: { status: "pending", outcome: "incomplete" },
-      fileSearch: distribution(fileSearchSamples, "Gemini File Search"),
-      total: distribution(totalSamples, "Retrieval total"),
-      scopeSizeMax: Math.max(...observations.map((entry) => entry.authorizedScopeSize)),
-      planSizeMax: Math.max(...observations.map((entry) => entry.planSize)),
-      fileSearchCallCount: observations.reduce((total, entry) => total + entry.fileSearchCallCount, 0),
-      storeCountMax: Math.max(...observations.map((entry) => entry.fileSearchStoreCount)),
-      evidenceBytes: observations.reduce((total, entry) => total + entry.evidenceBytes, 0),
-      citationCount: observations.reduce((total, entry) => total + entry.citationCount, 0),
-      partialCoverageCount: observations.filter((entry) => entry.partialCoverage).length,
-      unexpectedRealProviderCallCount: observations.reduce((total, entry) => total + entry.unexpectedRealProviderCallCount, 0),
-      samples: observations.map((entry) => ({
-        authorizedScopeSize: entry.authorizedScopeSize,
-        planSize: entry.planSize,
-        fileSearchCallCount: entry.fileSearchCallCount,
-        fileSearchStoreCount: entry.fileSearchStoreCount,
-        fileSearchLatencyMs: entry.fileSearchLatencyMs,
-        evidenceBytes: entry.evidenceBytes,
-        citationCount: entry.citationCount,
-        partialCoverage: entry.partialCoverage,
-        jurisdictions: entry.jurisdictions,
-        totalLatencyMs: entry.totalLatencyMs,
-        unexpectedRealProviderCallCount: entry.unexpectedRealProviderCallCount,
-      })),
     },
   };
 }

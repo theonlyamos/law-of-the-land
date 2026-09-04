@@ -679,12 +679,7 @@ export default defineSchema({
   jurisdictionMigrationCheckpoints: defineTable({
     environment: v.string(),
     migrationVersion: v.literal("jurisdiction_ids_v1"),
-    target: v.union(
-      v.literal("chatSessions"),
-      v.literal("telemetryCorrelations"),
-      v.literal("queryRuns"),
-      v.literal("dailyMetrics"),
-    ),
+    target: v.literal("chatSessions"),
     mode: v.union(v.literal("dry_run"), v.literal("execute")),
     runNumber: v.number(),
     status: v.union(v.literal("running"), v.literal("completed")),

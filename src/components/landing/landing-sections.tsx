@@ -1,6 +1,5 @@
 import logo from "@/app/logo-transparent.png";
 import type { ChatSession } from "@/lib/chat-sessions";
-import type { PublicJurisdiction } from "@/lib/countries";
 import { ArrowRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -8,12 +7,10 @@ import { LegalInformationNotice } from "./legal-information-notice";
 import styles from "./landing-page.module.css";
 
 interface LandingSectionsProps {
-  jurisdictions: readonly PublicJurisdiction[] | undefined;
   recentChats: readonly ChatSession[];
   isAuthenticated: boolean;
   onResumeChat: (chatId: string) => void;
   plansHref: string;
-  searchFirstCoverage: boolean;
 }
 
 interface LedgerEntry {
@@ -100,12 +97,10 @@ function registerNumber(index: number) {
 }
 
 export function LandingSections({
-  jurisdictions,
   recentChats,
   isAuthenticated,
   onResumeChat,
   plansHref,
-  searchFirstCoverage,
 }: LandingSectionsProps) {
   return (
     <>
@@ -215,39 +210,13 @@ export function LandingSections({
           </div>
 
           <div className={styles.coverageRegister}>
-            <h3>{searchFirstCoverage ? "Search governed coverage" : "Published jurisdiction register"}</h3>
-            {searchFirstCoverage ? (
-              <p className={styles.registerState}>
-                Search by place or organization to find enabled public coverage and organizations
-                available through your membership.
-              </p>
-            ) : jurisdictions === undefined ? (
-              <p className={styles.registerState}>
-                {"Loading the published jurisdiction register\u2026"}
-              </p>
-            ) : jurisdictions.length === 0 ? (
-              <p className={styles.registerState}>
-                Legal research is not available for a jurisdiction right now. Please check again
-                later.
-              </p>
-            ) : (
-              <ul>
-                {jurisdictions.map((jurisdiction) => (
-                  <li key={jurisdiction.code}>
-                    <span className={styles.jurisdictionCode}>{jurisdiction.code}</span>
-                    <span>
-                      <strong>{jurisdiction.name}</strong>
-                      <small>Production legal library</small>
-                    </span>
-                    <span className={styles.status}>Available</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <h3>Search governed coverage</h3>
+            <p className={styles.registerState}>
+              Search by place or organization to find enabled public coverage and organizations
+              available through your membership.
+            </p>
             <p className={styles.coverageNote}>
-              {searchFirstCoverage
-                ? "Search results are bounded and reflect the access available to the current account."
-                : "The public selector updates automatically as additional jurisdictions complete review and publication."}
+              Search results are bounded and reflect the access available to the current account.
             </p>
           </div>
         </div>

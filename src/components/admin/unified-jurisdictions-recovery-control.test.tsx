@@ -14,9 +14,6 @@ const readyRollout: UnifiedJurisdictionRolloutState = {
   ghana: { ready: true, jurisdictionId: null, reasons: [] },
   targets: [
     { target: "chatSessions", status: "verified", processed: 1, updated: 0, unresolved: 0, mismatches: 0, runNumber: 2, verifiedAt: 1 },
-    { target: "telemetryCorrelations", status: "verified", processed: 0, updated: 0, unresolved: 0, mismatches: 0, runNumber: 2, verifiedAt: 1 },
-    { target: "queryRuns", status: "verified", processed: 1, updated: 0, unresolved: 0, mismatches: 0, runNumber: 2, verifiedAt: 1 },
-    { target: "dailyMetrics", status: "verified", processed: 1, updated: 0, unresolved: 0, mismatches: 0, runNumber: 2, verifiedAt: 1 },
   ],
   blockers: [],
   canEnable: true,

@@ -10,21 +10,17 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const metricProjection = v.object({
   id: v.id("dailyMetrics"),
   day: v.string(),
-  jurisdictionCode: v.optional(v.string()),
-  jurisdictionId: v.optional(v.id("jurisdictions")),
-  jurisdictionName: v.optional(v.string()),
-  jurisdictionKind: v.optional(v.union(v.literal("geographic"), v.literal("organizational"))),
+  jurisdictionId: v.id("jurisdictions"),
+  jurisdictionName: v.string(),
+  jurisdictionKind: v.union(v.literal("geographic"), v.literal("organizational")),
   totalQuestions: v.number(),
   successCount: v.number(),
   failureCount: v.number(),
   abortedCount: v.number(),
   providerFailureCount: v.number(),
-  noResultCount: v.number(),
   p50UpperBoundMs: v.number(),
   p95UpperBoundMs: v.number(),
   updatedAt: v.number(),
-  configurationUnavailableCount: v.optional(v.number()),
-  supplementaryProviderFailureCount: v.optional(v.number()),
 });
 
 function validateDay(value: string): string {
@@ -45,21 +41,17 @@ function project(row: Doc<"dailyMetrics">) {
   return {
     id: row._id,
     day: row.day,
-    ...(row.jurisdictionCode ? { jurisdictionCode: row.jurisdictionCode } : {}),
-    ...(row.jurisdictionId ? { jurisdictionId: row.jurisdictionId } : {}),
-    ...(row.jurisdictionName ? { jurisdictionName: row.jurisdictionName } : {}),
-    ...(row.jurisdictionKind ? { jurisdictionKind: row.jurisdictionKind } : {}),
+    jurisdictionId: row.jurisdictionId,
+    jurisdictionName: row.jurisdictionName,
+    jurisdictionKind: row.jurisdictionKind,
     totalQuestions: row.totalQuestions,
     successCount: row.successCount,
     failureCount: row.failureCount,
     abortedCount: row.abortedCount,
     providerFailureCount: row.providerFailureCount,
-    noResultCount: row.noResultCount,
     p50UpperBoundMs: row.p50UpperBoundMs,
     p95UpperBoundMs: row.p95UpperBoundMs,
     updatedAt: row.updatedAt,
-    ...(row.configurationUnavailableCount !== undefined ? { configurationUnavailableCount: row.configurationUnavailableCount } : {}),
-    ...(row.supplementaryProviderFailureCount !== undefined ? { supplementaryProviderFailureCount: row.supplementaryProviderFailureCount } : {}),
   };
 }
 
@@ -67,7 +59,6 @@ export const listDailyMetrics = query({
   args: {
     paginationOpts: paginationOptsValidator,
     jurisdictionId: v.optional(v.union(v.id("jurisdictions"), v.null())),
-    jurisdictionCode: v.union(v.string(), v.null()),
     fromDay: v.string(),
     toDay: v.string(),
   },
@@ -84,14 +75,9 @@ export const listDailyMetrics = query({
       throw new ConvexError("INVALID_ANALYTICS_RANGE");
     }
     const paginationOpts = validatePage(args.paginationOpts);
-    const code = args.jurisdictionCode?.trim().toUpperCase() ?? null;
-    if (args.jurisdictionId != null && code !== null) throw new ConvexError("INVALID_ANALYTICS_JURISDICTION");
-    if (code !== null && !/^[A-Z]{2}$/.test(code)) throw new ConvexError("INVALID_ANALYTICS_JURISDICTION");
     const result = args.jurisdictionId
       ? await ctx.db.query("dailyMetrics").withIndex("by_jurisdictionId_and_day", (q) => q.eq("jurisdictionId", args.jurisdictionId!).gte("day", fromDay).lte("day", toDay)).order("desc").paginate(paginationOpts)
-      : code
-        ? await ctx.db.query("dailyMetrics").withIndex("by_jurisdictionCode_and_jurisdictionId_and_day", (q) => q.eq("jurisdictionCode", code).eq("jurisdictionId", undefined).gte("day", fromDay).lte("day", toDay)).order("desc").paginate(paginationOpts)
-        : await ctx.db.query("dailyMetrics").withIndex("by_day", (q) => q.gte("day", fromDay).lte("day", toDay)).order("desc").paginate(paginationOpts);
+      : await ctx.db.query("dailyMetrics").withIndex("by_day", (q) => q.gte("day", fromDay).lte("day", toDay)).order("desc").paginate(paginationOpts);
     return {
       page: result.page.map(project),
       isDone: result.isDone,

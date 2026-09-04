@@ -233,7 +233,6 @@ const RETENTION_PHASES = [
   "query_runs",
   "job_provider_diagnostics",
   "jobs_succeeded", "jobs_failed", "jobs_cancelled",
-  "correlations_issued", "correlations_search_complete", "correlations_chat_claimed", "correlations_finalized",
   "storage",
 ] as const;
 type RetentionPhase = typeof RETENTION_PHASES[number];
@@ -321,10 +320,6 @@ export const runRetentionBatch = internalMutation({
           });
           deleted += 1;
         }
-      } else if (phase.startsWith("correlations_")) {
-        const status = phase.slice("correlations_".length) as "issued" | "search_complete" | "chat_claimed" | "finalized";
-        const rows = await ctx.db.query("telemetryCorrelations").withIndex("by_status_and_expiresAt", (q) => q.eq("status", status).lt("expiresAt", now)).take(capacity);
-        for (const row of rows) { await ctx.db.delete(row._id); deleted += 1; }
       } else {
         storageVisited = true;
         const page = await ctx.db.system.query("_storage").order("asc").paginate({ numItems: capacity, cursor: storageCursor });

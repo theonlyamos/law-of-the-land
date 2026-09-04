@@ -58,10 +58,7 @@ const GHANA_MIGRATION_ACTOR = "migration:seed-ghana-jurisdiction-v1";
 const GHANA_V2_MIGRATION_ACTOR = "migration:seed-ghana-jurisdiction-v2";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 type MigrationRow =
-  | { target: "chatSessions"; row: Doc<"chatSessions"> }
-  | { target: "telemetryCorrelations"; row: Doc<"telemetryCorrelations"> }
-  | { target: "queryRuns"; row: Doc<"queryRuns"> }
-  | { target: "dailyMetrics"; row: Doc<"dailyMetrics"> };
+  { target: "chatSessions"; row: Doc<"chatSessions"> };
 
 type MigrationClassification = {
   status: "clean" | "update" | "unresolved" | "mismatch";
@@ -522,26 +519,12 @@ export const seedGhanaJurisdictionV2 = internalMutation({
 });
 
 function rowCode(migrationRow: MigrationRow): string | undefined {
-  switch (migrationRow.target) {
-    case "chatSessions":
-      return migrationRow.row.country;
-    case "telemetryCorrelations":
-    case "queryRuns":
-    case "dailyMetrics":
-      return migrationRow.row.jurisdictionCode;
-  }
+  return migrationRow.row.country;
 }
 
 function isCanonicalStoredLegacyCode(value: string | undefined): value is string {
   return value !== undefined && value === value.trim().toUpperCase() &&
     isLegacyCountryCode(value);
-}
-
-function rowHasContract(migrationRow: MigrationRow): migrationRow is
-  | { target: "chatSessions"; row: Doc<"chatSessions"> }
-  | { target: "telemetryCorrelations"; row: Doc<"telemetryCorrelations"> } {
-  return migrationRow.target === "chatSessions" ||
-    migrationRow.target === "telemetryCorrelations";
 }
 
 async function classifyMigrationRow(
@@ -551,9 +534,7 @@ async function classifyMigrationRow(
 ): Promise<MigrationClassification> {
   const row = migrationRow.row;
   const code = rowCode(migrationRow);
-  const contract = rowHasContract(migrationRow)
-    ? migrationRow.row.jurisdictionContract
-    : undefined;
+  const contract = migrationRow.row.jurisdictionContract;
   if (!row.jurisdictionId) {
     if (contract === "unified" ||
         (contract === "legacy" && !isCanonicalStoredLegacyCode(code))) {
@@ -580,7 +561,7 @@ async function classifyMigrationRow(
         ...(row.jurisdictionKind === undefined
           ? { jurisdictionKind: resolved.jurisdictionKind }
           : {}),
-        ...(rowHasContract(migrationRow) ? { jurisdictionContract: "legacy" } : {}),
+        jurisdictionContract: "legacy",
       },
     };
   }
@@ -642,18 +623,6 @@ async function paginateMigrationTarget(
       const page = await ctx.db.query("chatSessions").paginate(paginationOpts);
       return { ...page, page: page.page.map((row) => ({ target, row }) satisfies MigrationRow) };
     }
-    case "telemetryCorrelations": {
-      const page = await ctx.db.query("telemetryCorrelations").paginate(paginationOpts);
-      return { ...page, page: page.page.map((row) => ({ target, row }) satisfies MigrationRow) };
-    }
-    case "queryRuns": {
-      const page = await ctx.db.query("queryRuns").paginate(paginationOpts);
-      return { ...page, page: page.page.map((row) => ({ target, row }) satisfies MigrationRow) };
-    }
-    case "dailyMetrics": {
-      const page = await ctx.db.query("dailyMetrics").paginate(paginationOpts);
-      return { ...page, page: page.page.map((row) => ({ target, row }) satisfies MigrationRow) };
-    }
   }
 }
 
@@ -662,23 +631,7 @@ async function patchMigrationRow(
   migrationRow: MigrationRow,
   patch: NonNullable<MigrationClassification["patch"]>,
 ): Promise<void> {
-  switch (migrationRow.target) {
-    case "chatSessions":
-      await ctx.db.patch(migrationRow.row._id, patch);
-      return;
-    case "telemetryCorrelations":
-      await ctx.db.patch(migrationRow.row._id, patch);
-      return;
-    case "queryRuns": {
-      const { jurisdictionContract: _ignored, ...identityPatch } = patch;
-      await ctx.db.patch(migrationRow.row._id, identityPatch);
-      return;
-    }
-    case "dailyMetrics": {
-      const { jurisdictionContract: _ignored, ...identityPatch } = patch;
-      await ctx.db.patch(migrationRow.row._id, identityPatch);
-    }
-  }
+  await ctx.db.patch(migrationRow.row._id, patch);
 }
 
 export const backfillJurisdictionReferences = internalMutation({
@@ -769,66 +722,13 @@ export const backfillJurisdictionReferences = internalMutation({
       row: MigrationRow;
       classification: MigrationClassification;
     }> = [];
-    const dailyCandidateCounts = new Map<string, number>();
-    const dailyIdOwnerCache = new Map<string, Promise<Doc<"dailyMetrics">[]>>();
-    const dailyCodeCandidateCache = new Map<string, Promise<Doc<"dailyMetrics">[]>>();
     for (const row of page.page) {
       const classification = await classifyMigrationRow(ctx, row, lookupCache);
       classified.push({ row, classification });
-      if (row.target === "dailyMetrics" &&
-          (classification.status === "clean" || classification.status === "update")) {
-        const candidateId = row.row.jurisdictionId ?? classification.patch?.jurisdictionId;
-        if (candidateId) {
-          const key = `${row.row.day}\u0000${candidateId}`;
-          dailyCandidateCounts.set(key, (dailyCandidateCounts.get(key) ?? 0) + 1);
-        }
-      }
     }
     for (const item of classified) {
       const { row } = item;
-      let { classification } = item;
-      if (row.target === "dailyMetrics" &&
-          (classification.status === "clean" || classification.status === "update")) {
-        const candidateId = row.row.jurisdictionId ?? classification.patch?.jurisdictionId;
-        if (candidateId) {
-          const key = `${row.row.day}\u0000${candidateId}`;
-          let ownerRead = dailyIdOwnerCache.get(key);
-          if (!ownerRead) {
-            ownerRead = ctx.db
-              .query("dailyMetrics")
-              .withIndex("by_day_and_jurisdictionId", (q) =>
-                q.eq("day", row.row.day).eq("jurisdictionId", candidateId),
-              )
-              .take(2);
-            dailyIdOwnerCache.set(key, ownerRead);
-          }
-          const owners = await ownerRead;
-          const code = row.row.jurisdictionCode;
-          let codeCandidates: Doc<"dailyMetrics">[] = [];
-          if (isCanonicalStoredLegacyCode(code)) {
-            const codeKey = `${row.row.day}\u0000${code}`;
-            let candidateRead = dailyCodeCandidateCache.get(codeKey);
-            if (!candidateRead) {
-              candidateRead = ctx.db
-                .query("dailyMetrics")
-                .withIndex("by_day_and_jurisdictionCode", (q) =>
-                  q.eq("day", row.row.day).eq("jurisdictionCode", code),
-                )
-                .take(2);
-              dailyCodeCandidateCache.set(codeKey, candidateRead);
-            }
-            codeCandidates = await candidateRead;
-          }
-          if ((dailyCandidateCounts.get(key) ?? 0) > 1 ||
-              owners.some((owner) => owner._id !== row.row._id) ||
-              codeCandidates.some((candidate) =>
-                candidate._id !== row.row._id &&
-                (candidate.jurisdictionId === undefined ||
-                  candidate.jurisdictionId === candidateId))) {
-            classification = { status: "mismatch" };
-          }
-        }
-      }
+      const { classification } = item;
       if (classification.status === "update") {
         updated += 1;
         if (!args.dryRun && classification.patch) {

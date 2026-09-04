@@ -300,9 +300,7 @@ describe("POST /api/chat request boundary", () => {
 
   it.each([
     ["context", "untrusted context"],
-    ["correlationToken", "a".repeat(43)],
     ["country", "GH"],
-    ["scenarioQuestion", "hidden question"],
     ["legacyCountryCode", "GH"],
     ["stores", [{ storeName: "fileSearchStores/forged" }]],
     ["supplementaryStores", ["fileSearchStores/forged"]],

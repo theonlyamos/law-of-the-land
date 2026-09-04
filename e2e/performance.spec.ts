@@ -2,9 +2,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { E2E_JURISDICTION_QUESTIONS } from "../shared/e2e-jurisdiction-provider-contract";
 import { readPerformanceArtifact, removePerformanceArtifacts, writePerformanceArtifact } from "../scripts/admin-performance-artifact.mjs";
-import { adminOnlyScriptBytes, buildAdminSliceArtifact, buildJurisdictionPerformanceSections, collectPacedRetrievalObservations, collectRetrievalObservation, percentile95, validatePerformanceCalibration } from "../scripts/admin-performance-collector.mjs";
+import { adminOnlyScriptBytes, buildAdminSliceArtifact, buildJurisdictionPerformanceSections, percentile95, validatePerformanceCalibration } from "../scripts/admin-performance-collector.mjs";
 import { controlBrowserFixtures, installSessionCookie, loadBrowserFixtureManifest, type BrowserFixtureManifest } from "./admin/fixtures";
 
 type ScriptResource = { url: string; encodedBodySize: number };
@@ -14,26 +13,10 @@ type CalibrationInput = {
   selectorP95LimitsMs: [number, number, number, number];
   autocompleteP95LimitMs: number;
   detailsP95LimitMs: number;
-  fileSearchP95LimitMs: number;
-  totalP95LimitMs: number;
 };
 
 const artifactPath = path.resolve("artifacts/admin-performance.json");
 const publicBaselineArtifactPath = path.resolve("test-results/admin-performance-public-baseline.json");
-const intermediateEvidencePath = path.resolve("test-results/admin-performance-intermediate.json");
-
-type SelectorProfileEvidence = Awaited<ReturnType<typeof collectSelectorProfile>> & {
-  flagState: "off" | "on";
-  profile: "desktop" | "mobile" | "throttled";
-  baselineP95Ms: number;
-};
-
-type IntermediatePerformanceEvidence = ReturnType<typeof buildAdminSliceArtifact> & {
-  selectorProfiles: SelectorProfileEvidence[];
-  placePicker: Awaited<ReturnType<typeof collectPlacePicker>>;
-  organizationalPlacesInvocationCount: number;
-  scriptResources: ScriptResource[];
-};
 
 type PlaceDetailsResponse = {
   place: {
@@ -48,7 +31,7 @@ type PlaceDetailsResponse = {
 };
 
 test.describe.configure({ mode: "serial" });
-const temporaryArtifactPaths = [publicBaselineArtifactPath, intermediateEvidencePath];
+const temporaryArtifactPaths = [publicBaselineArtifactPath];
 test.beforeAll(() => removePerformanceArtifacts(temporaryArtifactPaths));
 test.afterAll(() => removePerformanceArtifacts(temporaryArtifactPaths));
 
@@ -108,29 +91,17 @@ async function collectSelectorProfile(page: Page, fixture: BrowserFixtureManifes
   try {
     await page.goto("/");
     const samplesMs: number[] = [];
-    let resultRowCount = 0;
-    if (!enabled) {
-      const selector = page.getByRole("combobox", { name: "Research jurisdiction" });
-      await expect(selector).toHaveValue("GH");
-      for (let index = 0; index < 20; index += 1) {
-        const startedAt = performance.now();
-        await selector.selectOption("GH");
-        samplesMs.push(performance.now() - startedAt);
-      }
-      resultRowCount = await selector.getByRole("option").count();
-    } else {
-      await page.getByRole("radio", { name: "Organizational" }).click();
-      const selector = page.getByRole("combobox", { name: "Find jurisdiction" });
-      const expected = page.getByRole("option", { name: new RegExp(`${fixture.tag} Public Organization, Organizational`) });
-      for (let index = 0; index < 20; index += 1) {
-        await selector.fill("");
-        const startedAt = performance.now();
-        await selector.fill(`${fixture.tag} Public Organization`);
-        await expect(expected).toBeVisible();
-        samplesMs.push(performance.now() - startedAt);
-      }
-      resultRowCount = await page.getByRole("listbox", { name: "Jurisdiction results" }).getByRole("option").count();
+    await page.getByRole("radio", { name: "Organizational" }).click();
+    const selector = page.getByRole("combobox", { name: "Find jurisdiction" });
+    const expected = page.getByRole("option", { name: new RegExp(`${fixture.tag} Public Organization, Organizational`) });
+    for (let index = 0; index < 20; index += 1) {
+      await selector.fill("");
+      const startedAt = performance.now();
+      await selector.fill(`${fixture.tag} Public Organization`);
+      await expect(expected).toBeVisible();
+      samplesMs.push(performance.now() - startedAt);
     }
+    const resultRowCount = await page.getByRole("listbox", { name: "Jurisdiction results" }).getByRole("option").count();
     return { samplesMs, resultRowCount };
   } finally {
     if (cdp) await cdp.detach();
@@ -177,19 +148,6 @@ async function collectPlacePicker(request: APIRequestContext, cookie: string, fi
   return { branch: "geographic", autocompleteSamplesMs, detailsSamplesMs, resultCount, requestCount: 40, sameSessionCorrelation: true, placesInvocationCount: 40 };
 }
 
-async function collectRetrievalPlan(fixture: BrowserFixtureManifest, cookie: string) {
-  const secret = process.env.ADMIN_E2E_PROVIDER_OBSERVATION_SECRET;
-  if (!secret) throw new Error("Parent-only retrieval observation secret is unavailable.");
-  return await collectPacedRetrievalObservations({
-    collect: async () => await collectRetrievalObservation({
-      url: "http://127.0.0.1:3000/api/search",
-      cookie,
-      observationSecret: secret,
-      body: { query: E2E_JURISDICTION_QUESTIONS.complete, jurisdictionId: fixture.records.publicOrganizationJurisdictionId },
-    }),
-  });
-}
-
 function approvedCalibration(): CalibrationInput | null {
   const calibrationPath = process.env.ADMIN_E2E_PERFORMANCE_CALIBRATION_FILE;
   if (!calibrationPath) return null;
@@ -210,25 +168,22 @@ function applyCalibration(sections: ReturnType<typeof buildJurisdictionPerforman
   const autocompleteOutcome = sections.geographicPlacePicker.autocomplete.p95Ms <= calibration.autocompleteP95LimitMs ? "pass" : "fail";
   const detailsOutcome = sections.geographicPlacePicker.details.p95Ms <= calibration.detailsP95LimitMs ? "pass" : "fail";
   Object.assign(sections.geographicPlacePicker.calibration, { status: "approved", reference: calibration.reference, autocompleteP95LimitMs: calibration.autocompleteP95LimitMs, detailsP95LimitMs: calibration.detailsP95LimitMs, autocompleteOutcome, detailsOutcome, outcome: autocompleteOutcome === "pass" && detailsOutcome === "pass" ? "pass" : "fail" });
-  const fileSearchOutcome = sections.retrievalPlan.fileSearch.p95Ms <= calibration.fileSearchP95LimitMs ? "pass" : "fail";
-  const totalOutcome = sections.retrievalPlan.total.p95Ms <= calibration.totalP95LimitMs ? "pass" : "fail";
-  Object.assign(sections.retrievalPlan.calibration, { status: "approved", reference: calibration.reference, fileSearchP95LimitMs: calibration.fileSearchP95LimitMs, totalP95LimitMs: calibration.totalP95LimitMs, fileSearchOutcome, totalOutcome, outcome: fileSearchOutcome === "pass" && totalOutcome === "pass" ? "pass" : "fail" });
   return sections;
 }
 
-test("records the unauthenticated public-search API baseline performance metrics", async ({ page, request }) => {
+test("records the unauthenticated public-chat API baseline performance metrics", async ({ page, request }) => {
   await installPerformanceObservers(page);
   await page.goto("/", { waitUntil: "networkidle" });
   await createMeasuredInteraction(page, "public");
   const requestDurations: number[] = [];
   for (let index = 0; index < 20; index += 1) {
     const startedAt = performance.now();
-    const response = await request.post("/api/search", { data: { query: "tenant rights" } });
+    const response = await request.post("/api/chat");
     requestDurations.push(performance.now() - startedAt);
     expect(response.status()).toBe(401);
   }
   const metrics = await readBrowserMetrics(page);
-  const artifact = { ...metrics, p95: percentile95(requestDurations), baseline: "public-search-api-unauthenticated-401", baselineDescription: "Unauthenticated /api/search guard before rate limiting, usage mutation, or provider work.", sampleCount: requestDurations.length, timestamp: new Date().toISOString(), commitSha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
+  const artifact = { ...metrics, p95: percentile95(requestDurations), baseline: "public-chat-api-unauthenticated-401", baselineDescription: "Unauthenticated /api/chat guard before rate limiting, usage mutation, or provider work.", sampleCount: requestDurations.length, timestamp: new Date().toISOString(), commitSha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
   expect(metrics.interactionEntries).toBeGreaterThan(0);
   expect(metrics.inp).toBeGreaterThan(0);
   writePerformanceArtifact(publicBaselineArtifactPath, artifact);
@@ -265,8 +220,8 @@ test("records authenticated admin, selector, and Places performance evidence", a
   const throttled = await collectSelectorProfile(page, fixture, "throttled", true);
   const baselineP95Ms = percentile95(off.samplesMs);
   const placePicker = await collectPlacePicker(request, adminCookie, fixture);
-  writePerformanceArtifact(intermediateEvidencePath, {
-    ...baseArtifact,
+  const calibration = approvedCalibration();
+  const sections = applyCalibration(buildJurisdictionPerformanceSections({
     selectorProfiles: [
       { flagState: "off", profile: "desktop", ...off, baselineP95Ms },
       { flagState: "on", profile: "desktop", ...desktop, baselineP95Ms },
@@ -275,27 +230,10 @@ test("records authenticated admin, selector, and Places performance evidence", a
     ],
     placePicker,
     organizationalPlacesInvocationCount: placesRequests.length,
-    scriptResources: browserMetrics.scriptResources,
-  });
-});
-
-test("records paced retrieval evidence and writes the final performance artifact", async () => {
-  test.setTimeout(300_000);
-  const fixture = await loadBrowserFixtureManifest();
-  const adminCookie = fixture.sessions.super_admin;
-  if (!adminCookie) throw new Error("Guarded fixture manifest omitted the assured Super Admin session.");
-  expect(fs.existsSync(intermediateEvidencePath)).toBe(true);
-  const intermediate = readPerformanceArtifact(intermediateEvidencePath) as IntermediatePerformanceEvidence;
-  const { selectorProfiles, placePicker, organizationalPlacesInvocationCount, ...baseArtifact } = intermediate;
-  const retrievalObservations = await collectRetrievalPlan(fixture, adminCookie);
-  const calibration = approvedCalibration();
-  const sections = applyCalibration(buildJurisdictionPerformanceSections({
-    selectorProfiles,
-    placePicker,
-    organizationalPlacesInvocationCount,
-    retrievalObservations,
   }), calibration);
-  const calibratedOutcome = [sections.jurisdictionSelector.calibration, sections.geographicPlacePicker.calibration, sections.retrievalPlan.calibration]
-    .every((entry) => entry.status === "approved" && entry.outcome === "pass") ? "pass" : calibration ? "fail" : "incomplete";
+  const calibratedOutcome = [sections.jurisdictionSelector.calibration, sections.geographicPlacePicker.calibration]
+    .every((entry) => entry.status === "approved" && entry.outcome === "pass")
+    ? "pass"
+    : calibration ? "fail" : "incomplete";
   writePerformanceArtifact(artifactPath, { ...baseArtifact, ...sections, calibratedOutcome, targetClass: process.env.ADMIN_E2E_TARGET_ENV, browserProfile: "chromium", deviceProfiles: ["desktop-1280x900", "mobile-390x844"], networkProfiles: ["unthrottled", "150ms-1600kbps-down-750kbps-up"] });
 });

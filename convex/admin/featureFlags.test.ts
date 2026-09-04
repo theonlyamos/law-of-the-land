@@ -71,15 +71,9 @@ describe("unified jurisdictions feature flag", () => {
       blockers: [
         "GHANA_NOT_READY",
         "CHAT_SESSIONS_NOT_VERIFIED",
-        "TELEMETRY_CORRELATIONS_NOT_VERIFIED",
-        "QUERY_RUNS_NOT_VERIFIED",
-        "DAILY_METRICS_NOT_VERIFIED",
       ],
       targets: [
         { target: "chatSessions", status: "missing" },
-        { target: "telemetryCorrelations", status: "missing" },
-        { target: "queryRuns", status: "missing" },
-        { target: "dailyMetrics", status: "missing" },
       ],
     });
   });
@@ -162,7 +156,7 @@ describe("unified jurisdictions feature flag", () => {
     )).rejects.toThrow("JURISDICTION_MIGRATION_STATE_INVALID");
   });
 
-  it("reports running, blocked, verified, and missing target readiness states", async () => {
+  it("reports the remaining chat-session migration readiness state", async () => {
     process.env.ADMIN_ENVIRONMENT = "test";
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
@@ -189,34 +183,12 @@ describe("unified jurisdictions feature flag", () => {
         lastResult: { processed: 1, updated: 0, unresolved: 0, mismatches: 0,
           continueCursor: `ujm1_${"1".repeat(32)}`, isDone: false },
       });
-      await ctx.db.insert("jurisdictionMigrationCheckpoints", {
-        ...base,
-        target: "telemetryCorrelations",
-        status: "completed",
-        updated: 1,
-        completedAt: 2,
-        lastResult: { processed: 1, updated: 1, unresolved: 0, mismatches: 0,
-          continueCursor: null, isDone: true },
-      });
-      await ctx.db.insert("jurisdictionMigrationCheckpoints", {
-        ...base,
-        target: "queryRuns",
-        status: "completed",
-        updated: 0,
-        completedAt: 2,
-        verifiedAt: 2,
-        lastResult: { processed: 1, updated: 0, unresolved: 0, mismatches: 0,
-          continueCursor: null, isDone: true },
-      });
     });
     await expect(t.run((ctx) =>
       calculateUnifiedJurisdictionRolloutState(ctx, "test", 10),
     )).resolves.toMatchObject({
       targets: [
         { target: "chatSessions", status: "running" },
-        { target: "telemetryCorrelations", status: "blocked" },
-        { target: "queryRuns", status: "verified" },
-        { target: "dailyMetrics", status: "missing" },
       ],
     });
   });

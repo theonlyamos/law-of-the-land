@@ -434,7 +434,8 @@ describe("bounded retention", () => {
     const t = createBackend();
     const old = Date.now() - 100 * 24 * 60 * 60_000;
     const fixture = await t.run(async (ctx) => {
-      const chatId = await ctx.db.insert("chatSessions", { userId: "retention_user", externalId: "retention-fairness", title: "Retention", lastMessage: "safe", messageCount: 0, updatedAt: old });
+      const jurisdictionId = await ctx.db.insert("jurisdictions", { code: "GH", name: "Ghana", slug: "ghana", status: "enabled", isDefault: true, providerSyncState: "synced", createdBy: "system", updatedBy: "system", createdAt: old, updatedAt: old });
+      const chatId = await ctx.db.insert("chatSessions", { userId: "retention_user", externalId: "retention-fairness", title: "Retention", lastMessage: "safe", messageCount: 0, jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", jurisdictionContract: "unified", updatedAt: old });
       const grantId = await ctx.db.insert("adminAccessGrants", { adminId: "retention_admin", chatSessionId: chatId, purpose: "Expired retention fixture", issuedAt: old, expiresAt: old, correlationId: "retention_grant_anchor" });
       for (let index = 0; index < 120; index += 1) {
         await ctx.db.insert("adminAccessGrants", { adminId: "retention_admin", chatSessionId: chatId, purpose: "Replenished early backlog", issuedAt: old, expiresAt: old, correlationId: `retention_grant_${index}` });
@@ -445,10 +446,7 @@ describe("bounded retention", () => {
           if (status === "queued") await ctx.db.insert("exportDownloadReferences", { exportId, requesterId: "retention_admin", referenceHash: `${status}_${index}`.padEnd(64, "a"), expiresAt: old, createdAt: old });
         }
       }
-      for (const status of ["issued", "search_complete", "chat_claimed", "finalized"] as const) {
-        for (let index = 0; index < 45; index += 1) await ctx.db.insert("telemetryCorrelations", { tokenHash: `${status}_${index}`.padEnd(64, "b"), ownerBinding: "owner", sessionBinding: "session", jurisdictionCode: "GH", status, issuedAt: old, expiresAt: old });
-      }
-      for (let index = 0; index < 45; index += 1) await ctx.db.insert("queryRuns", { correlationId: `retention_fair_run_${index}`, day: "2025-01-01", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 1, completedAt: old, rollupStatus: "processed", rolledUpAt: old });
+      for (let index = 0; index < 45; index += 1) await ctx.db.insert("queryRuns", { requestNonceHash: `retention_fair_run_${index}`.padEnd(64, "a"), chatSessionId: chatId, assistantClientIdBinding: "assistant", completionBinding: "completion", day: "2025-01-01", jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", outcome: "success", model: "gemini-test", totalLatencyMs: 2, authorizedScopeSize: 1, readyStoreCount: 1, citationCount: 1, partialCoverage: false, jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "evidence" }], completedAt: old, rollupStatus: "processed", rolledUpAt: old });
       for (const status of ["succeeded", "failed", "cancelled"] as const) {
         for (let index = 0; index < 45; index += 1) await ctx.db.insert("integrationJobs", { type: "gemini_delete_store", targetType: "operation", targetId: `fair_${status}_${index}`, payload: JSON.stringify({ secret: index }), actorId: "system", actorRoles: [], idempotencyKey: `fair_${status}_${index}`, requestFingerprint: "{}", correlationId: `fair_${status}_${index}`, status, attemptCount: 1, lastErrorKind: "network", retentionPending: true, createdAt: old, updatedAt: old });
       }
@@ -469,12 +467,12 @@ describe("bounded retention", () => {
     }
 
     const advanced = await t.run(async (ctx) => ({
-      correlations: await ctx.db.query("telemetryCorrelations").take(500),
+      runs: await ctx.db.query("queryRuns").take(500),
       jobs: await ctx.db.query("integrationJobs").take(500),
       storage: await ctx.db.system.query("_storage").take(500),
       state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(),
     }));
-    expect(advanced.correlations.length).toBeLessThan(180);
+    expect(advanced.runs.length).toBeLessThan(45);
     expect(advanced.jobs.filter((job) => job.retentionPending === true).length).toBeLessThan(135);
     expect(advanced.storage.length).toBeLessThan(45);
     expect(advanced.state?.lastSuccessfulAt).toBeUndefined();
@@ -487,9 +485,9 @@ describe("bounded retention", () => {
     }
     expect(result.done).toBe(true);
     const drained = await t.run(async (ctx) => ({
-      grants: await ctx.db.query("adminAccessGrants").take(1), refs: await ctx.db.query("exportDownloadReferences").take(1), exports: await ctx.db.query("adminExports").take(1), correlations: await ctx.db.query("telemetryCorrelations").take(1), runs: await ctx.db.query("queryRuns").take(1), pendingJobs: await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", "failed").eq("retentionPending", true)).take(1), storage: await ctx.db.system.query("_storage").take(1), state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(),
+      grants: await ctx.db.query("adminAccessGrants").take(1), refs: await ctx.db.query("exportDownloadReferences").take(1), exports: await ctx.db.query("adminExports").take(1), runs: await ctx.db.query("queryRuns").take(1), pendingJobs: await ctx.db.query("integrationJobs").withIndex("by_status_and_retentionPending_and_createdAt", (q) => q.eq("status", "failed").eq("retentionPending", true)).take(1), storage: await ctx.db.system.query("_storage").take(1), state: await ctx.db.query("retentionState").withIndex("by_key", (q) => q.eq("key", "default")).unique(),
     }));
-    expect(drained).toMatchObject({ grants: [], refs: [], exports: [], correlations: [], runs: [], pendingJobs: [], storage: [], state: { phase: "complete", lastSuccessfulAt: Date.now() } });
+    expect(drained).toMatchObject({ grants: [], refs: [], exports: [], runs: [], pendingJobs: [], storage: [], state: { phase: "complete", lastSuccessfulAt: Date.now() } });
   }, 20_000);
 
   it("redacts more than 200 eligible jobs per terminal status across invocations and completes only after exhaustion", async () => {
@@ -550,11 +548,13 @@ describe("bounded retention", () => {
     const t = createBackend();
     const old = Date.now() - 100 * 24 * 60 * 60_000;
     await t.run(async (ctx) => {
+      const jurisdictionId = await ctx.db.insert("jurisdictions", { code: "GH", name: "Ghana", slug: "ghana", status: "enabled", isDefault: true, providerSyncState: "synced", createdBy: "system", updatedBy: "system", createdAt: old, updatedAt: old });
+      const chatSessionId = await ctx.db.insert("chatSessions", { userId: "retention_user", externalId: "retention-query-runs", title: "Retention", lastMessage: "safe", messageCount: 0, jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", jurisdictionContract: "unified", updatedAt: old });
       for (let index = 0; index < 205; index += 1) await ctx.db.insert("queryRuns", {
-        correlationId: `retention_${index}`, day: "2025-01-01", jurisdictionCode: "GH", outcome: "success", searchProviderStatus: "success", generationProviderStatus: "success", searchLatencyMs: 1, generationLatencyMs: 1, totalLatencyMs: 2, resultCount: 1, completedAt: old, rollupStatus: "processed", rolledUpAt: old,
+        requestNonceHash: `retention_${index}`.padEnd(64, "a"), chatSessionId, assistantClientIdBinding: "assistant", completionBinding: "completion", day: "2025-01-01", jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", outcome: "success", model: "gemini-test", totalLatencyMs: 2, authorizedScopeSize: 1, readyStoreCount: 1, citationCount: 1, partialCoverage: false, jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "evidence" }], completedAt: old, rollupStatus: "processed", rolledUpAt: old,
       });
       await ctx.db.insert("auditEvents", { actorType: "system", actorUserId: "system", actorId: "system", actorRoles: [], action: "retention.protected", targetType: "retention", targetId: "protected_audit", outcome: "success", metadata: {}, createdAt: old });
-      await ctx.db.insert("dailyMetrics", { day: "2025-01-01", jurisdictionCode: "GH", totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0, providerFailureCount: 0, noResultCount: 0, latencyLe250: 1, latencyLe500: 0, latencyLe1000: 0, latencyLe2500: 0, latencyLe5000: 0, latencyGt5000: 0, p50UpperBoundMs: 250, p95UpperBoundMs: 250, updatedAt: old });
+      await ctx.db.insert("dailyMetrics", { day: "2025-01-01", jurisdictionId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0, providerFailureCount: 0, latencyLe250: 1, latencyLe500: 0, latencyLe1000: 0, latencyLe2500: 0, latencyLe5000: 0, latencyGt5000: 0, p50UpperBoundMs: 250, p95UpperBoundMs: 250, updatedAt: old });
     });
     vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
     let result = await t.mutation(runRetentionBatch, { cursor: null });

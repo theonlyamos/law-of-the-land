@@ -22,7 +22,7 @@ vi.mock("@/components/chat/chat-workspace", () => ({
 import ChatPage from "./page";
 
 beforeEach(() => {
-  mocks.search = new URLSearchParams("q=Question&jurisdiction=jurisdiction-ghana&country=GH");
+  mocks.search = new URLSearchParams("q=Question&jurisdiction=jurisdiction-ghana");
   mocks.notFound.mockReset();
   mocks.useQuery.mockReset();
   mocks.useQuery.mockReturnValue(null);
