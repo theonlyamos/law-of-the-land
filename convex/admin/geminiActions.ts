@@ -14,6 +14,8 @@ import {
 } from "./integrations/geminiFileSearch";
 
 const PROVIDER_MAX_DOCUMENT_BYTES = 100_000_000;
+const PROVIDER_RAW_RESPONSE_MAX_BYTES = 64 * 1024;
+const PROVIDER_RAW_RESPONSE_TRUNCATION_SUFFIX = "\n...[truncated]";
 
 const getJobRef = makeFunctionReference<"query">("admin/jobs:getJobForRun");
 const claimJobRef = makeFunctionReference<"mutation">("admin/jobs:claimJob");
@@ -109,6 +111,19 @@ function invalidExecution(): ProviderError {
 
 function documentTooLarge(): ProviderError {
   return new ProviderError("validation", false, null, "DOCUMENT_TOO_LARGE");
+}
+
+export function truncateProviderRawResponse(rawResponse: string): string {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(rawResponse);
+  if (encoded.byteLength <= PROVIDER_RAW_RESPONSE_MAX_BYTES) return rawResponse;
+
+  const suffixBytes = encoder.encode(PROVIDER_RAW_RESPONSE_TRUNCATION_SUFFIX);
+  let end = PROVIDER_RAW_RESPONSE_MAX_BYTES - suffixBytes.byteLength;
+  while (end > 0 && (encoded[end] & 0b1100_0000) === 0b1000_0000) end -= 1;
+
+  return new TextDecoder().decode(encoded.slice(0, end))
+    + PROVIDER_RAW_RESPONSE_TRUNCATION_SUFFIX;
 }
 
 export async function executeGeminiJob(
@@ -370,7 +385,7 @@ export const runGeminiJob = internalAction({
         ),
         ...(
           error instanceof ProviderError && error.rawResponse !== undefined
-            ? { providerRawResponse: error.rawResponse }
+            ? { providerRawResponse: truncateProviderRawResponse(error.rawResponse) }
             : {}
         ),
       });
