@@ -27,7 +27,7 @@ import { POST } from "./route";
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
 const selectedVersionId = "selected-version-id";
-const selectedDocumentName = "fileSearchStores/ghana/documents/labour-act";
+const selectedStoreName = "fileSearchStores/ghana";
 const citationClaim = "c".repeat(43);
 
 type PublicCitation = {
@@ -144,7 +144,7 @@ function canonicalInteraction(
         text: answer,
         annotations: [{
           type: "file_citation",
-          document_uri: selectedDocumentName,
+          document_uri: selectedStoreName,
           custom_metadata: {
             jurisdiction_id: citationJurisdictionId,
             resource_id: selectedResourceId,
@@ -482,7 +482,7 @@ describe("POST /api/chat streamed governed interaction", () => {
         jurisdictionId: selectedJurisdictionId,
         resourceId: selectedResourceId,
         versionId: selectedVersionId,
-        providerDocumentName: selectedDocumentName,
+        providerStoreName: selectedStoreName,
         pageNumber: 12,
       }],
       model: "gemini-test-model",
@@ -497,25 +497,20 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).not.toHaveProperty("error");
   });
 
-  it("carries a same-store canonical document name only through terminal validation", async () => {
-    const wrongDocumentName = "fileSearchStores/ghana/documents/wrong-document";
+  it("rejects a document URI instead of treating it as a store identity", async () => {
+    const documentName = "fileSearchStores/ghana/documents/wrong-document";
     const canonical = canonicalInteraction();
-    canonical.steps[0].content[0].annotations[0].document_uri = wrongDocumentName;
+    canonical.steps[0].content[0].annotations[0].document_uri = documentName;
     interactionMocks.get.mockResolvedValue(canonical);
 
     const streamEvents = await events(await POST(request()));
 
-    const terminalArgs = authMocks.fetchAuthMutation.mock.calls.find(
-      ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
-    )?.[1];
-    expect(terminalArgs.citations).toEqual([{
-      jurisdictionId: selectedJurisdictionId,
-      resourceId: selectedResourceId,
-      versionId: selectedVersionId,
-      providerDocumentName: wrongDocumentName,
-      pageNumber: 12,
-    }]);
-    expect(JSON.stringify(streamEvents)).not.toContain(wrongDocumentName);
+    expect(streamEvents.at(-1)).toEqual({
+      type: "error",
+      error: "We couldn't process your request. Please try again.",
+    });
+    expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+    expect(JSON.stringify(streamEvents)).not.toContain(documentName);
   });
 
   it("rejects a result without a selected-store citation and emits no done", async () => {

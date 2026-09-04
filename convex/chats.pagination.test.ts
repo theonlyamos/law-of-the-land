@@ -107,7 +107,7 @@ async function issueClaim(
         jurisdictionId: citation.jurisdictionId,
         resourceId,
         versionId,
-        providerDocumentName,
+        providerStoreName: stores.get(citation.jurisdictionId)!,
       });
     }
     return { identities };

@@ -27,7 +27,10 @@ import {
   isOpaqueTelemetryToken,
   verifyTelemetryServiceProof,
 } from "./lib/telemetryProof";
-import { isGeminiDocumentName } from "./lib/geminiFileSearchNames";
+import {
+  isGeminiDocumentName,
+  isGeminiFileSearchStoreName,
+} from "./lib/geminiFileSearchNames";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 
 const messageValidator = v.union(
@@ -77,7 +80,7 @@ type GovernedCitationIdentity = {
   jurisdictionId: string;
   resourceId: string;
   versionId: string;
-  providerDocumentName: string;
+  providerStoreName: string;
   pageNumber?: number;
 };
 type GovernedJurisdictionCoverage = {
@@ -136,7 +139,7 @@ const governedCitationIdentityValidator = v.object({
   jurisdictionId: v.string(),
   resourceId: v.string(),
   versionId: v.string(),
-  providerDocumentName: v.string(),
+  providerStoreName: v.string(),
   pageNumber: v.optional(v.number()),
 });
 const governedJurisdictionCoverageValidator = v.object({
@@ -169,7 +172,7 @@ export async function completeGovernedInteractionProofParts(
     [],
   );
   return [
-    "complete-governed-interaction-v1",
+    "complete-governed-interaction-v2",
     input.routeNonce,
     input.externalId,
     input.jurisdictionId,
@@ -193,7 +196,7 @@ export async function completeGovernedInteractionProofParts(
       citation.jurisdictionId,
       citation.resourceId,
       citation.versionId,
-      citation.providerDocumentName,
+      citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
   ];
@@ -206,7 +209,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
     [],
   );
   const completionBinding = await hashOpaqueTelemetryValue(JSON.stringify([
-    "governed-completion-idempotency-v1",
+    "governed-completion-idempotency-v2",
     input.externalId,
     input.jurisdictionId,
     claimBindings.assistantContentBinding,
@@ -217,7 +220,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
       citation.jurisdictionId,
       citation.resourceId,
       citation.versionId,
-      citation.providerDocumentName,
+      citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
   ]));
@@ -252,7 +255,7 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
       !boundedIdentifier(citation.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.resourceId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.versionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
-      || !isGeminiDocumentName(citation.providerDocumentName)
+      || !isGeminiFileSearchStoreName(citation.providerStoreName)
       || (citation.pageNumber !== undefined
         && (!Number.isSafeInteger(citation.pageNumber)
           || citation.pageNumber <= 0
@@ -623,7 +626,7 @@ async function resolveGovernedCompletionAuthority(
     const resourceId = ctx.db.normalizeId("legalResources", citation.resourceId);
     const versionId = ctx.db.normalizeId("documentVersions", citation.versionId);
     const store = citedJurisdictionId ? stores.get(citedJurisdictionId) : undefined;
-    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerDocumentName}\u0000${citation.pageNumber ?? ""}`;
+    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerStoreName}\u0000${citation.pageNumber ?? ""}`;
     if (!citedJurisdictionId || !resourceId || !versionId || !store || seen.has(key)) {
       throw new ConvexError("INVALID_CHAT_CITATIONS");
     }
@@ -651,7 +654,7 @@ async function resolveGovernedCompletionAuthority(
       || version.status !== "published"
       || !documentName
       || !isGeminiDocumentName(documentName)
-      || citation.providerDocumentName !== documentName
+      || citation.providerStoreName !== store.storeName
       || !documentName.startsWith(`${store.storeName}/documents/`)
       || locks.length !== 0
       || !label

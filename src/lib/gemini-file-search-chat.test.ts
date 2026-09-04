@@ -112,7 +112,7 @@ function canonical(answer = "The Constitution applies.", annotations: Interactio
 function citation(overrides: Partial<Interactions.FileCitation> = {}): Interactions.FileCitation {
   return {
     type: "file_citation",
-    document_uri: "fileSearchStores/ghana-law/documents/constitution",
+    document_uri: "fileSearchStores/ghana-law",
     custom_metadata: {
       jurisdiction_id: "ghana",
       resource_id: "resource-1",
@@ -194,7 +194,7 @@ describe("GeminiFileSearchChat", () => {
         jurisdictionId: "ghana",
         resourceId: "resource-1",
         versionId: "version-1",
-        providerDocumentName: "fileSearchStores/ghana-law/documents/constitution",
+        providerStoreName: "fileSearchStores/ghana-law",
       }],
       usage: { promptTokens: 101, outputTokens: 22, totalTokens: 123 },
     });
@@ -237,29 +237,20 @@ describe("GeminiFileSearchChat", () => {
           jurisdictionId: "ghana",
           resourceId: "resource-1",
           versionId: "version-1",
-          providerDocumentName: "fileSearchStores/ghana-law/documents/constitution",
+          providerStoreName: "fileSearchStores/ghana-law",
           pageNumber: 4,
         }],
       },
     });
   });
 
-  it("preserves a same-store canonical document name for exact terminal validation", async () => {
+  it("rejects a document URI even when it belongs to an authorized store", async () => {
     await expect(run(
       undefined,
       canonical(undefined, [citation({
         document_uri: "fileSearchStores/ghana-law/documents/wrong-document",
       })]),
-    )).resolves.toMatchObject({
-      result: {
-        citations: [{
-          jurisdictionId: "ghana",
-          resourceId: "resource-1",
-          versionId: "version-1",
-          providerDocumentName: "fileSearchStores/ghana-law/documents/wrong-document",
-        }],
-      },
-    });
+    )).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
   });
 
   const invalidCases = [
@@ -276,8 +267,8 @@ describe("GeminiFileSearchChat", () => {
       jurisdiction_id: "accra", resource_id: "resource-1", version_id: "version-1",
     } })])],
     ["a citation omits its canonical document URI", eventStream(), canonical(undefined, [citation({ document_uri: undefined })])],
-    ["a citation document belongs to a different store", eventStream(), canonical(undefined, [citation({
-      document_uri: "fileSearchStores/accra-law/documents/constitution",
+    ["a citation names a different store", eventStream(), canonical(undefined, [citation({
+      document_uri: "fileSearchStores/accra-law",
     })])],
     ["a citation has a negative byte offset", eventStream(), canonical(undefined, [citation({ start_index: -1, end_index: 1 })])],
     ["the stream ends before completion", eventStream().slice(0, -1), canonical(undefined, [citation()])],

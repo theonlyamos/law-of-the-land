@@ -17,10 +17,7 @@ const MAX_FILE_SEARCH_CALLS = 8;
 const MAX_FILE_SEARCH_CALL_ID_LENGTH = 128;
 const MAX_PAGE_NUMBER = 10_000;
 const GEMINI_RESOURCE_ID = "[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?";
-const GEMINI_DOCUMENT_NAME = new RegExp(
-  `^fileSearchStores/(${GEMINI_RESOURCE_ID})/documents/(${GEMINI_RESOURCE_ID})$`,
-  "u",
-);
+const GEMINI_STORE_NAME = new RegExp(`^fileSearchStores/${GEMINI_RESOURCE_ID}$`, "u");
 const encoder = new TextEncoder();
 
 export type ChatStore = {
@@ -35,7 +32,7 @@ export type ValidatedCitation = {
   jurisdictionId: string;
   resourceId: string;
   versionId: string;
-  providerDocumentName: string;
+  providerStoreName: string;
   pageNumber?: number;
 };
 
@@ -85,12 +82,6 @@ function isIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH;
 }
 
-function providerDocumentStore(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const match = GEMINI_DOCUMENT_NAME.exec(value);
-  return match === null ? null : `fileSearchStores/${match[1]}`;
-}
-
 function validStepIndex(value: unknown): value is number {
   return typeof value === "number"
     && Number.isSafeInteger(value)
@@ -114,6 +105,7 @@ function validateInput(input: GovernedChatInput): void {
       !isIdentifier(store.jurisdictionId)
       || !isIdentifier(store.name)
       || !isIdentifier(store.storeName)
+      || !GEMINI_STORE_NAME.test(store.storeName)
       || (store.kind !== "geographic" && store.kind !== "organizational")
       || (store.relation !== "selected" && store.relation !== "geographic_ancestor" && store.relation !== "organizational_geography")
       || jurisdictionIds.has(store.jurisdictionId)
@@ -223,14 +215,13 @@ function citationsFor(
     const store = typeof jurisdictionId === "string"
       ? storesByJurisdictionId.get(jurisdictionId)
       : undefined;
-    const providerDocumentName = annotation.document_uri;
+    const providerStoreName = annotation.document_uri;
     if (
       !isIdentifier(jurisdictionId)
       || !isIdentifier(resourceId)
       || !isIdentifier(versionId)
       || !store
-      || typeof providerDocumentName !== "string"
-      || providerDocumentStore(providerDocumentName) !== store.storeName
+      || providerStoreName !== store.storeName
     ) {
       return invalidResponse();
     }
@@ -251,10 +242,10 @@ function citationsFor(
       jurisdictionId,
       resourceId,
       versionId,
-      providerDocumentName,
+      providerStoreName,
       ...(annotation.page_number === undefined ? {} : { pageNumber: annotation.page_number }),
     };
-    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerDocumentName}\u0000${citation.pageNumber ?? ""}`;
+    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerStoreName}\u0000${citation.pageNumber ?? ""}`;
     if (!seen.has(key)) {
       citations.push(citation);
       seen.add(key);
