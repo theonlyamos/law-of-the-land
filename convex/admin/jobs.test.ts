@@ -572,6 +572,58 @@ describe("durable Gemini jobs", () => {
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
   });
 
+  it("mentions 30 minutes only after the index review window elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.UTC(2026, 8, 4, 12);
+      vi.setSystemTime(startedAt);
+      const t = createBackend();
+
+      const earlyTimeout = await seedBoundGeminiIndexJob(t, {
+        suffix: "early-poll-timeout",
+        status: "waiting_provider",
+        providerSyncState: "synced",
+      });
+      await t.run((ctx) => ctx.db.patch(earlyTimeout.jobId, { attemptCount: 3 }));
+      const earlyLease = await claimLease(t, earlyTimeout.jobId);
+      await t.mutation(recordProviderFailure, {
+        jobId: earlyTimeout.jobId,
+        leaseToken: earlyLease,
+        kind: "timeout",
+        retryable: true,
+      });
+      await expect(t.run((ctx) => ctx.db.get(earlyTimeout.versionId))).resolves.toMatchObject({
+        failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.",
+      });
+
+      const elapsedWindow = await seedBoundGeminiIndexJob(t, {
+        suffix: "elapsed-index-window",
+        status: "waiting_provider",
+        providerSyncState: "synced",
+      });
+      await t.run(async (ctx) => {
+        const lock = await ctx.db
+          .query("documentLifecycleLocks")
+          .withIndex("by_resourceId", (q) => q.eq("resourceId", elapsedWindow.resourceId))
+          .unique();
+        if (!lock) throw new Error("expected lifecycle lock");
+        await ctx.db.patch(lock._id, { expiresAt: startedAt + 31 * 60_000 });
+      });
+      vi.setSystemTime(startedAt + 30 * 60_000);
+      const elapsedLease = await claimLease(t, elapsedWindow.jobId);
+      await t.mutation(applyGeminiProviderResult, {
+        jobId: elapsedWindow.jobId,
+        leaseToken: elapsedLease,
+        result: { kind: "index_pending" },
+      });
+      await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.toMatchObject({
+        failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("persists a safe Gemini diagnostic for a denied document upload", async () => {
     const t = createBackend();
     await enablePanel(t);

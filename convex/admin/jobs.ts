@@ -792,14 +792,20 @@ const geminiProviderResultValidator = v.union(
   v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
 );
 
-async function markGeminiJurisdictionDrifted(ctx: MutationCtx, job: Doc<"integrationJobs">) {
+async function markGeminiJurisdictionDrifted(
+  ctx: MutationCtx,
+  job: Doc<"integrationJobs">,
+  reviewWindowElapsed: boolean,
+) {
   if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
     const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
     if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
     return;
   }
   const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
-  const manualReviewSummary = "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.";
+  const manualReviewSummary = reviewWindowElapsed
+    ? "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job."
+    : "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.";
   if (version && job.type === "gemini_index_document") {
     await ctx.db.patch(version._id, { failureSummary: manualReviewSummary, updatedAt: Date.now() });
   } else if (version && job.type === "gemini_delete_document") {
@@ -955,7 +961,7 @@ export const applyGeminiProviderResult = internalMutation({
           lastErrorKind: "timeout",
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job);
+        await markGeminiJurisdictionDrifted(ctx, job, true);
         await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         return null;
@@ -1365,7 +1371,7 @@ export const recordProviderFailure = internalMutation({
       await applyPublicationJobFailure(ctx, job, now);
     }
     if (status === "manual_review") {
-      await markGeminiJurisdictionDrifted(ctx, job);
+      await markGeminiJurisdictionDrifted(ctx, job, false);
     }
     if (status === "failed" && job.type === "gemini_create_store") {
       const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
@@ -1451,7 +1457,7 @@ export const reconcileStaleJobs = internalMutation({
           recoveryKind,
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job);
+        await markGeminiJurisdictionDrifted(ctx, job, false);
         await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
@@ -1474,7 +1480,7 @@ export const reconcileStaleJobs = internalMutation({
           recoveryKind,
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job);
+        await markGeminiJurisdictionDrifted(ctx, job, false);
         await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
