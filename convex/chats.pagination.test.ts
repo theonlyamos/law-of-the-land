@@ -85,6 +85,7 @@ async function issueClaim(
         createdAt: now,
         updatedAt: now,
       });
+      const providerDocumentName = `${stores.get(citation.jurisdictionId)!}/documents/${crypto.randomUUID()}`;
       const versionId = await ctx.db.insert("documentVersions", {
         resourceId,
         versionNumber: 1,
@@ -95,7 +96,7 @@ async function issueClaim(
         sha256: "a".repeat(64),
         sourceUrl: "https://official.example/law",
         status: "published",
-        geminiDocumentName: `${stores.get(citation.jurisdictionId)!}/documents/${crypto.randomUUID()}`,
+        geminiDocumentName: providerDocumentName,
         submittedBy: "fixture",
         publishedAt: now,
         createdAt: now,
@@ -106,6 +107,7 @@ async function issueClaim(
         jurisdictionId: citation.jurisdictionId,
         resourceId,
         versionId,
+        providerDocumentName,
       });
     }
     return { identities };

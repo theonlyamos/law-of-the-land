@@ -550,9 +550,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
         if (
-          chatData.citations.length
-            ? !chatData.citationClaim || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
-            : chatData.citationClaim !== undefined
+          chatData.citations.length === 0
+          || !chatData.citationClaim
+          || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
         ) {
           throw new ApiError(500, "The answer could not be verified. Please try again.");
         }

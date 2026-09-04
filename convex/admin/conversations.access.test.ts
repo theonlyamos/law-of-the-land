@@ -30,6 +30,9 @@ const createAccessGrant = makeFunctionReference<"mutation">(
 const listMessages = makeFunctionReference<"query">(
   "admin/conversations:listMessages",
 );
+const listConversations = makeFunctionReference<"query">(
+  "admin/conversations:list",
+);
 const queueConversationExport = makeFunctionReference<"mutation">(
   "admin/exports:queueConversationExport",
 );
@@ -181,6 +184,56 @@ async function issueExportStepUp(
 const firstPage = { paginationOpts: { numItems: 50, cursor: null } };
 
 describe("audited conversation access grants", () => {
+  it("projects stable unified jurisdiction metadata without using country", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const seeded = await t.run(async (ctx) => {
+      const now = Date.now();
+      const jurisdictionId = await ctx.db.insert("jurisdictions", {
+        name: "Ghana",
+        slug: `ghana-${crypto.randomUUID().slice(0, 8)}`,
+        status: "enabled",
+        isDefault: false,
+        providerSyncState: "synced",
+        kind: "geographic",
+        visibility: "public",
+        createdBy: "fixture",
+        updatedBy: "fixture",
+        createdAt: now,
+        updatedAt: now,
+      });
+      const chatId = await ctx.db.insert("chatSessions", {
+        userId: "reader_42",
+        externalId: `browser-${crypto.randomUUID()}`,
+        title: "Unified legal question",
+        lastMessage: "Answer",
+        messageCount: 2,
+        updatedAt: now,
+        country: "NG",
+        jurisdictionId,
+        jurisdictionName: "Ghana",
+        jurisdictionKind: "geographic",
+        jurisdictionContract: "unified",
+      });
+      return { chatId, jurisdictionId };
+    });
+
+    const result = await admin.client.query(listConversations, {
+      paginationOpts: { numItems: 30, cursor: null },
+    });
+
+    expect(result.page).toEqual([expect.objectContaining({
+      id: seeded.chatId,
+      jurisdiction: {
+        id: seeded.jurisdictionId,
+        name: "Ghana",
+        kind: "geographic",
+      },
+    })]);
+    expect(result.page[0]).not.toHaveProperty("country");
+  });
+
   it("issues one 15-minute audit grant and reads masked messages without refresh writes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));

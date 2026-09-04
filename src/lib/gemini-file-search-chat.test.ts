@@ -112,6 +112,7 @@ function canonical(answer = "The Constitution applies.", annotations: Interactio
 function citation(overrides: Partial<Interactions.FileCitation> = {}): Interactions.FileCitation {
   return {
     type: "file_citation",
+    document_uri: "fileSearchStores/ghana-law/documents/constitution",
     custom_metadata: {
       jurisdiction_id: "ghana",
       resource_id: "resource-1",
@@ -189,7 +190,12 @@ describe("GeminiFileSearchChat", () => {
     expect(client.getIds).toEqual(["interaction-1"]);
     expect(result).toEqual({
       answer: "The Constitution applies.",
-      citations: [{ jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1" }],
+      citations: [{
+        jurisdictionId: "ghana",
+        resourceId: "resource-1",
+        versionId: "version-1",
+        providerDocumentName: "fileSearchStores/ghana-law/documents/constitution",
+      }],
       usage: { promptTokens: 101, outputTokens: 22, totalTokens: 123 },
     });
   });
@@ -227,7 +233,31 @@ describe("GeminiFileSearchChat", () => {
       canonical(answer, [citation({ start_index: 0, end_index: new TextEncoder().encode(answer).byteLength, page_number: 4 })]),
     )).resolves.toMatchObject({
       result: {
-        citations: [{ jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1", pageNumber: 4 }],
+        citations: [{
+          jurisdictionId: "ghana",
+          resourceId: "resource-1",
+          versionId: "version-1",
+          providerDocumentName: "fileSearchStores/ghana-law/documents/constitution",
+          pageNumber: 4,
+        }],
+      },
+    });
+  });
+
+  it("preserves a same-store canonical document name for exact terminal validation", async () => {
+    await expect(run(
+      undefined,
+      canonical(undefined, [citation({
+        document_uri: "fileSearchStores/ghana-law/documents/wrong-document",
+      })]),
+    )).resolves.toMatchObject({
+      result: {
+        citations: [{
+          jurisdictionId: "ghana",
+          resourceId: "resource-1",
+          versionId: "version-1",
+          providerDocumentName: "fileSearchStores/ghana-law/documents/wrong-document",
+        }],
       },
     });
   });
@@ -245,6 +275,10 @@ describe("GeminiFileSearchChat", () => {
     ["selected-store evidence is missing", eventStream(), canonical(undefined, [citation({ custom_metadata: {
       jurisdiction_id: "accra", resource_id: "resource-1", version_id: "version-1",
     } })])],
+    ["a citation omits its canonical document URI", eventStream(), canonical(undefined, [citation({ document_uri: undefined })])],
+    ["a citation document belongs to a different store", eventStream(), canonical(undefined, [citation({
+      document_uri: "fileSearchStores/accra-law/documents/constitution",
+    })])],
     ["a citation has a negative byte offset", eventStream(), canonical(undefined, [citation({ start_index: -1, end_index: 1 })])],
     ["the stream ends before completion", eventStream().slice(0, -1), canonical(undefined, [citation()])],
   ] satisfies Array<[string, StreamEvent[], CanonicalInteraction]>;
@@ -265,6 +299,39 @@ describe("GeminiFileSearchChat", () => {
       { event_type: "interaction.completed", interaction: { id: "interaction-1", status: "completed" } },
     ] satisfies StreamEvent[]],
     ["completion with an open step", eventStream().filter((event) => !(event.event_type === "step.stop" && event.index === 2))],
+  ] satisfies Array<[string, StreamEvent[]]>)("rejects %s", async (_name, events) => {
+    await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it("rejects more than eight File Search call IDs", async () => {
+    const answer = "The Constitution applies.";
+    const events: StreamEvent[] = [
+      { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } },
+      ...Array.from({ length: 9 }, (_, index) => ([
+        { event_type: "step.start", index, step: { type: "file_search_call", id: `file-search-${index}` } },
+        { event_type: "step.stop", index },
+      ] satisfies StreamEvent[])).flat(),
+      { event_type: "step.start", index: 9, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 9, delta: { type: "text", text: answer } },
+      { event_type: "step.stop", index: 9 },
+      { event_type: "interaction.completed", interaction: { id: "interaction-1", status: "completed" } },
+    ];
+
+    await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it.each([
+    ["an excessive step index", eventStream().map((event) =>
+      "index" in event && event.index === 0 ? { ...event, index: 32 } : event) as StreamEvent[]],
+    ["an oversized File Search call ID", eventStream().map((event) => {
+      if (event.event_type === "step.start" && event.step.type === "file_search_call") {
+        return { ...event, step: { ...event.step, id: "x".repeat(129) } };
+      }
+      if (event.event_type === "step.start" && event.step.type === "file_search_result") {
+        return { ...event, step: { ...event.step, call_id: "x".repeat(129) } };
+      }
+      return event;
+    }) as StreamEvent[]],
   ] satisfies Array<[string, StreamEvent[]]>)("rejects %s", async (_name, events) => {
     await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
   });

@@ -263,7 +263,7 @@ describe("unified chat client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("omits an empty citation claim when done has no citations", async () => {
+  it("rejects done without citations and a one-use claim", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
       { type: "done", result: "No supported citation was returned.", citations: [], partialCoverage: false },
     ])));
@@ -276,10 +276,9 @@ describe("unified chat client", () => {
       />,
     );
 
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
-    const assistant = mocks.appendMessages.mock.calls[0][0].messages[1];
-    expect(assistant).not.toHaveProperty("citations");
-    expect(assistant).not.toHaveProperty("citationClaim");
+    expect(await screen.findByText("The answer could not be verified. Please try again.")).toBeVisible();
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
   });
 
   it("rejects cited done data without a valid citation claim", async () => {

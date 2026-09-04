@@ -35,6 +35,7 @@ type CitationIdentity = {
   jurisdictionId: string;
   resourceId: string;
   versionId: string;
+  providerDocumentName: string;
   pageNumber?: number;
 };
 type Coverage = {
@@ -212,7 +213,11 @@ async function publishedDocument(
       updatedAt: now,
     });
     await ctx.db.patch(resourceId, { activeVersionId: versionId });
-    return { resourceId, versionId };
+    return {
+      resourceId,
+      versionId,
+      providerDocumentName: `${storeName}/documents/constitution`,
+    };
   });
 }
 
@@ -245,6 +250,7 @@ async function fixture() {
       jurisdictionId: selection.jurisdictionId,
       resourceId: document.resourceId,
       versionId: document.versionId,
+      providerDocumentName: document.providerDocumentName,
       pageNumber: 4,
     }],
     model: "gemini-3.5-flash-lite",
@@ -289,6 +295,7 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
       citation.jurisdictionId,
       citation.resourceId,
       citation.versionId,
+      citation.providerDocumentName,
       citation.pageNumber ?? 0,
     ]),
   ];
@@ -510,6 +517,7 @@ describe("completeGovernedInteraction", () => {
           jurisdictionId: other.jurisdictionId,
           resourceId: document.resourceId,
           versionId: document.versionId,
+          providerDocumentName: document.providerDocumentName,
         };
       }
       const input = {
@@ -552,6 +560,20 @@ describe("completeGovernedInteraction", () => {
       expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
     },
   );
+
+  it("rejects a citation naming the wrong active document in the same store", async () => {
+    const { t, owner, selection, base } = await fixture();
+    const input: CompletionInput = {
+      ...base,
+      citations: [{
+        ...base.citations[0],
+        providerDocumentName: `${selection.storeName}/documents/wrong-document`,
+      }],
+    };
+
+    await expect(complete(owner.client, input)).rejects.toThrow("INVALID_CHAT_CITATIONS");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
 
   it.each([
     ["failure", "network"],

@@ -77,6 +77,7 @@ type GovernedCitationIdentity = {
   jurisdictionId: string;
   resourceId: string;
   versionId: string;
+  providerDocumentName: string;
   pageNumber?: number;
 };
 type GovernedJurisdictionCoverage = {
@@ -135,6 +136,7 @@ const governedCitationIdentityValidator = v.object({
   jurisdictionId: v.string(),
   resourceId: v.string(),
   versionId: v.string(),
+  providerDocumentName: v.string(),
   pageNumber: v.optional(v.number()),
 });
 const governedJurisdictionCoverageValidator = v.object({
@@ -191,6 +193,7 @@ export async function completeGovernedInteractionProofParts(
       citation.jurisdictionId,
       citation.resourceId,
       citation.versionId,
+      citation.providerDocumentName,
       citation.pageNumber ?? 0,
     ]),
   ];
@@ -214,6 +217,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
       citation.jurisdictionId,
       citation.resourceId,
       citation.versionId,
+      citation.providerDocumentName,
       citation.pageNumber ?? 0,
     ]),
   ]));
@@ -248,6 +252,7 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
       !boundedIdentifier(citation.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.resourceId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.versionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+      || !isGeminiDocumentName(citation.providerDocumentName)
       || (citation.pageNumber !== undefined
         && (!Number.isSafeInteger(citation.pageNumber)
           || citation.pageNumber <= 0
@@ -618,7 +623,7 @@ async function resolveGovernedCompletionAuthority(
     const resourceId = ctx.db.normalizeId("legalResources", citation.resourceId);
     const versionId = ctx.db.normalizeId("documentVersions", citation.versionId);
     const store = citedJurisdictionId ? stores.get(citedJurisdictionId) : undefined;
-    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.pageNumber ?? ""}`;
+    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerDocumentName}\u0000${citation.pageNumber ?? ""}`;
     if (!citedJurisdictionId || !resourceId || !versionId || !store || seen.has(key)) {
       throw new ConvexError("INVALID_CHAT_CITATIONS");
     }
@@ -646,6 +651,7 @@ async function resolveGovernedCompletionAuthority(
       || version.status !== "published"
       || !documentName
       || !isGeminiDocumentName(documentName)
+      || citation.providerDocumentName !== documentName
       || !documentName.startsWith(`${store.storeName}/documents/`)
       || locks.length !== 0
       || !label

@@ -397,13 +397,14 @@ describe("read-only admin query behavior", () => {
       1_900_000_000_001,
     ]);
     expect(Object.keys(first.page[0]).sort()).toEqual([
-      "country",
       "externalId",
       "id",
+      "jurisdiction",
       "messageCount",
       "updatedAt",
       "userId",
     ]);
+    expect(first.page.every((row) => row.jurisdiction === null)).toBe(true);
     expect(JSON.stringify(first)).not.toContain("Sensitive prompt");
     expect(JSON.stringify(first)).not.toContain("Sensitive answer");
   });

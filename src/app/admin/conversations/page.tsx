@@ -71,7 +71,11 @@ export default async function ConversationsPage({
           externalId: string;
           messageCount: number;
           updatedAt: number;
-          country: string | null;
+          jurisdiction: {
+            id: string;
+            name: string;
+            kind: "geographic" | "organizational";
+          } | null;
         }>
       : [];
 
@@ -121,7 +125,16 @@ export default async function ConversationsPage({
                   {conversation.userId}
                 </Link>
               ),
-              jurisdiction: conversation.country ?? "Default jurisdiction",
+              jurisdiction: conversation.jurisdiction ? (
+                <span className="grid gap-1">
+                  <span className="font-semibold">{conversation.jurisdiction.name}</span>
+                  <span className="text-xs text-[oklch(45%_0.035_252)]">
+                    {conversation.jurisdiction.kind === "geographic"
+                      ? "Geographic"
+                      : "Organizational"}
+                  </span>
+                </span>
+              ) : "Unmigrated session",
               messages: (
                 <span className="tabular-nums">
                   {conversation.messageCount.toLocaleString("en")}

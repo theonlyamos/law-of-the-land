@@ -12,7 +12,15 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_OUTPUT_BLOCKS = 32;
 const MAX_ANNOTATIONS = 64;
 const MAX_IDENTIFIER_LENGTH = 200;
+const MAX_STREAM_STEP_INDEX = 31;
+const MAX_FILE_SEARCH_CALLS = 8;
+const MAX_FILE_SEARCH_CALL_ID_LENGTH = 128;
 const MAX_PAGE_NUMBER = 10_000;
+const GEMINI_RESOURCE_ID = "[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?";
+const GEMINI_DOCUMENT_NAME = new RegExp(
+  `^fileSearchStores/(${GEMINI_RESOURCE_ID})/documents/(${GEMINI_RESOURCE_ID})$`,
+  "u",
+);
 const encoder = new TextEncoder();
 
 export type ChatStore = {
@@ -27,6 +35,7 @@ export type ValidatedCitation = {
   jurisdictionId: string;
   resourceId: string;
   versionId: string;
+  providerDocumentName: string;
   pageNumber?: number;
 };
 
@@ -74,6 +83,25 @@ function checkAbortOrDeadline(signal: AbortSignal, deadlineAt: number): void {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH;
+}
+
+function providerDocumentStore(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = GEMINI_DOCUMENT_NAME.exec(value);
+  return match === null ? null : `fileSearchStores/${match[1]}`;
+}
+
+function validStepIndex(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= MAX_STREAM_STEP_INDEX;
+}
+
+function validFileSearchCallId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= MAX_FILE_SEARCH_CALL_ID_LENGTH
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value);
 }
 
 function validateInput(input: GovernedChatInput): void {
@@ -192,7 +220,18 @@ function citationsFor(
     const jurisdictionId = metadata.jurisdiction_id;
     const resourceId = metadata.resource_id;
     const versionId = metadata.version_id;
-    if (!isIdentifier(jurisdictionId) || !isIdentifier(resourceId) || !isIdentifier(versionId) || !storesByJurisdictionId.has(jurisdictionId)) {
+    const store = typeof jurisdictionId === "string"
+      ? storesByJurisdictionId.get(jurisdictionId)
+      : undefined;
+    const providerDocumentName = annotation.document_uri;
+    if (
+      !isIdentifier(jurisdictionId)
+      || !isIdentifier(resourceId)
+      || !isIdentifier(versionId)
+      || !store
+      || typeof providerDocumentName !== "string"
+      || providerDocumentStore(providerDocumentName) !== store.storeName
+    ) {
       return invalidResponse();
     }
     const start = annotation.start_index;
@@ -212,9 +251,10 @@ function citationsFor(
       jurisdictionId,
       resourceId,
       versionId,
+      providerDocumentName,
       ...(annotation.page_number === undefined ? {} : { pageNumber: annotation.page_number }),
     };
-    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.pageNumber ?? ""}`;
+    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.providerDocumentName}\u0000${citation.pageNumber ?? ""}`;
     if (!seen.has(key)) {
       citations.push(citation);
       seen.add(key);
@@ -292,21 +332,34 @@ export class GeminiFileSearchChat {
         continue;
       }
       if (event.event_type === "step.start") {
+        if (!validStepIndex(event.index)) return invalidResponse();
         const type = event.step.type;
         if (type !== "thought" && type !== "file_search_call" && type !== "file_search_result" && type !== "model_output") return invalidResponse();
         if (steps.has(event.index)) return invalidResponse();
-        if (type === "file_search_call") calls.add(event.step.id);
-        if (type === "file_search_result" && !calls.has(event.step.call_id)) return invalidResponse();
+        if (type === "file_search_call") {
+          if (
+            !validFileSearchCallId(event.step.id)
+            || calls.has(event.step.id)
+            || calls.size >= MAX_FILE_SEARCH_CALLS
+          ) return invalidResponse();
+          calls.add(event.step.id);
+        }
+        if (type === "file_search_result" && (
+          !validFileSearchCallId(event.step.call_id)
+          || !calls.has(event.step.call_id)
+        )) return invalidResponse();
         steps.set(event.index, { type, stopped: false });
         continue;
       }
       if (event.event_type === "step.stop") {
+        if (!validStepIndex(event.index)) return invalidResponse();
         const step = steps.get(event.index);
         if (!step || step.stopped) return invalidResponse();
         step.stopped = true;
         continue;
       }
       if (event.event_type !== "step.delta") return invalidResponse();
+      if (!validStepIndex(event.index)) return invalidResponse();
       const step = steps.get(event.index);
       if (!step || step.stopped) return invalidResponse();
       const stepType = step.type;

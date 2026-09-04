@@ -27,6 +27,7 @@ import { POST } from "./route";
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
 const selectedVersionId = "selected-version-id";
+const selectedDocumentName = "fileSearchStores/ghana/documents/labour-act";
 const citationClaim = "c".repeat(43);
 
 type PublicCitation = {
@@ -143,6 +144,7 @@ function canonicalInteraction(
         text: answer,
         annotations: [{
           type: "file_citation",
+          document_uri: selectedDocumentName,
           custom_metadata: {
             jurisdiction_id: citationJurisdictionId,
             resource_id: selectedResourceId,
@@ -480,6 +482,7 @@ describe("POST /api/chat streamed governed interaction", () => {
         jurisdictionId: selectedJurisdictionId,
         resourceId: selectedResourceId,
         versionId: selectedVersionId,
+        providerDocumentName: selectedDocumentName,
         pageNumber: 12,
       }],
       model: "gemini-test-model",
@@ -492,6 +495,27 @@ describe("POST /api/chat streamed governed interaction", () => {
       serviceProof: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(terminalArgs).not.toHaveProperty("error");
+  });
+
+  it("carries a same-store canonical document name only through terminal validation", async () => {
+    const wrongDocumentName = "fileSearchStores/ghana/documents/wrong-document";
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations[0].document_uri = wrongDocumentName;
+    interactionMocks.get.mockResolvedValue(canonical);
+
+    const streamEvents = await events(await POST(request()));
+
+    const terminalArgs = authMocks.fetchAuthMutation.mock.calls.find(
+      ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+    )?.[1];
+    expect(terminalArgs.citations).toEqual([{
+      jurisdictionId: selectedJurisdictionId,
+      resourceId: selectedResourceId,
+      versionId: selectedVersionId,
+      providerDocumentName: wrongDocumentName,
+      pageNumber: 12,
+    }]);
+    expect(JSON.stringify(streamEvents)).not.toContain(wrongDocumentName);
   });
 
   it("rejects a result without a selected-store citation and emits no done", async () => {
