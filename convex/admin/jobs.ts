@@ -795,7 +795,7 @@ const geminiProviderResultValidator = v.union(
 async function markGeminiJurisdictionDrifted(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
-  errorKind: ProviderErrorKind,
+  reviewWindowElapsed: boolean,
 ) {
   if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
     const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
@@ -803,7 +803,7 @@ async function markGeminiJurisdictionDrifted(
     return;
   }
   const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
-  const manualReviewSummary = errorKind === "timeout"
+  const manualReviewSummary = reviewWindowElapsed
     ? "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job."
     : "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.";
   if (version && job.type === "gemini_index_document") {
@@ -961,7 +961,7 @@ export const applyGeminiProviderResult = internalMutation({
           lastErrorKind: "timeout",
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job, "timeout");
+        await markGeminiJurisdictionDrifted(ctx, job, true);
         await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         return null;
@@ -1371,7 +1371,7 @@ export const recordProviderFailure = internalMutation({
       await applyPublicationJobFailure(ctx, job, now);
     }
     if (status === "manual_review") {
-      await markGeminiJurisdictionDrifted(ctx, job, args.kind);
+      await markGeminiJurisdictionDrifted(ctx, job, false);
     }
     if (status === "failed" && job.type === "gemini_create_store") {
       const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
@@ -1457,7 +1457,7 @@ export const reconcileStaleJobs = internalMutation({
           recoveryKind,
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job, "timeout");
+        await markGeminiJurisdictionDrifted(ctx, job, false);
         await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
@@ -1480,7 +1480,7 @@ export const reconcileStaleJobs = internalMutation({
           recoveryKind,
           updatedAt: now,
         });
-        await markGeminiJurisdictionDrifted(ctx, job, "timeout");
+        await markGeminiJurisdictionDrifted(ctx, job, false);
         await releaseExpiredGeminiExecutionPermit(ctx, job, now);
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         continue;
