@@ -16,10 +16,3 @@ export interface ChatCitation {
   jurisdictionKind: ResearchJurisdictionKind;
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
 }
-
-export interface PartialCoverage {
-  jurisdictionId: string;
-  name: string;
-  kind: ResearchJurisdictionKind;
-  relation: "geographic_ancestor" | "organizational_geography";
-}
