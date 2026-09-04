@@ -1,5 +1,7 @@
 "use client";
 
+import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
+import { AssistantMessageFooter } from "./assistant-message-footer";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
@@ -87,8 +89,8 @@ async function postChat(
     signal,
   });
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new ApiError(response.status, data?.error);
+    const data = (await response.json().catch(() => null)) as { error?: unknown } | null;
+    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined);
   }
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) throw new ApiError(500);
   if (!response.body) throw new ApiError(500);
@@ -152,6 +154,9 @@ class ApiError extends Error {
 
 function answerErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.status === 504) {
+      return "The answer took too long to finish. Please try again.";
+    }
     if (error.status === 401) {
       return "Your sign-in expired, so this question was not sent. Sign in again to continue.";
     }
@@ -264,6 +269,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         content: message.content,
         createdAt: message.createdAt,
         creationTime: message.creationTime,
+        completedAt: message.completedAt,
+        durationMs: message.durationMs,
         citations: message.citations,
       });
     }
@@ -550,7 +557,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
         if (
-          chatData.citations.length === 0
+          (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE)
           || !chatData.citationClaim
           || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
         ) {
@@ -560,7 +567,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         const completedAssistant = {
           ...assistantMessage,
           content: chatData.result,
-          ...(chatData.citations.length ? { citations: chatData.citations } : {}),
+          citations: chatData.citations,
           ...(chatData.partialCoverage ? { partialCoverage: true } : {}),
         };
         setLocalMessages((previous) =>
@@ -907,6 +914,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       {message.source === "local" && message.state === "error" ? (
                         <p className="mt-2 text-xs font-medium text-destructive">Failed</p>
                       ) : null}
+                      {message.source === "persisted" && (
+                        <AssistantMessageFooter content={assistantMarkdown(message.content)} citations={message.citations}
+                          completedAt={message.completedAt} savedAt={message.creationTime} durationMs={message.durationMs} />
+                      )}
                     </div>
                   )}
                 </div>

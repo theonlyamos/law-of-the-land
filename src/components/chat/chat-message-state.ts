@@ -9,6 +9,8 @@ export interface PersistedChatMessage {
   content: string;
   createdAt: number;
   creationTime: number;
+  completedAt?: number;
+  durationMs?: number;
   citations?: ChatCitation[];
 }
 

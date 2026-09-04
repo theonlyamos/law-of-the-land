@@ -22,7 +22,7 @@ vi.mock("@google/genai", () => ({
   },
 }));
 
-import { POST } from "./route";
+import { POST, maxDuration } from "./route";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -223,7 +223,7 @@ describe("POST /api/chat request boundary", () => {
     }));
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(55_000);
+    await vi.advanceTimersByTimeAsync(90_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -262,7 +262,7 @@ describe("POST /api/chat request boundary", () => {
     } as RequestInit & { duplex: "half" });
 
     const responsePromise = POST(stalledRequest);
-    await vi.advanceTimersByTimeAsync(55_000);
+    await vi.advanceTimersByTimeAsync(90_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -402,6 +402,33 @@ describe("POST /api/chat request boundary", () => {
 });
 
 describe("POST /api/chat streamed governed interaction", () => {
+  it("reserves hosting time beyond the application deadline", () => {
+    expect(maxDuration).toBeGreaterThan(110);
+  });
+
+  it("completes an uncited greeting as a claimed no-evidence answer", async () => {
+    interactionMocks.create.mockResolvedValue(successfulStream("Hello!"));
+    const final = canonicalInteraction("Hello!");
+    final.steps[0].content[0].annotations = [];
+    interactionMocks.get.mockResolvedValue(final);
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return {};
+      return { status: "completed", outcome: "success", citations: [], partialCoverage: false,
+        citationClaim, expiresAt: Date.now() + 60_000 };
+    });
+    const result = await events(await POST(request({ query: "hello" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", citations: [], citationClaim,
+      result: "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question." });
+  });
+
+  it("closes at the application deadline even when the canonical read ignores cancellation", async () => {
+    vi.useFakeTimers();
+    interactionMocks.get.mockImplementation(() => new Promise(() => undefined));
+    const resultPromise = events(await POST(request()));
+    await vi.advanceTimersByTimeAsync(110_000);
+    expect((await resultPromise).at(-1)?.type).toBe("error");
+  });
+
   it("uses one selected-first File Search interaction and terminalizes before done", async () => {
     let finishTerminal!: (value: unknown) => void;
     const terminal = new Promise((resolve) => { finishTerminal = resolve; });
@@ -560,6 +587,10 @@ describe("POST /api/chat streamed governed interaction", () => {
     }]);
     expect(JSON.stringify(streamEvents)).not.toContain(rawSecret);
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain(rawSecret);
+    expect(errorLog).toHaveBeenCalledWith("chat_request_failed", expect.any(String));
+    expect(JSON.parse(errorLog.mock.calls.at(-1)![1])).toMatchObject({
+      phase: "generation", category: "authentication", elapsedMs: expect.any(Number),
+    });
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
     const terminalArgs = authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1];
     expect(terminalArgs).toMatchObject({
@@ -588,7 +619,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it("aborts the provider at the single 55-second model cutoff and remains inside the terminal window", async () => {
+  it("aborts the provider at the single 90-second model cutoff and remains inside the terminal window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
@@ -606,7 +637,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(55_000);
+    await vi.advanceTimersByTimeAsync(90_000);
     const streamEvents = await events(await responsePromise);
 
     expect(providerSignal?.aborted).toBe(true);
@@ -619,11 +650,11 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).toMatchObject({
       outcome: "failure",
       failureCategory: "timeout",
-      elapsedMs: 55_000,
+      elapsedMs: 90_000,
     });
   });
 
-  it("uses the terminal reserve for the canonical read after the stream completes near 55 seconds", async () => {
+  it("uses the terminal reserve for the canonical read after the stream completes near 90 seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let streamSignal: AbortSignal | undefined;
@@ -631,7 +662,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     interactionMocks.create.mockImplementation(async (_input, options) => {
       streamSignal = options.signal;
       return (async function* () {
-        await new Promise((resolve) => setTimeout(resolve, 54_900));
+        await new Promise((resolve) => setTimeout(resolve, 89_900));
         for await (const event of successfulStream()) yield event;
       })();
     });
@@ -648,16 +679,16 @@ describe("POST /api/chat streamed governed interaction", () => {
 
     const response = await POST(request());
     const streamEventsPromise = events(response);
-    await vi.advanceTimersByTimeAsync(56_000);
+    await vi.advanceTimersByTimeAsync(91_000);
     const streamEvents = await streamEventsPromise;
 
-    expect(streamSignal?.aborted).toBe(true);
+    expect(streamSignal?.aborted).toBe(false);
     expect(canonicalSignal).not.toBe(streamSignal);
     expect(canonicalSignal?.aborted).toBe(false);
     expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
-  it("emits no done when terminal validation exhausts the shared 60-second deadline", async () => {
+  it("emits no done when terminal validation exhausts the shared 110-second deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -675,7 +706,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     });
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(110_000);
     const terminalEvent = JSON.parse(decoder.decode((await reader.read()).value).trim());
 
     expect(terminalEvent).toEqual({

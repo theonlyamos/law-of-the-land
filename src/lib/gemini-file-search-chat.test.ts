@@ -143,6 +143,14 @@ async function run(
 }
 
 describe("GeminiFileSearchChat", () => {
+  it("replaces an uncited reply with a safe no-evidence answer", async () => {
+    const { result } = await run(eventStream("Hello!"), canonical("Hello!"));
+    expect(result).toMatchObject({
+      answer: "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.",
+      citations: [],
+    });
+  });
+
   it("builds one typed File Search request with selected-first stores and bounded chronological history", async () => {
     const longTurn = "x".repeat(30_000);
     const { client } = await run(undefined, undefined, input({

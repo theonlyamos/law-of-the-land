@@ -32,6 +32,7 @@ import {
   isGeminiFileSearchStoreName,
 } from "./lib/geminiFileSearchNames";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 
 const messageValidator = v.union(
   v.object({
@@ -264,13 +265,16 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
     throw new ConvexError("INVALID_GOVERNED_INTERACTION");
   }
   if (input.outcome === "success") {
+    const noEvidence = input.citations.length === 0 && answer === CHAT_NO_EVIDENCE;
     if (
       answer === undefined
       || !answer.trim()
       || new TextEncoder().encode(answer).byteLength > MAX_ASSISTANT_CONTENT_BYTES
-      || input.citations.length === 0
+      || (input.citations.length === 0 && !noEvidence)
       || input.failureCategory !== undefined
-      || input.jurisdictionCoverage[0]?.coverage !== "evidence"
+      || (noEvidence
+        ? input.jurisdictionCoverage.some((item) => item.coverage !== "no_evidence")
+        : input.jurisdictionCoverage[0]?.coverage !== "evidence")
     ) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     return;
   }
@@ -601,6 +605,8 @@ const chatMessageValidator = v.object({
   createdAt: v.number(),
   creationTime: v.number(),
   citations: v.optional(v.array(chatCitationValidator)),
+  completedAt: v.optional(v.number()),
+  durationMs: v.optional(v.number()),
 });
 
 type GovernedCompletionAuthority = {
@@ -827,7 +833,7 @@ export const completeGovernedInteraction = mutation({
     };
     const now = Date.now();
     let claim: { citationClaim: string; expiresAt: number } | null = null;
-    if (publicCitations.length > 0) {
+    if (args.outcome === "success") {
       const principal = await citationClaimPrincipal(ctx);
       const citationClaim = createOpaqueTelemetryToken();
       const tokenHash = await hashOpaqueTelemetryValue(citationClaim);
@@ -1038,14 +1044,28 @@ export const listMessages = query({
     return {
       // The database query reads newest-first so the cursor continues into
       // older history; each page itself remains chronological for consumers.
-      page: result.page.reverse().map((message) => ({
-        storageId: message._id,
-        clientId: message.clientId ?? null,
-        role: message.role,
-        content: message.content,
-        createdAt: message.createdAt,
-        creationTime: message._creationTime,
-        citations: message.citations,
+      page: await Promise.all(result.page.reverse().map(async (message) => {
+        let timing: { completedAt: number; durationMs: number } | undefined;
+        if (message.role === "assistant" && message.clientId && process.env.TELEMETRY_INGEST_SECRET) {
+          const { assistantClientIdBinding } = await createCitationClaimBindings(message.clientId, "", []);
+          const run = await ctx.db.query("queryRuns")
+            .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>
+              q.eq("chatSessionId", session._id).eq("assistantClientIdBinding", assistantClientIdBinding))
+            .unique();
+          if (run?.outcome === "success") {
+            timing = { completedAt: run.completedAt, durationMs: run.totalLatencyMs };
+          }
+        }
+        return {
+          storageId: message._id,
+          clientId: message.clientId ?? null,
+          role: message.role,
+          content: message.content,
+          createdAt: message.createdAt,
+          creationTime: message._creationTime,
+          citations: message.citations,
+          ...timing,
+        };
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,

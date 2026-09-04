@@ -21,6 +21,11 @@ import {
   type GovernedChatResult,
 } from "@/lib/gemini-file-search-chat";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
+import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
+
+export const runtime = "nodejs";
+// Leave time for the route to close its stream before the host kills the function.
+export const maxDuration = 120;
 
 type Message = { role: "user" | "assistant"; content: string };
 type ChatBody = {
@@ -99,8 +104,8 @@ const MAX_STORES = 4;
 const MAX_PUBLIC_CITATIONS = 16;
 const MAX_PUBLIC_CITATION_LABEL = 200;
 const REQUESTS_PER_MINUTE = 15;
-const MODEL_WINDOW_MS = 55_000;
-const TERMINAL_WINDOW_MS = 60_000;
+const MODEL_WINDOW_MS = 90_000;
+const TERMINAL_WINDOW_MS = 110_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
 const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const completeGovernedInteraction = makeFunctionReference<"mutation">(
@@ -425,7 +430,7 @@ function parsePublicCitation(value: unknown): PublicCitation | null {
   return citation as PublicCitation;
 }
 
-function parseCompletionResult(value: unknown, selectedJurisdictionId: string): CompletionResult | null {
+function parseCompletionResult(value: unknown, selectedJurisdictionId: string, answer: string): CompletionResult | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = value as Record<string, unknown>;
   if (
@@ -440,7 +445,7 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string): 
     || result.status !== "completed"
     || result.outcome !== "success"
     || !Array.isArray(result.citations)
-    || result.citations.length < 1
+    || (result.citations.length === 0 && answer !== CHAT_NO_EVIDENCE)
     || result.citations.length > MAX_PUBLIC_CITATIONS
     || typeof result.partialCoverage !== "boolean"
     || typeof result.citationClaim !== "string"
@@ -450,7 +455,7 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string): 
   const citations = result.citations.map(parsePublicCitation);
   if (
     citations.some((citation) => citation === null)
-    || !citations.some((citation) => citation?.jurisdictionId === selectedJurisdictionId)
+    || (citations.length > 0 && !citations.some((citation) => citation?.jurisdictionId === selectedJurisdictionId))
   ) return null;
   return { ...result, citations } as CompletionResult;
 }
@@ -494,12 +499,13 @@ function streamResponse(input: {
         }
       };
       void (async () => {
+        let phase = "generation";
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
           const apiKey = process.env.GOOGLE_AI_API_KEY;
           if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
           const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
-          const result = await chat.run({
+          const result = await raceWithAbort(chat.run({
             query: input.body.query,
             stores: input.manifest.stores,
             history: input.body.messages,
@@ -509,9 +515,14 @@ function streamResponse(input: {
             streamSignal: input.streamSignal,
             streamDeadlineAt: input.modelDeadlineAt,
             onDelta: (text) => send({ type: "delta", text }),
-          });
+            onStreamComplete: () => {
+              phase = "canonical_read";
+              clearTimeout(input.modelTimer);
+            },
+          }), input.providerSignal);
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          phase = "completion";
           const terminalInput: CompletionInput = {
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
@@ -534,6 +545,7 @@ function streamResponse(input: {
               input.providerSignal,
             ),
             input.body.jurisdictionId,
+            result.answer,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
           send({
@@ -549,6 +561,12 @@ function streamResponse(input: {
           const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
             ? "timeout"
             : classifyFailure(error);
+          // Do not log provider errors, prompts, answers, tokens, or store identifiers.
+          if (!aborted) console.error("chat_request_failed", JSON.stringify({
+            phase, category, elapsedMs: Date.now() - input.requestStartedAt,
+            code: error instanceof Error && /^GOVERNED_CHAT_[A-Z_]+(?::[a-z_]+)?$/u.test(error.message)
+              ? error.message : undefined,
+          }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
           try {
             await completeWithinDeadline(
