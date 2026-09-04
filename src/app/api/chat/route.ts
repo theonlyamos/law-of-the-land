@@ -326,7 +326,7 @@ async function loadManifest(
 }
 
 function safeModelName(): string {
-  return process.env.GOOGLE_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
+  return process.env.GEMINI_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
 }
 
 function classifyFailure(error: unknown): FailureCategory {

@@ -128,7 +128,7 @@ async function run(
   request = input(),
 ) {
   const client = new FakeInteractionsClient(events, final);
-  const chat = new GeminiFileSearchChat(client, { GOOGLE_AI_MODEL: "configured-model" });
+  const chat = new GeminiFileSearchChat(client, { GEMINI_AI_MODEL: "configured-model" });
   const deltas: string[] = [];
   const signal = new AbortController().signal;
   const deadlineAt = Date.now() + 10_000;
@@ -195,7 +195,13 @@ describe("GeminiFileSearchChat", () => {
       "## What is uncertain or missing",
       "## Legislation and provisions",
     ]);
-    expect(request.system_instruction).toContain("Do not write PDF page references or printed page labels");
+    expect(request.system_instruction).toContain("Keep PDF pages out of the closing Legislation and provisions list");
+    expect(request.system_instruction).toContain("Every legal conclusion must be supported by a specific retrieved provision");
+    expect(request.system_instruction).toContain('When the user asks for "exact", "all", or "when"');
+    expect(request.system_instruction).toContain("support both its identity and its role in this specific issue");
+    expect(request.system_instruction).toContain("short, exact supporting excerpt copied from the retrieved text");
+    expect(request.system_instruction).toContain("The retrieved passages do not establish [specific issue]");
+    expect(request.system_instruction).not.toContain("The available library does not contain");
     expect(request.system_instruction).toContain("Continue supplying File Search citation annotations");
     expect(request.system_instruction).not.toContain("[verified page]");
     const payload = JSON.parse((request.input as { type: "text"; text: string }).text);

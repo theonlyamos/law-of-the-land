@@ -170,7 +170,7 @@ function mutationNames() {
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.GOOGLE_AI_API_KEY = "test-google-key";
-  process.env.GOOGLE_AI_MODEL = "gemini-test-model";
+  process.env.GEMINI_AI_MODEL = "gemini-test-model";
   process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://convex.example.test";
   process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
   authMocks.isAuthenticated.mockResolvedValue(true);
@@ -208,7 +208,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   delete process.env.GOOGLE_AI_API_KEY;
-  delete process.env.GOOGLE_AI_MODEL;
+  delete process.env.GEMINI_AI_MODEL;
   delete process.env.NEXT_PUBLIC_CONVEX_SITE_URL;
   delete process.env.TELEMETRY_INGEST_SECRET;
 });
