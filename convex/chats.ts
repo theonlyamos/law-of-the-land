@@ -10,6 +10,7 @@ import {
   isLegacyCountryCode,
   jurisdictionKindValidator,
   MAX_GEOGRAPHIC_DEPTH,
+  type ChatCitation,
   type JurisdictionKind,
 } from "./lib/jurisdictionDomain";
 import {
@@ -18,9 +19,7 @@ import {
 } from "./lib/jurisdictionAccess";
 import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
 import {
-  citationClaimIssueProofParts,
   createCitationClaimBindings,
-  isCitationClaimBinding,
   type ClaimCitation,
 } from "./lib/chatCitationClaim";
 import {
@@ -30,6 +29,8 @@ import {
   isOpaqueTelemetryToken,
   verifyTelemetryServiceProof,
 } from "./lib/telemetryProof";
+import { isGeminiDocumentName } from "./lib/geminiFileSearchNames";
+import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import {
   effectiveJurisdictionContract,
   hasCoherentJurisdictionContractIdentity,
@@ -78,9 +79,49 @@ const MAX_ORGANIZATION_SCOPE_LINKS = 8;
 const CITATION_CLAIM_TTL_MS = 2 * 60_000;
 const MAX_CHAT_EXTERNAL_ID_LENGTH = 200;
 const MAX_ASSISTANT_CLIENT_ID_LENGTH = 200;
-const MAX_ASSISTANT_CONTENT_LENGTH = 32_000;
+const MAX_ASSISTANT_CONTENT_BYTES = 64 * 1024;
+const MAX_MODEL_NAME_LENGTH = 100;
+const MAX_ROUTE_SCOPE_SIZE = 4;
+const MAX_PROVIDER_LATENCY_MS = 10 * 60_000;
+const MAX_PAGE_NUMBER = 10_000;
 const expireCitationClaimRef = makeFunctionReference<"mutation">("chats:expireCitationClaim");
 type ChatCtx = QueryCtx | MutationCtx;
+
+type GovernedInteractionOutcome = "success" | "failure" | "aborted";
+type GovernedFailureCategory =
+  | "authentication"
+  | "configuration"
+  | "network"
+  | "timeout"
+  | "validation"
+  | "internal";
+type GovernedCitationIdentity = {
+  jurisdictionId: string;
+  resourceId: string;
+  versionId: string;
+  pageNumber?: number;
+};
+type GovernedJurisdictionCoverage = {
+  ordinal: number;
+  relation: "selected" | "geographic_ancestor" | "organizational_geography";
+  coverage: "evidence" | "no_evidence" | "unavailable";
+};
+type GovernedCompletionProofInput = {
+  routeNonce: string;
+  externalId: string;
+  jurisdictionId: string;
+  assistantClientId: string;
+  finalAnswer?: string;
+  citations: readonly GovernedCitationIdentity[];
+  model: string;
+  elapsedMs: number;
+  outcome: GovernedInteractionOutcome;
+  failureCategory?: GovernedFailureCategory;
+  authorizedScopeSize: number;
+  readyStoreCount: number;
+  partialCoverage: boolean;
+  jurisdictionCoverage: readonly GovernedJurisdictionCoverage[];
+};
 
 function unavailable(): never {
   throw new ConvexError("That jurisdiction is not available for research.");
@@ -97,6 +138,160 @@ function opaqueEqual(left: string, right: string): boolean {
     difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
   }
   return difference === 0;
+}
+
+const governedInteractionOutcomeValidator = v.union(
+  v.literal("success"),
+  v.literal("failure"),
+  v.literal("aborted"),
+);
+const governedFailureCategoryValidator = v.union(
+  v.literal("authentication"),
+  v.literal("configuration"),
+  v.literal("network"),
+  v.literal("timeout"),
+  v.literal("validation"),
+  v.literal("internal"),
+);
+const governedCitationIdentityValidator = v.object({
+  jurisdictionId: v.string(),
+  resourceId: v.string(),
+  versionId: v.string(),
+  pageNumber: v.optional(v.number()),
+});
+const governedJurisdictionCoverageValidator = v.object({
+  ordinal: v.number(),
+  relation: v.union(
+    v.literal("selected"),
+    v.literal("geographic_ancestor"),
+    v.literal("organizational_geography"),
+  ),
+  coverage: v.union(
+    v.literal("evidence"),
+    v.literal("no_evidence"),
+    v.literal("unavailable"),
+  ),
+});
+
+function boundedIdentifier(value: string, maximum: number): boolean {
+  return value.length > 0 && value.length <= maximum && value === value.trim();
+}
+
+function validCount(value: number, maximum: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+export async function completeGovernedInteractionProofParts(
+  input: GovernedCompletionProofInput,
+): Promise<readonly (string | number)[]> {
+  const bindings = await createCitationClaimBindings(
+    input.assistantClientId,
+    input.finalAnswer ?? "",
+    [],
+  );
+  return [
+    "complete-governed-interaction-v1",
+    input.routeNonce,
+    input.externalId,
+    input.jurisdictionId,
+    bindings.assistantClientIdBinding,
+    bindings.assistantContentBinding,
+    input.model,
+    input.elapsedMs,
+    input.outcome,
+    input.failureCategory ?? "",
+    input.authorizedScopeSize,
+    input.readyStoreCount,
+    input.partialCoverage ? 1 : 0,
+    input.jurisdictionCoverage.length,
+    ...input.jurisdictionCoverage.flatMap((item) => [
+      item.ordinal,
+      item.relation,
+      item.coverage,
+    ]),
+    input.citations.length,
+    ...input.citations.flatMap((citation) => [
+      citation.jurisdictionId,
+      citation.resourceId,
+      citation.versionId,
+      citation.pageNumber ?? 0,
+    ]),
+  ];
+}
+
+async function governedCompletionBindings(input: GovernedCompletionProofInput) {
+  const claimBindings = await createCitationClaimBindings(
+    input.assistantClientId,
+    input.finalAnswer ?? "",
+    [],
+  );
+  const completionBinding = await hashOpaqueTelemetryValue(JSON.stringify([
+    "governed-completion-idempotency-v1",
+    input.externalId,
+    input.jurisdictionId,
+    claimBindings.assistantContentBinding,
+    input.outcome,
+    input.failureCategory ?? "",
+    input.partialCoverage,
+    input.citations.map((citation) => [
+      citation.jurisdictionId,
+      citation.resourceId,
+      citation.versionId,
+      citation.pageNumber ?? 0,
+    ]),
+  ]));
+  return {
+    assistantClientIdBinding: claimBindings.assistantClientIdBinding,
+    completionBinding,
+  };
+}
+
+function validateGovernedCompletionInput(input: GovernedCompletionProofInput): void {
+  const answer = input.finalAnswer;
+  if (
+    !isOpaqueTelemetryToken(input.routeNonce)
+    || !boundedIdentifier(input.externalId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+    || !boundedIdentifier(input.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+    || !boundedIdentifier(input.assistantClientId, MAX_ASSISTANT_CLIENT_ID_LENGTH)
+    || !boundedIdentifier(input.model, MAX_MODEL_NAME_LENGTH)
+    || !Number.isSafeInteger(input.elapsedMs)
+    || input.elapsedMs < 0
+    || input.elapsedMs > MAX_PROVIDER_LATENCY_MS
+    || !validCount(input.authorizedScopeSize, MAX_ROUTE_SCOPE_SIZE)
+    || input.authorizedScopeSize === 0
+    || !validCount(input.readyStoreCount, input.authorizedScopeSize)
+    || input.readyStoreCount === 0
+    || input.jurisdictionCoverage.length !== input.readyStoreCount
+    || input.jurisdictionCoverage.some((item, index) =>
+      item.ordinal !== index
+      || (index === 0 && item.relation !== "selected")
+      || (index > 0 && item.relation === "selected"))
+    || input.citations.length > MAX_CITATIONS
+    || input.citations.some((citation) =>
+      !boundedIdentifier(citation.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+      || !boundedIdentifier(citation.resourceId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+      || !boundedIdentifier(citation.versionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
+      || (citation.pageNumber !== undefined
+        && (!Number.isSafeInteger(citation.pageNumber)
+          || citation.pageNumber <= 0
+          || citation.pageNumber > MAX_PAGE_NUMBER)))
+  ) {
+    throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+  }
+  if (input.outcome === "success") {
+    if (
+      answer === undefined
+      || !answer.trim()
+      || new TextEncoder().encode(answer).byteLength > MAX_ASSISTANT_CONTENT_BYTES
+      || input.citations.length === 0
+      || input.failureCategory !== undefined
+      || input.jurisdictionCoverage[0]?.coverage !== "evidence"
+    ) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    return;
+  }
+  if (answer !== undefined || input.citations.length !== 0) {
+    throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+  }
 }
 
 async function citationClaimPrincipal(ctx: MutationCtx) {
@@ -480,77 +675,228 @@ const chatMessageValidator = v.object({
   citations: v.optional(v.array(chatCitationValidator)),
 });
 
-export const issueCitationClaim = mutation({
+async function authorizeGovernedCitations(
+  ctx: MutationCtx,
+  session: Doc<"chatSessions">,
+  jurisdictionId: Id<"jurisdictions">,
+  citations: readonly GovernedCitationIdentity[],
+): Promise<ChatCitation[]> {
+  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
+  const stores = new Map(resolution.stores.map((store) => [store.jurisdictionId, store]));
+  const seen = new Set<string>();
+  const publicCitations: ChatCitation[] = [];
+  for (const citation of citations) {
+    const citedJurisdictionId = ctx.db.normalizeId("jurisdictions", citation.jurisdictionId);
+    const resourceId = ctx.db.normalizeId("legalResources", citation.resourceId);
+    const versionId = ctx.db.normalizeId("documentVersions", citation.versionId);
+    const store = citedJurisdictionId ? stores.get(citedJurisdictionId) : undefined;
+    const key = `${citation.jurisdictionId}\u0000${citation.resourceId}\u0000${citation.versionId}\u0000${citation.pageNumber ?? ""}`;
+    if (!citedJurisdictionId || !resourceId || !versionId || !store || seen.has(key)) {
+      throw new ConvexError("INVALID_CHAT_CITATIONS");
+    }
+    seen.add(key);
+    const [resource, version, locks] = await Promise.all([
+      ctx.db.get("legalResources", resourceId),
+      ctx.db.get("documentVersions", versionId),
+      ctx.db
+        .query("documentLifecycleLocks")
+        .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
+        .take(1),
+    ]);
+    const documentName = version?.geminiDocumentName;
+    const title = resource?.title.trim();
+    const label = title
+      ? `${title}${citation.pageNumber === undefined ? "" : `, page ${citation.pageNumber}`}`
+      : "";
+    if (
+      !resource
+      || resource.jurisdictionId !== citedJurisdictionId
+      || resource.status !== "active"
+      || resource.activeVersionId !== versionId
+      || !version
+      || version.resourceId !== resourceId
+      || version.status !== "published"
+      || !documentName
+      || !isGeminiDocumentName(documentName)
+      || !documentName.startsWith(`${store.storeName}/documents/`)
+      || locks.length !== 0
+      || !label
+      || label.length > MAX_CITATION_LABEL_LENGTH
+    ) throw new ConvexError("INVALID_CHAT_CITATIONS");
+    publicCitations.push({
+      label,
+      jurisdictionId: citedJurisdictionId,
+      jurisdictionName: store.name,
+      jurisdictionKind: store.kind,
+      relation: store.relation,
+    });
+  }
+  if (!publicCitations.some((citation) => citation.jurisdictionId === jurisdictionId)) {
+    throw new ConvexError("INVALID_CHAT_CITATIONS");
+  }
+  await validateCitations(ctx, session, [{ role: "assistant", citations: publicCitations }]);
+  return publicCitations;
+}
+
+const completionResultValidator = v.union(
+  v.object({
+    status: v.literal("completed"),
+    outcome: v.literal("success"),
+    citations: v.array(chatCitationValidator),
+    partialCoverage: v.boolean(),
+    citationClaim: v.string(),
+    expiresAt: v.number(),
+  }),
+  v.object({
+    status: v.literal("completed"),
+    outcome: v.union(v.literal("failure"), v.literal("aborted")),
+  }),
+  v.object({
+    status: v.literal("replayed"),
+    outcome: governedInteractionOutcomeValidator,
+  }),
+);
+
+export const completeGovernedInteraction = mutation({
   args: {
+    routeNonce: v.string(),
     externalId: v.string(),
     jurisdictionId: v.string(),
     assistantClientId: v.string(),
-    assistantContent: v.string(),
-    citations: v.array(chatCitationValidator),
-    assistantClientIdBinding: v.string(),
-    assistantContentBinding: v.string(),
-    orderedCitationBinding: v.string(),
+    finalAnswer: v.optional(v.string()),
+    citations: v.array(governedCitationIdentityValidator),
+    model: v.string(),
+    elapsedMs: v.number(),
+    outcome: governedInteractionOutcomeValidator,
+    failureCategory: v.optional(governedFailureCategoryValidator),
+    authorizedScopeSize: v.number(),
+    readyStoreCount: v.number(),
+    partialCoverage: v.boolean(),
+    jurisdictionCoverage: v.array(governedJurisdictionCoverageValidator),
     serviceProof: v.string(),
   },
-  returns: v.object({ citationClaim: v.string(), expiresAt: v.number() }),
+  returns: completionResultValidator,
   handler: async (ctx, args) => {
-    if (!args.externalId.trim() || args.externalId.length > MAX_CHAT_EXTERNAL_ID_LENGTH ||
-      !args.assistantClientId.trim() || args.assistantClientId.length > MAX_ASSISTANT_CLIENT_ID_LENGTH ||
-      !args.assistantContent.trim() || args.assistantContent.length > MAX_ASSISTANT_CONTENT_LENGTH ||
-      args.citations.length === 0 || args.citations.length > MAX_CITATIONS) invalidCitationClaim();
-    const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
-    if (!jurisdictionId) invalidCitationClaim();
-    const suppliedBindings = {
-      assistantClientIdBinding: args.assistantClientIdBinding,
-      assistantContentBinding: args.assistantContentBinding,
-      orderedCitationBinding: args.orderedCitationBinding,
-    };
-    if (!isCitationClaimBinding(suppliedBindings.assistantClientIdBinding) ||
-      !isCitationClaimBinding(suppliedBindings.assistantContentBinding) ||
-      !isCitationClaimBinding(suppliedBindings.orderedCitationBinding)) {
-      invalidCitationClaim();
-    }
+    const input: GovernedCompletionProofInput = args;
+    validateGovernedCompletionInput(input);
     if (!(await verifyTelemetryServiceProof(
       args.serviceProof,
-      await citationClaimIssueProofParts({ externalId: args.externalId, jurisdictionId, ...suppliedBindings }),
-    ))) invalidCitationClaim();
-    const expectedBindings = await createCitationClaimBindings(
-      args.assistantClientId,
-      args.assistantContent,
-      args.citations,
-    );
-    if (!opaqueEqual(expectedBindings.assistantClientIdBinding, suppliedBindings.assistantClientIdBinding) ||
-      !opaqueEqual(expectedBindings.assistantContentBinding, suppliedBindings.assistantContentBinding) ||
-      !opaqueEqual(expectedBindings.orderedCitationBinding, suppliedBindings.orderedCitationBinding)) {
-      invalidCitationClaim();
+      await completeGovernedInteractionProofParts(input),
+    ))) throw new ConvexError("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+
+    const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
+    if (!jurisdictionId) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    const userId = await requireUserId(ctx);
+    const session = await ctx.db
+      .query("chatSessions")
+      .withIndex("by_user_externalId", (q) =>
+        q.eq("userId", userId).eq("externalId", args.externalId))
+      .unique();
+    if (
+      !session
+      || session.jurisdictionId !== jurisdictionId
+      || !(await canAccessSession(ctx, session))
+    ) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    const selected = await ctx.db.get("jurisdictions", jurisdictionId);
+    if (!selected) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    let kind: JurisdictionKind;
+    try {
+      kind = await assertTypedJurisdiction(ctx, selected);
+    } catch {
+      throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     }
 
-    const userId = await requireUserId(ctx);
-    const session = await ctx.db.query("chatSessions")
-      .withIndex("by_user_externalId", (q) => q.eq("userId", userId).eq("externalId", args.externalId))
-      .unique();
-    if (!session || session.jurisdictionId !== jurisdictionId || !(await canAccessSession(ctx, session))) {
-      invalidCitationClaim();
+    const requestNonceHash = await hashOpaqueTelemetryValue(args.routeNonce);
+    const nonceRows = await ctx.db
+      .query("queryRuns")
+      .withIndex("by_requestNonceHash", (q) => q.eq("requestNonceHash", requestNonceHash))
+      .take(2);
+    if (nonceRows.length > 1) throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
+    if (nonceRows.length === 1) {
+      if (nonceRows[0].chatSessionId !== session._id) {
+        throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
+      }
+      return { status: "replayed" as const, outcome: nonceRows[0].outcome };
     }
-    if (!(await readUnifiedJurisdictionsEnabled(ctx))) invalidCitationClaim();
-    await validateCitations(ctx, session, [{ role: "assistant", citations: args.citations }]);
-    const principal = await citationClaimPrincipal(ctx);
-    const citationClaim = createOpaqueTelemetryToken();
-    const tokenHash = await hashOpaqueTelemetryValue(citationClaim);
-    const duplicates = await ctx.db.query("chatCitationClaims")
-      .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash)).take(2);
-    if (duplicates.length !== 0) invalidCitationClaim();
-    const expiresAt = Date.now() + CITATION_CLAIM_TTL_MS;
-    await ctx.db.insert("chatCitationClaims", {
-      tokenHash,
-      ...principal,
+
+    const idempotency = await governedCompletionBindings(input);
+    const clientRows = await ctx.db
+      .query("queryRuns")
+      .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>
+        q
+          .eq("chatSessionId", session._id)
+          .eq("assistantClientIdBinding", idempotency.assistantClientIdBinding))
+      .take(2);
+    if (clientRows.length > 1) throw new ConvexError("CHAT_CLIENT_ID_CONFLICT");
+    if (clientRows.length === 1) {
+      if (!opaqueEqual(clientRows[0].completionBinding, idempotency.completionBinding)) {
+        throw new ConvexError("CHAT_CLIENT_ID_CONFLICT");
+      }
+      return { status: "replayed" as const, outcome: clientRows[0].outcome };
+    }
+
+    const publicCitations = args.outcome === "success"
+      ? await authorizeGovernedCitations(ctx, session, jurisdictionId, args.citations)
+      : [];
+    const now = Date.now();
+    let claim: { citationClaim: string; expiresAt: number } | null = null;
+    if (publicCitations.length > 0) {
+      const principal = await citationClaimPrincipal(ctx);
+      const citationClaim = createOpaqueTelemetryToken();
+      const tokenHash = await hashOpaqueTelemetryValue(citationClaim);
+      const duplicates = await ctx.db
+        .query("chatCitationClaims")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+        .take(2);
+      if (duplicates.length !== 0) invalidCitationClaim();
+      const claimBindings = await createCitationClaimBindings(
+        args.assistantClientId,
+        args.finalAnswer!,
+        publicCitations,
+      );
+      const expiresAt = now + CITATION_CLAIM_TTL_MS;
+      await ctx.db.insert("chatCitationClaims", {
+        tokenHash,
+        ...principal,
+        chatSessionId: session._id,
+        jurisdictionId,
+        ...claimBindings,
+        expiresAt,
+      });
+      await ctx.scheduler.runAt(expiresAt, expireCitationClaimRef, { tokenHash });
+      claim = { citationClaim, expiresAt };
+    }
+    await ctx.db.insert("queryRuns", {
+      requestNonceHash,
       chatSessionId: session._id,
+      ...idempotency,
+      day: new Date(now).toISOString().slice(0, 10),
       jurisdictionId,
-      ...expectedBindings,
-      expiresAt,
+      jurisdictionName: selected.name,
+      jurisdictionKind: kind,
+      outcome: args.outcome,
+      ...(args.failureCategory ? { failureCategory: args.failureCategory } : {}),
+      model: args.model,
+      totalLatencyMs: args.elapsedMs,
+      authorizedScopeSize: args.authorizedScopeSize,
+      readyStoreCount: args.readyStoreCount,
+      citationCount: publicCitations.length,
+      partialCoverage: args.partialCoverage,
+      jurisdictionCoverage: args.jurisdictionCoverage,
+      completedAt: now,
+      rollupStatus: "pending",
     });
-    await ctx.scheduler.runAt(expiresAt, expireCitationClaimRef, { tokenHash });
-    return { citationClaim, expiresAt };
+    if (args.outcome !== "success") {
+      return { status: "completed" as const, outcome: args.outcome };
+    }
+    if (!claim) throw new ConvexError("INVALID_CHAT_CITATIONS");
+    return {
+      status: "completed" as const,
+      outcome: "success" as const,
+      citations: publicCitations,
+      partialCoverage: args.partialCoverage,
+      ...claim,
+    };
   },
 });
 
@@ -832,7 +1178,6 @@ export const appendMessages = mutation({
     externalId: v.string(),
     title: v.optional(v.string()),
     lastMessage: v.string(),
-    country: v.optional(v.string()),
     jurisdictionId: v.optional(v.string()),
     jurisdictionName: v.optional(v.string()),
     jurisdictionKind: v.optional(jurisdictionKindValidator),
