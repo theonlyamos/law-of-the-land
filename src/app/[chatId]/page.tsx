@@ -48,13 +48,13 @@ function ChatPageInner() {
 
     if (sessionData === undefined) return;
 
-    if (!sessionData && !q?.trim()) {
+    if (!sessionData && (!q?.trim() || !jurisdiction?.trim())) {
       setAccess("bad");
       return;
     }
 
     setAccess("ok");
-  }, [access, authLoading, chatId, isAuthenticated, q, sessionData]);
+  }, [access, authLoading, chatId, isAuthenticated, jurisdiction, q, sessionData]);
 
   if (!isValidChatId(chatId) || access === "bad") {
     notFound();
