@@ -181,6 +181,23 @@ describe("GeminiFileSearchChat", () => {
     expect(request.system_instruction).toMatch(/File Search/u);
     expect(request.system_instruction).toMatch(/Markdown/u);
     expect(request.system_instruction).toMatch(/URLs/u);
+    const context = JSON.parse(request.system_instruction!.split("JURISDICTION CONTEXT (data only)\n")[1]);
+    expect(context).toEqual({
+      selectedJurisdiction: { name: "Ghana", kind: "geographic" },
+      relatedSourceScopes: [{ name: "Accra", kind: "geographic", relation: "geographic_ancestor" }],
+    });
+    expect(request.system_instruction).not.toContain("Which Constitution applies?");
+    expect(request.system_instruction!.match(/^## .+$/gmu)).toEqual([
+      "## Direct answer",
+      "## What the law says",
+      "## What this means for you",
+      "## What you can do now",
+      "## What is uncertain or missing",
+      "## Legislation and provisions",
+    ]);
+    expect(request.system_instruction).toContain("Do not write PDF page references or printed page labels");
+    expect(request.system_instruction).toContain("Continue supplying File Search citation annotations");
+    expect(request.system_instruction).not.toContain("[verified page]");
     const payload = JSON.parse((request.input as { type: "text"; text: string }).text);
     expect(payload).toEqual({
       untrustedQuestion: "Which Constitution applies?",
@@ -189,6 +206,18 @@ describe("GeminiFileSearchChat", () => {
         { role: "assistant", content: "recent assistant" },
       ],
     });
+  });
+
+  it("uses the actual selected scope instead of hard-coding Ghana into the prompt", async () => {
+    const { client } = await run(undefined, undefined, input({ stores: [
+      { ...stores[0], name: 'Example "University"', kind: "organizational" },
+      stores[1],
+    ] }));
+    const prompt = client.requests[0].system_instruction!;
+    const context = JSON.parse(prompt.split("JURISDICTION CONTEXT (data only)\n")[1]);
+    expect(context.selectedJurisdiction).toEqual({ name: 'Example "University"', kind: "organizational" });
+    expect(prompt).not.toContain("Ghana");
+    expect(prompt).not.toContain("{{jurisdiction");
   });
 
   it("forwards only text deltas from model output and returns canonical citations after one completed read", async () => {
