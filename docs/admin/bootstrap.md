@@ -9,7 +9,7 @@
 | Variable | Owner | Local | Preview | Production |
 | --- | --- | --- | --- | --- |
 | `GOOGLE_AI_API_KEY` | Vercel and Convex | Required for legal search, indexing, and generated answers | Required | Required |
-| `GOOGLE_AI_MODEL` | Vercel | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` |
+| `GEMINI_AI_MODEL` | Vercel | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` |
 | `PLACES_API_KEY` | Vercel | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
 | `PLACE_CLAIM_SECRET` | Vercel and Convex | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
 | `CONVEX_DEPLOYMENT` | local shell / Vercel build | Required | Required | Required |
@@ -108,7 +108,7 @@ Do not reuse a preview user ID or run the isolated `convex dev` sequence against
 ### 1. Deploy disabled and prepare the production account
 
 1. In the Convex production deployment, set `ADMIN_ENVIRONMENT=production` and `ADMIN_PANEL_ENABLED=false`. Confirm `INITIAL_SUPER_ADMIN_IDS` is absent. Configure the Convex-owned variables in the matrix.
-2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GOOGLE_AI_API_KEY`, `GOOGLE_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared telemetry secret must match Convex exactly.
+2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GOOGLE_AI_API_KEY`, `GEMINI_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared telemetry secret must match Convex exactly.
 3. Promote the already-reviewed commit through the normal `main` deployment pipeline. Do not run an ad hoc `convex deploy` from the release shell: that command defaults to the project's production deployment and does not accept the exact-name selector used below.
 4. Verify the production site loads while ordinary `/admin` access remains disabled. The candidate must create a new production credential account, verify its email, enroll in 2FA at `/settings/security`, and copy the production Better Auth user ID. Verify the production ID, email-verification state, and 2FA state in that same environment.
 
