@@ -534,6 +534,7 @@ describe("durable Gemini jobs", () => {
       expect(job).toMatchObject({
         status: "waiting_provider",
         providerOperationName: "fileSearchStores/ghana-poll/upload/operations/index-poll",
+        providerPollingStartedAt: Date.now(),
         nextAttemptAt: Date.now() + 5_000,
       });
 
@@ -572,7 +573,7 @@ describe("durable Gemini jobs", () => {
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
   });
 
-  it("mentions 30 minutes only after the index review window elapses", async () => {
+  it("keeps polling at 30 minutes and requires review after one hour", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = Date.UTC(2026, 8, 4, 12);
@@ -607,17 +608,29 @@ describe("durable Gemini jobs", () => {
           .withIndex("by_resourceId", (q) => q.eq("resourceId", elapsedWindow.resourceId))
           .unique();
         if (!lock) throw new Error("expected lifecycle lock");
-        await ctx.db.patch(lock._id, { expiresAt: startedAt + 31 * 60_000 });
+        await ctx.db.patch(lock._id, { expiresAt: startedAt + 61 * 60_000 });
       });
       vi.setSystemTime(startedAt + 30 * 60_000);
-      const elapsedLease = await claimLease(t, elapsedWindow.jobId);
+      let elapsedLease = await claimLease(t, elapsedWindow.jobId);
+      await t.mutation(applyGeminiProviderResult, {
+        jobId: elapsedWindow.jobId,
+        leaseToken: elapsedLease,
+        result: { kind: "index_pending" },
+      });
+      await expect(t.run((ctx) => ctx.db.get("integrationJobs", elapsedWindow.jobId))).resolves.toMatchObject({
+        status: "waiting_provider",
+      });
+      await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.not.toHaveProperty("failureSummary");
+
+      vi.setSystemTime(startedAt + 60 * 60_000);
+      elapsedLease = await claimLease(t, elapsedWindow.jobId);
       await t.mutation(applyGeminiProviderResult, {
         jobId: elapsedWindow.jobId,
         leaseToken: elapsedLease,
         result: { kind: "index_pending" },
       });
       await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.toMatchObject({
-        failureSummary: "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job.",
+        failureSummary: "Gemini did not confirm the index update within 1 hour. Search is paused until an administrator reviews the job.",
       });
     } finally {
       vi.useRealTimers();
@@ -737,6 +750,54 @@ describe("durable Gemini jobs", () => {
     await expect(admin.client.mutation(retryJob, {
       jobId: uncertain.jobId, reason: "Do not replay uncertain creation", idempotencyKey: "retry-initial-create-admin",
     })).rejects.toThrow("Integration job is not retryable");
+  });
+
+  it("starts a fresh provider polling window when an indexing job is retried", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-09-04T10:00:00.000Z");
+      vi.setSystemTime(startedAt);
+      const t = createBackend();
+      await enablePanel(t);
+      const safePoll = await seedBoundGeminiIndexJob(t, {
+        suffix: "retry-poll-window",
+        status: "manual_review",
+        providerSyncState: "drifted",
+        lastErrorKind: "provider",
+      });
+
+      vi.setSystemTime(startedAt.getTime() + 61 * 60_000);
+      const admin = await asAdmin(t, "super_admin");
+      await t.run(async (ctx) => {
+        const lock = await ctx.db
+          .query("documentLifecycleLocks")
+          .withIndex("by_resourceId", (q) => q.eq("resourceId", safePoll.resourceId))
+          .unique();
+        if (!lock) throw new Error("expected lifecycle lock");
+        await ctx.db.patch(lock._id, { expiresAt: Date.now() + 61 * 60_000 });
+      });
+
+      await admin.client.mutation(retryJob, {
+        jobId: safePoll.jobId,
+        reason: "Resume the existing Gemini operation",
+        idempotencyKey: "retry-safe-gemini-poll-window",
+      });
+      const running = await t.run((ctx) => ctx.db.get("integrationJobs", safePoll.jobId));
+      if (!running?.leaseToken) throw new Error("expected retry lease");
+
+      await t.mutation(applyGeminiProviderResult, {
+        jobId: safePoll.jobId,
+        leaseToken: running.leaseToken,
+        result: { kind: "index_pending" },
+      });
+
+      await expect(t.run((ctx) => ctx.db.get("integrationJobs", safePoll.jobId))).resolves.toMatchObject({
+        status: "waiting_provider",
+        providerPollingStartedAt: Date.now(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries an uncertain store deletion using its exact persisted target", async () => {

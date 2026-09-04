@@ -27,7 +27,7 @@ const MAX_RECONCILE_BATCH = 25;
 const JOB_LEASE_MS = 15 * 60_000;
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 20 * 60_000] as const;
 const GEMINI_POLL_DELAYS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const;
-const GEMINI_INDEX_REVIEW_AFTER_MS = 30 * 60_000;
+const GEMINI_INDEX_REVIEW_AFTER_MS = 60 * 60_000;
 const GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-2" as const;
 const PROVIDER_DIAGNOSTIC_RETENTION_MS = 24 * 60 * 60_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -98,6 +98,7 @@ const jobDocumentValidator = v.object({
   correlationId: v.string(),
   providerOperationName: v.optional(v.string()),
   providerPollCount: v.optional(v.number()),
+  providerPollingStartedAt: v.optional(v.number()),
   knownStoreResult: v.optional(knownStoreResultValidator),
   recoveryKind: v.optional(v.union(
     v.literal("poll_operation"),
@@ -804,7 +805,7 @@ async function markGeminiJurisdictionDrifted(
   }
   const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
   const manualReviewSummary = reviewWindowElapsed
-    ? "Gemini did not confirm the index update within 30 minutes. Search is paused until an administrator reviews the job."
+    ? "Gemini did not confirm the index update within 1 hour. Search is paused until an administrator reviews the job."
     : "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.";
   if (version && job.type === "gemini_index_document") {
     await ctx.db.patch(version._id, { failureSummary: manualReviewSummary, updatedAt: Date.now() });
@@ -935,6 +936,7 @@ export const applyGeminiProviderResult = internalMutation({
       await ctx.db.patch(job._id, {
         providerOperationName: args.result.operationName,
         providerPollCount: 0,
+        providerPollingStartedAt: now,
         recoveryKind: "poll_operation",
         status: "waiting_provider",
         leaseToken: undefined,
@@ -952,7 +954,7 @@ export const applyGeminiProviderResult = internalMutation({
       }
       const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
       if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
-      if (now - job.createdAt >= GEMINI_INDEX_REVIEW_AFTER_MS) {
+      if (now - (job.providerPollingStartedAt ?? job.createdAt) >= GEMINI_INDEX_REVIEW_AFTER_MS) {
         await ctx.db.patch(job._id, {
           status: "manual_review",
           leaseToken: undefined,
@@ -1599,6 +1601,9 @@ export const retryJob = mutation({
       }
       const claim = await claimJobDocument(ctx, job, false, true);
       if (!claim) throw new ConvexError("Integration job is not retryable");
+      if (job.type === "gemini_index_document" && job.recoveryKind === "poll_operation") {
+        await ctx.db.patch(job._id, { providerPollingStartedAt: now });
+      }
       await ctx.scheduler.runAfter(0, jobRunner(job.type), { jobId: job._id, leaseToken: claim.leaseToken });
       status = "running";
     } else if (

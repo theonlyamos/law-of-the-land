@@ -460,6 +460,7 @@ export default defineSchema({
     processId: v.optional(v.string()),
     providerOperationName: v.optional(v.string()),
     providerPollCount: v.optional(v.number()),
+    providerPollingStartedAt: v.optional(v.number()),
     knownStoreResult: v.optional(v.union(
       v.object({
         kind: v.literal("store_created"),

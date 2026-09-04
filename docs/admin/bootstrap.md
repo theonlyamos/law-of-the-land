@@ -41,7 +41,7 @@ For guarded admin E2E and performance-budget runs, provide the selected target's
 
 ## Search indexing and export controls
 
-Only publishing queues Gemini indexing; drafts, submitted versions, review, and approval make no provider request. Accepted uploads are polled after 5, 10, 20, 30, then at most 60 seconds. After 30 minutes without confirmation, the job requires manual review and legal research for that jurisdiction remains paused. Legal research uses one File Search call across the complete server-authorized set of ready jurisdiction stores. Gemini store, document, and operation names remain server-only.
+Only publishing queues Gemini indexing; drafts, submitted versions, review, and approval make no provider request. Accepted uploads are polled after 5, 10, 20, 30, then at most 60 seconds. After 1 hour without confirmation, the job requires manual review and legal research for that jurisdiction remains paused. Legal research uses one File Search call across the complete server-authorized set of ready jurisdiction stores. Gemini store, document, and operation names remain server-only.
 
 Conversation exports use a hashed, one-time `exp_` reference. The browser posts it to the authenticated Next.js proxy `/api/admin/exports/download`, which forwards it to private Convex route `/admin/export-download`. Both export and reference expire within 10 minutes.
 

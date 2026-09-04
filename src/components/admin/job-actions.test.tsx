@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ mutate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ mutate: vi.fn(), refresh: vi.fn() }));
 vi.mock("convex/react", () => ({ useMutation: () => mocks.mutate }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 import { JobActions } from "./job-actions";
-afterEach(() => { cleanup(); mocks.mutate.mockReset(); });
+afterEach(() => { cleanup(); mocks.mutate.mockReset(); mocks.refresh.mockReset(); });
 describe("authoritative job controls", () => {
   it("keeps a waiting Gemini poll read-only", () => {
     render(<JobActions jobId={"job-waiting" as never} status="waiting_provider" canRetry canCancel />);
@@ -19,5 +20,6 @@ describe("authoritative job controls", () => {
     fireEvent.change(screen.getByLabelText("Reason for job-1"), { target: { value: "Retry confirmed transport failure" } });
     fireEvent.click(screen.getByRole("button", { name: "Retry safely" }));
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ jobId: "job-1", reason: "Retry confirmed transport failure", idempotencyKey: expect.stringMatching(/^retry_[a-f0-9]{32}$/) }));
+    expect(mocks.refresh).toHaveBeenCalledOnce();
   });
 });
