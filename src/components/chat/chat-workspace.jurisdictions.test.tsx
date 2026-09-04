@@ -10,20 +10,34 @@ const mocks = vi.hoisted(() => ({
   useMutation: vi.fn(),
   ensureSession: vi.fn(),
   appendMessages: vi.fn(),
-  unifiedEnabled: false,
   resolvedSelection: null as null | {
-    id: string; name: string; slug: string; kind: "geographic" | "organizational";
-    isDefault: boolean; legacyCountryCode?: string;
-  },
-  catalog: undefined as undefined | Array<{
-    code: string;
+    id: string;
     name: string;
     slug: string;
+    kind: "geographic" | "organizational";
     isDefault: boolean;
+  },
+  session: null as null | {
+    title: string;
+    jurisdictionId?: string | null;
+    jurisdictionName?: string | null;
+    jurisdictionKind?: "geographic" | "organizational" | null;
+  },
+  sessions: [] as Array<{
+    id: string;
+    title: string;
+    lastMessage: string;
+    timestamp: number;
+    messageCount: number;
   }>,
-  session: null as null | { country: string | null; title: string; jurisdictionId?: string | null; jurisdictionName?: string | null; jurisdictionKind?: "geographic" | "organizational" | null; jurisdictionContract?: "legacy" | "unified" | null },
-  sessions: [] as Array<{ id: string; title: string; lastMessage: string; timestamp: number; messageCount: number }>,
-  messages: [] as Array<{ storageId: string; clientId: string | null; role: "user" | "assistant"; content: string; createdAt: number; creationTime: number }>,
+  messages: [] as Array<{
+    storageId: string;
+    clientId: string | null;
+    role: "user" | "assistant";
+    content: string;
+    createdAt: number;
+    creationTime: number;
+  }>,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -43,6 +57,29 @@ vi.mock("convex/react", () => ({
 
 import { ChatWorkspace } from "./chat-workspace";
 
+const chatId = "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c";
+const jurisdiction = {
+  id: "organization-jurisdiction",
+  name: "Private University",
+  slug: "private-university",
+  kind: "organizational" as const,
+  isDefault: false,
+};
+const citation = {
+  label: "University policy, page 3",
+  jurisdictionId: jurisdiction.id,
+  jurisdictionName: jurisdiction.name,
+  jurisdictionKind: jurisdiction.kind,
+  relation: "selected" as const,
+};
+const citationClaim = "c".repeat(43);
+
+function ndjsonResponse(events: unknown[]): Response {
+  return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
+    headers: { "content-type": "application/x-ndjson" },
+  });
+}
+
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -57,22 +94,8 @@ beforeEach(() => {
   mocks.appendMessages.mockReset();
   mocks.ensureSession.mockResolvedValue(undefined);
   mocks.appendMessages.mockResolvedValue(undefined);
-  mocks.unifiedEnabled = false;
-  mocks.resolvedSelection = null;
-  mocks.catalog = [
-    {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      isDefault: true,
-    },
-    {
-      code: "NG",
-      name: "Nigeria",
-      slug: "nigeria",
-      isDefault: false,
-    },
-  ];
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  mocks.resolvedSelection = jurisdiction;
   mocks.session = null;
   mocks.sessions = [];
   mocks.messages = [];
@@ -83,9 +106,9 @@ beforeEach(() => {
   }));
   mocks.useQuery.mockImplementation((reference, args) => {
     const name = getFunctionName(reference);
-    if (name === "jurisdictions:isUnifiedJurisdictionsEnabled") return mocks.unifiedEnabled;
-    if (name === "jurisdictions:resolveResearchSelection") return args === "skip" ? undefined : mocks.resolvedSelection;
-    if (name === "jurisdictions:listPublicEnabled") return mocks.catalog;
+    if (name === "jurisdictions:resolveResearchSelection") {
+      return args === "skip" ? undefined : mocks.resolvedSelection;
+    }
     if (name === "chats:getByExternalId") return args === "skip" ? undefined : mocks.session;
     return undefined;
   });
@@ -95,23 +118,25 @@ beforeEach(() => {
     if (name === "chats:appendMessages") return mocks.appendMessages;
     return vi.fn();
   });
-  vi.stubGlobal("fetch", vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({
-      result: "context",
-      correlationToken: "token",
-      jurisdictionCode: "NG",
-    }), { status: 200 }))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ result: "answer" }), { status: 200 })));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+    { type: "done", result: "Answer", citations: [citation], citationClaim, partialCoverage: false },
+  ])));
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
-describe("new-chat jurisdiction selector", () => {
+describe("unified chat client", () => {
   it("normalizes escaped paragraph breaks before rendering persisted assistant Markdown", async () => {
-    mocks.session = { country: "GH", title: "Formatted answer" };
+    mocks.session = {
+      title: "Formatted answer",
+      jurisdictionId: jurisdiction.id,
+      jurisdictionName: jurisdiction.name,
+      jurisdictionKind: jurisdiction.kind,
+    };
     mocks.messages = [{
       storageId: "assistant-message",
       clientId: "assistant-client",
@@ -129,7 +154,58 @@ describe("new-chat jurisdiction selector", () => {
     expect(within(list!).getAllByRole("listitem")).toHaveLength(2);
   });
 
-  it("batches streamed text into the next animation frame", async () => {
+  it("posts once to chat with the stable jurisdiction and persists only after done", async () => {
+    let resolveEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { resolveEnsure = resolve; }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "delta", text: "Governed " },
+      { type: "done", result: "Governed answer", citations: [citation], citationClaim, partialCoverage: true },
+    ])));
+
+    render(
+      <ChatWorkspace
+        chatId={chatId}
+        initialQuery="What is the policy?"
+        initialJurisdiction={jurisdiction.id}
+      />,
+    );
+
+    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledWith({
+      externalId: chatId,
+      jurisdictionId: jurisdiction.id,
+      jurisdictionName: jurisdiction.name,
+      jurisdictionKind: jurisdiction.kind,
+    }));
+    expect(fetch).not.toHaveBeenCalled();
+    resolveEnsure();
+
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe("/api/chat");
+    const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
+    expect(body).toEqual({
+      query: "What is the policy?",
+      jurisdictionId: jurisdiction.id,
+      messages: [],
+      externalId: chatId,
+      assistantClientId: expect.any(String),
+    });
+    expect(mocks.appendMessages.mock.calls[0][0]).toMatchObject({
+      externalId: chatId,
+      jurisdictionId: jurisdiction.id,
+      jurisdictionName: jurisdiction.name,
+      jurisdictionKind: jurisdiction.kind,
+      messages: [
+        { role: "user", content: "What is the policy?" },
+        { role: "assistant", content: "Governed answer", citationClaim },
+      ],
+    });
+    expect(mocks.appendMessages.mock.calls[0][0]).not.toHaveProperty("country");
+    expect(await screen.findByRole("region", { name: "Sources" })).toHaveTextContent(citation.label);
+    expect(screen.getByRole("status")).toHaveTextContent("Partial coverage");
+  });
+
+  it("batches streamed deltas into one animation frame", async () => {
     let frame!: FrameRequestCallback;
     const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
       frame = callback;
@@ -139,25 +215,24 @@ describe("new-chat jurisdiction selector", () => {
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
     let finishStream!: () => void;
     const encoder = new TextEncoder();
-    const streamedChatResponse = new Response(new ReadableStream({
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({
       start(controller) {
         controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
         controller.enqueue(encoder.encode('{"type":"delta","text":"answer."}\n'));
         finishStream = () => {
-          controller.enqueue(encoder.encode('{"type":"done","result":"The streamed answer."}\n'));
+          controller.enqueue(encoder.encode(`{"type":"done","result":"The streamed answer.","citations":[${JSON.stringify(citation)}],"citationClaim":"${citationClaim}","partialCoverage":false}\n`));
           controller.close();
         };
       },
-    }), { headers: { "content-type": "application/x-ndjson" } });
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "context",
-        correlationToken: "token",
-        jurisdictionCode: "GH",
-      }), { status: 200 }))
-      .mockResolvedValueOnce(streamedChatResponse));
+    }), { headers: { "content-type": "application/x-ndjson" } })));
 
-    render(<ChatWorkspace chatId="batched-stream" initialQuery="What is the rule?" />);
+    render(
+      <ChatWorkspace
+        chatId="batched-stream"
+        initialQuery="What is the rule?"
+        initialJurisdiction={jurisdiction.id}
+      />,
+    );
 
     await waitFor(() => expect(requestAnimationFrame).toHaveBeenCalledTimes(1));
     expect(mocks.appendMessages).not.toHaveBeenCalled();
@@ -166,332 +241,95 @@ describe("new-chat jurisdiction selector", () => {
     expect(await screen.findByText("The streamed answer.")).toBeVisible();
 
     finishStream();
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
   });
 
-  it("renders streamed answer text before persisting the terminal response", async () => {
-    let finishStream!: () => void;
-    const encoder = new TextEncoder();
-    const streamedChatResponse = new Response(new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
-        finishStream = () => {
-          controller.enqueue(encoder.encode('{"type":"done","result":"The streamed answer."}\n'));
-          controller.close();
-        };
-      },
-    }), { headers: { "content-type": "application/x-ndjson" } });
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "context",
-        correlationToken: "token",
-        jurisdictionCode: "GH",
-      }), { status: 200 }))
-      .mockResolvedValueOnce(streamedChatResponse));
-
-    render(<ChatWorkspace chatId="streamed-chat" initialQuery="What is the rule?" />);
-
-    expect(await screen.findByText("The streamed")).toBeVisible();
-    expect(mocks.appendMessages).not.toHaveBeenCalled();
-
-    finishStream();
-
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
-    expect(mocks.appendMessages.mock.calls[0][0].messages[1].content).toBe("The streamed answer.");
-  });
-
-  it("renders the governed catalog and selects its configured default", async () => {
-    render(<ChatWorkspace chatId={null} initialQuery={null} />);
-
-    const selector = await screen.findByRole("combobox", { name: "Research jurisdiction" });
-    await waitFor(() => expect(selector).toHaveValue("GH"));
-    expect(screen.getByRole("option", { name: "Nigeria" })).toBeVisible();
-  });
-
-  it("explains when no governed jurisdiction is available for a new chat", () => {
-    mocks.catalog = [];
-
-    render(<ChatWorkspace chatId={null} initialQuery={null} />);
-
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "No jurisdictions are currently available",
-    );
-    expect(screen.getByRole("textbox")).toBeDisabled();
-  });
-
-  it("waits for the governed catalog before creating a routed chat", async () => {
-    mocks.catalog = undefined;
-    const props = {
-      chatId: "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c",
-      initialQuery: "What is the law?",
-      initialCountry: "NG",
-    };
-    const view = render(<ChatWorkspace {...props} />);
-
-    expect(mocks.ensureSession).not.toHaveBeenCalled();
-
-    mocks.catalog = [
-      {
-        code: "NG",
-        name: "Nigeria",
-        slug: "nigeria",
-        isDefault: true,
-      },
-    ];
-    view.rerender(<ChatWorkspace {...props} />);
-
-    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledWith({
-      externalId: props.chatId,
-      country: "NG",
-    }));
-  });
-
-  it("keeps an existing chat bound to its stored jurisdiction", async () => {
-    mocks.session = { country: "NG", title: "Nigerian tenancy" };
+  it("marks both optimistic bubbles failed and does not persist an error event", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "error", error: "We could not finish that answer." },
+    ])));
 
     render(
       <ChatWorkspace
-        chatId="7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c"
-        initialQuery="What is the law?"
-        initialCountry="GH"
+        chatId="failed-chat"
+        initialQuery="What is the rule?"
+        initialJurisdiction={jurisdiction.id}
       />,
     );
 
-    expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
-    await waitFor(() => expect(fetch).toHaveBeenCalled());
-    expect(mocks.ensureSession).not.toHaveBeenCalled();
-  });
-
-  it("creates and persists a code-less organization chat by stable ID with safe citations", async () => {
-    let resolveEnsure!: () => void;
-    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { resolveEnsure = resolve; }));
-    mocks.unifiedEnabled = true;
-    mocks.resolvedSelection = {
-      id: "organization-jurisdiction",
-      name: "Private University",
-      slug: "private-university",
-      kind: "organizational",
-      isDefault: false,
-    };
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "governed context",
-        correlationToken: "token",
-        jurisdictionId: "organization-jurisdiction",
-        partialCoverage: [{ jurisdictionId: "ancestor", name: "Ghana", kind: "geographic", relation: "organizational_geography" }],
-      }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "Governed answer",
-        citationClaim: "c".repeat(43),
-        citations: [{ label: "[University policy](https://untrusted.example)", jurisdictionId: "organization-jurisdiction", jurisdictionName: "Private University", jurisdictionKind: "organizational", relation: "selected" }],
-      }), { status: 200 })));
-
-    render(<ChatWorkspace
-      chatId="7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c"
-      initialQuery="What is the policy?"
-      initialJurisdiction="organization-jurisdiction"
-    />);
-
-    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledWith({
-      externalId: "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c",
-      jurisdictionId: "organization-jurisdiction",
-      jurisdictionName: "Private University",
-      jurisdictionKind: "organizational",
-    }));
-    expect(fetch).not.toHaveBeenCalled();
+    expect(await screen.findByText("We could not finish that answer.")).toBeVisible();
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
     expect(mocks.appendMessages).not.toHaveBeenCalled();
-    resolveEnsure();
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
-    const searchBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
-    const chatBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
-    expect(searchBody).toEqual({ query: "What is the policy?", jurisdictionId: "organization-jurisdiction" });
-    expect(chatBody).toMatchObject({
-      jurisdictionId: "organization-jurisdiction",
-      context: "governed context",
-      externalId: "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c",
-      assistantClientId: expect.any(String),
-    });
-    const append = mocks.appendMessages.mock.calls[0][0];
-    expect(append.messages[1]).toMatchObject({
-      role: "assistant",
-      clientId: chatBody.assistantClientId,
-      citationClaim: "c".repeat(43),
-    });
-    const sources = await screen.findByRole("region", { name: "Sources" });
-    expect(sources).toHaveTextContent("[University policy](https://untrusted.example)");
-    expect(sources.querySelector("a")).toBeNull();
-    expect(screen.getByRole("status")).toHaveTextContent("Partial coverage: this answer could not include Ghana.");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("does not call chat or persist when search returns a different stable jurisdiction", async () => {
-    mocks.unifiedEnabled = true;
-    mocks.resolvedSelection = {
-      id: "selected-jurisdiction",
-      name: "Selected University",
-      slug: "selected-university",
-      kind: "organizational",
-      isDefault: false,
-    };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
-      result: "governed context",
-      correlationToken: "token",
-      jurisdictionId: "different-jurisdiction",
-    }), { status: 200 })));
+  it("omits an empty citation claim when done has no citations", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "done", result: "No supported citation was returned.", citations: [], partialCoverage: false },
+    ])));
 
-    render(<ChatWorkspace
-      chatId="7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c"
-      initialQuery="What is the policy?"
-      initialJurisdiction="selected-jurisdiction"
-    />);
+    render(
+      <ChatWorkspace
+        chatId="empty-citations-chat"
+        initialQuery="What is the policy?"
+        initialJurisdiction={jurisdiction.id}
+      />,
+    );
 
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByText("The jurisdiction selection could not be verified. Please try again.")).toBeVisible());
-    expect(mocks.appendMessages).not.toHaveBeenCalled();
-  });
-
-  it("keeps a stored ID authoritative when its immutable country snapshot differs from the current code", async () => {
-    mocks.unifiedEnabled = true;
-    mocks.session = {
-      country: "GH",
-      title: "Stored snapshot",
-      jurisdictionId: "stable-jurisdiction",
-      jurisdictionName: "Ghana",
-      jurisdictionKind: "geographic",
-    };
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "governed context",
-        correlationToken: "token",
-        jurisdictionId: "stable-jurisdiction",
-        legacyCountryCode: "NG",
-      }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ result: "Current answer" }), { status: 200 })));
-
-    render(<ChatWorkspace
-      chatId="stored-chat"
-      initialQuery="What changed?"
-      initialJurisdiction="stable-jurisdiction"
-      initialCountry="GH"
-    />);
-
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
-    const searchBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
-    const chatBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
-    expect(searchBody).toEqual({ query: "What changed?", jurisdictionId: "stable-jurisdiction" });
-    expect(chatBody).toMatchObject({ jurisdictionId: "stable-jurisdiction", country: "NG" });
-    expect(mocks.appendMessages.mock.calls[0][0]).toMatchObject({
-      jurisdictionId: "stable-jurisdiction",
-      country: "GH",
-    });
-  });
-
-  it("persists a governed answer with no citations without requesting an empty citation claim", async () => {
-    mocks.unifiedEnabled = true;
-    mocks.resolvedSelection = {
-      id: "organization-jurisdiction",
-      name: "Public Organization",
-      slug: "public-organization",
-      kind: "organizational",
-      isDefault: false,
-    };
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "governed context",
-        correlationToken: "token",
-        jurisdictionId: "organization-jurisdiction",
-      }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        result: "No supported citation was returned.",
-        citations: [],
-      }), { status: 200 })));
-
-    render(<ChatWorkspace
-      chatId="empty-citations-chat"
-      initialQuery="What is the policy?"
-      initialJurisdiction="organization-jurisdiction"
-    />);
-
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
     const assistant = mocks.appendMessages.mock.calls[0][0].messages[1];
     expect(assistant).not.toHaveProperty("citations");
     expect(assistant).not.toHaveProperty("citationClaim");
   });
 
-  it.each([
-    { kind: "organizational" as const, country: null },
-    { kind: "geographic" as const, country: "GH" },
-  ])("keeps a stored $kind ID chat readable but explicitly read-only while the unified rollout is disabled", async ({ kind, country }) => {
-    const chatId = `saved-${kind}`;
-    mocks.unifiedEnabled = false;
-    mocks.session = {
-      country,
-      title: "Saved governed chat",
-      jurisdictionId: `${kind}-jurisdiction`,
-      jurisdictionName: kind === "organizational" ? "Public Organization" : "Ghana",
-      jurisdictionKind: kind,
-      jurisdictionContract: "unified",
-    };
-    mocks.sessions = [{
-      id: chatId,
-      title: "Saved governed chat",
-      lastMessage: "Previously saved answer",
-      timestamp: Date.now(),
-      messageCount: 1,
-    }];
-    mocks.messages = [{
-      storageId: "stored-message",
-      clientId: "stored-client",
-      role: "assistant",
-      content: "Previously saved answer",
-      createdAt: 1,
-      creationTime: 1,
-    }];
+  it("rejects cited done data without a valid citation claim", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "done", result: "Unverified answer", citations: [citation], citationClaim: "bad", partialCoverage: false },
+    ])));
 
-    render(<ChatWorkspace chatId={chatId} initialQuery="Do not submit" />);
-
-    expect(await screen.findByText("Previously saved answer")).toBeVisible();
-    expect(screen.getAllByText("Saved governed chat").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.",
+    render(
+      <ChatWorkspace
+        chatId="invalid-terminal-chat"
+        initialQuery="What is the policy?"
+        initialJurisdiction={jurisdiction.id}
+      />,
     );
-    expect(fetch).not.toHaveBeenCalled();
+
+    expect(await screen.findByText("The answer could not be verified. Please try again.")).toBeVisible();
     expect(mocks.appendMessages).not.toHaveBeenCalled();
   });
 
-  it("keeps an explicit legacy ID session writable while the unified rollout is disabled", async () => {
-    mocks.unifiedEnabled = false;
-    mocks.session = {
-      country: "GH",
-      title: "Legacy dual-write chat",
-      jurisdictionId: "ghana-jurisdiction",
-      jurisdictionName: "Ghana",
-      jurisdictionKind: "geographic",
-      jurisdictionContract: "legacy",
-    };
-
-    render(<ChatWorkspace chatId="legacy-chat" initialQuery="What changed?" />);
-
-    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalled());
-    expect(screen.getByRole("textbox")).not.toBeDisabled();
-    expect(screen.queryByText(
-      "Research for this saved jurisdiction is temporarily unavailable while unified jurisdictions are disabled.",
-    )).not.toBeInTheDocument();
-    expect(fetch).toHaveBeenCalled();
-  });
-
   it("uses one unavailable state and performs no work for an unresolved route selection", async () => {
-    mocks.unifiedEnabled = true;
     mocks.resolvedSelection = null;
-    render(<ChatWorkspace
-      chatId="7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c"
-      initialQuery="What is the policy?"
-      initialJurisdiction="missing-jurisdiction"
-    />);
+
+    render(
+      <ChatWorkspace
+        chatId={chatId}
+        initialQuery="What is the policy?"
+        initialJurisdiction="missing-jurisdiction"
+      />,
+    );
+
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "That jurisdiction is not available for research.",
     );
+    expect(mocks.ensureSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not let a route parameter make a stored legacy chat writable", async () => {
+    mocks.session = { title: "Historical chat" };
+
+    render(
+      <ChatWorkspace
+        chatId="historical-chat"
+        initialQuery="Do not submit"
+        initialJurisdiction={jurisdiction.id}
+      />,
+    );
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    await act(async () => undefined);
     expect(mocks.ensureSession).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });

@@ -1,4 +1,4 @@
-import type { ChatCitation, PartialCoverage } from "@/lib/countries";
+import type { ChatCitation } from "@/lib/countries";
 
 export type MessageRole = "user" | "assistant";
 
@@ -21,7 +21,7 @@ export interface LocalChatMessage {
   sequence: number;
   state: "pending" | "error";
   citations?: ChatCitation[];
-  partialCoverage?: PartialCoverage[];
+  partialCoverage?: boolean;
 }
 
 export type DisplayChatMessage =

@@ -25,13 +25,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("chat route jurisdiction selection", () => {
-  it("passes the stable ID and optional matching legacy snapshot to the workspace", () => {
+  it("passes only the stable jurisdiction ID to the workspace", () => {
     render(<ChatPage />);
     expect(screen.getByRole("status", { name: "workspace-props" })).toHaveTextContent(
       '"initialJurisdiction":"jurisdiction-ghana"',
     );
-    expect(screen.getByRole("status", { name: "workspace-props" })).toHaveTextContent(
-      '"initialCountry":"GH"',
+    expect(screen.getByRole("status", { name: "workspace-props" })).not.toHaveTextContent(
+      "initialCountry",
     );
   });
 });

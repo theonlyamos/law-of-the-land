@@ -15,7 +15,6 @@ function ChatPageInner() {
   const chatId = params.chatId as string;
   const searchParams = useSearchParams();
   const q = searchParams.get("q");
-  const country = searchParams.get("country");
   const jurisdiction = searchParams.get("jurisdiction");
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const sessionData = useQuery(
@@ -67,7 +66,7 @@ function ChatPageInner() {
 
   // While the chat's content loads, the workspace stays mounted and shows the
   // loading state in the chat panel only.
-  return <ChatWorkspace chatId={chatId} initialQuery={q} initialJurisdiction={jurisdiction} initialCountry={country} />;
+  return <ChatWorkspace chatId={chatId} initialQuery={q} initialJurisdiction={jurisdiction} />;
 }
 
 export default function ChatPage() {
