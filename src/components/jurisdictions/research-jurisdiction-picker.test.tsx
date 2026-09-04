@@ -39,7 +39,6 @@ const ghana: ResearchJurisdiction = {
   slug: "ghana",
   kind: "geographic",
   isDefault: true,
-  legacyCountryCode: "GH",
 };
 
 function deferred<T>() {

@@ -1,487 +1,589 @@
+import { GoogleGenAI } from "@google/genai";
 import { makeFunctionReference } from "convex/server";
-import { NextResponse } from "next/server";
 
 import { api } from "../../../../convex/_generated/api";
-import { createTelemetryServiceProof, isOpaqueTelemetryToken } from "../../../../convex/lib/telemetryProof";
+import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
 import {
-  citationClaimIssueProofParts,
-  createCitationClaimBindings,
-} from "../../../../convex/lib/chatCitationClaim";
-import { fetchAuthMutation, fetchAuthQuery, isAuthenticated } from "@/lib/auth-server";
+  createOpaqueTelemetryToken,
+  createTelemetryServiceProof,
+  isOpaqueTelemetryToken,
+} from "../../../../convex/lib/telemetryProof";
+import {
+  fetchAuthMutation,
+  fetchAuthQuery,
+  getToken,
+  isAuthenticated,
+} from "@/lib/auth-server";
+import {
+  DEFAULT_FILE_SEARCH_CHAT_MODEL,
+  GeminiFileSearchChat,
+  type ChatStore,
+  type GovernedChatResult,
+} from "@/lib/gemini-file-search-chat";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
-import { digestExactContext, MAX_GOVERNED_CONTEXT_LENGTH, parseGovernedContext } from "@/lib/research-limits";
-import { createChatProvider } from "@/lib/jurisdiction-provider-adapters";
 
-interface Message {
-  id?: string;
-  role: "user" | "assistant";
-  content: string;
-}
+type Message = { role: "user" | "assistant"; content: string };
+type ChatBody = {
+  query: string;
+  jurisdictionId: string;
+  messages: Message[];
+  externalId: string;
+  assistantClientId: string;
+};
+type ResearchManifest = {
+  authorizedScopeSize: number;
+  stores: ChatStore[];
+  partialCoverage: boolean;
+};
+type FailureCategory =
+  | "authentication"
+  | "configuration"
+  | "network"
+  | "timeout"
+  | "validation"
+  | "internal";
+type Coverage = {
+  ordinal: number;
+  relation: ChatStore["relation"];
+  coverage: "evidence" | "no_evidence";
+};
+type CompletionInput = {
+  routeNonce: string;
+  externalId: string;
+  jurisdictionId: string;
+  assistantClientId: string;
+  finalAnswer?: string;
+  citations: GovernedChatResult["citations"];
+  model: string;
+  elapsedMs: number;
+  outcome: "success" | "failure" | "aborted";
+  failureCategory?: FailureCategory;
+  authorizedScopeSize: number;
+  readyStoreCount: number;
+  partialCoverage: boolean;
+  jurisdictionCoverage: Coverage[];
+};
+type PublicCitation = {
+  label: string;
+  jurisdictionId: string;
+  jurisdictionName: string;
+  jurisdictionKind: "geographic" | "organizational";
+  relation: ChatStore["relation"];
+};
+type CompletionResult = {
+  status: "completed";
+  outcome: "success";
+  citations: PublicCitation[];
+  partialCoverage: boolean;
+  citationClaim: string;
+  expiresAt: number;
+};
+type StreamEvent =
+  | { type: "delta"; text: string }
+  | {
+    type: "done";
+    result: string;
+    citations: PublicCitation[];
+    citationClaim: string;
+    partialCoverage: boolean;
+  }
+  | { type: "error"; error: string };
 
 const MAX_QUERY_LENGTH = 4_000;
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_MESSAGE_LENGTH = 16_000;
-const MAX_ANSWER_LENGTH = 32_000;
-const MAX_CITATIONS = 16;
-const MAX_CITATION_LABEL_LENGTH = 200;
+const MAX_ID_LENGTH = 200;
+const MAX_REQUEST_BODY_BYTES = 384 * 1024;
+const MAX_MANIFEST_BODY_BYTES = 16 * 1024;
+const MAX_STORES = 4;
+const MAX_PUBLIC_CITATIONS = 16;
+const MAX_PUBLIC_CITATION_LABEL = 200;
 const REQUESTS_PER_MINUTE = 15;
-const claimChatPhase = makeFunctionReference<"mutation">("telemetry:claimChatPhase");
-const finalizeChatPhase = makeFunctionReference<"mutation">("telemetry:finalizeChatPhase");
-const issueCitationClaim = makeFunctionReference<"mutation">("chats:issueCitationClaim");
+const MODEL_WINDOW_MS = 55_000;
+const TERMINAL_WINDOW_MS = 60_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
+const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
+const completeGovernedInteraction = makeFunctionReference<"mutation">(
+  "chats:completeGovernedInteraction",
+);
 
-type CommonBody = {
-  query: string;
-  scenarioQuestion: string;
-  messages: Message[];
-  context: string;
-  correlationToken: string;
-  country?: string;
-  jurisdictionId?: string;
-  externalId?: string;
-  assistantClientId?: string;
-};
-
-type ChatResult = {
-  result: string;
-  citations?: ReturnType<typeof governedOutput>["citations"];
-  citationClaim?: string;
-};
-
-type ChatStreamEvent =
-  | { type: "delta"; text: string }
-  | { type: "done"; result: string; citations?: ReturnType<typeof governedOutput>["citations"]; citationClaim?: string }
-  | { type: "error"; error: string };
-
-function parseCommonBody(body: unknown): CommonBody | null {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
-  const { query, messages, context, correlationToken, country, jurisdictionId, externalId, assistantClientId } = body as Record<string, unknown>;
-  if (typeof query !== "string" || !query.trim() || query.trim().length > MAX_QUERY_LENGTH) return null;
-  if (typeof context !== "string") return null;
-  if (typeof correlationToken !== "string" || !isOpaqueTelemetryToken(correlationToken)) return null;
-  if (!Array.isArray(messages) || messages.length > MAX_HISTORY_MESSAGES) return null;
-  const history: Message[] = [];
-  for (const message of messages) {
-    if (typeof message !== "object" || message === null || Array.isArray(message)) return null;
-    const { role, content } = message as Record<string, unknown>;
-    if ((role !== "user" && role !== "assistant") || typeof content !== "string" || content.length > MAX_MESSAGE_LENGTH) return null;
-    history.push({ role, content });
-  }
-  if (country !== undefined && (typeof country !== "string" || !/^[A-Za-z]{2}$/u.test(country.trim()))) return null;
-  if (jurisdictionId !== undefined && (typeof jurisdictionId !== "string" || !jurisdictionId.trim())) return null;
-  if (externalId !== undefined && (typeof externalId !== "string" || !externalId.trim() || externalId.length > 200)) return null;
-  if (assistantClientId !== undefined &&
-    (typeof assistantClientId !== "string" || !assistantClientId.trim() || assistantClientId.length > 200)) return null;
-  return {
-    query: query.trim(), scenarioQuestion: query, messages: history, context, correlationToken,
-    ...(typeof country === "string" ? { country: country.trim().toUpperCase() } : {}),
-    ...(typeof jurisdictionId === "string" ? { jurisdictionId: jurisdictionId.trim() } : {}),
-    ...(typeof externalId === "string" ? { externalId: externalId.trim() } : {}),
-    ...(typeof assistantClientId === "string" ? { assistantClientId: assistantClientId.trim() } : {}),
-  };
-}
-
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]) {
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const sorted = [...expected].sort();
-  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+  return actual.length === sorted.length
+    && actual.every((key, index) => key === sorted[index]);
 }
 
-function governedOutput(text: string | undefined, sources: ReturnType<typeof parseGovernedContext>["sources"]) {
-  let parsed: unknown;
-  try { parsed = JSON.parse(text ?? ""); } catch { throw new Error("CHAT_CITATION_SOURCE_INVALID"); }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("CHAT_CITATION_SOURCE_INVALID");
-  const value = parsed as Record<string, unknown>;
-  if (!exactKeys(value, ["answer", "citations"]) || typeof value.answer !== "string" || !value.answer.trim() || value.answer.length > MAX_ANSWER_LENGTH || !Array.isArray(value.citations) || value.citations.length > MAX_CITATIONS) {
-    throw new Error("CHAT_CITATION_SOURCE_INVALID");
-  }
-  const sourceMap = new Map<string, (typeof sources)[number]>(
-    sources.map((source) => [source.sourceRef, source]),
-  );
-  const seen = new Set<string>();
-  const citations = value.citations.map((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("CHAT_CITATION_SOURCE_INVALID");
-    const citation = raw as Record<string, unknown>;
-    if (!exactKeys(citation, ["label", "sourceRef"]) || typeof citation.sourceRef !== "string" || typeof citation.label !== "string") throw new Error("CHAT_CITATION_SOURCE_INVALID");
-    const label = citation.label.trim();
-    const source = sourceMap.get(citation.sourceRef);
-    const key = `${citation.sourceRef}\u0000${label}`;
-    if (!source || !label || label.length > MAX_CITATION_LABEL_LENGTH || seen.has(key)) throw new Error("CHAT_CITATION_SOURCE_INVALID");
-    seen.add(key);
-    return {
-      label,
-      jurisdictionId: source.jurisdictionId,
-      jurisdictionName: source.name,
-      jurisdictionKind: source.kind,
-      relation: source.relation,
+function boundedIdentifier(value: unknown, maximum = MAX_ID_LENGTH): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maximum
+    && value === value.trim();
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("CHAT_REQUEST_ABORTED");
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
     };
-  });
-  return { answer: value.answer.trim(), citations };
-}
-
-type GovernedAnswerParserMode =
-  | "before-object"
-  | "expect-key"
-  | "read-key"
-  | "expect-colon"
-  | "expect-value"
-  | "skip-value"
-  | "read-answer"
-  | "after-value"
-  | "done"
-  | "invalid";
-
-class GovernedAnswerStreamParser {
-  private mode: GovernedAnswerParserMode = "before-object";
-  private depth = 0;
-  private key = "";
-  private stringMode: "key" | "skip" | null = null;
-  private stringEscaped = false;
-  private answerEscaped = false;
-  private answerUnicode: string | null = null;
-
-  push(text: string): string {
-    let delta = "";
-    for (const character of text) {
-      if (this.mode === "read-answer") {
-        delta += this.readAnswerCharacter(character);
-        continue;
-      }
-      if (this.stringMode) {
-        this.readStringCharacter(character);
-        continue;
-      }
-      this.readStructureCharacter(character);
-    }
-    return delta;
-  }
-
-  private readStringCharacter(character: string) {
-    if (this.stringEscaped) {
-      if (this.stringMode === "key") this.key += character;
-      this.stringEscaped = false;
-      return;
-    }
-    if (character === "\\") {
-      this.stringEscaped = true;
-      return;
-    }
-    if (character !== '"') {
-      if (this.stringMode === "key") this.key += character;
-      return;
-    }
-    const wasKey = this.stringMode === "key";
-    this.stringMode = null;
-    if (wasKey) this.mode = "expect-colon";
-  }
-
-  private readAnswerCharacter(character: string): string {
-    if (this.answerUnicode !== null) {
-      if (!/^[0-9a-fA-F]$/u.test(character)) {
-        this.mode = "invalid";
-        return "";
-      }
-      this.answerUnicode += character;
-      if (this.answerUnicode.length === 4) {
-        const value = String.fromCharCode(Number.parseInt(this.answerUnicode, 16));
-        this.answerUnicode = null;
-        this.answerEscaped = false;
-        return value;
-      }
-      return "";
-    }
-    if (this.answerEscaped) {
-      const escaped = {
-        '"': '"',
-        "\\": "\\",
-        "/": "/",
-        b: "\b",
-        f: "\f",
-        n: "\n",
-        r: "\r",
-        t: "\t",
-      }[character];
-      if (escaped !== undefined) {
-        this.answerEscaped = false;
-        return escaped;
-      }
-      if (character === "u") {
-        this.answerUnicode = "";
-        return "";
-      }
-      this.mode = "invalid";
-      return "";
-    }
-    if (character === "\\") {
-      this.answerEscaped = true;
-      return "";
-    }
-    if (character === '"') {
-      this.mode = "after-value";
-      return "";
-    }
-    if (character < " ") {
-      this.mode = "invalid";
-      return "";
-    }
-    return character;
-  }
-
-  private readStructureCharacter(character: string) {
-    if (this.mode === "before-object") {
-      if (/\s/u.test(character)) return;
-      if (character === "{") {
-        this.depth = 1;
-        this.mode = "expect-key";
-      } else {
-        this.mode = "invalid";
-      }
-      return;
-    }
-    if (this.mode === "expect-key") {
-      if (/\s/u.test(character)) return;
-      if (character === '"') {
-        this.key = "";
-        this.stringMode = "key";
-        this.mode = "read-key";
-      } else if (character === "}") {
-        this.depth = 0;
-        this.mode = "done";
-      } else {
-        this.mode = "invalid";
-      }
-      return;
-    }
-    if (this.mode === "expect-colon") {
-      if (/\s/u.test(character)) return;
-      this.mode = character === ":" ? "expect-value" : "invalid";
-      return;
-    }
-    if (this.mode === "expect-value") {
-      if (/\s/u.test(character)) return;
-      if (this.key === "answer") {
-        if (character === '"') {
-          this.mode = "read-answer";
-          this.answerEscaped = false;
-          this.answerUnicode = null;
-        } else {
-          this.mode = "invalid";
-        }
-        return;
-      }
-      this.mode = "skip-value";
-    }
-    if (this.mode === "skip-value") {
-      if (character === '"') {
-        this.stringMode = "skip";
-      } else if (character === "{" || character === "[") {
-        this.depth += 1;
-      } else if (character === "}" || character === "]") {
-        this.depth -= 1;
-        if (this.depth < 0) this.mode = "invalid";
-        else if (this.depth === 0) this.mode = "done";
-      } else if (character === "," && this.depth === 1) {
-        this.mode = "expect-key";
-      }
-      return;
-    }
-    if (this.mode === "after-value") {
-      if (/\s/u.test(character)) return;
-      if (character === ",") {
-        this.mode = "expect-key";
-      } else if (character === "}") {
-        this.depth = 0;
-        this.mode = "done";
-      } else {
-        this.mode = "invalid";
-      }
-    }
-  }
-}
-
-function legacyInstruction(context: string, query: string) {
-  return `Today's date is ${new Date().toISOString().split("T")[0]}.\n\nYou are a helpful virtual assistant that answers questions using the content below. Create detailed answers by combining your understanding of the world with the content provided below.\n\nCite the section names and/or article numbers from the context that support your answer. Do not invent references, and do not include web links — citations should point to the legal text itself.\nFormat your response in markdown.\nUse proper line breaks between paragraphs.\n\nContext:\n=======\n${context}\n=======\n\nCurrent query: ${query}`;
-}
-
-async function generateChatResult(
-  parsed: CommonBody,
-  unified: boolean,
-  onDelta?: (text: string) => void,
-  signal?: AbortSignal,
-): Promise<ChatResult> {
-  if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
-  const chatProvider = createChatProvider(process.env);
-  if (!onDelta) {
-    if (unified) {
-      const governed = parseGovernedContext(parsed.context);
-      const model = governedOutput(await chatProvider.generate({
-        mode: "governed",
-        scenarioQuestion: parsed.scenarioQuestion,
-        context: parsed.context,
-        query: parsed.query,
-        history: parsed.messages,
-      }), governed.sources);
-      return { result: model.answer, citations: model.citations };
-    }
-    const context = parsed.context.slice(0, MAX_GOVERNED_CONTEXT_LENGTH);
-    return {
-      result: (await chatProvider.generate({
-        mode: "legacy",
-        scenarioQuestion: parsed.scenarioQuestion,
-        instruction: legacyInstruction(context, parsed.query),
-        query: parsed.query,
-        history: parsed.messages,
-      })) ?? "",
-    };
-  }
-
-  if (unified) {
-    const governed = parseGovernedContext(parsed.context);
-    let rawResult = "";
-    const answerParser = new GovernedAnswerStreamParser();
-    for await (const chunk of chatProvider.stream({
-      mode: "governed",
-      scenarioQuestion: parsed.scenarioQuestion,
-      context: parsed.context,
-      query: parsed.query,
-      history: parsed.messages,
-    }, signal)) {
-      if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
-      rawResult += chunk;
-      const delta = answerParser.push(chunk);
-      if (delta) onDelta(delta);
-    }
-    const model = governedOutput(rawResult, governed.sources);
-    return { result: model.answer, citations: model.citations };
-  }
-
-  let result = "";
-  const context = parsed.context.slice(0, MAX_GOVERNED_CONTEXT_LENGTH);
-  for await (const chunk of chatProvider.stream({
-    mode: "legacy",
-    scenarioQuestion: parsed.scenarioQuestion,
-    instruction: legacyInstruction(context, parsed.query),
-    query: parsed.query,
-    history: parsed.messages,
-  }, signal)) {
-    if (signal?.aborted) throw signal.reason ?? new Error("CHAT_STREAM_ABORTED");
-    result += chunk;
-    if (chunk) onDelta(chunk);
-  }
-  return { result };
-}
-
-async function finalize(
-  token: string,
-  claimNonce: string,
-  providerStatus: "success" | "failure",
-  latencyMs: number,
-) {
-  await fetchAuthMutation(finalizeChatPhase, {
-    token, claimNonce, providerStatus, latencyMs,
-    serviceProof: await createTelemetryServiceProof(["finalize", token, claimNonce, providerStatus, latencyMs]),
-  });
-}
-
-async function finalizeSuccessfulChat(
-  parsed: CommonBody,
-  unified: boolean,
-  claim: { claimNonce: string },
-  startedAt: number,
-  result: ChatResult,
-): Promise<ChatResult> {
-  const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-  if (unified && result.citations?.length) {
-    const bindings = await createCitationClaimBindings(
-      parsed.assistantClientId!,
-      result.result,
-      result.citations,
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
     );
-    try {
-      const issued = await fetchAuthMutation(issueCitationClaim, {
-        externalId: parsed.externalId!,
-        jurisdictionId: parsed.jurisdictionId!,
-        assistantClientId: parsed.assistantClientId!,
-        assistantContent: result.result,
-        citations: result.citations,
-        ...bindings,
-        serviceProof: await createTelemetryServiceProof(await citationClaimIssueProofParts({
-          externalId: parsed.externalId!,
-          jurisdictionId: parsed.jurisdictionId!,
-          ...bindings,
-        })),
-      }) as { citationClaim: string };
-      result.citationClaim = issued.citationClaim;
-    } catch {
-      try { await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs); } catch { /* lease expiry fallback */ }
-      console.error("Chat citation persistence claim failed");
-      throw new Error("CHAT_CITATION_CLAIM_FAILED");
-    }
-  }
-  try {
-    await finalize(parsed.correlationToken, claim.claimNonce, "success", latencyMs);
-  } catch {
-    console.error("Chat telemetry finalization failed");
-    throw new Error("CHAT_TELEMETRY_FINALIZATION_FAILED");
-  }
-  return result;
+  });
 }
 
-function streamingResponse(
-  parsed: CommonBody,
-  unified: boolean,
-  claim: { claimNonce: string },
-  startedAt: number,
+async function readBoundedBody(
+  request: Request | Response,
+  maximumBytes: number,
   signal: AbortSignal,
-) {
-  const encoder = new TextEncoder();
-  const generation = new AbortController();
-  let cancelled = signal.aborted;
-  const abortGeneration = (reason?: unknown) => {
-    cancelled = true;
-    if (!generation.signal.aborted) generation.abort(reason);
+): Promise<Uint8Array | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maximumBytes) return null;
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const cancelRead = () => {
+    void reader.cancel(signal.reason).catch(() => undefined);
   };
+  if (signal.aborted) {
+    cancelRead();
+    throw abortReason(signal);
+  }
+  signal.addEventListener("abort", cancelRead, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await raceWithAbort(reader.read(), signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximumBytes) {
+        await raceWithAbort(reader.cancel(), signal);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal.removeEventListener("abort", cancelRead);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function parseBody(bytes: Uint8Array): ChatBody | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const value = parsed as Record<string, unknown>;
+  if (!exactKeys(value, [
+    "query",
+    "jurisdictionId",
+    "messages",
+    "externalId",
+    "assistantClientId",
+  ])) return null;
+  if (
+    typeof value.query !== "string"
+    || !value.query.trim()
+    || value.query.trim().length > MAX_QUERY_LENGTH
+    || !boundedIdentifier(value.jurisdictionId)
+    || !boundedIdentifier(value.externalId)
+    || !boundedIdentifier(value.assistantClientId)
+    || !Array.isArray(value.messages)
+    || value.messages.length > MAX_HISTORY_MESSAGES
+  ) return null;
+  const messages: Message[] = [];
+  for (const entry of value.messages) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const message = entry as Record<string, unknown>;
+    if (
+      !exactKeys(message, ["role", "content"])
+      || (message.role !== "user" && message.role !== "assistant")
+      || typeof message.content !== "string"
+      || message.content.length > MAX_MESSAGE_LENGTH
+    ) return null;
+    messages.push({ role: message.role, content: message.content });
+  }
+  return {
+    query: value.query.trim(),
+    jurisdictionId: value.jurisdictionId,
+    messages,
+    externalId: value.externalId,
+    assistantClientId: value.assistantClientId,
+  };
+}
+
+function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): ResearchManifest | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const value = parsed as Record<string, unknown>;
+  if (
+    !exactKeys(value, ["authorizedScopeSize", "stores", "partialCoverage"])
+    || !Number.isSafeInteger(value.authorizedScopeSize)
+    || (value.authorizedScopeSize as number) < 1
+    || (value.authorizedScopeSize as number) > MAX_STORES
+    || typeof value.partialCoverage !== "boolean"
+    || !Array.isArray(value.stores)
+    || value.stores.length < 1
+    || value.stores.length > (value.authorizedScopeSize as number)
+    || value.partialCoverage !== (value.stores.length !== value.authorizedScopeSize)
+  ) return null;
+  const stores: ChatStore[] = [];
+  const jurisdictionIds = new Set<string>();
+  const storeNames = new Set<string>();
+  for (const [index, entry] of value.stores.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const store = entry as Record<string, unknown>;
+    if (
+      !exactKeys(store, ["jurisdictionId", "name", "kind", "relation", "storeName"])
+      || !boundedIdentifier(store.jurisdictionId)
+      || !boundedIdentifier(store.name)
+      || !boundedIdentifier(store.storeName)
+      || !/^fileSearchStores\/[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/u.test(store.storeName)
+      || (store.kind !== "geographic" && store.kind !== "organizational")
+      || (store.relation !== "selected"
+        && store.relation !== "geographic_ancestor"
+        && store.relation !== "organizational_geography")
+      || (index === 0 && (store.relation !== "selected" || store.jurisdictionId !== selectedJurisdictionId))
+      || (index > 0 && store.relation === "selected")
+      || jurisdictionIds.has(store.jurisdictionId)
+      || storeNames.has(store.storeName)
+    ) return null;
+    jurisdictionIds.add(store.jurisdictionId);
+    storeNames.add(store.storeName);
+    stores.push({
+      jurisdictionId: store.jurisdictionId,
+      name: store.name,
+      kind: store.kind,
+      relation: store.relation,
+      storeName: store.storeName,
+    });
+  }
+  return {
+    authorizedScopeSize: value.authorizedScopeSize as number,
+    stores,
+    partialCoverage: value.partialCoverage,
+  };
+}
+
+async function loadManifest(
+  jurisdictionId: string,
+  token: string,
+  signal: AbortSignal,
+): Promise<ResearchManifest | null> {
+  const site = process.env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/$/u, "");
+  if (!site) return null;
+  const response = await raceWithAbort(
+    fetch(`${site}/private/chat-research-manifest`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ jurisdictionId }),
+      cache: "no-store",
+      signal,
+    }),
+    signal,
+  );
+  if (!response.ok) return null;
+  const bytes = await readBoundedBody(response, MAX_MANIFEST_BODY_BYTES, signal);
+  return bytes ? parseManifest(bytes, jurisdictionId) : null;
+}
+
+function safeModelName(): string {
+  return process.env.GOOGLE_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
+}
+
+function classifyFailure(error: unknown): FailureCategory {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const status = typeof record.status === "number" ? record.status : undefined;
+  const message = error instanceof Error ? error.message.toUpperCase() : "";
+  if (message.includes("DEADLINE") || message.includes("TIMEOUT")) return "timeout";
+  if (status === 401 || status === 403 || message.includes("PERMISSION_DENIED") || message.includes("UNAUTHENTICATED")) {
+    return "authentication";
+  }
+  if (
+    message.includes("NOT_CONFIGURED")
+    || message.includes("API_KEY")
+    || message.includes("MODEL_NOT_FOUND")
+    || message.includes("FAILED_PRECONDITION")
+  ) return "configuration";
+  if (message.includes("GOVERNED_CHAT_") || message.includes("INVALID_GOVERNED_INTERACTION")) {
+    return "validation";
+  }
+  if (error instanceof TypeError || (status !== undefined && status >= 500)) return "network";
+  return "internal";
+}
+
+function coverageFor(manifest: ResearchManifest, citations: GovernedChatResult["citations"]): Coverage[] {
+  const citedJurisdictions = new Set(citations.map((citation) => citation.jurisdictionId));
+  return manifest.stores.map((store, ordinal) => ({
+    ordinal,
+    relation: store.relation,
+    coverage: citedJurisdictions.has(store.jurisdictionId) ? "evidence" : "no_evidence",
+  }));
+}
+
+function failureInput(
+  body: ChatBody,
+  manifest: ResearchManifest,
+  routeNonce: string,
+  model: string,
+  requestStartedAt: number,
+  outcome: "failure" | "aborted",
+  failureCategory?: FailureCategory,
+): CompletionInput {
+  return {
+    routeNonce,
+    externalId: body.externalId,
+    jurisdictionId: body.jurisdictionId,
+    assistantClientId: body.assistantClientId,
+    citations: [],
+    model,
+    elapsedMs: Math.max(0, Math.round(Date.now() - requestStartedAt)),
+    outcome,
+    ...(failureCategory ? { failureCategory } : {}),
+    authorizedScopeSize: manifest.authorizedScopeSize,
+    readyStoreCount: manifest.stores.length,
+    partialCoverage: manifest.partialCoverage,
+    jurisdictionCoverage: manifest.stores.map((store, ordinal) => ({
+      ordinal,
+      relation: store.relation,
+      coverage: "no_evidence" as const,
+    })),
+  };
+}
+
+async function completeWithinDeadline(
+  input: CompletionInput,
+  terminalDeadlineAt: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (Date.now() >= terminalDeadlineAt) {
+    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+  }
+  const proofParts = await raceWithAbort(
+    completeGovernedInteractionProofParts(input),
+    signal,
+  );
+  const serviceProof = await raceWithAbort(
+    createTelemetryServiceProof(proofParts),
+    signal,
+  );
+  if (Date.now() >= terminalDeadlineAt) {
+    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+  }
+  return await raceWithAbort(
+    fetchAuthMutation(completeGovernedInteraction, { ...input, serviceProof }),
+    signal,
+  );
+}
+
+function parsePublicCitation(value: unknown): PublicCitation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const citation = value as Record<string, unknown>;
+  if (
+    !exactKeys(citation, ["label", "jurisdictionId", "jurisdictionName", "jurisdictionKind", "relation"])
+    || !boundedIdentifier(citation.label, MAX_PUBLIC_CITATION_LABEL)
+    || !boundedIdentifier(citation.jurisdictionId)
+    || !boundedIdentifier(citation.jurisdictionName)
+    || (citation.jurisdictionKind !== "geographic" && citation.jurisdictionKind !== "organizational")
+    || (citation.relation !== "selected"
+      && citation.relation !== "geographic_ancestor"
+      && citation.relation !== "organizational_geography")
+  ) return null;
+  return citation as PublicCitation;
+}
+
+function parseCompletionResult(value: unknown, selectedJurisdictionId: string): CompletionResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = value as Record<string, unknown>;
+  if (
+    !exactKeys(result, [
+      "status",
+      "outcome",
+      "citations",
+      "partialCoverage",
+      "citationClaim",
+      "expiresAt",
+    ])
+    || result.status !== "completed"
+    || result.outcome !== "success"
+    || !Array.isArray(result.citations)
+    || result.citations.length < 1
+    || result.citations.length > MAX_PUBLIC_CITATIONS
+    || typeof result.partialCoverage !== "boolean"
+    || typeof result.citationClaim !== "string"
+    || !isOpaqueTelemetryToken(result.citationClaim)
+    || !Number.isFinite(result.expiresAt)
+  ) return null;
+  const citations = result.citations.map(parsePublicCitation);
+  if (
+    citations.some((citation) => citation === null)
+    || !citations.some((citation) => citation?.jurisdictionId === selectedJurisdictionId)
+  ) return null;
+  return { ...result, citations } as CompletionResult;
+}
+
+function streamResponse(input: {
+  body: ChatBody;
+  manifest: ResearchManifest;
+  model: string;
+  routeNonce: string;
+  requestStartedAt: number;
+  modelDeadlineAt: number;
+  terminalDeadlineAt: number;
+  clientSignal: AbortSignal;
+  streamCutoffSignal: AbortSignal;
+  terminalSignal: AbortSignal;
+  providerSignal: AbortSignal;
+  streamSignal: AbortSignal;
+  abortClient: (reason: unknown) => void;
+  abortStream: (reason: unknown) => void;
+  modelTimer: ReturnType<typeof setTimeout>;
+  terminalTimer: ReturnType<typeof setTimeout>;
+  request: Request;
+  detachRequestAbort: () => void;
+}) {
+  const encoder = new TextEncoder();
+  let cancelled = input.request.signal.aborted;
   return new Response(new ReadableStream({
     start(controller) {
-      const cancel = () => abortGeneration(signal.reason);
-      if (signal.aborted) cancel();
-      else signal.addEventListener("abort", cancel, { once: true });
-      const send = (event: ChatStreamEvent) => {
+      const onRequestAbort = () => {
+        cancelled = true;
+        input.abortClient(new Error("CHAT_REQUEST_ABORTED"));
+      };
+      input.request.signal.addEventListener("abort", onRequestAbort, { once: true });
+      const send = (event: StreamEvent) => {
         if (cancelled) return;
         try {
           controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
         } catch {
           cancelled = true;
+          input.abortClient(new Error("CHAT_STREAM_CANCELLED"));
         }
       };
       void (async () => {
         try {
-          let result: ChatResult;
+          if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
+          const apiKey = process.env.GOOGLE_AI_API_KEY;
+          if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+          const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
+          const result = await chat.run({
+            query: input.body.query,
+            stores: input.manifest.stores,
+            history: input.body.messages,
+          }, {
+            signal: input.providerSignal,
+            deadlineAt: input.terminalDeadlineAt,
+            streamSignal: input.streamSignal,
+            streamDeadlineAt: input.modelDeadlineAt,
+            onDelta: (text) => send({ type: "delta", text }),
+          });
+          clearTimeout(input.modelTimer);
+          if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          const terminalInput: CompletionInput = {
+            routeNonce: input.routeNonce,
+            externalId: input.body.externalId,
+            jurisdictionId: input.body.jurisdictionId,
+            assistantClientId: input.body.assistantClientId,
+            finalAnswer: result.answer,
+            citations: result.citations,
+            model: input.model,
+            elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)),
+            outcome: "success",
+            authorizedScopeSize: input.manifest.authorizedScopeSize,
+            readyStoreCount: input.manifest.stores.length,
+            partialCoverage: input.manifest.partialCoverage,
+            jurisdictionCoverage: coverageFor(input.manifest, result.citations),
+          };
+          const completed = parseCompletionResult(
+            await completeWithinDeadline(
+              terminalInput,
+              input.terminalDeadlineAt,
+              input.providerSignal,
+            ),
+            input.body.jurisdictionId,
+          );
+          if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          send({
+            type: "done",
+            result: result.answer,
+            citations: completed.citations,
+            citationClaim: completed.citationClaim,
+            partialCoverage: completed.partialCoverage,
+          });
+          return;
+        } catch (error) {
+          const aborted = cancelled || input.request.signal.aborted || input.clientSignal.aborted;
+          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
+            ? "timeout"
+            : classifyFailure(error);
+          input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
           try {
-            result = await generateChatResult(parsed, unified, (text) => send({ type: "delta", text }), generation.signal);
+            await completeWithinDeadline(
+              failureInput(
+                input.body,
+                input.manifest,
+                input.routeNonce,
+                input.model,
+                input.requestStartedAt,
+                aborted ? "aborted" : "failure",
+                aborted ? undefined : category,
+              ),
+              input.terminalDeadlineAt,
+              aborted ? input.terminalSignal : input.providerSignal,
+            );
           } catch {
-            const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-            try { await finalize(parsed.correlationToken, claim.claimNonce, "failure", latencyMs); } catch { /* lease expiry fallback */ }
-            if (!generation.signal.aborted) {
-              console.error("Chat provider request failed");
-              send({ type: "error", error: CHAT_FAILURE });
-            }
-            return;
+            // The client still receives only the generic terminal state.
           }
-          try {
-            const complete = await finalizeSuccessfulChat(parsed, unified, claim, startedAt, result);
-            send({ type: "done", ...complete });
-          } catch {
-            send({ type: "error", error: CHAT_FAILURE });
-          }
+          if (!aborted) send({ type: "error", error: CHAT_FAILURE });
         } finally {
-          signal.removeEventListener("abort", cancel);
-          try { controller.close(); } catch { /* consumer already cancelled */ }
+          clearTimeout(input.modelTimer);
+          clearTimeout(input.terminalTimer);
+          input.request.signal.removeEventListener("abort", onRequestAbort);
+          input.detachRequestAbort();
+          try {
+            controller.close();
+          } catch {
+            // The consumer already cancelled the response body.
+          }
         }
       })();
     },
     cancel(reason) {
-      abortGeneration(reason);
+      cancelled = true;
+      input.abortClient(reason);
     },
   }), {
     headers: {
@@ -492,67 +594,127 @@ function streamingResponse(
   });
 }
 
-export async function POST(request: Request) {
+function jsonError(error: string, status: number, headers?: HeadersInit): Response {
+  return Response.json({ error }, {
+    status,
+    headers: { "cache-control": "no-store", ...headers },
+  });
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const requestStartedAt = Date.now();
+  const modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
+  const terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
+  const clientAbort = new AbortController();
+  const streamCutoffAbort = new AbortController();
+  const terminalAbort = new AbortController();
+  const abortClient = (reason: unknown) => {
+    if (!clientAbort.signal.aborted) clientAbort.abort(reason);
+  };
+  const abortStream = (reason: unknown) => {
+    if (!streamCutoffAbort.signal.aborted) streamCutoffAbort.abort(reason);
+  };
+  const onRequestAbort = () => abortClient(new Error("CHAT_REQUEST_ABORTED"));
+  if (request.signal.aborted) onRequestAbort();
+  else request.signal.addEventListener("abort", onRequestAbort, { once: true });
+  const detachRequestAbort = () => request.signal.removeEventListener("abort", onRequestAbort);
+  const providerSignal = AbortSignal.any([clientAbort.signal, terminalAbort.signal]);
+  const streamSignal = AbortSignal.any([providerSignal, streamCutoffAbort.signal]);
+  const modelTimer = setTimeout(() => {
+    abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
+  }, Math.max(0, modelDeadlineAt - Date.now()));
+  const terminalTimer = setTimeout(() => {
+    if (!terminalAbort.signal.aborted) {
+      terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
+    }
+  }, Math.max(0, terminalDeadlineAt - Date.now()));
+  const stopEarly = (response: Response) => {
+    clearTimeout(modelTimer);
+    clearTimeout(terminalTimer);
+    detachRequestAbort();
+    return response;
+  };
+
   try {
-    if (!(await isAuthenticated())) return NextResponse.json({ error: "Sign in to ask questions." }, { status: 401 });
+    if (!(await raceWithAbort(isAuthenticated(), streamSignal))) {
+      return stopEarly(jsonError("Sign in to ask questions.", 401));
+    }
     const limit = rateLimit(`chat:${clientKey(request)}`, REQUESTS_PER_MINUTE);
-    if (!limit.ok) return NextResponse.json({ error: "You have sent several questions in a short time. Wait a minute, then try again." }, { status: 429, headers: { "Retry-After": String(limit.retryAfterSeconds) } });
-    const parsed = parseCommonBody(await request.json());
-    if (!parsed) return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
-    const unified = await fetchAuthQuery(api.jurisdictions.isUnifiedJurisdictionsEnabled, {});
-    if (unified) {
-      if (!parsed.jurisdictionId || !parsed.externalId || !parsed.assistantClientId ||
-        parsed.context.length > MAX_GOVERNED_CONTEXT_LENGTH) {
-        return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
+    if (!limit.ok) {
+      return stopEarly(jsonError(
+        "You have sent several questions in a short time. Wait a minute, then try again.",
+        429,
+        { "retry-after": String(limit.retryAfterSeconds) },
+      ));
+    }
+    const bodyBytes = await readBoundedBody(request, MAX_REQUEST_BODY_BYTES, streamSignal);
+    const body = bodyBytes ? parseBody(bodyBytes) : null;
+    if (!body) {
+      return stopEarly(jsonError(
+        "That question could not be processed. Shorten it and try again.",
+        400,
+      ));
+    }
+    const allowance = await raceWithAbort(
+      fetchAuthQuery(api.usage.checkAllowance, {}),
+      streamSignal,
+    );
+    if (!allowance.allowed || !allowance.canRecord) {
+      return stopEarly(jsonError(
+        "You have reached your question limit for today. It resets tomorrow.",
+        402,
+      ));
+    }
+    const token = await raceWithAbort(getToken(), streamSignal);
+    if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
+    let manifest: ResearchManifest | null = null;
+    try {
+      manifest = await raceWithAbort(
+        loadManifest(body.jurisdictionId, token, streamSignal),
+        streamSignal,
+      );
+    } catch {
+      manifest = null;
+    }
+    if (!manifest) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
+
+    const routeNonce = createOpaqueTelemetryToken();
+    try {
+      await raceWithAbort(
+        fetchAuthMutation(api.usage.recordQuestion, {}),
+        streamSignal,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.includes("QUOTA_EXCEEDED")) {
+        return stopEarly(jsonError(
+          "You have reached your question limit for today. It resets tomorrow.",
+          402,
+        ));
       }
-    } else if (!parsed.country) {
-      return NextResponse.json({ error: "That question could not be processed. Shorten it and try again." }, { status: 400 });
+      return stopEarly(jsonError(CHAT_FAILURE, 500));
     }
-    const allowance = await fetchAuthQuery(api.usage.checkAllowance, {});
-    if (!allowance.allowed) return NextResponse.json({ error: "You have reached your question limit for today. It resets tomorrow.", code: "quota" }, { status: 402 });
-
-    const contextDigest = unified ? await digestExactContext(parsed.context) : undefined;
-    let claim: { claimNonce: string };
-    try {
-      claim = await fetchAuthMutation(claimChatPhase, unified ? {
-        token: parsed.correlationToken,
-        jurisdictionId: parsed.jurisdictionId!,
-        ...(parsed.country ? { legacyCountryCode: parsed.country } : {}),
-        contextDigest,
-        serviceProof: await createTelemetryServiceProof([
-          "claim-jurisdiction-v1", parsed.correlationToken, parsed.jurisdictionId!, parsed.country ?? "", contextDigest!,
-        ]),
-      } : {
-        token: parsed.correlationToken,
-        jurisdictionCode: parsed.country!,
-        serviceProof: await createTelemetryServiceProof(["claim", parsed.correlationToken, parsed.country!]),
-      });
-    } catch {
-      return NextResponse.json({ error: "That search result has expired or was already used. Search again." }, { status: 400 });
-    }
-
-    const startedAt = performance.now();
-    if (request.headers.get("accept")?.includes("application/x-ndjson")) {
-      return streamingResponse(parsed, unified, claim, startedAt, request.signal);
-    }
-
-    let result: ChatResult;
-    try {
-      result = await generateChatResult(parsed, unified);
-    } catch {
-      const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
-      try { await finalize(parsed.correlationToken, claim.claimNonce, "failure", latencyMs); } catch { /* lease expiry fallback */ }
-      console.error("Chat provider request failed");
-      return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
-    }
-    try {
-      result = await finalizeSuccessfulChat(parsed, unified, claim, startedAt, result);
-    } catch {
-      return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
-    }
-    return NextResponse.json(result);
+    return streamResponse({
+      body,
+      manifest,
+      model: safeModelName(),
+      routeNonce,
+      requestStartedAt,
+      modelDeadlineAt,
+      terminalDeadlineAt,
+      clientSignal: clientAbort.signal,
+      streamCutoffSignal: streamCutoffAbort.signal,
+      terminalSignal: terminalAbort.signal,
+      providerSignal,
+      streamSignal,
+      abortClient,
+      abortStream,
+      modelTimer,
+      terminalTimer,
+      request,
+      detachRequestAbort,
+    });
   } catch {
-    console.error("Chat request failed");
-    return NextResponse.json({ error: CHAT_FAILURE }, { status: 500 });
+    return stopEarly(jsonError(CHAT_FAILURE, 500));
   }
 }

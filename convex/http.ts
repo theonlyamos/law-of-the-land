@@ -1,15 +1,10 @@
 import { httpRouter, makeFunctionReference } from "convex/server";
 import { ConvexError } from "convex/values";
 import { httpAction } from "./_generated/server";
-import { internal } from "./_generated/api";
 import { authComponent, createAuth } from "./auth";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
-import {
-  MAX_RESEARCH_MANIFEST_REQUEST_BYTES,
-  RESEARCH_MANIFEST_HEADERS,
-  verifyResearchManifestProof,
-} from "./lib/researchManifestProof";
+import type { ChatResearchStores } from "./jurisdictions";
 
 const http = httpRouter();
 
@@ -19,206 +14,67 @@ authComponent.registerRoutes(http, createAuth);
 polar.registerRoutes(http);
 
 const MAX_EXPORT_REFERENCE_BYTES = 256;
-const MAX_SEARCH_JURISDICTION_BYTES = 64;
+const MAX_CHAT_RESEARCH_MANIFEST_BYTES = 256;
 const MAX_JURISDICTION_ID_LENGTH = 128;
-const MAX_RESEARCH_CITATION_KEYS = 64;
 const claimConversationExportReference = makeFunctionReference<"mutation">(
   "admin/exports:claimConversationExportReference",
 );
 const bootstrapE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:bootstrap");
 const cleanupE2eFixtures = makeFunctionReference<"mutation">("admin/e2eFixtures:cleanup");
 const controlE2eFixtures = makeFunctionReference<"action">("admin/e2eFixtures:control");
-const getSearchJurisdiction = internal.jurisdictions.getPublicByCode;
-const getResearchManifestAvailability = makeFunctionReference<"query">(
-  "jurisdictions:getResearchManifestAvailability",
-);
-const consumeResearchManifestNonce = makeFunctionReference<"mutation">(
-  "jurisdictions:consumeResearchManifestNonce",
+const resolveChatResearchStores = makeFunctionReference<"query">(
+  "jurisdictions:resolveChatResearchStores",
 );
 
-async function verifySearchJurisdictionRequest(
-  request: Request,
-  bodyBytes: Uint8Array,
-  expectedPathname: string,
-) {
-  const configured = process.env.SEARCH_JURISDICTION_SECRET;
-  let pathname = "";
-  try { pathname = new URL(request.url).pathname; } catch { return null; }
-  if (!configured || configured.length < 32 || request.method !== "POST" || pathname !== expectedPathname) return null;
-  return await verifyResearchManifestProof({
-    secret: configured,
-    method: request.method,
-    pathname,
-    version: request.headers.get(RESEARCH_MANIFEST_HEADERS.version) ?? "",
-    timestamp: request.headers.get(RESEARCH_MANIFEST_HEADERS.timestamp) ?? "",
-    nonce: request.headers.get(RESEARCH_MANIFEST_HEADERS.nonce) ?? "",
-    signature: request.headers.get(RESEARCH_MANIFEST_HEADERS.signature) ?? "",
-    bodyBytes,
-    now: Date.now(),
-  });
+function noStore(status: number): Response {
+  return new Response(null, { status, headers: { "cache-control": "no-store" } });
 }
 
-function readSearchJurisdictionCode(bytes: Uint8Array) {
-  try {
-    const code = (JSON.parse(new TextDecoder().decode(bytes)) as { code?: unknown }).code;
-    return typeof code === "string" && /^[A-Z]{2}$/.test(code) ? code : null;
-  } catch {
-    return null;
-  }
-}
-
-http.route({
-  path: "/internal/search-jurisdiction",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const bytes = await readBoundedBody(request, MAX_SEARCH_JURISDICTION_BYTES);
-    if (!bytes) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
-    const proof = await verifySearchJurisdictionRequest(request, bytes, "/internal/search-jurisdiction");
-    if (!proof) {
-      return new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
-    }
-    try { await ctx.runMutation(consumeResearchManifestNonce, proof); }
-    catch { return new Response(null, { status: 404, headers: { "cache-control": "no-store" } }); }
-    const code = readSearchJurisdictionCode(bytes);
-    if (!code) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
-    const jurisdiction = await ctx.runQuery(getSearchJurisdiction, { code });
-    return Response.json(jurisdiction, {
-      headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" },
-    });
-  }),
-});
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function boundedOpaqueId(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.trim().length > 0 &&
-    value.length <= MAX_JURISDICTION_ID_LENGTH
-  );
-}
-
-function readResearchManifestRequest(bytes: Uint8Array) {
-  if (!bytes || bytes.byteLength === 0) return null;
+function readChatResearchManifestRequest(bytes: Uint8Array): { jurisdictionId: string } | null {
+  if (bytes.byteLength === 0) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     return null;
   }
-  if (!isPlainObject(parsed)) return null;
-  const keys = Object.keys(parsed);
-  const hasCitationKeys = Object.prototype.hasOwnProperty.call(parsed, "citationKeys");
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
   if (
-    keys.length !== (hasCitationKeys ? 3 : 2) ||
-    !keys.includes("selectedJurisdictionId") ||
-    !keys.includes("supplementaryJurisdictionIds") ||
-    (hasCitationKeys && !keys.includes("citationKeys")) ||
-    !boundedOpaqueId(parsed.selectedJurisdictionId) ||
-    !Array.isArray(parsed.supplementaryJurisdictionIds) ||
-    parsed.supplementaryJurisdictionIds.length > 3 ||
-    !parsed.supplementaryJurisdictionIds.every(boundedOpaqueId)
-  ) {
-    return null;
-  }
-  const supplementaryJurisdictionIds = parsed.supplementaryJurisdictionIds as string[];
-  const ids = [parsed.selectedJurisdictionId, ...supplementaryJurisdictionIds];
-  if (new Set(ids).size !== ids.length) return null;
-  if (hasCitationKeys && (
-    !Array.isArray(parsed.citationKeys) ||
-    parsed.citationKeys.length > MAX_RESEARCH_CITATION_KEYS
-  )) return null;
-  const citationKeys = hasCitationKeys ? parsed.citationKeys as unknown[] : undefined;
-  const seenCitationKeys = new Set<string>();
-  for (const candidate of citationKeys ?? []) {
-    if (!isPlainObject(candidate)) return null;
-    const candidateKeys = Object.keys(candidate);
-    if (
-      candidateKeys.length !== 3 ||
-      !candidateKeys.includes("jurisdictionId") ||
-      !candidateKeys.includes("resourceId") ||
-      !candidateKeys.includes("versionId") ||
-      !boundedOpaqueId(candidate.jurisdictionId) ||
-      !boundedOpaqueId(candidate.resourceId) ||
-      !boundedOpaqueId(candidate.versionId) ||
-      !ids.includes(candidate.jurisdictionId)
-    ) return null;
-    const key = `${candidate.jurisdictionId}\u0000${candidate.resourceId}\u0000${candidate.versionId}`;
-    if (seenCitationKeys.has(key)) return null;
-    seenCitationKeys.add(key);
-  }
-  return {
-    selectedJurisdictionId: parsed.selectedJurisdictionId,
-    supplementaryJurisdictionIds,
-    ...(citationKeys === undefined ? {} : { citationKeys: citationKeys as ResearchManifestRequest["citationKeys"] }),
-  };
-}
-
-type ResearchManifestRequest = {
-  selectedJurisdictionId: string;
-  supplementaryJurisdictionIds: string[];
-  citationKeys?: Array<{
-    jurisdictionId: string;
-    resourceId: string;
-    versionId: string;
-  }>;
-};
-
-export async function researchManifestResolutionResponse(
-  runQuery: (input: ResearchManifestRequest) => Promise<unknown>,
-  input: ResearchManifestRequest,
-): Promise<Response> {
-  try {
-    const resolution = await runQuery(input);
-    return Response.json(resolution, {
-      headers: {
-        "cache-control": "no-store, private",
-        "x-content-type-options": "nosniff",
-      },
-    });
-  } catch (error) {
-    const code = error instanceof ConvexError ? error.message : null;
-    const status = code === "RESEARCH_MANIFEST_REQUEST_INVALID"
-      ? 400
-      : code === "RESEARCH_MANIFEST_NOT_FOUND"
-        ? 404
-        : 500;
-    return new Response(null, {
-      status,
-      headers: { "cache-control": "no-store" },
-    });
-  }
+    Object.keys(record).length !== 1
+    || typeof record.jurisdictionId !== "string"
+    || record.jurisdictionId.length === 0
+    || record.jurisdictionId.length > MAX_JURISDICTION_ID_LENGTH
+    || record.jurisdictionId !== record.jurisdictionId.trim()
+  ) return null;
+  return { jurisdictionId: record.jurisdictionId };
 }
 
 http.route({
-  path: "/internal/search-jurisdictions",
+  path: "/private/chat-research-manifest",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
-    const bytes = await readBoundedBody(request, MAX_RESEARCH_MANIFEST_REQUEST_BYTES);
-    if (!bytes) return new Response(null, { status: 400, headers: { "cache-control": "no-store" } });
-    const proof = await verifySearchJurisdictionRequest(request, bytes, "/internal/search-jurisdictions");
-    if (!proof) {
-      return new Response(null, {
-        status: 404,
-        headers: { "cache-control": "no-store" },
+    if (!await ctx.auth.getUserIdentity()) return noStore(401);
+    const bytes = await readBoundedBody(request, MAX_CHAT_RESEARCH_MANIFEST_BYTES);
+    if (!bytes) return noStore(400);
+    const input = readChatResearchManifestRequest(bytes);
+    if (!input) return noStore(400);
+    try {
+      const resolution: ChatResearchStores = await ctx.runQuery(resolveChatResearchStores, input);
+      return Response.json(resolution, {
+        headers: {
+          "cache-control": "no-store, private",
+          "x-content-type-options": "nosniff",
+        },
       });
+    } catch (error) {
+      const code = error instanceof ConvexError ? error.message : null;
+      if (code === "JURISDICTION_ACCESS_DENIED" || code === "JURISDICTION_SCOPE_STATE_INVALID") {
+        return noStore(404);
+      }
+      if (code === "CHAT_RESEARCH_STORE_NOT_READY") return noStore(503);
+      return noStore(500);
     }
-    try { await ctx.runMutation(consumeResearchManifestNonce, proof); }
-    catch { return new Response(null, { status: 404, headers: { "cache-control": "no-store" } }); }
-    const input = readResearchManifestRequest(bytes);
-    if (!input) {
-      return new Response(null, {
-        status: 400,
-        headers: { "cache-control": "no-store" },
-      });
-    }
-    return await researchManifestResolutionResponse(
-      async (queryInput) =>
-        await ctx.runQuery(getResearchManifestAvailability, queryInput),
-      input,
-    );
   }),
 });
 

@@ -46,7 +46,14 @@ const conversationRowValidator = v.object({
   externalId: v.string(),
   messageCount: v.number(),
   updatedAt: v.number(),
-  country: v.union(v.string(), v.null()),
+  jurisdiction: v.union(
+    v.object({
+      id: v.id("jurisdictions"),
+      name: v.string(),
+      kind: v.union(v.literal("geographic"), v.literal("organizational")),
+    }),
+    v.null(),
+  ),
 });
 
 export const list = query({
@@ -100,7 +107,17 @@ export const list = query({
         externalId: session.externalId,
         messageCount: session.messageCount,
         updatedAt: session.updatedAt,
-        country: session.country ?? null,
+        jurisdiction:
+          session.jurisdictionContract === "unified"
+          && session.jurisdictionId
+          && session.jurisdictionName?.trim()
+          && session.jurisdictionKind
+            ? {
+                id: session.jurisdictionId,
+                name: session.jurisdictionName,
+                kind: session.jurisdictionKind,
+              }
+            : null,
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,

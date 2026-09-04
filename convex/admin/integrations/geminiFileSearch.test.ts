@@ -100,18 +100,28 @@ describe("GeminiFileSearchAdapter", () => {
       .rejects.toMatchObject({ kind: "invalid_request" });
   });
 
-  it("maps provider failures without disclosing provider response details", async () => {
+  it("retains the full denied Gemini response with its endpoint and status", async () => {
     const client = sdk();
-    vi.mocked(client.fileSearchStores.get).mockRejectedValue({
-      status: 401,
-      message: "Authorization: test-key",
+    const rawResponse = "Permission denied for key test-key and store fileSearchStores/ghana-law";
+    vi.mocked(client.fileSearchStores.uploadToFileSearchStore).mockRejectedValue({
+      status: 403,
+      message: rawResponse,
     });
     const adapter = new GeminiFileSearchAdapter({ apiKey: "test-key", sdk: client });
 
-    await expect(adapter.getStore(STORE)).rejects.toMatchObject({
+    await expect(adapter.uploadDocument({
+      storeName: STORE,
+      file: new Blob(["law"], { type: "text/plain" }),
+      mimeType: "text/plain",
+      displayName: "Constitution",
+      customMetadata: [],
+    })).rejects.toMatchObject({
       kind: "authentication",
       retryable: false,
+      status: 403,
+      operation: "document_upload",
       message: "Gemini authentication failed",
+      rawResponse,
     } satisfies Partial<ProviderError>);
   });
 

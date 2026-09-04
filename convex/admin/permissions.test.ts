@@ -306,12 +306,7 @@ describe("admin permission registry", () => {
       geminiFileSearchStoreName: "fileSearchStores/ghana-permissions-test",
       geminiEmbeddingModel: "models/gemini-embedding-2",
     }));
-    for (const target of [
-      "chatSessions",
-      "telemetryCorrelations",
-      "queryRuns",
-      "dailyMetrics",
-    ] as const) {
+    for (const target of ["chatSessions"] as const) {
       for (const pass of [1, 2]) {
         await t.mutation(backfillJurisdictionReferences, {
           environment: "test",

@@ -29,6 +29,7 @@ const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 20 * 60_000] as const;
 const GEMINI_POLL_DELAYS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const;
 const GEMINI_INDEX_REVIEW_AFTER_MS = 30 * 60_000;
 const GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-2" as const;
+const PROVIDER_DIAGNOSTIC_RETENTION_MS = 24 * 60 * 60_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_TARGET_TYPE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const SENSITIVE_KEY = /(?:token|secret|password|passwd|credential|auth(?:entication|orization)?|bearer|cookie|api.?key|signature|private.?key)/i;
@@ -49,6 +50,14 @@ const providerErrorKindValidator = v.union(
   v.literal("network"),
   v.literal("invalid_response"),
   v.literal("provider"),
+);
+const providerOperationValidator = v.union(
+  v.literal("store_create"),
+  v.literal("document_upload"),
+  v.literal("operation_poll"),
+  v.literal("store_get"),
+  v.literal("document_delete"),
+  v.literal("store_delete"),
 );
 const actorRoleValidator = v.union(
   v.literal("super_admin"),
@@ -102,6 +111,10 @@ const jobDocumentValidator = v.object({
   attemptCount: v.number(),
   nextAttemptAt: v.optional(v.number()),
   lastErrorKind: v.optional(providerErrorKindValidator),
+  lastProviderOperation: v.optional(providerOperationValidator),
+  lastProviderStatus: v.optional(v.number()),
+  lastProviderRawResponse: v.optional(v.string()),
+  providerDiagnosticExpiresAt: v.optional(v.number()),
   retentionRedactedAt: v.optional(v.number()),
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -820,6 +833,11 @@ async function succeedGeminiJob(
     leaseToken: undefined,
     leaseExpiresAt: undefined,
     nextAttemptAt: undefined,
+    lastErrorKind: undefined,
+    lastProviderOperation: undefined,
+    lastProviderStatus: undefined,
+    lastProviderRawResponse: undefined,
+    providerDiagnosticExpiresAt: undefined,
     recoveryKind: undefined,
     knownStoreResult: undefined,
     updatedAt: now,
@@ -1217,6 +1235,9 @@ export const recordProviderFailure = internalMutation({
     kind: providerErrorKindValidator,
     retryable: v.optional(v.boolean()),
     sideEffectUncertain: v.optional(v.boolean()),
+    providerOperation: v.optional(providerOperationValidator),
+    providerStatus: v.optional(v.number()),
+    providerRawResponse: v.optional(v.string()),
     providerOperationName: v.optional(v.string()),
     knownStoreResult: v.optional(knownStoreResultValidator),
   },
@@ -1228,6 +1249,33 @@ export const recordProviderFailure = internalMutation({
     const now = Date.now();
     assertCurrentLease(job, args.leaseToken, now);
     const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
+    if (
+      (args.providerOperation === undefined) !== (args.providerStatus === undefined)
+      || (args.providerStatus !== undefined && (
+        !Number.isInteger(args.providerStatus)
+        || args.providerStatus < 100
+        || args.providerStatus > 599
+      ))
+    ) {
+      throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+    }
+    const providerDiagnostic = args.providerOperation === undefined
+      ? {
+          lastProviderOperation: undefined,
+          lastProviderStatus: undefined,
+          lastProviderRawResponse: args.providerRawResponse,
+          providerDiagnosticExpiresAt: args.providerRawResponse === undefined
+            ? undefined
+            : now + PROVIDER_DIAGNOSTIC_RETENTION_MS,
+        }
+      : {
+          lastProviderOperation: args.providerOperation,
+          lastProviderStatus: args.providerStatus,
+          lastProviderRawResponse: args.providerRawResponse,
+          providerDiagnosticExpiresAt: args.providerRawResponse === undefined
+            ? undefined
+            : now + PROVIDER_DIAGNOSTIC_RETENTION_MS,
+        };
     if (args.providerOperationName !== undefined) {
       if (job.type !== "gemini_index_document" || job.providerOperationName !== undefined) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
@@ -1291,6 +1339,7 @@ export const recordProviderFailure = internalMutation({
         leaseToken: undefined,
         leaseExpiresAt: undefined,
         lastErrorKind: args.kind,
+        ...providerDiagnostic,
         updatedAt: now,
       });
       await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
@@ -1306,6 +1355,7 @@ export const recordProviderFailure = internalMutation({
       leaseToken: undefined,
       leaseExpiresAt: undefined,
       lastErrorKind: args.kind,
+      ...providerDiagnostic,
       recoveryKind: status === "failed" ? undefined : replacementDeleteWorkflow ? "delete_document" : job.recoveryKind,
       knownStoreResult: status === "failed" ? undefined : job.knownStoreResult,
       updatedAt: now,
@@ -1556,6 +1606,8 @@ export const retryJob = mutation({
       status = "queued";
       await ctx.db.patch(job._id, {
         status, attemptCount: 0, nextAttemptAt: Date.now(), lastErrorKind: undefined,
+        lastProviderOperation: undefined, lastProviderStatus: undefined, lastProviderRawResponse: undefined,
+        providerDiagnosticExpiresAt: undefined,
         leaseToken: undefined, leaseExpiresAt: undefined, updatedAt: Date.now(),
       });
       await ctx.scheduler.runAfter(0, jobRunner(job.type), { jobId: job._id });
@@ -1592,6 +1644,7 @@ export const cancelJob = mutation({
 const jobListRowValidator = v.object({
   id: v.id("integrationJobs"), type: jobTypeValidator, targetType: v.string(), targetId: v.string(),
   status: jobStatusValidator, attemptCount: v.number(), lastErrorKind: v.optional(providerErrorKindValidator),
+  lastProviderOperation: v.optional(providerOperationValidator), lastProviderStatus: v.optional(v.number()), lastProviderRawResponse: v.optional(v.string()),
   nextAttemptAt: v.optional(v.number()), correlationId: v.string(), createdAt: v.number(), updatedAt: v.number(),
 });
 
@@ -1599,7 +1652,8 @@ export const listJobs = query({
   args: { paginationOpts: paginationOptsValidator, status: v.optional(jobStatusValidator), type: v.optional(jobTypeValidator) },
   returns: v.object({ page: v.array(jobListRowValidator), isDone: v.boolean(), continueCursor: v.string() }),
   handler: async (ctx, args) => {
-    await requireEnabledAdminPermission(ctx, "operations", "read");
+    const actor = await requireEnabledAdminPermission(ctx, "operations", "read");
+    const canReadRawProviderResponse = actor.roles.includes("super_admin");
     if (!Number.isInteger(args.paginationOpts.numItems) || args.paginationOpts.numItems < 1) throw new ConvexError("INVALID_ADMIN_PAGINATION");
     const opts = { ...args.paginationOpts, numItems: Math.min(args.paginationOpts.numItems, 50), maximumRowsRead: 51 };
     const base = args.status && args.type
@@ -1610,6 +1664,6 @@ export const listJobs = query({
           ? ctx.db.query("integrationJobs").withIndex("by_type_and_createdAt", (q) => q.eq("type", args.type!))
           : ctx.db.query("integrationJobs").withIndex("by_createdAt");
     const result = await base.order("desc").paginate(opts);
-    return { page: result.page.filter(isGeminiJobDocument).map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, nextAttemptAt: job.nextAttemptAt, lastErrorKind: job.lastErrorKind, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
+    return { page: result.page.filter(isGeminiJobDocument).map((job) => ({ id: job._id, type: job.type, targetType: job.targetType, targetId: job.targetId, status: job.status, attemptCount: job.attemptCount, nextAttemptAt: job.nextAttemptAt, lastErrorKind: job.lastErrorKind, lastProviderOperation: job.lastProviderOperation, lastProviderStatus: job.lastProviderStatus, lastProviderRawResponse: canReadRawProviderResponse ? job.lastProviderRawResponse : undefined, correlationId: job.correlationId, createdAt: job.createdAt, updatedAt: job.updatedAt })), isDone: result.isDone, continueCursor: result.continueCursor };
   },
 });

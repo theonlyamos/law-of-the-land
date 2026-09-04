@@ -3,13 +3,11 @@
 export type AnalyticsMetric = {
   id: string;
   day: string;
-  jurisdictionCode?: string;
-  jurisdictionId?: string;
-  jurisdictionName?: string;
+  jurisdictionId: string;
+  jurisdictionName: string;
   totalQuestions: number;
   failureCount: number;
   providerFailureCount: number;
-  noResultCount: number;
   p95UpperBoundMs: number;
 };
 
@@ -33,12 +31,8 @@ function dayLabel(day: string): string {
 export default function AnalyticsChartPlot({ metrics }: { metrics: readonly AnalyticsMetric[] }) {
   const grouped = new Map<string, { label: string; metrics: AnalyticsMetric[] }>();
   for (const metric of metrics) {
-    const key = metric.jurisdictionId
-      ? `id:${metric.jurisdictionId}`
-      : `legacy:${metric.jurisdictionCode ?? "unscoped"}`;
-    const label = metric.jurisdictionId
-      ? `${metric.jurisdictionName ?? "Jurisdiction"} — stable ID ${metric.jurisdictionId}`
-      : `Legacy ${metric.jurisdictionCode ?? "unscoped"}`;
+    const key = `id:${metric.jurisdictionId}`;
+    const label = `${metric.jurisdictionName} — stable ID ${metric.jurisdictionId}`;
     const group = grouped.get(key);
     if (group) group.metrics.push(metric);
     else grouped.set(key, { label, metrics: [metric] });
@@ -72,7 +66,7 @@ export default function AnalyticsChartPlot({ metrics }: { metrics: readonly Anal
                 {chronological.map((row) => (
                   <li key={row.id} className="grid grid-cols-[6rem_1fr] gap-4 py-3">
                     <time dateTime={row.day} className="font-semibold">{dayLabel(row.day)}</time>
-                    <span>{`${row.totalQuestions.toLocaleString("en-US")} questions, ${row.providerFailureCount.toLocaleString("en-US")} provider ${row.providerFailureCount === 1 ? "failure" : "failures"}, ${row.noResultCount.toLocaleString("en-US")} empty results, p95 ≤ ${row.p95UpperBoundMs.toLocaleString("en-US")} ms`}</span>
+                    <span>{`${row.totalQuestions.toLocaleString("en-US")} questions, ${row.providerFailureCount.toLocaleString("en-US")} provider ${row.providerFailureCount === 1 ? "failure" : "failures"}, p95 ≤ ${row.p95UpperBoundMs.toLocaleString("en-US")} ms`}</span>
                   </li>
                 ))}
               </ol>

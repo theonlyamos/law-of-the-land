@@ -16,7 +16,6 @@
 | `NEXT_PUBLIC_CONVEX_URL` | Vercel | Required | Required | Required |
 | `NEXT_PUBLIC_CONVEX_SITE_URL` | Vercel and Convex | Required | Required | Required |
 | `NEXT_PUBLIC_SITE_URL` | Vercel | Required | Required | Required |
-| `SEARCH_JURISDICTION_SECRET` | Vercel and Convex | Required | Required | Required |
 | `TELEMETRY_INGEST_SECRET` | Vercel and Convex | Required | Required | Required |
 | `ADMIN_MAX_DOCUMENT_BYTES` | Convex | Required for admin upload | Required | Required |
 | `BETTER_AUTH_SECRET` | Convex | Required | Required | Required |
@@ -38,7 +37,7 @@
 
 Gemini File Search store names are governed server-only `jurisdictions` fields, not environment variables or browser inputs. Create one store per jurisdiction through the audited **Set up Gemini search** action; never copy store names into release evidence. The Polar webhook is the selected Convex Site origin plus `/polar/events`.
 
-For guarded admin E2E and performance-budget runs, provide the selected target's shared search and telemetry values to the controlling shell as `ADMIN_E2E_SEARCH_JURISDICTION_SECRET` and `ADMIN_E2E_TELEMETRY_INGEST_SECRET`. Each must be at least 32 characters. The launcher maps them to the canonical server-only names only inside the Next.js child, keeps them out of the browser and recovery manifest, and refuses bootstrap unless the isolated Convex runtime proves that its telemetry secret matches. Teardown clears the parent aliases.
+For guarded admin E2E and performance-budget runs, provide the selected target's shared telemetry value to the controlling shell as `ADMIN_E2E_TELEMETRY_INGEST_SECRET`. It must be at least 32 characters. The launcher maps it to the canonical server-only name only inside the Next.js child, keeps it out of the browser and recovery manifest, and refuses bootstrap unless the isolated Convex runtime proves that its telemetry secret matches. Teardown clears the parent alias.
 
 ## Search indexing and export controls
 
@@ -109,7 +108,7 @@ Do not reuse a preview user ID or run the isolated `convex dev` sequence against
 ### 1. Deploy disabled and prepare the production account
 
 1. In the Convex production deployment, set `ADMIN_ENVIRONMENT=production` and `ADMIN_PANEL_ENABLED=false`. Confirm `INITIAL_SUPER_ADMIN_IDS` is absent. Configure the Convex-owned variables in the matrix.
-2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GOOGLE_AI_API_KEY`, `GOOGLE_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, `SEARCH_JURISDICTION_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared search and telemetry secrets must each match Convex exactly.
+2. In the Vercel **Production** environment, configure the Vercel-owned variables in the matrix. `GOOGLE_AI_API_KEY`, `GOOGLE_AI_MODEL`, `PLACES_API_KEY`, `PLACE_CLAIM_SECRET`, and `TELEMETRY_INGEST_SECRET` are server-only even though Vercel also needs them; never prefix them with `NEXT_PUBLIC_`. Geographic jurisdiction verification requires Vercel's `PLACES_API_KEY` and the identical 32+ character `PLACE_CLAIM_SECRET` in Vercel and Convex. The shared telemetry secret must match Convex exactly.
 3. Promote the already-reviewed commit through the normal `main` deployment pipeline. Do not run an ad hoc `convex deploy` from the release shell: that command defaults to the project's production deployment and does not accept the exact-name selector used below.
 4. Verify the production site loads while ordinary `/admin` access remains disabled. The candidate must create a new production credential account, verify its email, enroll in 2FA at `/settings/security`, and copy the production Better Auth user ID. Verify the production ID, email-verification state, and 2FA state in that same environment.
 

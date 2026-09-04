@@ -112,7 +112,6 @@ export const jurisdictionSearchPageValidator = v.object({
       slug: v.string(),
       kind: jurisdictionKindValidator,
       isDefault: v.boolean(),
-      legacyCountryCode: v.optional(v.string()),
     }),
   ),
   group: v.union(
@@ -140,53 +139,6 @@ export const researchScopeValidator = v.object({
   items: v.array(researchScopeItemValidator),
 });
 
-export const researchDocumentManifestValidator = v.object({
-  resourceId: v.id("legalResources"),
-  versionId: v.id("documentVersions"),
-  documentName: v.string(),
-  title: v.string(),
-  officialCitation: v.string(),
-  sourceUrl: v.string(),
-});
-
-export const researchCitationKeyValidator = v.object({
-  jurisdictionId: v.string(),
-  resourceId: v.string(),
-  versionId: v.string(),
-});
-
-export const researchLibraryAvailabilityValidator = v.union(
-  v.object({
-    jurisdictionId: v.id("jurisdictions"),
-    status: v.literal("ready"),
-    storeName: v.string(),
-    documents: v.array(researchDocumentManifestValidator),
-  }),
-  v.object({
-    jurisdictionId: v.id("jurisdictions"),
-    status: v.literal("unconfigured"),
-  }),
-  v.object({
-    jurisdictionId: v.id("jurisdictions"),
-    status: v.literal("provisioning"),
-  }),
-  v.object({
-    jurisdictionId: v.id("jurisdictions"),
-    status: v.literal("needs_review"),
-  }),
-);
-
-export const researchLibraryRequestValidator = v.object({
-  selectedJurisdictionId: v.string(),
-  supplementaryJurisdictionIds: v.array(v.string()),
-  citationKeys: v.optional(v.array(researchCitationKeyValidator)),
-});
-
-export const researchLibraryResolutionValidator = v.object({
-  selected: researchLibraryAvailabilityValidator,
-  supplementary: v.array(researchLibraryAvailabilityValidator),
-});
-
 export const chatCitationValidator = v.object({
   label: v.string(),
   jurisdictionId: v.id("jurisdictions"),
@@ -209,38 +161,6 @@ export type ResearchScopeItem = {
 export type ResearchScope = {
   selectedJurisdictionId: Id<"jurisdictions">;
   items: ResearchScopeItem[];
-};
-
-export type ResearchDocumentManifest = {
-  resourceId: Id<"legalResources">;
-  versionId: Id<"documentVersions">;
-  documentName: string;
-  title: string;
-  officialCitation: string;
-  sourceUrl: string;
-};
-
-export type ResearchCitationKey = {
-  jurisdictionId: string;
-  resourceId: string;
-  versionId: string;
-};
-
-export type ResearchLibraryAvailability =
-  | {
-      jurisdictionId: Id<"jurisdictions">;
-      status: "ready";
-      storeName: string;
-      documents: ResearchDocumentManifest[];
-    }
-  | {
-      jurisdictionId: Id<"jurisdictions">;
-      status: "unconfigured" | "provisioning" | "needs_review";
-    };
-
-export type ResearchLibraryResolution = {
-  selected: ResearchLibraryAvailability;
-  supplementary: ResearchLibraryAvailability[];
 };
 
 export type ChatCitation = {
@@ -304,19 +224,4 @@ export function projectJurisdictionVisibility(
 
 export function isLegacyCountryCode(value: string | undefined): value is string {
   return value !== undefined && /^[A-Z]{2}$/.test(value);
-}
-
-export function normalizeUniqueJurisdictionIds(
-  values: readonly string[],
-  normalize: (value: string) => Id<"jurisdictions"> | null,
-): Id<"jurisdictions">[] {
-  const normalized = values.map(normalize);
-  if (normalized.some((id) => id === null)) {
-    throw new ConvexError("RESEARCH_MANIFEST_NOT_FOUND");
-  }
-  const ids = normalized as Id<"jurisdictions">[];
-  if (new Set(ids).size !== ids.length) {
-    throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
-  }
-  return ids;
 }

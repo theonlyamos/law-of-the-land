@@ -57,7 +57,7 @@ async function createAuditor(t: Backend) {
 function metric(day: string, updatedAt: number) {
   return {
     day, totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0,
-    providerFailureCount: 0, noResultCount: 0, latencyLe250: 1, latencyLe500: 1,
+    providerFailureCount: 0, latencyLe250: 1, latencyLe500: 1,
     latencyLe1000: 1, latencyLe2500: 1, latencyLe5000: 1, latencyGt5000: 0,
     p50UpperBoundMs: 250, p95UpperBoundMs: 250, updatedAt,
   };
@@ -70,11 +70,11 @@ describe("admin daily analytics", () => {
     process.env.ADMIN_ENVIRONMENT = "test";
     await expect(t.query(api.admin.analytics.listDailyMetrics, {
       paginationOpts: { numItems: 0, cursor: null }, jurisdictionId: null,
-      jurisdictionCode: "invalid", fromDay: "not-a-day", toDay: "also-not-a-day",
+      fromDay: "not-a-day", toDay: "also-not-a-day",
     })).rejects.toThrow("ADMIN_AUTH_REQUIRED");
   });
 
-  it("filters ID-keyed metrics by the ID/day composite index without merging legacy rows", async () => {
+  it("filters metrics by the stable ID/day composite index", async () => {
     const t = createBackend();
     const auditor = await createAuditor(t);
     const { firstId, secondId } = await t.run(async (ctx) => {
@@ -83,15 +83,14 @@ describe("admin daily analytics", () => {
         createdBy: "fixture", updatedBy: "fixture", createdAt: 1, updatedAt: 1 };
       const firstId = await ctx.db.insert("jurisdictions", { ...base, name: "Ghana", slug: "ghana" });
       const secondId = await ctx.db.insert("jurisdictions", { ...base, name: "Other Ghana", slug: "other-ghana" });
-      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 1), jurisdictionId: firstId, jurisdictionName: "Ghana", jurisdictionKind: "geographic", jurisdictionCode: "GH" });
-      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 2), jurisdictionId: secondId, jurisdictionName: "Other Ghana", jurisdictionKind: "geographic", jurisdictionCode: "GH" });
-      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 3), jurisdictionCode: "GH" });
+      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 1), jurisdictionId: firstId, jurisdictionName: "Ghana", jurisdictionKind: "geographic" });
+      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 2), jurisdictionId: secondId, jurisdictionName: "Other Ghana", jurisdictionKind: "geographic" });
       return { firstId, secondId };
     });
 
     const result = await auditor.query(api.admin.analytics.listDailyMetrics, {
       paginationOpts: { numItems: 10, cursor: null }, jurisdictionId: firstId,
-      jurisdictionCode: null, fromDay: "2026-07-01", toDay: "2026-07-31",
+      fromDay: "2026-07-01", toDay: "2026-07-31",
     });
     expect(result.page).toHaveLength(1);
     expect(result.page[0]).toMatchObject({ jurisdictionId: firstId, jurisdictionName: "Ghana" });
@@ -101,40 +100,4 @@ describe("admin daily analytics", () => {
     expect(result.page[0]).not.toHaveProperty("retrievalPlanSize");
   });
 
-  it("rejects ambiguous simultaneous ID and legacy-code filters", async () => {
-    const t = createBackend();
-    const auditor = await createAuditor(t);
-    const id = await t.run((ctx) => ctx.db.insert("jurisdictions", {
-      name: "Ghana", slug: "ghana", status: "enabled", isDefault: true, providerSyncState: "synced",
-      kind: "geographic", visibility: "public", createdBy: "fixture", updatedBy: "fixture", createdAt: 1, updatedAt: 1,
-    }));
-    await expect(auditor.query(api.admin.analytics.listDailyMetrics, {
-      paginationOpts: { numItems: 10, cursor: null }, jurisdictionId: id,
-      jurisdictionCode: "GH", fromDay: "2026-07-01", toDay: "2026-07-31",
-    })).rejects.toThrow("INVALID_ANALYTICS_JURISDICTION");
-  });
-
-  it("keeps the legacy-code adapter limited to code-only historical rows", async () => {
-    const t = createBackend();
-    const auditor = await createAuditor(t);
-    await t.run(async (ctx) => {
-      const jurisdictionId = await ctx.db.insert("jurisdictions", {
-        name: "Ghana", slug: "ghana", status: "enabled", isDefault: true, providerSyncState: "synced",
-        kind: "geographic", visibility: "public", legacyCountryCode: "GH",
-        createdBy: "fixture", updatedBy: "fixture", createdAt: 1, updatedAt: 1,
-      });
-      await ctx.db.insert("dailyMetrics", { ...metric("2026-07-01", 1), jurisdictionCode: "GH" });
-      await ctx.db.insert("dailyMetrics", {
-        ...metric("2026-07-01", 2), jurisdictionCode: "GH", jurisdictionId,
-        jurisdictionName: "Ghana", jurisdictionKind: "geographic",
-      });
-    });
-    const result = await auditor.query(api.admin.analytics.listDailyMetrics, {
-      paginationOpts: { numItems: 10, cursor: null },
-      jurisdictionCode: "gh", fromDay: "2026-07-01", toDay: "2026-07-31",
-    });
-    expect(result.page).toHaveLength(1);
-    expect(result.page[0]).toMatchObject({ jurisdictionCode: "GH" });
-    expect(result.page[0]).not.toHaveProperty("jurisdictionId");
-  });
 });

@@ -4,15 +4,11 @@ import logo from "@/app/logo-transparent.png";
 import { UserNav } from "@/components/auth/user-nav";
 import { LandingSections } from "@/components/landing/landing-sections";
 import styles from "@/components/landing/landing-page.module.css";
-import { PublicJurisdictionSelector } from "@/components/landing/public-jurisdiction-selector";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { ChatSession } from "@/lib/chat-sessions";
-import {
-  type PublicJurisdiction,
-  type ResearchJurisdiction,
-} from "@/lib/countries";
+import type { ResearchJurisdiction } from "@/lib/countries";
 import { ArrowRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -27,10 +23,6 @@ interface LandingPageProps {
   savedChats: ChatSession[];
   onResumeChat: (chatId: string) => void;
   isAuthenticated: boolean;
-  country: string;
-  onCountryChange: (code: string) => void;
-  jurisdictions: readonly PublicJurisdiction[] | undefined;
-  unifiedJurisdictionsEnabled: boolean | undefined;
   researchJurisdiction: ResearchJurisdiction | null;
   onResearchJurisdictionChange: (selection: ResearchJurisdiction | null) => void;
 }
@@ -51,25 +43,11 @@ export function LandingPage({
   savedChats,
   onResumeChat,
   isAuthenticated,
-  country,
-  onCountryChange,
-  jurisdictions,
-  unifiedJurisdictionsEnabled,
   researchJurisdiction,
   onResearchJurisdictionChange,
 }: LandingPageProps) {
   const recentChats = savedChats.slice(0, 3);
-  const catalogUnavailable =
-    unifiedJurisdictionsEnabled === false &&
-    jurisdictions !== undefined &&
-    jurisdictions.length === 0;
-  const selectorReady =
-    unifiedJurisdictionsEnabled === true
-      ? Boolean(researchJurisdiction?.id)
-      : unifiedJurisdictionsEnabled === false &&
-        jurisdictions !== undefined &&
-        !catalogUnavailable &&
-        Boolean(country);
+  const selectorReady = Boolean(researchJurisdiction?.id);
   const researchDisabled =
     isLoading || !selectorReady || !query.trim();
   const plansHref = isAuthenticated
@@ -132,29 +110,10 @@ export function LandingPage({
             }}
           >
             <div className={styles.jurisdictionField}>
-              {unifiedJurisdictionsEnabled === undefined ? (
-                <p role="status">Loading jurisdiction access…</p>
-              ) : unifiedJurisdictionsEnabled ? (
-                <ResearchJurisdictionPicker
-                  value={researchJurisdiction}
-                  onChange={onResearchJurisdictionChange}
-                />
-              ) : (
-                <PublicJurisdictionSelector
-                  id="landing-jurisdiction"
-                  label="Research jurisdiction"
-                  jurisdictions={jurisdictions}
-                  value={country}
-                  onChange={onCountryChange}
-                  className={styles.selectorRoot}
-                />
-              )}
-              {catalogUnavailable ? (
-                <p role="status" className={styles.unavailableMessage}>
-                  Legal research is not available for a jurisdiction right now. Please check again
-                  later.
-                </p>
-              ) : null}
+              <ResearchJurisdictionPicker
+                value={researchJurisdiction}
+                onChange={onResearchJurisdictionChange}
+              />
             </div>
 
             <div className={styles.questionBody}>
@@ -198,8 +157,6 @@ export function LandingPage({
       </section>
 
       <LandingSections
-        jurisdictions={jurisdictions}
-        searchFirstCoverage={unifiedJurisdictionsEnabled === true}
         recentChats={recentChats}
         isAuthenticated={isAuthenticated}
         onResumeChat={onResumeChat}

@@ -2,7 +2,7 @@
 
 import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { components } from "./_generated/api";
 import authSchema from "./betterAuth/schema";
 import { MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS } from "./lib/jurisdictionDomain";
@@ -18,20 +18,9 @@ const authModules = Object.fromEntries(
 
 type Backend = TestConvex<typeof schema>;
 const searchAccessible = makeFunctionReference<"query">("jurisdictions:searchAccessible");
-const isUnifiedJurisdictionsEnabled = makeFunctionReference<"query">(
-  "jurisdictions:isUnifiedJurisdictionsEnabled",
-);
-const listPublicEnabled = makeFunctionReference<"query">("jurisdictions:listPublicEnabled");
 const resolveResearchSelection = makeFunctionReference<"query">(
   "jurisdictions:resolveResearchSelection",
 );
-
-const previousEnvironment = process.env.ADMIN_ENVIRONMENT;
-
-afterEach(() => {
-  if (previousEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
-  else process.env.ADMIN_ENVIRONMENT = previousEnvironment;
-});
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -79,13 +68,12 @@ async function asUser(t: Backend, label: string) {
 
 async function insertGeographic(
   t: Backend,
-  input: { name: string; code?: string; legacyOnly?: boolean; status?: "draft" | "enabled"; visibility?: "public" | "members" },
+  input: { name: string; legacyCountryCode?: string; status?: "draft" | "enabled"; visibility?: "public" | "members" },
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
-      ...(input.code && !input.legacyOnly ? { code: input.code } : {}),
-      ...(input.code ? { legacyCountryCode: input.code } : {}),
+      ...(input.legacyCountryCode ? { legacyCountryCode: input.legacyCountryCode } : {}),
       name: input.name,
       slug: input.name.toLowerCase().replaceAll(" ", "-"),
       status: input.status ?? "enabled",
@@ -115,36 +103,29 @@ async function insertGeographic(
 }
 
 describe("server-authorized research selection", () => {
-  it("resolves an ID, a unique legacy code, and a matching pair to the same safe projection", async () => {
+  it("resolves only a stable ID without returning legacy selector fields", async () => {
     const t = createBackend();
-    const id = await insertGeographic(t, { name: "Ghana", code: "GH", legacyOnly: true });
+    const id = await insertGeographic(t, { name: "Ghana", legacyCountryCode: "GH" });
 
-    const byId = await t.query(resolveResearchSelection, { jurisdictionId: id, country: undefined });
-    const byCode = await t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "gh" });
-    const byPair = await t.query(resolveResearchSelection, { jurisdictionId: id, country: "GH" });
-
-    expect(byId).toEqual(byCode);
-    expect(byPair).toEqual(byId);
+    const byId = await t.query(resolveResearchSelection, { jurisdictionId: id });
     expect(byId).toEqual({
       id,
       name: "Ghana",
       slug: "ghana",
       kind: "geographic",
       isDefault: false,
-      legacyCountryCode: "GH",
     });
-    expect(JSON.stringify(byId)).not.toMatch(/productionBucket|SECRET_|visibility|organizationId/);
+    expect(JSON.stringify(byId)).not.toMatch(
+      /legacyCountryCode|productionBucket|SECRET_|visibility|organizationId/,
+    );
   });
 
-  it("fails closed when a legacy snapshot identifies multiple enabled typed rows", async () => {
+  it("rejects the retired country selector argument", async () => {
     const t = createBackend();
-    const first = await insertGeographic(t, { name: "Ghana One", code: "GH", legacyOnly: true });
-    await insertGeographic(t, { name: "Ghana Two", code: "GH", legacyOnly: true });
+    const id = await insertGeographic(t, { name: "Ghana", legacyCountryCode: "GH" });
 
-    await expect(t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "GH" }))
-      .resolves.toBeNull();
-    await expect(t.query(resolveResearchSelection, { jurisdictionId: first, country: "GH" }))
-      .resolves.toBeNull();
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: id, country: "GH" }))
+      .rejects.toThrow();
   });
 
   it("returns the uniform unavailable result for malformed browser jurisdiction IDs", async () => {
@@ -153,27 +134,22 @@ describe("server-authorized research selection", () => {
     for (const jurisdictionId of ["not-a-convex-id", "", "x".repeat(201)]) {
       const result = await t.query(resolveResearchSelection, {
         jurisdictionId,
-        country: undefined,
       });
       expect(result).toBeNull();
       expect(JSON.stringify(result)).not.toMatch(/productionBucket|SECRET_|visibility|organizationId/);
     }
   });
 
-  it("returns one unavailable result for mismatches, disabled rows, and inaccessible member rows", async () => {
+  it("returns one unavailable result for disabled and inaccessible member rows", async () => {
     const t = createBackend();
-    const ghanaId = await insertGeographic(t, { name: "Ghana", code: "GH" });
-    await insertGeographic(t, { name: "Nigeria", code: "NG" });
+    const disabledId = await insertGeographic(t, { name: "Ghana", status: "draft" });
     const members = await insertOrganizationJurisdiction(t, {
       name: "Private University",
       visibility: "members",
     });
 
-    await expect(t.query(resolveResearchSelection, { jurisdictionId: ghanaId, country: "NG" }))
-      .resolves.toBeNull();
-    await expect(t.query(resolveResearchSelection, { jurisdictionId: members.jurisdictionId, country: undefined }))
-      .resolves.toBeNull();
-    await expect(t.query(resolveResearchSelection, { jurisdictionId: undefined, country: "ZZ" }))
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: disabledId })).resolves.toBeNull();
+    await expect(t.query(resolveResearchSelection, { jurisdictionId: members.jurisdictionId }))
       .resolves.toBeNull();
   });
 });
@@ -229,7 +205,10 @@ describe("bounded accessible jurisdiction search", () => {
   it("paginates typed public geographies at twenty without disclosing governed fields", async () => {
     const t = createBackend();
     for (let index = 0; index < 21; index += 1) {
-      await insertGeographic(t, { name: `Place ${String(index).padStart(2, "0")}` });
+      await insertGeographic(t, {
+        name: `Place ${String(index).padStart(2, "0")}`,
+        ...(index === 0 ? { legacyCountryCode: "GH" } : {}),
+      });
     }
     await insertGeographic(t, { name: "Draft Place", status: "draft" });
     await insertOrganizationJurisdiction(t, { name: "Hidden Organization", visibility: "members" });
@@ -242,7 +221,9 @@ describe("bounded accessible jurisdiction search", () => {
     expect(first.group).toBe("geographic");
     expect(first.page).toHaveLength(20);
     expect(first.isDone).toBe(false);
-    expect(JSON.stringify(first)).not.toMatch(/SECRET_|productionBucket|visibility|organizationId/);
+    expect(JSON.stringify(first)).not.toMatch(
+      /legacyCountryCode|SECRET_|productionBucket|visibility|organizationId/,
+    );
 
     const second = await t.query(searchAccessible, {
       kind: "geographic",
@@ -493,40 +474,5 @@ describe("bounded accessible jurisdiction search", () => {
         cursor: null,
       }),
     ).rejects.toThrow("JURISDICTION_SELECTOR_STATE_INVALID");
-  });
-});
-
-describe("unified selector rollout state", () => {
-  it("returns only a fail-closed boolean while preserving the Ghana legacy adapter", async () => {
-    process.env.ADMIN_ENVIRONMENT = "test";
-    const t = createBackend();
-    await expect(t.query(isUnifiedJurisdictionsEnabled, {})).resolves.toBe(false);
-    await t.run(async (ctx) => {
-      const now = Date.now();
-      await ctx.db.insert("featureFlags", {
-        key: "unified_jurisdictions",
-        environment: "test",
-        enabled: true,
-        updatedAt: now,
-      });
-      await ctx.db.insert("jurisdictions", {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        status: "enabled",
-        isDefault: true,
-        geminiFileSearchStoreName: "fileSearchStores/ghana",
-        geminiEmbeddingModel: "models/gemini-embedding-2",
-        providerSyncState: "synced",
-        createdBy: "fixture",
-        updatedBy: "fixture",
-        createdAt: now,
-        updatedAt: now,
-      });
-    });
-    await expect(t.query(isUnifiedJurisdictionsEnabled, {})).resolves.toBe(true);
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-    ]);
   });
 });

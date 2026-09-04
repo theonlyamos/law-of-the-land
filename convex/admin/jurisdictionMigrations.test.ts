@@ -374,12 +374,12 @@ describe("safe unified-jurisdiction migration", () => {
     await expect(
       t.mutation(backfillJurisdictionReferences, {
         environment: "test",
-        target: "dailyMetrics",
+        target: "chatSessions",
         cursor: null,
         batchSize,
         dryRun: true,
         confirmation:
-          "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics DRY_RUN",
+          "UNIFIED_JURISDICTIONS BACKFILL test chatSessions DRY_RUN",
         reason: "Inspect stable jurisdiction references",
         idempotencyKey: "metrics-dry-run-1",
       }),
@@ -390,11 +390,11 @@ describe("safe unified-jurisdiction migration", () => {
     const t = convexTest(schema, modules);
     const args = {
       environment: "test",
-      target: "queryRuns" as const,
+      target: "chatSessions" as const,
       cursor: null,
       batchSize: 100,
       dryRun: false,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test queryRuns EXECUTE",
+      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions EXECUTE",
       reason: "Verify stable jurisdiction references",
     };
     await t.mutation(backfillJurisdictionReferences, {
@@ -411,7 +411,7 @@ describe("safe unified-jurisdiction migration", () => {
               q
                 .eq("environment", "test")
                 .eq("migrationVersion", "jurisdiction_ids_v1")
-                .eq("target", "queryRuns")
+                .eq("target", "chatSessions")
                 .eq("mode", "execute"),
           )
           .unique();
@@ -433,7 +433,7 @@ describe("safe unified-jurisdiction migration", () => {
               q
                 .eq("environment", "test")
                 .eq("migrationVersion", "jurisdiction_ids_v1")
-                .eq("target", "queryRuns")
+                .eq("target", "chatSessions")
                 .eq("mode", "execute"),
           )
           .unique();
@@ -547,58 +547,13 @@ describe("safe unified-jurisdiction migration", () => {
     ).resolves.toMatchObject({ updated: 0, unresolved: 1, mismatches: 0 });
   });
 
-  it("fills a blank required name snapshot without rewriting a nonblank historical name", async () => {
-    const t = convexTest(schema, modules);
-    const { jurisdictionId } = await insertGhana(t);
-    await t.mutation(seedGhanaJurisdictionV2, {
-      environment: "test",
-      place,
-      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
-      reason: "Adopt the reviewed Ghana country projection",
-      idempotencyKey: "ghana-before-name-fill",
-    });
-    await enableGhanaSearch(t, jurisdictionId);
-    const runId = await t.run((ctx) =>
-      ctx.db.insert("queryRuns", {
-        correlationId: "blank-name-run",
-        day: "2026-08-15",
-        jurisdictionCode: "GH",
-        jurisdictionId,
-        jurisdictionName: "   ",
-        jurisdictionKind: "geographic",
-        outcome: "success",
-        searchProviderStatus: "success",
-        generationProviderStatus: "success",
-        searchLatencyMs: 1,
-        generationLatencyMs: 1,
-        totalLatencyMs: 2,
-        resultCount: 1,
-        completedAt: 1,
-        rollupStatus: "processed",
-      }),
-    );
-    await t.mutation(backfillJurisdictionReferences, {
-      environment: "test",
-      target: "queryRuns",
-      cursor: null,
-      batchSize: 100,
-      dryRun: false,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test queryRuns EXECUTE",
-      reason: "Backfill stable jurisdiction references",
-      idempotencyKey: "blank-name-execute",
-    });
-    await expect(t.run((ctx) => ctx.db.get("queryRuns", runId))).resolves.toMatchObject({
-      jurisdictionName: "Republic of Ghana",
-    });
-  });
-
   it("rejects malformed checkpoint counters before idempotency replay", async () => {
     const t = convexTest(schema, modules);
     await t.run((ctx) =>
       ctx.db.insert("jurisdictionMigrationCheckpoints", {
         environment: "test",
         migrationVersion: "jurisdiction_ids_v1",
-        target: "dailyMetrics",
+        target: "chatSessions",
         mode: "dry_run",
         runNumber: 1,
         status: "completed",
@@ -624,12 +579,12 @@ describe("safe unified-jurisdiction migration", () => {
     await expect(
       t.mutation(backfillJurisdictionReferences, {
         environment: "test",
-        target: "dailyMetrics",
+        target: "chatSessions",
         cursor: null,
         batchSize: 100,
         dryRun: true,
         confirmation:
-          "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics DRY_RUN",
+          "UNIFIED_JURISDICTIONS BACKFILL test chatSessions DRY_RUN",
         reason: "Inspect stable jurisdiction references",
         idempotencyKey: "malformed-checkpoint",
       }),
@@ -649,7 +604,7 @@ describe("safe unified-jurisdiction migration", () => {
     const t = convexTest(schema, modules);
     await t.run((ctx) => ctx.db.insert("jurisdictionMigrationCheckpoints", {
       environment: "test", migrationVersion: "jurisdiction_ids_v1",
-      target: "dailyMetrics", mode: "execute", runNumber: 1,
+      target: "chatSessions", mode: "execute", runNumber: 1,
       status: "completed", processed: 1, updated: 0, unresolved: 0,
       mismatches: 0, startedAt: 1, completedAt: 2,
       lastIdempotencyKey: "malformed-invariant",
@@ -660,9 +615,9 @@ describe("safe unified-jurisdiction migration", () => {
       ...override,
     }));
     await expect(t.mutation(backfillJurisdictionReferences, {
-      environment: "test", target: "dailyMetrics", cursor: null, batchSize: 100,
+      environment: "test", target: "chatSessions", cursor: null, batchSize: 100,
       dryRun: false,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics EXECUTE",
+      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions EXECUTE",
       reason: "Verify stable jurisdiction references",
       idempotencyKey: "malformed-new-request",
     })).rejects.toThrow("JURISDICTION_MIGRATION_STATE_INVALID");
@@ -673,7 +628,7 @@ describe("safe unified-jurisdiction migration", () => {
     const token = `ujm1_${"1".repeat(32)}`;
     await t.run((ctx) => ctx.db.insert("jurisdictionMigrationCheckpoints", {
       environment: "test", migrationVersion: "jurisdiction_ids_v1",
-      target: "dailyMetrics", mode: "dry_run", runNumber: 1,
+      target: "chatSessions", mode: "dry_run", runNumber: 1,
       status: "running", databaseCursor: "corrupt-database-cursor",
       continuationToken: token, processed: 1, updated: 0, unresolved: 0,
       mismatches: 0, startedAt: 1,
@@ -684,123 +639,12 @@ describe("safe unified-jurisdiction migration", () => {
       updatedAt: 1,
     }));
     await expect(t.mutation(backfillJurisdictionReferences, {
-      environment: "test", target: "dailyMetrics", cursor: token, batchSize: 100,
+      environment: "test", target: "chatSessions", cursor: token, batchSize: 100,
       dryRun: true,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics DRY_RUN",
+      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions DRY_RUN",
       reason: "Inspect stable jurisdiction references",
       idempotencyKey: "cursor-corrupt-page-2",
     })).rejects.toThrow("JURISDICTION_MIGRATION_STATE_INVALID");
-  });
-
-  it("blocks a legacy daily aggregate when an ID aggregate already owns the day", async () => {
-    const t = convexTest(schema, modules);
-    const { jurisdictionId } = await insertGhana(t);
-    await t.mutation(seedGhanaJurisdictionV2, {
-      environment: "test", place,
-      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
-      reason: "Adopt the reviewed Ghana country projection",
-      idempotencyKey: "ghana-daily-collision",
-    });
-    await enableGhanaSearch(t, jurisdictionId);
-    const legacyId = await t.run(async (ctx) => {
-      const base = {
-        day: "2026-08-15", totalQuestions: 1, successCount: 1,
-        failureCount: 0, abortedCount: 0, providerFailureCount: 0,
-        noResultCount: 0, latencyLe250: 1, latencyLe500: 0,
-        latencyLe1000: 0, latencyLe2500: 0, latencyLe5000: 0,
-        latencyGt5000: 0, p50UpperBoundMs: 250, p95UpperBoundMs: 250,
-        updatedAt: 1,
-      };
-      await ctx.db.insert("dailyMetrics", {
-        ...base, jurisdictionId, jurisdictionCode: "GH",
-        jurisdictionName: "Republic of Ghana", jurisdictionKind: "geographic",
-      });
-      return ctx.db.insert("dailyMetrics", { ...base, jurisdictionCode: "GH" });
-    });
-    const result = await t.mutation(backfillJurisdictionReferences, {
-      environment: "test", target: "dailyMetrics", cursor: null, batchSize: 100,
-      dryRun: false,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics EXECUTE",
-      reason: "Backfill stable jurisdiction references",
-      idempotencyKey: "daily-legacy-id-collision",
-    });
-    expect(result).toMatchObject({ processed: 2, updated: 0, mismatches: 2 });
-    await expect(t.run((ctx) => ctx.db.get("dailyMetrics", legacyId)))
-      .resolves.not.toHaveProperty("jurisdictionId");
-  });
-
-  it("classifies every already-ID daily aggregate duplicate as a mismatch", async () => {
-    const t = convexTest(schema, modules);
-    const { jurisdictionId } = await insertGhana(t);
-    await t.mutation(seedGhanaJurisdictionV2, {
-      environment: "test", place,
-      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
-      reason: "Adopt the reviewed Ghana country projection",
-      idempotencyKey: "ghana-id-duplicate",
-    });
-    await enableGhanaSearch(t, jurisdictionId);
-    await t.run(async (ctx) => {
-      for (const updatedAt of [1, 2]) {
-        await ctx.db.insert("dailyMetrics", {
-          day: "2026-08-16", jurisdictionId, jurisdictionCode: "GH",
-          jurisdictionName: "Republic of Ghana", jurisdictionKind: "geographic",
-          totalQuestions: 1, successCount: 1, failureCount: 0, abortedCount: 0,
-          providerFailureCount: 0, noResultCount: 0, latencyLe250: 1,
-          latencyLe500: 0, latencyLe1000: 0, latencyLe2500: 0,
-          latencyLe5000: 0, latencyGt5000: 0, p50UpperBoundMs: 250,
-          p95UpperBoundMs: 250, updatedAt,
-        });
-      }
-    });
-    await expect(t.mutation(backfillJurisdictionReferences, {
-      environment: "test", target: "dailyMetrics", cursor: null, batchSize: 100,
-      dryRun: true,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics DRY_RUN",
-      reason: "Inspect stable jurisdiction references",
-      idempotencyKey: "daily-id-duplicate",
-    })).resolves.toMatchObject({ processed: 2, updated: 0, mismatches: 2 });
-  });
-
-  it("keeps cross-page duplicate daily candidates mismatched in dry-run and execute", async () => {
-    const t = convexTest(schema, modules);
-    const { jurisdictionId } = await insertGhana(t);
-    await t.mutation(seedGhanaJurisdictionV2, {
-      environment: "test", place,
-      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
-      reason: "Adopt the reviewed Ghana country projection",
-      idempotencyKey: "ghana-cross-page-daily",
-    });
-    await enableGhanaSearch(t, jurisdictionId);
-    await t.run(async (ctx) => {
-      for (const updatedAt of [1, 2]) {
-        await ctx.db.insert("dailyMetrics", {
-          day: "2026-08-17", jurisdictionCode: "GH", totalQuestions: 1,
-          successCount: 1, failureCount: 0, abortedCount: 0,
-          providerFailureCount: 0, noResultCount: 0, latencyLe250: 1,
-          latencyLe500: 0, latencyLe1000: 0, latencyLe2500: 0,
-          latencyLe5000: 0, latencyGt5000: 0, p50UpperBoundMs: 250,
-          p95UpperBoundMs: 250, updatedAt,
-        });
-      }
-    });
-    for (const dryRun of [true, false]) {
-      const args = {
-        environment: "test", target: "dailyMetrics" as const, batchSize: 1, dryRun,
-        confirmation: `UNIFIED_JURISDICTIONS BACKFILL test dailyMetrics ${dryRun ? "DRY_RUN" : "EXECUTE"}`,
-        reason: "Reject duplicate daily aggregate candidates",
-      };
-      const first = await t.mutation(backfillJurisdictionReferences, {
-        ...args, cursor: null, idempotencyKey: `daily-cross-page-${dryRun}-1`,
-      });
-      const second = await t.mutation(backfillJurisdictionReferences, {
-        ...args, cursor: first.continueCursor,
-        idempotencyKey: `daily-cross-page-${dryRun}-2`,
-      });
-      expect([first, second]).toMatchObject([
-        { processed: 1, updated: 0, mismatches: 1 },
-        { processed: 1, updated: 0, mismatches: 1 },
-      ]);
-    }
   });
 
   it("keeps dry-run source rows unchanged and makes page replay audit-idempotent", async () => {
@@ -872,7 +716,7 @@ describe("safe unified-jurisdiction migration", () => {
     ).rejects.toThrow("JURISDICTION_MIGRATION_CURSOR_STALE");
   });
 
-  it("rejects continuation-token target and mode substitution", async () => {
+  it("rejects continuation-token mode substitution", async () => {
     const t = convexTest(schema, modules);
     await insertGhana(t);
     await t.run(async (ctx) => {
@@ -889,18 +733,14 @@ describe("safe unified-jurisdiction migration", () => {
       confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions DRY_RUN",
       reason: "Inspect stable jurisdiction references", idempotencyKey: "tuple-page-one",
     });
-    for (const attempt of [
-      { target: "queryRuns" as const, dryRun: true,
-        confirmation: "UNIFIED_JURISDICTIONS BACKFILL test queryRuns DRY_RUN" },
-      { target: "chatSessions" as const, dryRun: false,
-        confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions EXECUTE" },
-    ]) {
-      await expect(t.mutation(backfillJurisdictionReferences, {
-        environment: "test", ...attempt, cursor: first.continueCursor,
-        batchSize: 1, reason: "Inspect stable jurisdiction references",
-        idempotencyKey: `tuple-substitution-${attempt.target}-${attempt.dryRun}`,
-      })).rejects.toThrow("JURISDICTION_MIGRATION_CURSOR_STALE");
-    }
+    await expect(t.mutation(backfillJurisdictionReferences, {
+      environment: "test", target: "chatSessions",
+      dryRun: false,
+      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions EXECUTE",
+      cursor: first.continueCursor,
+      batchSize: 1, reason: "Inspect stable jurisdiction references",
+      idempotencyKey: "tuple-mode-substitution",
+    })).rejects.toThrow("JURISDICTION_MIGRATION_CURSOR_STALE");
   });
 
   it("serializes concurrent continuation replay and conflicting keys", async () => {
@@ -960,11 +800,6 @@ describe("safe unified-jurisdiction migration", () => {
       await ctx.db.insert("chatSessions", { ...base, externalId: "unresolved" });
       await ctx.db.insert("chatSessions", { ...base, externalId: "mismatch", country: "GH",
         jurisdictionContract: "unified" });
-      await ctx.db.insert("telemetryCorrelations", {
-        tokenHash: "contract-mismatch", ownerBinding: "owner", sessionBinding: "session",
-        jurisdictionId, jurisdictionContract: "legacy", status: "issued",
-        issuedAt: 1, expiresAt: 2,
-      });
     });
     await expect(t.mutation(backfillJurisdictionReferences, {
       environment: "test", target: "chatSessions", cursor: null, batchSize: 100,
@@ -972,113 +807,5 @@ describe("safe unified-jurisdiction migration", () => {
       confirmation: "UNIFIED_JURISDICTIONS BACKFILL test chatSessions DRY_RUN",
       reason: "Classify contract integrity", idempotencyKey: "contract-chat-classify",
     })).resolves.toMatchObject({ processed: 4, updated: 1, unresolved: 1, mismatches: 1 });
-    await expect(t.mutation(backfillJurisdictionReferences, {
-      environment: "test", target: "telemetryCorrelations", cursor: null, batchSize: 100,
-      dryRun: true,
-      confirmation: "UNIFIED_JURISDICTIONS BACKFILL test telemetryCorrelations DRY_RUN",
-      reason: "Classify contract integrity", idempotencyKey: "contract-telemetry-classify",
-    })).resolves.toMatchObject({ processed: 1, updated: 0, unresolved: 0, mismatches: 1 });
-  });
-
-  it("patches identity snapshots in every persisted target without changing payload fields", async () => {
-    const t = convexTest(schema, modules);
-    const { jurisdictionId } = await insertGhana(t);
-    await t.mutation(seedGhanaJurisdictionV2, {
-      environment: "test",
-      place,
-      confirmation: "SEED_GHANA_JURISDICTION_V2 test",
-      reason: "Adopt the reviewed Ghana country projection",
-      idempotencyKey: "ghana-all-targets",
-    });
-    await enableGhanaSearch(t, jurisdictionId);
-    const ids = await t.run(async (ctx) => ({
-      correlation: await ctx.db.insert("telemetryCorrelations", {
-        tokenHash: "opaque-correlation",
-        ownerBinding: "opaque-owner",
-        sessionBinding: "opaque-session",
-        jurisdictionCode: "GH",
-        status: "issued",
-        issuedAt: 10,
-        expiresAt: 20,
-      }),
-      run: await ctx.db.insert("queryRuns", {
-        correlationId: "opaque-run",
-        day: "2026-08-15",
-        jurisdictionCode: "GH",
-        outcome: "success",
-        searchProviderStatus: "success",
-        generationProviderStatus: "success",
-        searchLatencyMs: 10,
-        generationLatencyMs: 20,
-        totalLatencyMs: 30,
-        resultCount: 2,
-        completedAt: 40,
-        rollupStatus: "processed",
-      }),
-      metric: await ctx.db.insert("dailyMetrics", {
-        day: "2026-08-15",
-        jurisdictionCode: "GH",
-        totalQuestions: 9,
-        successCount: 7,
-        failureCount: 1,
-        abortedCount: 1,
-        providerFailureCount: 1,
-        noResultCount: 2,
-        latencyLe250: 1,
-        latencyLe500: 2,
-        latencyLe1000: 3,
-        latencyLe2500: 1,
-        latencyLe5000: 1,
-        latencyGt5000: 1,
-        p50UpperBoundMs: 1_000,
-        p95UpperBoundMs: 6_000,
-        updatedAt: 50,
-      }),
-    }));
-    for (const target of [
-      "telemetryCorrelations",
-      "queryRuns",
-      "dailyMetrics",
-    ] as const) {
-      await t.mutation(backfillJurisdictionReferences, {
-        environment: "test",
-        target,
-        cursor: null,
-        batchSize: 100,
-        dryRun: false,
-        confirmation: `UNIFIED_JURISDICTIONS BACKFILL test ${target} EXECUTE`,
-        reason: "Backfill stable jurisdiction references",
-        idempotencyKey: `all-targets-${target}`,
-      });
-    }
-    await expect(
-      t.run(async (ctx) => ({
-        correlation: await ctx.db.get("telemetryCorrelations", ids.correlation),
-        run: await ctx.db.get("queryRuns", ids.run),
-        metric: await ctx.db.get("dailyMetrics", ids.metric),
-      })),
-    ).resolves.toMatchObject({
-      correlation: {
-        jurisdictionId,
-        jurisdictionName: "Republic of Ghana",
-        jurisdictionKind: "geographic",
-        jurisdictionContract: "legacy",
-        tokenHash: "opaque-correlation",
-      },
-      run: {
-        jurisdictionId,
-        jurisdictionName: "Republic of Ghana",
-        jurisdictionKind: "geographic",
-        resultCount: 2,
-        totalLatencyMs: 30,
-      },
-      metric: {
-        jurisdictionId,
-        jurisdictionName: "Republic of Ghana",
-        jurisdictionKind: "geographic",
-        totalQuestions: 9,
-        successCount: 7,
-      },
-    });
   });
 });

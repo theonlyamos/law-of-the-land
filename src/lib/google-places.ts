@@ -1,6 +1,12 @@
 import "server-only";
 
-import { createPlacesProvider } from "./jurisdiction-provider-adapters";
+import {
+  createPlacesProvider,
+  type PlaceSuggestion,
+  type VerifiedPlace,
+} from "./google-places-provider";
+
+export type { PlaceSuggestion, VerifiedPlace } from "./google-places-provider";
 
 const GOOGLE_PLACES_ORIGIN = "https://places.googleapis.com/v1";
 const AUTOCOMPLETE_FIELD_MASK = "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.types";
@@ -11,28 +17,6 @@ const MAX_ADDRESS_COMPONENTS = 32;
 const MIN_API_KEY_LENGTH = 20;
 const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1_024;
 const PROVIDER_TIMEOUT_MS = 8_000;
-
-export type PlaceSuggestion = {
-  placeId: string;
-  primaryText: string;
-  secondaryText: string;
-  types: string[];
-};
-
-export type VerifiedPlace = {
-  placeId: string;
-  displayName: string;
-  formattedAddress: string;
-  latitude: number;
-  longitude: number;
-  types: string[];
-  countryCode?: string;
-  addressComponents: Array<{
-    longText: string;
-    shortText: string;
-    types: string[];
-  }>;
-};
 
 function placesError(code: string): never {
   throw new Error(code);

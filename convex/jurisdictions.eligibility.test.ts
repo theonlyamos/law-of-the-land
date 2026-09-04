@@ -2,212 +2,197 @@
 
 import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
-import { afterEach, describe, expect, it } from "vitest";
-import type { Id } from "./_generated/dataModel";
+import { describe, expect, it } from "vitest";
+import { components } from "./_generated/api";
+import authSchema from "./betterAuth/schema";
 import schema from "./schema";
-import { researchManifestResolutionResponse } from "./http";
-import { normalizeUniqueJurisdictionIds } from "./lib/jurisdictionDomain";
-import {
-  createResearchManifestHeaders,
-  createResearchManifestNonce,
-  RESEARCH_MANIFEST_HEADERS,
-  RESEARCH_MANIFEST_REPLAY_WINDOW_MS,
-} from "./lib/researchManifestProof";
 
 const modules = import.meta.glob("./**/*.ts");
+const authModules = Object.fromEntries(
+  Object.entries(import.meta.glob("./betterAuth/**/*.ts")).map(([path, load]) => [
+    `./${path.slice("./betterAuth/".length)}`,
+    load,
+  ]),
+);
 type Backend = TestConvex<typeof schema>;
 
-const listPublicEnabled = makeFunctionReference<"query">(
-  "jurisdictions:listPublicEnabled",
-);
-const getPublicByCode = makeFunctionReference<"query">(
-  "jurisdictions:getPublicByCode",
-);
-const getResearchManifestAvailability = makeFunctionReference<"query">(
-  "jurisdictions:getResearchManifestAvailability",
-);
-const invalidGeminiStores = [
-  ["missing", null],
-  ["empty", ""],
-  ["malformed", "stores/ghana"],
-  ["cross-resource", "fileSearchStores/UPPERCASE"],
-] as const;
-
-const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
-const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
-const previousSearchJurisdictionSecret = process.env.SEARCH_JURISDICTION_SECRET;
-
-afterEach(() => {
-  if (previousAdminPanelEnabled === undefined) delete process.env.ADMIN_PANEL_ENABLED;
-  else process.env.ADMIN_PANEL_ENABLED = previousAdminPanelEnabled;
-  if (previousAdminEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT;
-  else process.env.ADMIN_ENVIRONMENT = previousAdminEnvironment;
-  if (previousSearchJurisdictionSecret === undefined) {
-    delete process.env.SEARCH_JURISDICTION_SECRET;
-  } else {
-    process.env.SEARCH_JURISDICTION_SECRET = previousSearchJurisdictionSecret;
-  }
-});
-
 function createBackend() {
-  return convexTest(schema, modules);
+  const t = convexTest(schema, modules);
+  t.registerComponent("betterAuth", authSchema, authModules);
+  return t;
 }
 
-async function insertJurisdiction(
+async function asUser(t: Backend, label: string) {
+  const identity = await t.run(async (ctx) => {
+    const now = Date.now();
+    const user = await ctx.runMutation(components.betterAuth.adapter.create, {
+      input: {
+        model: "user",
+        data: {
+          name: label,
+          email: `${label}-${crypto.randomUUID()}@example.com`,
+          emailVerified: true,
+          createdAt: now,
+          updatedAt: now,
+          role: "user",
+          banned: false,
+          twoFactorEnabled: false,
+        },
+      },
+    });
+    const session = await ctx.runMutation(components.betterAuth.adapter.create, {
+      input: {
+        model: "session",
+        data: {
+          token: `session-${crypto.randomUUID()}`,
+          userId: user._id,
+          expiresAt: now + 60_000,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+    return { userId: user._id, sessionId: session._id };
+  });
+  return {
+    userId: identity.userId,
+    client: t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId }),
+  };
+}
+
+async function insertGeographic(
   t: Backend,
   input: {
-    code: string;
     name: string;
-    slug: string;
-    status: "draft" | "enabled";
-    geminiFileSearchStoreName?: string | null;
+    level: "country" | "region" | "city";
+    parentJurisdictionId?: string;
+    status?: "draft" | "enabled";
+    storeName?: string | null;
     providerSyncState?: "pending" | "synced" | "drifted" | "failed";
-    isDefault?: boolean;
   },
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
-    return await ctx.db.insert("jurisdictions", {
-      code: input.code,
+    const storeName = input.storeName === undefined
+      ? `fileSearchStores/${crypto.randomUUID()}`
+      : input.storeName;
+    const jurisdictionId = await ctx.db.insert("jurisdictions", {
       name: input.name,
-      slug: input.slug,
-      status: input.status,
-      isDefault: input.isDefault ?? false,
-      geminiFileSearchStoreName: input.geminiFileSearchStoreName === null
-        ? undefined
-        : input.geminiFileSearchStoreName ?? `fileSearchStores/${input.slug}`,
+      slug: `${input.name.toLowerCase().replaceAll(" ", "-")}-${crypto.randomUUID()}`,
+      status: input.status ?? "enabled",
+      isDefault: false,
+      geminiFileSearchStoreName: storeName ?? undefined,
       providerSyncState: input.providerSyncState ?? "synced",
+      kind: "geographic",
+      visibility: "public",
       createdBy: "fixture",
       updatedBy: "fixture",
       createdAt: now,
       updatedAt: now,
     });
+    const profileId = await ctx.db.insert("geographicJurisdictions", {
+      jurisdictionId,
+      googlePlaceId: `place-${crypto.randomUUID()}`,
+      level: input.level,
+      latitude: 0,
+      longitude: 0,
+      formattedAddress: input.name,
+      parentJurisdictionId: input.parentJurisdictionId as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { jurisdictionId, profileId, storeName };
   });
 }
 
-async function signedResearchPost(
-  t: Backend,
-  pathname: "/internal/search-jurisdiction" | "/internal/search-jurisdictions",
-  body: BodyInit | null,
-  secret: string,
-  options: {
-    signedBody?: string;
-    timestamp?: number;
-    nonce?: string;
-    headers?: Record<string, string>;
-  } = {},
-) {
-  const signedBody = options.signedBody ?? (typeof body === "string" ? body : "");
-  const bodyBytes = new TextEncoder().encode(signedBody);
-  const proofHeaders = bodyBytes.byteLength <= 65_536
-    ? await createResearchManifestHeaders({
-      secret,
-      method: "POST",
-      pathname,
-      timestamp: options.timestamp ?? Date.now(),
-      nonce: options.nonce ?? createResearchManifestNonce(),
-      bodyBytes,
-    })
-    : {};
-  const requestInit = {
-    method: "POST",
-    headers: { "content-type": "application/json", ...proofHeaders, ...options.headers },
-    body,
-    ...(body instanceof ReadableStream ? { duplex: "half" as const } : {}),
-  } satisfies RequestInit & { duplex?: "half" };
-  return await t.fetch(pathname, requestInit);
-}
-
-describe("research manifest request proof", () => {
-  it("binds method, path, timestamp, nonce, and exact body bytes without sending the secret", async () => {
-    const bodyBytes = new TextEncoder().encode('{"selectedJurisdictionId":"one","supplementaryJurisdictionIds":[]}');
-    const headers = await createResearchManifestHeaders({
-      secret: "research-manifest-secret-at-least-32-characters",
-      method: "POST",
-      pathname: "/internal/search-jurisdictions",
-      timestamp: 1_700_000_000_000,
-      nonce: createResearchManifestNonce(),
-      bodyBytes,
-    });
-    expect(headers).toEqual({
-      "x-research-manifest-version": "1",
-      "x-research-manifest-timestamp": "1700000000000",
-      "x-research-manifest-nonce": expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
-      "x-research-manifest-signature": expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
-    });
-    expect(JSON.stringify(headers)).not.toContain("research-manifest-secret");
-  });
-});
-
-async function insertPublishedDocument(
-  t: Backend,
-  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
-  storeName: string,
-) {
+async function insertMemberOrganization(t: Backend) {
   return await t.run(async (ctx) => {
     const now = Date.now();
-    const resourceId = await ctx.db.insert("legalResources", {
-      jurisdictionId,
-      type: "act",
-      title: "Trusted Act",
-      issuer: "Parliament",
-      officialCitation: "Act 7 of 2026",
-      officialCitationKey: "act 7 of 2026",
-      sourceUrl: "https://official.example/act-7",
-      topics: ["employment"],
-      effectiveDate: "2026-01-01",
+    const organizationId = await ctx.db.insert("organizations", {
+      name: "Private authority",
+      slug: `private-${crypto.randomUUID()}`,
+      class: "government",
       status: "active",
       createdBy: "fixture",
       updatedBy: "fixture",
       createdAt: now,
       updatedAt: now,
     });
-    const originalStorageId = await ctx.storage.store(new Blob(["law"]));
-    const versionId = await ctx.db.insert("documentVersions", {
-      resourceId,
-      versionNumber: 1,
-      originalStorageId,
-      filename: "act.pdf",
-      mimeType: "application/pdf",
-      byteSize: 3,
-      sha256: "a".repeat(64),
-      sourceUrl: "https://upload.example/untrusted",
-      status: "published",
-      geminiDocumentName: `${storeName}/documents/trusted-act-v1`,
-      geminiIndexedAt: now,
-      submittedBy: "fixture",
-      publishedAt: now,
+    const jurisdictionId = await ctx.db.insert("jurisdictions", {
+      name: "Private authority",
+      slug: `private-authority-${crypto.randomUUID()}`,
+      status: "enabled",
+      isDefault: false,
+      geminiFileSearchStoreName: `fileSearchStores/${crypto.randomUUID()}`,
+      providerSyncState: "synced",
+      kind: "organizational",
+      visibility: "members",
+      organizationId,
+      createdBy: "fixture",
+      updatedBy: "fixture",
       createdAt: now,
       updatedAt: now,
     });
-    await ctx.db.patch(resourceId, { activeVersionId: versionId });
-    return { resourceId, versionId };
+    await ctx.db.insert("organizationalJurisdictions", {
+      jurisdictionId,
+      scopeMode: "global",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { organizationId, jurisdictionId };
   });
 }
 
-async function insertPublishedDocuments(
-  t: Backend,
-  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
-  storeName: string,
-  count: number,
-) {
-  return await t.run(async (ctx) => {
-    const originalStorageId = await ctx.storage.store(new Blob(["law"]));
-    const documents: Array<{
-      resourceId: Id<"legalResources">;
-      versionId: Id<"documentVersions">;
-    }> = [];
-    for (let index = 1; index <= count; index += 1) {
+async function post(client: Pick<Backend, "fetch">, body: string) {
+  return await client.fetch("/private/chat-research-manifest", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+}
+
+describe("authenticated private chat research manifest", () => {
+  it("requires authentication before parsing or resolving a selection", async () => {
+    const t = createBackend();
+    const selected = await insertGeographic(t, { name: "Selected", level: "country" });
+
+    for (const body of [
+      JSON.stringify({ jurisdictionId: selected.jurisdictionId }),
+      JSON.stringify({ jurisdictionId: "not-a-convex-id" }),
+      "{",
+    ]) {
+      const response = await post(t, body);
+      expect(response.status).toBe(401);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.text()).toBe("");
+    }
+  });
+
+  it("needs no shared secret or client-supplied scope and returns selected-first ready stores only", async () => {
+    const t = createBackend();
+    const user = await asUser(t, "reader");
+    const country = await insertGeographic(t, { name: "Country", level: "country" });
+    const region = await insertGeographic(t, {
+      name: "Region",
+      level: "region",
+      parentJurisdictionId: country.jurisdictionId,
+    });
+    const city = await insertGeographic(t, {
+      name: "City",
+      level: "city",
+      parentJurisdictionId: region.jurisdictionId,
+    });
+    await t.run(async (ctx) => {
       const now = Date.now();
       const resourceId = await ctx.db.insert("legalResources", {
-        jurisdictionId,
+        jurisdictionId: city.jurisdictionId,
         type: "act",
-        title: `Trusted Act ${index}`,
-        issuer: "Parliament",
-        officialCitation: `Act ${index} of 2026`,
-        officialCitationKey: `act ${index} of 2026`,
-        sourceUrl: `https://official.example/act-${index}`,
-        topics: ["employment"],
+        title: "Private document title",
+        issuer: "Fixture",
+        officialCitation: "Act 1",
+        officialCitationKey: "act 1",
+        sourceUrl: "https://official.example/act-1",
+        topics: [],
         effectiveDate: "2026-01-01",
         status: "active",
         createdBy: "fixture",
@@ -215,17 +200,18 @@ async function insertPublishedDocuments(
         createdAt: now,
         updatedAt: now,
       });
+      const originalStorageId = await ctx.storage.store(new Blob(["law"]));
       const versionId = await ctx.db.insert("documentVersions", {
         resourceId,
         versionNumber: 1,
         originalStorageId,
-        filename: `act-${index}.pdf`,
+        filename: "law.pdf",
         mimeType: "application/pdf",
         byteSize: 3,
-        sha256: index.toString(16).padStart(64, "0"),
-        sourceUrl: `https://upload.example/act-${index}`,
+        sha256: "a".repeat(64),
+        sourceUrl: "https://official.example/act-1",
         status: "published",
-        geminiDocumentName: `${storeName}/documents/trusted-act-${index}`,
+        geminiDocumentName: `${city.storeName}/documents/private-document-name`,
         geminiIndexedAt: now,
         submittedBy: "fixture",
         publishedAt: now,
@@ -233,848 +219,125 @@ async function insertPublishedDocuments(
         updatedAt: now,
       });
       await ctx.db.patch(resourceId, { activeVersionId: versionId });
-      documents.push({ resourceId, versionId });
-    }
-    return documents;
-  });
-}
-
-async function insertDraftDocument(
-  t: Backend,
-  jurisdictionId: Awaited<ReturnType<typeof insertJurisdiction>>,
-) {
-  return await t.run(async (ctx) => {
-    const now = Date.now();
-    const resourceId = await ctx.db.insert("legalResources", {
-      jurisdictionId,
-      type: "act",
-      title: "Draft Act",
-      issuer: "Parliament",
-      officialCitation: "Draft Act of 2026",
-      officialCitationKey: "draft act of 2026",
-      sourceUrl: "https://official.example/draft-act",
-      topics: ["employment"],
-      effectiveDate: "2026-06-01",
-      status: "active",
-      createdBy: "fixture",
-      updatedBy: "fixture",
-      createdAt: now,
-      updatedAt: now,
-    });
-    const originalStorageId = await ctx.storage.store(new Blob(["draft"]));
-    const versionId = await ctx.db.insert("documentVersions", {
-      resourceId,
-      versionNumber: 1,
-      originalStorageId,
-      filename: "draft-act.pdf",
-      mimeType: "application/pdf",
-      byteSize: 5,
-      sha256: "b".repeat(64),
-      sourceUrl: "https://upload.example/draft-act",
-      status: "draft",
-      submittedBy: "fixture",
-      createdAt: now,
-      updatedAt: now,
-    });
-    return { resourceId, versionId };
-  });
-}
-
-describe("public jurisdiction eligibility", () => {
-  it.each(invalidGeminiStores)(
-    "excludes an enabled jurisdiction with a %s Gemini store",
-    async (_label, geminiFileSearchStoreName) => {
-      const t = createBackend();
-      await insertJurisdiction(t, {
-        code: "GH",
-        name: "Ghana",
-        slug: "ghana",
-        status: "enabled",
-        geminiFileSearchStoreName,
-        isDefault: true,
-      });
-
-      await expect(t.query(listPublicEnabled, {})).resolves.toEqual([]);
-      await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toBeNull();
-    },
-  );
-
-  it("excludes every duplicate enabled code while retaining an unrelated eligible code", async () => {
-    const t = createBackend();
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      isDefault: true,
-    });
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Duplicate Ghana",
-      slug: "duplicate-ghana",
-      status: "enabled",
-    });
-    await insertJurisdiction(t, {
-      code: "NG",
-      name: "Nigeria",
-      slug: "nigeria",
-      status: "enabled",
     });
 
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "NG", name: "Nigeria", slug: "nigeria", isDefault: false },
-    ]);
-    await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toBeNull();
-  });
-
-  it("retains a single eligible enabled code when another row is still a draft", async () => {
-    const t = createBackend();
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      isDefault: true,
-    });
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Draft Ghana",
-      slug: "draft-ghana",
-      status: "draft",
-    });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-    ]);
-    await expect(t.query(getPublicByCode, { code: "GH" })).resolves.toMatchObject({
-      code: "GH",
-      searchReady: true,
-    });
-  });
-});
-
-describe("internal search jurisdiction HTTP boundary", () => {
-  const secret = "search-jurisdiction-test-secret-at-least-32-characters";
-
-  async function post(t: Backend, body: string, suppliedSecret = secret) {
-    return await signedResearchPost(t, "/internal/search-jurisdiction", body, suppliedSecret);
-  }
-
-  it("fails closed for absent and incorrect transport secrets", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-
-    const absent = await t.fetch("/internal/search-jurisdiction", {
-      method: "POST",
-      body: JSON.stringify({ code: "GH" }),
-    });
-    const incorrect = await post(
-      t,
-      JSON.stringify({ code: "GH" }),
-      "incorrect-search-jurisdiction-secret-at-least-32-characters",
-    );
-
-    expect(absent.status).toBe(404);
-    expect(absent.headers.get("cache-control")).toBe("no-store");
-    expect(incorrect.status).toBe(404);
-    expect(incorrect.headers.get("cache-control")).toBe("no-store");
-  });
-
-  it.each([
-    ["missing", ""],
-    ["malformed JSON", "{"],
-    ["invalid code", JSON.stringify({ code: "gh" })],
-    ["oversized", "x".repeat(65)],
-  ])("rejects a %s request body", async (_label, body) => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-
-    const response = await post(t, body);
-
-    expect(response.status).toBe(400);
-    expect(response.headers.get("cache-control")).toBe("no-store");
-  });
-
-  it("returns private null responses for unknown and duplicate enabled codes", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-    });
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Duplicate Ghana",
-      slug: "duplicate-ghana",
-      status: "enabled",
-    });
-
-    for (const code of ["ZZ", "GH"]) {
-      const response = await post(t, JSON.stringify({ code }));
-      expect(response.status).toBe(200);
-      expect(response.headers.get("cache-control")).toBe("no-store, private");
-      await expect(response.json()).resolves.toBeNull();
-    }
-  });
-
-  it("keeps the public four-field DTO separate from the private search response", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-      isDefault: true,
-    });
-
-    await expect(t.query(listPublicEnabled, {})).resolves.toEqual([
-      { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-    ]);
-    const response = await post(t, JSON.stringify({ code: "GH" }));
-    expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("no-store, private");
-    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-    await expect(response.json()).resolves.toEqual({
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      enabled: true,
-      isDefault: true,
-      searchReady: true,
-    });
-  });
-});
-
-describe("internal multi-jurisdiction library availability boundary", () => {
-  const secret = "search-jurisdiction-test-secret-at-least-32-characters";
-
-  async function post(
-    t: Backend,
-    body: BodyInit | null,
-    suppliedSecret = secret,
-    headers: Record<string, string> = {},
-    signedBody?: string,
-  ) {
-    return await signedResearchPost(t, "/internal/search-jurisdictions", body, suppliedSecret, {
-      headers,
-      ...(signedBody === undefined ? {} : { signedBody }),
-    });
-  }
-
-  async function reusableRequest(body: string, overrides: {
-    pathname?: string;
-    timestamp?: number;
-    nonce?: string;
-  } = {}) {
-    const bodyBytes = new TextEncoder().encode(body);
-    const headers = await createResearchManifestHeaders({
-      secret,
-      method: "POST",
-      pathname: overrides.pathname ?? "/internal/search-jurisdictions",
-      timestamp: overrides.timestamp ?? Date.now(),
-      nonce: overrides.nonce ?? createResearchManifestNonce(),
-      bodyBytes,
-    });
-    return { method: "POST", headers: { "content-type": "application/json", ...headers }, body } satisfies RequestInit;
-  }
-
-  it("rejects proofs with tampered method, path, body, signature, timestamp, or nonce", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const body = JSON.stringify({ selectedJurisdictionId: "opaque", supplementaryJurisdictionIds: [] });
-    const original = await reusableRequest(body);
-    const badSignature = { ...original, headers: { ...original.headers, [RESEARCH_MANIFEST_HEADERS.signature]: "A".repeat(43) } };
-    const malformedNonce = { ...original, headers: { ...original.headers, [RESEARCH_MANIFEST_HEADERS.nonce]: "not-a-nonce" } };
-    const tamperedBody = { ...original, body: `${body} ` };
-    const wrongPath = await reusableRequest(body, { pathname: "/internal/search-jurisdiction" });
-    const stale = await reusableRequest(body, { timestamp: Date.now() - RESEARCH_MANIFEST_REPLAY_WINDOW_MS - 1 });
-    const future = await reusableRequest(body, { timestamp: Date.now() + RESEARCH_MANIFEST_REPLAY_WINDOW_MS + 1 });
-
-    for (const init of [badSignature, malformedNonce, tamperedBody, wrongPath, stale, future]) {
-      expect((await t.fetch("/internal/search-jurisdictions", init)).status).toBe(404);
-    }
-    expect((await t.fetch("/internal/search-jurisdictions", { ...original, method: "GET" })).status).toBe(404);
-  });
-
-  it("atomically rejects sequential and concurrent replay of a valid proof", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const body = JSON.stringify({ selectedJurisdictionId: selected, supplementaryJurisdictionIds: [] });
-    const sequential = await reusableRequest(body);
-    expect((await t.fetch("/internal/search-jurisdictions", sequential)).status).toBe(200);
-    expect((await t.fetch("/internal/search-jurisdictions", sequential)).status).toBe(404);
-
-    const concurrent = await reusableRequest(body);
-    const statuses = await Promise.all([
-      t.fetch("/internal/search-jurisdictions", concurrent),
-      t.fetch("/internal/search-jurisdictions", concurrent),
-    ]).then((responses) => responses.map(({ status }) => status).sort());
-    expect(statuses).toEqual([200, 404]);
-  });
-
-  it("returns canonical ready libraries in selected and supplementary request order", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH",
-      name: "Ghana",
-      slug: "ghana",
-      status: "enabled",
-    });
-    const second = await insertJurisdiction(t, {
-      code: "NG",
-      name: "Nigeria",
-      slug: "nigeria",
-      status: "enabled",
-    });
-    const third = await insertJurisdiction(t, {
-      code: "KE",
-      name: "Kenya",
-      slug: "kenya",
-      status: "enabled",
-    });
-
-    await expect(t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [third, second],
-    })).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
-      supplementary: [
-        { jurisdictionId: third, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
-        { jurisdictionId: second, status: "ready", storeName: "fileSearchStores/nigeria", documents: [] },
-      ],
-    });
-
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [third, second],
-    }));
+    const response = await post(user.client, JSON.stringify({ jurisdictionId: city.jurisdictionId }));
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store, private");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-    await expect(response.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
-      supplementary: [
-        { jurisdictionId: third, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
-        { jurisdictionId: second, status: "ready", storeName: "fileSearchStores/nigeria", documents: [] },
-      ],
-    });
-  });
-
-  it("returns only the current active Convex citation manifest and rejects duplicate store ownership", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const { resourceId, versionId } = await insertPublishedDocument(t, selected, storeName);
-    const citationKeys = [{ jurisdictionId: selected, resourceId, versionId }];
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys,
-    }));
-    await expect(response.json()).resolves.toEqual({
-      selected: {
-        jurisdictionId: selected,
-        status: "ready",
-        storeName,
-        documents: [{
-          resourceId,
-          versionId,
-          documentName: `${storeName}/documents/trusted-act-v1`,
-          title: "Trusted Act",
-          officialCitation: "Act 7 of 2026",
-          sourceUrl: "https://official.example/act-7",
-        }],
-      },
-      supplementary: [],
-    });
-
-    await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const duplicate = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys,
-    }));
-    await expect(duplicate.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "needs_review" },
-      supplementary: [],
-    });
-  });
-
-  it("treats only non-null active-version pointers as publication claims", async () => {
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const published = await insertPublishedDocument(t, selected, storeName);
-    const draft = await insertDraftDocument(t, selected);
-
-    await expect(t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys: [
-        { jurisdictionId: selected, resourceId: published.resourceId, versionId: published.versionId },
-        { jurisdictionId: selected, resourceId: draft.resourceId, versionId: draft.versionId },
-      ],
-    })).resolves.toEqual({
-      selected: {
-        jurisdictionId: selected,
-        status: "ready",
-        storeName,
-        documents: [{
-          resourceId: published.resourceId,
-          versionId: published.versionId,
-          documentName: `${storeName}/documents/trusted-act-v1`,
-          title: "Trusted Act",
-          officialCitation: "Act 7 of 2026",
-          sourceUrl: "https://official.example/act-7",
-        }],
-      },
-      supplementary: [],
-    });
-
-    await t.run(async (ctx) => {
-      await ctx.db.patch(draft.resourceId, { activeVersionId: draft.versionId });
-    });
-    await expect(t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys: [
-        { jurisdictionId: selected, resourceId: published.resourceId, versionId: published.versionId },
-        { jurisdictionId: selected, resourceId: draft.resourceId, versionId: draft.versionId },
-      ],
-    })).resolves.toEqual({
-      selected: {
-        jurisdictionId: selected,
-        status: "ready",
-        storeName,
-        documents: [{
-          resourceId: published.resourceId,
-          versionId: published.versionId,
-          documentName: `${storeName}/documents/trusted-act-v1`,
-          title: "Trusted Act",
-          officialCitation: "Act 7 of 2026",
-          sourceUrl: "https://official.example/act-7",
-        }],
-      },
-      supplementary: [],
-    });
-  });
-
-  it("authorizes a cited current document beyond the first 64 published documents", async () => {
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const published = await insertPublishedDocuments(t, selected, storeName, 65);
-
-    const cited = published[64];
-    const result = await t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys: [{ jurisdictionId: selected, ...cited }],
-    });
-
-    expect(result.selected).toEqual({
-      jurisdictionId: selected,
-      status: "ready",
-      storeName,
-      documents: [{
-        ...cited,
-        documentName: `${storeName}/documents/trusted-act-65`,
-        title: "Trusted Act 65",
-        officialCitation: "Act 65 of 2026",
-        sourceUrl: "https://official.example/act-65",
-      }],
-    });
-  });
-
-  it("retains at most 64 non-authoritative preflight document hints", async () => {
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    await insertPublishedDocuments(t, selected, storeName, 65);
-
-    const result = await t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-    });
-
-    expect(result.selected.status).toBe("ready");
-    if (result.selected.status !== "ready") throw new Error("expected ready research availability");
-    expect(result.selected.documents).toHaveLength(64);
-  });
-
-  it("omits a cited document while its lifecycle operation can change store contents", async () => {
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const { resourceId, versionId } = await insertPublishedDocument(t, selected, storeName);
-    await t.run(async (ctx) => {
-      const now = Date.now();
-      await ctx.db.insert("documentLifecycleLocks", {
-        resourceId,
-        versionId,
-        operation: "publish",
-        actorId: "fixture",
-        idempotencyKey: "fixture-lock",
-        expiresAt: now + 60_000,
-        createdAt: now,
-        updatedAt: now,
-      });
-    });
-
-    await expect(t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys: [{ jurisdictionId: selected, resourceId, versionId }],
-    })).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", storeName, documents: [] },
-      supplementary: [],
-    });
-  });
-
-  it("omits forged, foreign-resource, draft, and stale citation candidates individually", async () => {
-    const t = createBackend();
-    const storeName = "fileSearchStores/ghana";
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled", geminiFileSearchStoreName: storeName,
-    });
-    const foreign = await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
-    });
-    const current = await insertPublishedDocument(t, selected, storeName);
-    const foreignDocument = await insertPublishedDocument(t, foreign, "fileSearchStores/nigeria");
-    const draft = await insertDraftDocument(t, selected);
-    const stale = await insertPublishedDocument(t, selected, storeName);
-    await t.run(async (ctx) => await ctx.db.patch(stale.resourceId, { activeVersionId: undefined }));
-
-    const result = await t.query(getResearchManifestAvailability, {
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys: [
-        { jurisdictionId: selected, ...current },
-        { jurisdictionId: selected, resourceId: "forged-resource", versionId: "forged-version" },
-        { jurisdictionId: selected, ...foreignDocument },
-        { jurisdictionId: selected, ...draft },
-        { jurisdictionId: selected, ...stale },
-      ],
-    });
-
-    expect(result.selected).toEqual({
-      jurisdictionId: selected,
-      status: "ready",
-      storeName,
-      documents: [{
-        ...current,
-        documentName: `${storeName}/documents/trusted-act-v1`,
-        title: "Trusted Act",
-        officialCitation: "Act 7 of 2026",
-        sourceUrl: "https://official.example/act-7",
-      }],
-    });
-  });
-
-  it.each([
-    ["missing", null, "synced", "unconfigured"],
-    ["pending", "fileSearchStores/secret", "pending", "provisioning"],
-    ["failed", "fileSearchStores/secret", "failed", "unconfigured"],
-    ["drifted", "fileSearchStores/secret", "drifted", "needs_review"],
-    ["malformed", "stores/secret", "synced", "needs_review"],
-  ] as const)("classifies a %s selected store without leaking its value", async (_label, geminiFileSearchStoreName, providerSyncState, status) => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH",
-      name: "SECRET_NAME",
-      slug: "secret-slug",
-      status: "enabled",
-      geminiFileSearchStoreName,
-      providerSyncState,
-    });
-
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-    }));
-
-    expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload).toEqual({
-      selected: { jurisdictionId: selected, status },
-      supplementary: [],
-    });
-    expect(JSON.stringify(payload)).not.toMatch(/SECRET_NAME|secret-slug|legacy-secret|fileSearchStores|stores\/secret/);
-  });
-
-  it("keeps supplementary unconfigured entries in place while later entries retain order", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const unavailable = await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
-      geminiFileSearchStoreName: null,
-    });
-    const ready = await insertJurisdiction(t, {
-      code: "KE", name: "Kenya", slug: "kenya", status: "enabled",
-    });
-
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [unavailable, ready],
-    }));
-    await expect(response.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
-      supplementary: [
-        { jurisdictionId: unavailable, status: "unconfigured" },
-        { jurisdictionId: ready, status: "ready", storeName: "fileSearchStores/kenya", documents: [] },
+      authorizedScopeSize: 3,
+      stores: [
+        { jurisdictionId: city.jurisdictionId, name: "City", kind: "geographic", relation: "selected", storeName: city.storeName },
+        { jurisdictionId: region.jurisdictionId, name: "Region", kind: "geographic", relation: "geographic_ancestor", storeName: region.storeName },
+        { jurisdictionId: country.jurisdictionId, name: "Country", kind: "geographic", relation: "geographic_ancestor", storeName: country.storeName },
       ],
+      partialCoverage: false,
     });
-  });
-
-  it("accepts the maximum one selected plus three supplementary IDs", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const ids = [];
-    for (const [code, name] of [
-      ["GH", "Ghana"],
-      ["NG", "Nigeria"],
-      ["KE", "Kenya"],
-      ["ZA", "South Africa"],
-    ] as const) {
-      ids.push(await insertJurisdiction(t, {
-        code,
-        name,
-        slug: name.toLowerCase().replaceAll(" ", "-"),
-        status: "enabled",
-      }));
-    }
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: ids[0],
-      supplementaryJurisdictionIds: ids.slice(1),
-    }));
-    expect(response.status).toBe(200);
-    const payload = await response.json();
-    expect(payload.supplementary.map((item: { jurisdictionId: string }) => item.jurisdictionId))
-      .toEqual(ids.slice(1));
-  });
-
-  it("accepts a signed citation-key request above the former 1 KiB limit", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const citationKeys = Array.from({ length: 64 }, (_, index) => ({
-      jurisdictionId: selected,
-      resourceId: `forged-resource-${index.toString().padStart(2, "0")}-${"r".repeat(32)}`,
-      versionId: `forged-version-${index.toString().padStart(2, "0")}-${"v".repeat(32)}`,
-    }));
-    const body = JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-      citationKeys,
-    });
-    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(1_024);
-
-    const response = await post(t, body);
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      selected: { jurisdictionId: selected, status: "ready", storeName: "fileSearchStores/ghana", documents: [] },
-      supplementary: [],
-    });
+    expect(JSON.stringify(payload)).not.toMatch(/documents\/|Private document title|resourceId|versionId/i);
   });
 
   it.each([
-    ["empty body", ""],
+    ["empty", ""],
     ["malformed JSON", "{"],
-    ["unknown key", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], extra: true })],
-    ["client store", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], storeName: "fileSearchStores/forged" })],
-    ["client document", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], documentName: "fileSearchStores/forged/documents/forged" })],
-    ["empty selected", JSON.stringify({ selectedJurisdictionId: "", supplementaryJurisdictionIds: [] })],
-    ["non-array supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: "y" })],
-    ["too many supplementary", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: ["a", "b", "c", "d"] })],
-    ["raw duplicate", JSON.stringify({ selectedJurisdictionId: "same", supplementaryJurisdictionIds: ["same"] })],
-    ["overlong ID", JSON.stringify({ selectedJurisdictionId: "x".repeat(129), supplementaryJurisdictionIds: [] })],
-    ["unknown citation key field", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "x", resourceId: "r", versionId: "v", documentName: "forged" }] })],
-    ["citation outside requested jurisdictions", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "y", resourceId: "r", versionId: "v" }] })],
-    ["duplicate citation key", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [
-      { jurisdictionId: "x", resourceId: "r", versionId: "v" },
-      { jurisdictionId: "x", resourceId: "r", versionId: "v" },
-    ] })],
-    ["too many citation keys", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: Array.from({ length: 65 }, (_, index) => ({ jurisdictionId: "x", resourceId: `r-${index}`, versionId: `v-${index}` })) })],
-    ["overlong citation ID", JSON.stringify({ selectedJurisdictionId: "x", supplementaryJurisdictionIds: [], citationKeys: [{ jurisdictionId: "x", resourceId: "r".repeat(129), versionId: "v" }] })],
-    ["oversized body", "x".repeat(65_537)],
-  ])("rejects %s as a bodyless bounded request error", async (_label, body) => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const response = await post(createBackend(), body);
+    ["unknown field", JSON.stringify({ jurisdictionId: "opaque", extra: true })],
+    ["client supplementary IDs", JSON.stringify({ jurisdictionId: "opaque", supplementaryJurisdictionIds: [] })],
+    ["client nonce", JSON.stringify({ jurisdictionId: "opaque", nonce: "forged" })],
+    ["client signature", JSON.stringify({ jurisdictionId: "opaque", signature: "forged" })],
+    ["question text", JSON.stringify({ jurisdictionId: "opaque", query: "Expand to Ghana" })],
+    ["empty ID", JSON.stringify({ jurisdictionId: "" })],
+    ["overlong ID", JSON.stringify({ jurisdictionId: "x".repeat(129) })],
+    ["oversized body", "x".repeat(257)],
+  ])("rejects a %s request with the strict one-field schema", async (_label, body) => {
+    const t = createBackend();
+    const user = await asUser(t, "reader");
+    const response = await post(user.client, body);
     expect(response.status).toBe(400);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("");
   });
 
-  it("accepts a streamed request without content-length and rejects streamed overflow", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
+  it("does not disclose whether an authenticated unavailable selection exists or is unauthorized", async () => {
     const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const validBody = JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-    });
-    const valid = await post(t, new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(validBody));
-        controller.close();
-      },
-    }), secret, { "content-length": "not-a-number" }, validBody);
-    expect(valid.status).toBe(200);
+    const user = await asUser(t, "outsider");
+    const privateSelection = await insertMemberOrganization(t);
+    const missing = await insertGeographic(t, { name: "Missing", level: "country" });
+    await t.run(async (ctx) => await ctx.db.delete(missing.jurisdictionId));
 
-    const oversized = await post(t, new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("x".repeat(65_537)));
-        controller.close();
-      },
-    }));
-    expect(oversized.status).toBe(400);
-  });
+    const malformed = await post(user.client, JSON.stringify({ jurisdictionId: "not-a-convex-id" }));
+    const unavailable = await post(user.client, JSON.stringify({ jurisdictionId: missing.jurisdictionId }));
+    const unauthorized = await post(user.client, JSON.stringify({ jurisdictionId: privateSelection.jurisdictionId }));
 
-  it("fails the whole request uniformly for malformed, missing, or disabled rows", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const disabled = await insertJurisdiction(t, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "draft",
-    });
-
-    for (const supplementaryJurisdictionIds of [
-      ["not-a-convex-id"],
-      [disabled],
-    ]) {
-      const response = await post(t, JSON.stringify({
-        selectedJurisdictionId: selected,
-        supplementaryJurisdictionIds,
-      }));
+    for (const response of [malformed, unavailable, unauthorized]) {
       expect(response.status).toBe(404);
       expect(response.headers.get("cache-control")).toBe("no-store");
       expect(await response.text()).toBe("");
     }
   });
 
-  it("fails closed for missing and incorrect transport secrets", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-    const body = JSON.stringify({
-      selectedJurisdictionId: "opaque",
-      supplementaryJurisdictionIds: [],
-    });
+  it.each([
+    ["missing", null, "synced"],
+    ["malformed", "stores/not-private", "synced"],
+    ["pending", "fileSearchStores/pending", "pending"],
+    ["drifted", "fileSearchStores/drifted", "drifted"],
+    ["failed", "fileSearchStores/failed", "failed"],
+  ] as const)("returns a sanitized unavailable response for a %s selected store", async (_label, storeName, providerSyncState) => {
     const t = createBackend();
-    const absent = await t.fetch("/internal/search-jurisdictions", { method: "POST", body });
-    const incorrect = await post(
-      t,
-      body,
-      "incorrect-search-jurisdiction-secret-at-least-32-characters",
-    );
-    expect(absent.status).toBe(404);
-    expect(incorrect.status).toBe(404);
-    expect(await absent.text()).toBe("");
-    expect(await incorrect.text()).toBe("");
-  });
+    const user = await asUser(t, "reader");
+    const selected = await insertGeographic(t, {
+      name: "Private selected name",
+      level: "country",
+      storeName,
+      providerSyncState,
+    });
 
-  it("maps an unexpected internal query failure to a sanitized bodyless 500", async () => {
-    const response = await researchManifestResolutionResponse(
-      async () => {
-        throw new Error("database transport secret detail");
-      },
-      { selectedJurisdictionId: "opaque", supplementaryJurisdictionIds: [] },
-    );
-    expect(response.status).toBe(500);
+    const response = await post(user.client, JSON.stringify({ jurisdictionId: selected.jurisdictionId }));
+
+    expect(response.status).toBe(503);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("");
   });
 
-  it("rejects raw-distinct IDs that normalize to the same jurisdiction", () => {
-    expect(() => normalizeUniqueJurisdictionIds(
-      ["canonical", "alternate-encoding"],
-      () => "canonical" as never,
-    )).toThrow("RESEARCH_MANIFEST_REQUEST_INVALID");
-  });
-
-  it("uniformly rejects missing selected or supplementary rows and a disabled selected row", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
-
-    const missingSelectedBackend = createBackend();
-    const missingSelected = await insertJurisdiction(missingSelectedBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    await missingSelectedBackend.run(async (ctx) => await ctx.db.delete(missingSelected));
-    const missingSelectedResponse = await post(missingSelectedBackend, JSON.stringify({
-      selectedJurisdictionId: missingSelected,
-      supplementaryJurisdictionIds: [],
-    }));
-    expect(missingSelectedResponse.status).toBe(404);
-    expect(await missingSelectedResponse.text()).toBe("");
-
-    const missingSupplementaryBackend = createBackend();
-    const selected = await insertJurisdiction(missingSupplementaryBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
-    });
-    const missingSupplementary = await insertJurisdiction(missingSupplementaryBackend, {
-      code: "NG", name: "Nigeria", slug: "nigeria", status: "enabled",
-    });
-    await missingSupplementaryBackend.run(async (ctx) => await ctx.db.delete(missingSupplementary));
-    const missingSupplementaryResponse = await post(missingSupplementaryBackend, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [missingSupplementary],
-    }));
-    expect(missingSupplementaryResponse.status).toBe(404);
-    expect(await missingSupplementaryResponse.text()).toBe("");
-
-    const disabledBackend = createBackend();
-    const disabled = await insertJurisdiction(disabledBackend, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "draft",
-    });
-    const disabledResponse = await post(disabledBackend, JSON.stringify({
-      selectedJurisdictionId: disabled,
-      supplementaryJurisdictionIds: [],
-    }));
-    expect(disabledResponse.status).toBe(404);
-    expect(await disabledResponse.text()).toBe("");
-  });
-
-  it("stream-counts a valid body when content-length is the literal false value", async () => {
-    process.env.SEARCH_JURISDICTION_SECRET = secret;
+  it("requires unique store ownership and omits an unready supplementary store with partial coverage", async () => {
     const t = createBackend();
-    const selected = await insertJurisdiction(t, {
-      code: "GH", name: "Ghana", slug: "ghana", status: "enabled",
+    const user = await asUser(t, "reader");
+    const country = await insertGeographic(t, {
+      name: "Unavailable country",
+      level: "country",
+      storeName: null,
     });
-    const response = await post(t, JSON.stringify({
-      selectedJurisdictionId: selected,
-      supplementaryJurisdictionIds: [],
-    }), secret, { "content-length": "false" });
-    expect(response.status).toBe(200);
+    const city = await insertGeographic(t, {
+      name: "Ready city",
+      level: "city",
+      parentJurisdictionId: country.jurisdictionId,
+      storeName: "fileSearchStores/unique-city",
+    });
+
+    const partial = await post(user.client, JSON.stringify({ jurisdictionId: city.jurisdictionId }));
+    await expect(partial.json()).resolves.toEqual({
+      authorizedScopeSize: 2,
+      stores: [{ jurisdictionId: city.jurisdictionId, name: "Ready city", kind: "geographic", relation: "selected", storeName: "fileSearchStores/unique-city" }],
+      partialCoverage: true,
+    });
+
+    await insertGeographic(t, {
+      name: "Duplicate owner",
+      level: "country",
+      storeName: "fileSearchStores/unique-city",
+    });
+    const duplicateOwner = await post(user.client, JSON.stringify({ jurisdictionId: city.jurisdictionId }));
+    expect(duplicateOwner.status).toBe(503);
+    expect(await duplicateOwner.text()).toBe("");
+  });
+
+  it("removes the signed legacy manifest endpoints", async () => {
+    const t = createBackend();
+    const user = await asUser(t, "reader");
+    for (const path of ["/internal/search-jurisdiction", "/internal/search-jurisdictions"]) {
+      const response = await user.client.fetch(path, { method: "POST", body: "{}" });
+      expect(response.status).toBe(404);
+    }
   });
 });

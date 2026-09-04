@@ -154,7 +154,11 @@ describe("read-only admin pages", () => {
           externalId: "browser-session-1",
           messageCount: 4,
           updatedAt: 1_900_000_000_000,
-          country: "GH",
+          jurisdiction: {
+            id: "jurisdiction-1",
+            name: "Ghana",
+            kind: "geographic",
+          },
         },
       ],
       isDone: true,
@@ -185,6 +189,8 @@ describe("read-only admin pages", () => {
     );
     expect(screen.queryByRole("columnheader", { name: "Prompt" })).toBeNull();
     expect(screen.queryByRole("columnheader", { name: "Answer" })).toBeNull();
+    expect(screen.getByText("Ghana")).toBeVisible();
+    expect(screen.getByText("Geographic")).toBeVisible();
   });
 
   it("adapts user detail session visibility to the current role", async () => {

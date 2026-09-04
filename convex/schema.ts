@@ -501,6 +501,19 @@ export default defineSchema({
         v.literal("provider"),
       ),
     ),
+    lastProviderOperation: v.optional(
+      v.union(
+        v.literal("store_create"),
+        v.literal("document_upload"),
+        v.literal("operation_poll"),
+        v.literal("store_get"),
+        v.literal("document_delete"),
+        v.literal("store_delete"),
+      ),
+    ),
+    lastProviderStatus: v.optional(v.number()),
+    lastProviderRawResponse: v.optional(v.string()),
+    providerDiagnosticExpiresAt: v.optional(v.number()),
     retentionPending: v.optional(v.boolean()),
     retentionRedactedAt: v.optional(v.number()),
     createdAt: v.number(),
@@ -513,6 +526,7 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_status_and_retentionPending_and_createdAt", ["status", "retentionPending", "createdAt"])
+    .index("by_providerDiagnosticExpiresAt", ["providerDiagnosticExpiresAt"])
     .index("by_type_and_createdAt", ["type", "createdAt"])
     .index("by_status_and_type_and_createdAt", ["status", "type", "createdAt"])
     .index("by_targetType_and_targetId", ["targetType", "targetId"])
@@ -665,12 +679,7 @@ export default defineSchema({
   jurisdictionMigrationCheckpoints: defineTable({
     environment: v.string(),
     migrationVersion: v.literal("jurisdiction_ids_v1"),
-    target: v.union(
-      v.literal("chatSessions"),
-      v.literal("telemetryCorrelations"),
-      v.literal("queryRuns"),
-      v.literal("dailyMetrics"),
-    ),
+    target: v.literal("chatSessions"),
     mode: v.union(v.literal("dry_run"), v.literal("execute")),
     runNumber: v.number(),
     status: v.union(v.literal("running"), v.literal("completed")),
@@ -789,125 +798,60 @@ export default defineSchema({
     .index("by_expiresAt", ["expiresAt"])
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
-  researchManifestNonces: defineTable({
-    nonceHash: v.string(),
-    expiresAt: v.number(),
-    createdAt: v.number(),
-  }).index("by_nonceHash", ["nonceHash"]),
-  telemetryCorrelations: defineTable({
-    tokenHash: v.string(),
-    ownerBinding: v.string(),
-    sessionBinding: v.string(),
-    jurisdictionCode: v.optional(v.string()),
-    jurisdictionId: v.optional(v.id("jurisdictions")),
-    jurisdictionName: v.optional(v.string()),
-    jurisdictionKind: v.optional(jurisdictionKindValidator),
-    jurisdictionContract: v.optional(
-      v.union(v.literal("legacy"), v.literal("unified")),
-    ),
-    status: v.union(
-      v.literal("issued"),
-      v.literal("search_complete"),
-      v.literal("chat_claimed"),
-      v.literal("finalized"),
-    ),
-    issuedAt: v.number(),
-    expiresAt: v.number(),
-    searchProviderStatus: v.optional(
-      v.union(v.literal("success"), v.literal("no_result"), v.literal("failure")),
-    ),
-    searchLatencyMs: v.optional(v.number()),
-    resultCount: v.optional(v.number()),
-    claimNonceHash: v.optional(v.string()),
-    scopeSize: v.optional(v.number()),
-    retrievalPlanSize: v.optional(v.number()),
-    providerCallCount: v.optional(v.number()),
-    fileSearchCallCount: v.optional(v.number()),
-    fileSearchStoreCount: v.optional(v.number()),
-    fileSearchLatencyMs: v.optional(v.number()),
-    evidenceBytes: v.optional(v.number()),
-    citationCount: v.optional(v.number()),
-    jurisdictionCoverage: v.optional(v.array(v.object({
-      ordinal: v.number(),
-      relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
-      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
-    }))),
-    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
-    plannerLatencyMs: v.optional(v.number()),
-    contextDigest: v.optional(v.string()),
-    partialCoverage: v.optional(v.boolean()),
-    configurationUnavailableCount: v.optional(v.number()),
-    supplementaryProviderFailureCount: v.optional(v.number()),
-  })
-    .index("by_tokenHash", ["tokenHash"])
-    .index("by_status_and_expiresAt", ["status", "expiresAt"])
-    .index("by_jurisdictionId", ["jurisdictionId"]),
   queryRuns: defineTable({
-    correlationId: v.string(),
+    requestNonceHash: v.string(),
+    chatSessionId: v.id("chatSessions"),
+    assistantClientIdBinding: v.string(),
+    completionBinding: v.string(),
     day: v.string(),
-    jurisdictionCode: v.optional(v.string()),
-    jurisdictionId: v.optional(v.id("jurisdictions")),
-    jurisdictionName: v.optional(v.string()),
-    jurisdictionKind: v.optional(jurisdictionKindValidator),
+    jurisdictionId: v.id("jurisdictions"),
+    jurisdictionName: v.string(),
+    jurisdictionKind: jurisdictionKindValidator,
     outcome: v.union(
       v.literal("success"),
       v.literal("failure"),
       v.literal("aborted"),
     ),
-    searchProviderStatus: v.union(
-      v.literal("skipped"),
-      v.literal("success"),
-      v.literal("no_result"),
-      v.literal("failure"),
-    ),
-    generationProviderStatus: v.union(
-      v.literal("success"),
-      v.literal("failure"),
-      v.literal("skipped"),
-    ),
-    searchLatencyMs: v.number(),
-    generationLatencyMs: v.number(),
+    failureCategory: v.optional(v.union(
+      v.literal("authentication"),
+      v.literal("configuration"),
+      v.literal("network"),
+      v.literal("timeout"),
+      v.literal("validation"),
+      v.literal("internal"),
+    )),
+    model: v.string(),
     totalLatencyMs: v.number(),
-    resultCount: v.number(),
-    completedAt: v.number(),
-    rollupStatus: v.union(v.literal("pending"), v.literal("processed")),
-    rolledUpAt: v.optional(v.number()),
-    scopeSize: v.optional(v.number()),
-    retrievalPlanSize: v.optional(v.number()),
-    providerCallCount: v.optional(v.number()),
-    fileSearchCallCount: v.optional(v.number()),
-    fileSearchStoreCount: v.optional(v.number()),
-    fileSearchLatencyMs: v.optional(v.number()),
-    evidenceBytes: v.optional(v.number()),
-    citationCount: v.optional(v.number()),
-    jurisdictionCoverage: v.optional(v.array(v.object({
+    authorizedScopeSize: v.number(),
+    readyStoreCount: v.number(),
+    citationCount: v.number(),
+    partialCoverage: v.boolean(),
+    jurisdictionCoverage: v.array(v.object({
       ordinal: v.number(),
       relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
       coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
-    }))),
-    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
-    plannerLatencyMs: v.optional(v.number()),
-    contextDigest: v.optional(v.string()),
-    partialCoverage: v.optional(v.boolean()),
-    configurationUnavailableCount: v.optional(v.number()),
-    supplementaryProviderFailureCount: v.optional(v.number()),
+    })),
+    completedAt: v.number(),
+    rollupStatus: v.union(v.literal("pending"), v.literal("processed")),
+    rolledUpAt: v.optional(v.number()),
   })
-    .index("by_correlationId", ["correlationId"])
+    .index("by_requestNonceHash", ["requestNonceHash"])
+    .index("by_chatSessionId_and_assistantClientIdBinding", [
+      "chatSessionId",
+      "assistantClientIdBinding",
+    ])
     .index("by_rollupStatus_and_completedAt", ["rollupStatus", "completedAt"])
-    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
   dailyMetrics: defineTable({
     day: v.string(),
-    jurisdictionCode: v.optional(v.string()),
-    jurisdictionId: v.optional(v.id("jurisdictions")),
-    jurisdictionName: v.optional(v.string()),
-    jurisdictionKind: v.optional(jurisdictionKindValidator),
+    jurisdictionId: v.id("jurisdictions"),
+    jurisdictionName: v.string(),
+    jurisdictionKind: jurisdictionKindValidator,
     totalQuestions: v.number(),
     successCount: v.number(),
     failureCount: v.number(),
     abortedCount: v.number(),
     providerFailureCount: v.number(),
-    noResultCount: v.number(),
     latencyLe250: v.number(),
     latencyLe500: v.number(),
     latencyLe1000: v.number(),
@@ -918,24 +862,8 @@ export default defineSchema({
     p50UpperBoundMs: v.number(),
     p95UpperBoundMs: v.number(),
     updatedAt: v.number(),
-    scopeSize: v.optional(v.number()),
-    retrievalPlanSize: v.optional(v.number()),
-    providerCallCount: v.optional(v.number()),
-    plannerStatus: v.optional(v.union(v.literal("planned"), v.literal("fallback"))),
-    plannerLatencyMs: v.optional(v.number()),
-    contextDigest: v.optional(v.string()),
-    partialCoverage: v.optional(v.boolean()),
-    configurationUnavailableCount: v.optional(v.number()),
-    supplementaryProviderFailureCount: v.optional(v.number()),
   })
     .index("by_day", ["day"])
-    .index("by_jurisdictionCode_and_day", ["jurisdictionCode", "day"])
-    .index("by_jurisdictionCode_and_jurisdictionId_and_day", [
-      "jurisdictionCode",
-      "jurisdictionId",
-      "day",
-    ])
-    .index("by_day_and_jurisdictionCode", ["day", "jurisdictionCode"])
     .index("by_day_and_jurisdictionId", ["day", "jurisdictionId"])
     .index("by_jurisdictionId_and_day", ["jurisdictionId", "day"])
     .index("by_jurisdictionId", ["jurisdictionId"]),

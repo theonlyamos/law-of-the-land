@@ -34,6 +34,14 @@ export type ProviderErrorKind =
   | "invalid_response"
   | "provider";
 
+export type ProviderOperation =
+  | "store_create"
+  | "document_upload"
+  | "operation_poll"
+  | "store_get"
+  | "document_delete"
+  | "store_delete";
+
 export class ProviderError extends Error {
   readonly name = "ProviderError";
 
@@ -44,6 +52,10 @@ export class ProviderError extends Error {
     message: string,
     /** True only when a mutating request may have reached Gemini. */
     public readonly sideEffectUncertain = false,
+    /** A bounded internal request label, never a provider resource name. */
+    public readonly operation?: ProviderOperation,
+    /** The provider response body, retained temporarily for an authorized diagnostic view. */
+    public readonly rawResponse?: string,
   ) {
     super(message);
   }
@@ -131,12 +143,17 @@ function errorForRpcCode(code: number): ProviderError {
   return new ProviderError("provider", code === 13 || code === 14, code, "Gemini indexing operation failed");
 }
 
-function translateError(error: unknown, sideEffectUncertain = false): ProviderError {
+function translateError(
+  error: unknown,
+  sideEffectUncertain = false,
+  operation?: ProviderOperation,
+): ProviderError {
   if (error instanceof ProviderError) return error;
+  const rawResponse = rawProviderResponse(error);
   if (typeof error === "object" && error !== null) {
     const candidate = error as { name?: unknown; code?: unknown; status?: unknown; error?: { code?: unknown } };
     if (candidate.name === "AbortError" || candidate.code === "ECONNABORTED" || candidate.code === "ERR_CANCELED") {
-      return new ProviderError("timeout", true, null, "Gemini request timed out", sideEffectUncertain);
+      return new ProviderError("timeout", true, null, "Gemini request timed out", sideEffectUncertain, operation, rawResponse);
     }
     const status = typeof candidate.status === "number"
       ? candidate.status
@@ -147,10 +164,25 @@ function translateError(error: unknown, sideEffectUncertain = false): ProviderEr
       const translated = errorForStatus(status);
       const mutationMayBeAmbiguous = sideEffectUncertain &&
         (status === 408 || status === 504 || status >= 500);
-      return new ProviderError(translated.kind, translated.retryable, translated.status, translated.message, mutationMayBeAmbiguous);
+      return new ProviderError(translated.kind, translated.retryable, translated.status, translated.message, mutationMayBeAmbiguous, operation, rawResponse);
     }
   }
-  return new ProviderError("network", true, null, "Gemini network request failed", sideEffectUncertain);
+  return new ProviderError("network", true, null, "Gemini network request failed", sideEffectUncertain, operation, rawResponse);
+}
+
+function rawProviderResponse(error: unknown): string | undefined {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message || undefined;
+  if (typeof error === "object" && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return error === undefined ? undefined : String(error);
 }
 
 function valid<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -179,7 +211,7 @@ export class GeminiFileSearchAdapter {
       if (!name.success || response.embeddingModel !== EMBEDDING_MODEL) throw invalidResponse(true);
       return { name: name.data, embeddingModel: EMBEDDING_MODEL };
     } catch (error) {
-      throw translateError(error, true);
+      throw translateError(error, true, "store_create");
     }
   }
 
@@ -205,7 +237,7 @@ export class GeminiFileSearchAdapter {
       if (!operationName.success || !isGeminiUploadOperationForStore(operationName.data, storeName)) throw invalidResponse(true);
       return { operationName: operationName.data };
     } catch (error) {
-      throw translateError(error, true);
+      throw translateError(error, true, "document_upload");
     }
   }
 
@@ -232,7 +264,7 @@ export class GeminiFileSearchAdapter {
       if (!documentName.success) throw invalidResponse();
       return { done: true, documentName: documentName.data };
     } catch (error) {
-      throw translateError(error);
+      throw translateError(error, false, "operation_poll");
     }
   }
 
@@ -248,7 +280,7 @@ export class GeminiFileSearchAdapter {
       ) throw invalidResponse();
       return { name: responseName.data, embeddingModel: EMBEDDING_MODEL };
     } catch (error) {
-      throw translateError(error);
+      throw translateError(error, false, "store_get");
     }
   }
 
@@ -257,7 +289,7 @@ export class GeminiFileSearchAdapter {
     try {
       await this.sdk.fileSearchStores.documents.delete({ name, config: { force: true } });
     } catch (error) {
-      throw translateError(error, true);
+      throw translateError(error, true, "document_delete");
     }
   }
 
@@ -266,7 +298,7 @@ export class GeminiFileSearchAdapter {
     try {
       await this.sdk.fileSearchStores.delete({ name, config: { force: true } });
     } catch (error) {
-      throw translateError(error, true);
+      throw translateError(error, true, "store_delete");
     }
   }
 }

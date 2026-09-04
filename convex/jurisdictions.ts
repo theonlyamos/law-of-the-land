@@ -1,34 +1,22 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, internalQuery, query } from "./_generated/server";
-import { makeFunctionReference } from "convex/server";
+import { internalQuery, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import {
-  isLegacyCountryCode,
   jurisdictionKindValidator,
   jurisdictionSearchPageValidator,
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
-  MAX_RETRIEVAL_LIBRARIES,
   MAX_SELECTOR_PAGE_SIZE,
-  normalizeUniqueJurisdictionIds,
-  researchLibraryRequestValidator,
-  researchLibraryResolutionValidator,
-  researchScopeValidator,
-  type ResearchLibraryAvailability,
-  type ResearchLibraryResolution,
-  type ResearchCitationKey,
-  type ResearchDocumentManifest,
   type JurisdictionKind,
+  type ResearchScopeItem,
 } from "./lib/jurisdictionDomain";
-import { isPublicJurisdictionEligible } from "./lib/jurisdictionEligibility";
-import { isGeminiDocumentName, isGeminiFileSearchStoreName } from "./lib/geminiFileSearchNames";
+import { isGeminiFileSearchStoreName } from "./lib/geminiFileSearchNames";
 import {
   activeOrganizationIdsForUser,
   assertJurisdictionAccess,
   getAccessibleJurisdictionById,
 } from "./lib/jurisdictionAccess";
 import { optionalUserId } from "./lib/requireUser";
-import { readUnifiedJurisdictionsEnabled } from "./admin/featureFlags";
 import { resolveResearchScopeForJurisdiction } from "./lib/researchScope";
 
 const accessibleJurisdictionValidator = v.object({
@@ -40,71 +28,6 @@ const accessibleJurisdictionValidator = v.object({
   visibility: v.union(v.literal("public"), v.literal("members")),
 });
 
-const expireResearchManifestNonceRef = makeFunctionReference<"mutation">(
-  "jurisdictions:expireResearchManifestNonce",
-);
-
-export const consumeResearchManifestNonce = internalMutation({
-  args: { nonceHash: v.string(), expiresAt: v.number() },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(args.nonceHash)
-      || !Number.isSafeInteger(args.expiresAt)
-      || args.expiresAt <= now
-      || args.expiresAt > now + 60_000) {
-      throw new ConvexError("RESEARCH_MANIFEST_PROOF_INVALID");
-    }
-    const existing = await ctx.db.query("researchManifestNonces")
-      .withIndex("by_nonceHash", (q) => q.eq("nonceHash", args.nonceHash))
-      .unique();
-    if (existing) throw new ConvexError("RESEARCH_MANIFEST_REPLAY");
-    const nonceId = await ctx.db.insert("researchManifestNonces", {
-      nonceHash: args.nonceHash,
-      expiresAt: args.expiresAt,
-      createdAt: now,
-    });
-    await ctx.scheduler.runAt(args.expiresAt, expireResearchManifestNonceRef, { nonceId });
-    return null;
-  },
-});
-
-export const expireResearchManifestNonce = internalMutation({
-  args: { nonceId: v.id("researchManifestNonces") },
-  returns: v.null(),
-  handler: async (ctx, { nonceId }) => {
-    const row = await ctx.db.get(nonceId);
-    if (!row) return null;
-    if (row.expiresAt > Date.now()) {
-      await ctx.scheduler.runAt(row.expiresAt, expireResearchManifestNonceRef, { nonceId });
-      return null;
-    }
-    await ctx.db.delete(nonceId);
-    return null;
-  },
-});
-
-const searchJurisdictionValidator = v.union(
-  v.null(),
-  v.object({
-    code: v.string(),
-    name: v.string(),
-    slug: v.string(),
-    enabled: v.literal(true),
-    isDefault: v.boolean(),
-    searchReady: v.literal(true),
-  }),
-);
-
-const publicJurisdictionListItemValidator = v.object({
-  code: v.string(),
-  name: v.string(),
-  slug: v.string(),
-  isDefault: v.boolean(),
-});
-
-// Admin validation currently accepts any two-letter code (26 × 26).
-const MAX_PUBLIC_JURISDICTIONS = 26 * 26;
 const MAX_SEARCH_QUERY_LENGTH = 120;
 const MAX_RESEARCH_JURISDICTION_ID_LENGTH = 200;
 const MAX_CURSOR_LENGTH = 4096;
@@ -126,7 +49,6 @@ type ResearchJurisdiction = {
   slug: string;
   kind: JurisdictionKind;
   isDefault: boolean;
-  legacyCountryCode?: string;
 };
 
 function invalidCursor(): never {
@@ -230,17 +152,13 @@ function decodeCursor(
 }
 
 function projectResearchJurisdiction(row: Doc<"jurisdictions">): ResearchJurisdiction {
-  const projected: ResearchJurisdiction = {
+  return {
     id: row._id,
     name: row.name,
     slug: row.slug,
     kind: row.kind as JurisdictionKind,
     isDefault: row.isDefault,
   };
-  if (isLegacyCountryCode(row.legacyCountryCode)) {
-    projected.legacyCountryCode = row.legacyCountryCode;
-  }
-  return projected;
 }
 
 async function assertTypedRelationship(
@@ -375,84 +293,6 @@ async function memberOrganizationMatches(
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-function normalizeCode(code: string): string {
-  const normalized = code.trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(normalized)) {
-    throw new ConvexError("INVALID_JURISDICTION_CODE");
-  }
-  return normalized;
-}
-
-/** Returns readiness without provider identity to protected server-side callers. */
-export const getPublicByCode = internalQuery({
-  args: { code: v.string() },
-  returns: searchJurisdictionValidator,
-  handler: async (ctx, args) => {
-    const code = normalizeCode(args.code);
-    const rows = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_code_and_status", (q) =>
-        q.eq("code", code).eq("status", "enabled"),
-      )
-      .take(2);
-    if (
-      rows.length !== 1 ||
-      !isLegacyCountryCode(rows[0].code) ||
-      rows[0].code !== code ||
-      !isPublicJurisdictionEligible(rows[0])
-    ) {
-      return null;
-    }
-    const jurisdiction = rows[0];
-    return {
-      code,
-      name: jurisdiction.name,
-      slug: jurisdiction.slug,
-      enabled: true as const,
-      isDefault: jurisdiction.isDefault,
-      searchReady: true as const,
-    };
-  },
-});
-
-/** Lists the complete enabled ISO catalog used by public jurisdiction selectors. */
-export const listPublicEnabled = query({
-  args: {},
-  returns: v.array(publicJurisdictionListItemValidator),
-  handler: async (ctx) => {
-    const rows = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_status_and_code", (q) =>
-        q.eq("status", "enabled").gte("code", "AA").lte("code", "ZZ"),
-      )
-      .take(MAX_PUBLIC_JURISDICTIONS + 1);
-
-    const legacyRows = rows.filter(
-      (row): row is typeof row & { code: string } => isLegacyCountryCode(row.code),
-    );
-    // More legacy rows than possible two-letter codes proves corruption.
-    // Code-less unified rows are intentionally invisible to this flag-off path.
-    if (legacyRows.length > MAX_PUBLIC_JURISDICTIONS) return [];
-    const enabledRowsByCode = new Map<string, number>();
-    for (const row of legacyRows) {
-      enabledRowsByCode.set(row.code, (enabledRowsByCode.get(row.code) ?? 0) + 1);
-    }
-
-    return legacyRows
-      .filter(
-        (row) =>
-          enabledRowsByCode.get(row.code) === 1 &&
-          isPublicJurisdictionEligible(row),
-      )
-      .map(({ code, name, slug, isDefault }) => ({ code, name, slug, isDefault }))
-      .sort((left, right) =>
-        Number(right.isDefault) - Number(left.isDefault) ||
-        left.name.localeCompare(right.name) ||
-        left.code.localeCompare(right.code),
-      );
-  },
-});
-
 const researchJurisdictionValidator = v.union(
   v.null(),
   v.object({
@@ -461,7 +301,6 @@ const researchJurisdictionValidator = v.union(
     slug: v.string(),
     kind: jurisdictionKindValidator,
     isDefault: v.boolean(),
-    legacyCountryCode: v.optional(v.string()),
   }),
 );
 
@@ -472,52 +311,27 @@ export const getAccessibleById = query({
   handler: async (ctx, args) => await getAccessibleJurisdictionById(ctx, args.id),
 });
 
-/** Resolves the compatibility selector pair without exposing provider configuration. */
+/** Resolves a stable browser selection without exposing provider configuration. */
 export const resolveResearchSelection = query({
-  args: {
-    jurisdictionId: v.optional(v.string()),
-    country: v.optional(v.string()),
-  },
+  args: { jurisdictionId: v.string() },
   returns: researchJurisdictionValidator,
   handler: async (ctx, args) => {
-    if (args.jurisdictionId === undefined && args.country === undefined) return null;
     if (
-      args.jurisdictionId !== undefined
-      && (args.jurisdictionId.length === 0
-        || args.jurisdictionId.length > MAX_RESEARCH_JURISDICTION_ID_LENGTH)
-    ) return null;
-    let country: string | undefined;
-    if (args.country !== undefined) {
-      const normalized = args.country.trim().toUpperCase();
-      if (!isLegacyCountryCode(normalized)) return null;
-      country = normalized;
+      args.jurisdictionId.length === 0
+      || args.jurisdictionId.length > MAX_RESEARCH_JURISDICTION_ID_LENGTH
+    ) {
+      return null;
     }
     try {
-      const jurisdictionId = args.jurisdictionId === undefined
-        ? null
-        : ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
-      if (args.jurisdictionId !== undefined && !jurisdictionId) return null;
-      const byId = jurisdictionId
-        ? await ctx.db.get("jurisdictions", jurisdictionId)
-        : null;
-      const codeRows = country
-        ? await ctx.db
-            .query("jurisdictions")
-            .withIndex("by_legacyCountryCode_and_status", (q) =>
-              q.eq("legacyCountryCode", country).eq("status", "enabled"),
-            )
-            .take(2)
-        : [];
-      if ((jurisdictionId && !byId) || (country && codeRows.length !== 1)) return null;
-      const selected = byId ?? codeRows[0];
-      if (!selected || (byId && country && codeRows[0]?._id !== byId._id)) return null;
+      const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
+      if (!jurisdictionId) return null;
+      const selected = await ctx.db.get("jurisdictions", jurisdictionId);
+      if (!selected) return null;
       await assertJurisdictionAccess(ctx, selected);
       const kind = selected.kind;
       if (kind !== "geographic" && kind !== "organizational") return null;
       await assertTypedRelationship(ctx, selected, kind);
-      const projected = projectResearchJurisdiction(selected);
-      if (country && projected.legacyCountryCode !== country) return null;
-      return projected;
+      return projectResearchJurisdiction(selected);
     } catch {
       return null;
     }
@@ -598,207 +412,78 @@ export const searchAccessible = query({
   },
 });
 
-/** Exposes rollout readiness without revealing environment or flag records. */
-export const isUnifiedJurisdictionsEnabled = query({
-  args: {},
-  returns: v.boolean(),
-  handler: async (ctx) => await readUnifiedJurisdictionsEnabled(ctx),
+const chatResearchStoreValidator = v.object({
+  jurisdictionId: v.id("jurisdictions"),
+  name: v.string(),
+  kind: v.union(v.literal("geographic"), v.literal("organizational")),
+  relation: v.union(
+    v.literal("selected"),
+    v.literal("geographic_ancestor"),
+    v.literal("organizational_geography"),
+  ),
+  storeName: v.string(),
 });
 
-export const resolveResearchScope = query({
-  args: {
-    jurisdictionId: v.id("jurisdictions"),
-    geographicHints: v.array(v.string()),
-  },
-  returns: researchScopeValidator,
-  handler: async (ctx, args) =>
-    await resolveResearchScopeForJurisdiction(
-      ctx,
-      args.jurisdictionId,
-      args.geographicHints,
-    ),
+const chatResearchStoresValidator = v.object({
+  authorizedScopeSize: v.number(),
+  stores: v.array(chatResearchStoreValidator),
+  partialCoverage: v.boolean(),
 });
 
-// This bounds the trusted citation manifest, not the jurisdiction's store health.
-const MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION = 64;
-const MAX_RESEARCH_CITATION_KEYS = 64;
-const MAX_RESEARCH_REFERENCE_ID_LENGTH = 128;
+export type ChatResearchStore = ResearchScopeItem & { storeName: string };
+export type ChatResearchStores = {
+  authorizedScopeSize: number;
+  stores: ChatResearchStore[];
+  partialCoverage: boolean;
+};
 
-function boundedResearchReference(value: string) {
-  return value.length > 0
-    && value.length <= MAX_RESEARCH_REFERENCE_ID_LENGTH
-    && value === value.trim();
-}
-
-async function authorizeResearchCitation(
+async function readyStoreName(
   ctx: QueryCtx,
-  row: Doc<"jurisdictions">,
-  storeName: string,
-  key: ResearchCitationKey,
-): Promise<ResearchDocumentManifest | null> {
-  const resourceId = ctx.db.normalizeId("legalResources", key.resourceId);
-  const versionId = ctx.db.normalizeId("documentVersions", key.versionId);
-  if (!resourceId || !versionId) return null;
-  const [resource, version] = await Promise.all([
-    ctx.db.get(resourceId),
-    ctx.db.get(versionId),
-  ]);
-  const documentName = version?.geminiDocumentName;
+  jurisdictionId: Id<"jurisdictions">,
+): Promise<string | null> {
+  const row = await ctx.db.get("jurisdictions", jurisdictionId);
+  const storeName = row?.geminiFileSearchStoreName;
   if (
-    !resource ||
-    resource.jurisdictionId !== row._id ||
-    resource.status !== "active" ||
-    resource.activeVersionId !== versionId ||
-    !version ||
-    version.resourceId !== resourceId ||
-    version.status !== "published" ||
-    !documentName ||
-    !isGeminiDocumentName(documentName) ||
-    !documentName.startsWith(`${storeName}/documents/`)
+    !row
+    || row.status !== "enabled"
+    || row.providerSyncState !== "synced"
+    || !storeName
+    || !isGeminiFileSearchStoreName(storeName)
   ) return null;
-  const lock = await ctx.db.query("documentLifecycleLocks")
-    .withIndex("by_resourceId", (q) => q.eq("resourceId", resourceId))
-    .take(1);
-  if (lock.length > 0) return null;
-  return {
-    resourceId,
-    versionId,
-    documentName,
-    title: resource.title,
-    officialCitation: resource.officialCitation,
-    sourceUrl: resource.sourceUrl,
-  };
-}
-
-async function researchAvailability(
-  ctx: QueryCtx,
-  row: Doc<"jurisdictions">,
-  citationKeys?: readonly ResearchCitationKey[],
-): Promise<ResearchLibraryAvailability> {
-  if (row.providerSyncState === "pending") {
-    return { jurisdictionId: row._id, status: "provisioning" };
-  }
-  if (row.providerSyncState === "failed") {
-    return { jurisdictionId: row._id, status: "unconfigured" };
-  }
-  if (row.providerSyncState !== "synced") {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
-  const storeName = row.geminiFileSearchStoreName;
-  if (!storeName) return { jurisdictionId: row._id, status: "unconfigured" };
-  if (!isGeminiFileSearchStoreName(storeName)) {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
   const owners = await ctx.db
     .query("jurisdictions")
     .withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName))
     .take(2);
-  if (owners.length !== 1 || owners[0]._id !== row._id) {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
-  if (citationKeys !== undefined) {
-    const documents = await Promise.all(citationKeys.map(async (key) =>
-      await authorizeResearchCitation(ctx, row, storeName, key)));
-    return {
-      jurisdictionId: row._id,
-      status: "ready",
-      storeName,
-      documents: documents.filter((document): document is ResearchDocumentManifest => document !== null),
-    };
-  }
-  const resources = await ctx.db
-    .query("legalResources")
-    .withIndex("by_jurisdictionId_and_activeVersionId", (q) =>
-      q.eq("jurisdictionId", row._id).gt("activeVersionId", undefined))
-    .take(MAX_RESEARCH_MANIFEST_DOCUMENTS_PER_JURISDICTION);
-  const lifecycleLocks = await Promise.all(resources.map(async (resource) =>
-    await ctx.db.query("documentLifecycleLocks")
-      .withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id))
-      .take(1)));
-  if (lifecycleLocks.some((locks) => locks.length > 0)) {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
-  const versions = await Promise.all(resources.map(async (resource) =>
-    resource.activeVersionId ? await ctx.db.get(resource.activeVersionId) : null));
-  const documents = resources.map((resource, index) => {
-    const version = versions[index];
-    const documentName = version?.geminiDocumentName;
-    if (
-      resource.status !== "active" ||
-      !version ||
-      version.resourceId !== resource._id ||
-      version.status !== "published" ||
-      !documentName ||
-      !isGeminiDocumentName(documentName) ||
-      !documentName.startsWith(`${storeName}/documents/`)
-    ) return null;
-    return {
-      resourceId: resource._id,
-      versionId: version._id,
-      documentName,
-      title: resource.title,
-      officialCitation: resource.officialCitation,
-      sourceUrl: resource.sourceUrl,
-    };
+  return owners.length === 1 && owners[0]._id === row._id ? storeName : null;
+}
+
+export async function resolveChatResearchStoresForJurisdiction(
+  ctx: QueryCtx,
+  jurisdictionId: Id<"jurisdictions">,
+): Promise<ChatResearchStores> {
+  const scope = await resolveResearchScopeForJurisdiction(ctx, jurisdictionId);
+  const storeNames = await Promise.all(
+    scope.items.map(async (item) => await readyStoreName(ctx, item.jurisdictionId)),
+  );
+  if (!storeNames[0]) throw new ConvexError("CHAT_RESEARCH_STORE_NOT_READY");
+  const stores = scope.items.flatMap((item, index) => {
+    const storeName = storeNames[index];
+    return storeName ? [{ ...item, storeName }] : [];
   });
-  if (documents.some((document) => document === null)) {
-    return { jurisdictionId: row._id, status: "needs_review" };
-  }
   return {
-    jurisdictionId: row._id,
-    status: "ready",
-    storeName,
-    documents: documents as ResearchDocumentManifest[],
+    authorizedScopeSize: scope.items.length,
+    stores,
+    partialCoverage: stores.length !== scope.items.length,
   };
 }
 
-/** Resolves only provider availability for a transport-authenticated server route. */
-export const getResearchManifestAvailability = internalQuery({
-  args: researchLibraryRequestValidator.fields,
-  returns: researchLibraryResolutionValidator,
-  handler: async (ctx, args): Promise<ResearchLibraryResolution> => {
-    const rawIds = [args.selectedJurisdictionId, ...args.supplementaryJurisdictionIds];
-    if (
-      args.supplementaryJurisdictionIds.length > MAX_RETRIEVAL_LIBRARIES - 1 ||
-      new Set(rawIds).size !== rawIds.length ||
-      rawIds.some((id) => !boundedResearchReference(id)) ||
-      (args.citationKeys?.length ?? 0) > MAX_RESEARCH_CITATION_KEYS ||
-      args.citationKeys?.some((key) =>
-        !boundedResearchReference(key.jurisdictionId) ||
-        !boundedResearchReference(key.resourceId) ||
-        !boundedResearchReference(key.versionId))
-    ) {
-      throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
-    }
-    const ids = normalizeUniqueJurisdictionIds(
-      rawIds,
-      (value) => ctx.db.normalizeId("jurisdictions", value),
-    );
-    const rows = await Promise.all(ids.map((id) => ctx.db.get("jurisdictions", id)));
-    if (rows.some((row) => !row || row.status !== "enabled")) {
-      throw new ConvexError("RESEARCH_MANIFEST_NOT_FOUND");
-    }
-    const allowedJurisdictionIds = new Set(ids);
-    const citationKeysByJurisdiction = new Map<Id<"jurisdictions">, ResearchCitationKey[]>();
-    const seenCitationKeys = new Set<string>();
-    for (const key of args.citationKeys ?? []) {
-      const jurisdictionId = ctx.db.normalizeId("jurisdictions", key.jurisdictionId);
-      const uniqueKey = `${key.jurisdictionId}\u0000${key.resourceId}\u0000${key.versionId}`;
-      if (!jurisdictionId || !allowedJurisdictionIds.has(jurisdictionId) || seenCitationKeys.has(uniqueKey)) {
-        throw new ConvexError("RESEARCH_MANIFEST_REQUEST_INVALID");
-      }
-      seenCitationKeys.add(uniqueKey);
-      const existing = citationKeysByJurisdiction.get(jurisdictionId) ?? [];
-      existing.push(key);
-      citationKeysByJurisdiction.set(jurisdictionId, existing);
-    }
-    const availability = await Promise.all(
-      (rows as Doc<"jurisdictions">[]).map(async (row) => await researchAvailability(
-        ctx,
-        row,
-        args.citationKeys === undefined ? undefined : citationKeysByJurisdiction.get(row._id) ?? [],
-      )),
-    );
-    return { selected: availability[0], supplementary: availability.slice(1) };
+/** Private selected-first store resolution for the authenticated Next server route. */
+export const resolveChatResearchStores = internalQuery({
+  args: { jurisdictionId: v.string() },
+  returns: chatResearchStoresValidator,
+  handler: async (ctx, args): Promise<ChatResearchStores> => {
+    const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
+    if (!jurisdictionId) throw new ConvexError("JURISDICTION_ACCESS_DENIED");
+    return await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
   },
 });

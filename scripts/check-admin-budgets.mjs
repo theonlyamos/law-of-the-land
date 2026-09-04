@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 const METRIC_KEYS = ["lcp", "inp", "cls", "routeJsGzip", "p95"];
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const FORBIDDEN_KEY = /(?:cookie|token|secret|api.?key|claim|question|provider.?body|user.?id|place.?id|address)/i;
-const MAX_RETRIEVAL_EVIDENCE_BYTES = 360_000;
 
 /**
  * @param {unknown} metrics
@@ -35,13 +34,13 @@ export function requireAdminFixtureBoundary(environment = process.env) {
     || environment.BILLING_ENABLED !== "false") {
     throw new Error("The isolated test/preview fixture boundary with provider stubs and BILLING_ENABLED=false is required.");
   }
-  for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_SEARCH_JURISDICTION_SECRET", "ADMIN_E2E_TELEMETRY_INGEST_SECRET"]) {
+  for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_BETTER_AUTH_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_TELEMETRY_INGEST_SECRET"]) {
     if (typeof environment[key] !== "string" || environment[key].length === 0) throw new Error(`${key} is required.`);
   }
   for (const key of ["ADMIN_E2E_CONVEX_URL", "ADMIN_E2E_CONVEX_SITE_URL"]) {
     if (environment[key] !== environment[key].trim()) throw new Error(`${key} must be supplied as an exact origin without padding.`);
   }
-  if (environment.ADMIN_E2E_FIXTURE_SECRET.length < 32 || environment.ADMIN_E2E_BETTER_AUTH_SECRET.length < 32 || environment.ADMIN_E2E_ACCOUNT_PASSWORD.length < 12 || environment.ADMIN_E2E_SEARCH_JURISDICTION_SECRET.length < 32 || environment.ADMIN_E2E_TELEMETRY_INGEST_SECRET.length < 32) {
+  if (environment.ADMIN_E2E_FIXTURE_SECRET.length < 32 || environment.ADMIN_E2E_BETTER_AUTH_SECRET.length < 32 || environment.ADMIN_E2E_ACCOUNT_PASSWORD.length < 12 || environment.ADMIN_E2E_TELEMETRY_INGEST_SECRET.length < 32) {
     throw new Error("The guarded fixture secrets or account password are too short.");
   }
   if (!SHA_PATTERN.test(environment.ADMIN_E2E_APPROVED_COMMIT_SHA ?? "")
@@ -121,16 +120,6 @@ function checkCalibration(calibration, label, limits, outcomeKeys = []) {
   }
   if (calibration.outcome !== "pass") failures.push(`${label} calibration outcome must explicitly pass`);
   return failures;
-}
-
-function boundedInteger(value, maximum) {
-  return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
-}
-
-function sameNumbers(left, right) {
-  return Array.isArray(left) && Array.isArray(right)
-    && left.length === right.length
-    && left.every((value, index) => value === right[index]);
 }
 
 /** @param {Record<string, unknown>} m */
@@ -219,96 +208,6 @@ export function checkBudgets(m) {
     const detailsOutcome = Number.isFinite(picker.details?.p95Ms) && Number.isFinite(picker.calibration?.detailsP95LimitMs) && picker.details.p95Ms <= picker.calibration.detailsP95LimitMs ? "pass" : "fail";
     if (picker.calibration?.autocompleteOutcome !== autocompleteOutcome || picker.calibration?.autocompleteOutcome !== "pass") failures.push("geographicPlacePicker autocomplete outcome must match its calibrated pass/fail result");
     if (picker.calibration?.detailsOutcome !== detailsOutcome || picker.calibration?.detailsOutcome !== "pass") failures.push("geographicPlacePicker details outcome must match its calibrated pass/fail result");
-  }
-  const retrieval = m.retrievalPlan;
-  if (!retrieval || retrieval.sampleCount !== 20 || !Array.isArray(retrieval.samples) || retrieval.samples.length !== 20) {
-    failures.push("retrievalPlan must contain exactly 20 observations");
-  } else {
-    const retrievalKeys = ["calibration", "citationCount", "evidenceBytes", "fileSearch", "fileSearchCallCount", "partialCoverageCount", "planSizeMax", "sampleCount", "samples", "scopeSizeMax", "storeCountMax", "total", "unexpectedRealProviderCallCount"];
-    const sampleKeys = ["authorizedScopeSize", "citationCount", "evidenceBytes", "fileSearchCallCount", "fileSearchLatencyMs", "fileSearchStoreCount", "jurisdictions", "partialCoverage", "planSize", "totalLatencyMs", "unexpectedRealProviderCallCount"];
-    const jurisdictionKeys = ["coverage", "ordinal", "relation"];
-    if (!hasExactKeys(retrieval, retrievalKeys)) failures.push("retrievalPlan schema is invalid");
-    failures.push(...checkCalibration(retrieval.calibration, "retrievalPlan", ["fileSearchP95LimitMs", "totalP95LimitMs"], ["fileSearchOutcome", "totalOutcome"]));
-    failures.push(...distributionFailures(retrieval.fileSearch, "retrievalPlan File Search", true));
-    failures.push(...distributionFailures(retrieval.total, "retrievalPlan total", true));
-    if (!boundedInteger(retrieval.scopeSizeMax, 9)) failures.push("retrievalPlan scope must be non-negative and not exceed 9");
-    if (!boundedInteger(retrieval.planSizeMax, 4)) failures.push("retrievalPlan plan must be non-negative and not exceed 4 libraries");
-    if (!boundedInteger(retrieval.storeCountMax, 4)) failures.push("retrievalPlan store count must be non-negative and not exceed 4");
-    if (!boundedInteger(retrieval.fileSearchCallCount, 20)) failures.push("retrievalPlan File Search call count must be bounded to 20");
-    if (!boundedInteger(retrieval.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES * 20)) failures.push("retrievalPlan evidence bytes must be bounded");
-    if (!boundedInteger(retrieval.citationCount, 1_280)) failures.push("retrievalPlan citation count must be bounded");
-    if (!boundedInteger(retrieval.partialCoverageCount, 20)) failures.push("retrievalPlan partial coverage count must be bounded to 20");
-    if (retrieval.unexpectedRealProviderCallCount !== 0) failures.push("retrievalPlan has an unexpected provider call in stub mode");
-    let aggregateFileSearchCallCount = 0;
-    let aggregateEvidenceBytes = 0;
-    let aggregateCitationCount = 0;
-    let aggregatePartialCoverageCount = 0;
-    let aggregateUnexpectedCount = 0;
-    let aggregateScopeMax = 0;
-    let aggregatePlanMax = 0;
-    let aggregateStoreMax = 0;
-    for (const sample of retrieval.samples) {
-      if (!hasExactKeys(sample, sampleKeys)) { failures.push("retrievalPlan sample schema is invalid"); continue; }
-      if (!boundedInteger(sample.authorizedScopeSize, 9)
-        || !boundedInteger(sample.planSize, 4)
-        || !boundedInteger(sample.fileSearchCallCount, 1)
-        || !boundedInteger(sample.fileSearchStoreCount, 4)
-        || !Number.isFinite(sample.fileSearchLatencyMs) || sample.fileSearchLatencyMs < 0 || sample.fileSearchLatencyMs > 120_000
-        || !Number.isFinite(sample.totalLatencyMs) || sample.totalLatencyMs < 0 || sample.totalLatencyMs > 120_000
-        || !boundedInteger(sample.evidenceBytes, MAX_RETRIEVAL_EVIDENCE_BYTES)
-        || !boundedInteger(sample.citationCount, 64)
-        || typeof sample.partialCoverage !== "boolean"
-        || sample.unexpectedRealProviderCallCount !== 0
-        || !Array.isArray(sample.jurisdictions) || sample.jurisdictions.length !== sample.planSize) {
-        failures.push("retrievalPlan sample exceeds structural bounds");
-      }
-      if (Array.isArray(sample.jurisdictions)) {
-        const invalidJurisdiction = sample.jurisdictions.some((jurisdiction, index) => !hasExactKeys(jurisdiction, jurisdictionKeys)
-          || jurisdiction.ordinal !== index
-          || !boundedInteger(jurisdiction.ordinal, 3)
-          || !["selected", "geographic_ancestor", "organizational_geography"].includes(jurisdiction.relation)
-          || !["evidence", "no_evidence", "unavailable"].includes(jurisdiction.coverage));
-        if (invalidJurisdiction) failures.push("retrievalPlan jurisdiction schema is invalid");
-        const evidenceCount = sample.jurisdictions.filter((jurisdiction) => jurisdiction?.coverage === "evidence").length;
-        const selected = sample.jurisdictions[0];
-        if (sample.authorizedScopeSize < sample.planSize) failures.push("retrievalPlan authorized scope must contain every planned jurisdiction");
-        if ((sample.fileSearchCallCount === 0) !== (sample.fileSearchStoreCount === 0)) failures.push("retrievalPlan sample File Search call count and store count must agree");
-        if ((sample.fileSearchCallCount === 0) !== (sample.fileSearchLatencyMs === 0)) failures.push("retrievalPlan sample File Search call count and latency must agree");
-        if (sample.fileSearchStoreCount > sample.planSize || sample.fileSearchStoreCount < evidenceCount) failures.push("retrievalPlan sample store count must cover only planned evidence jurisdictions");
-        if (sample.totalLatencyMs < sample.fileSearchLatencyMs) failures.push("retrievalPlan sample total latency must cover File Search latency");
-        if (!selected || selected.relation !== "selected" || sample.jurisdictions.slice(1).some((jurisdiction) => jurisdiction?.relation === "selected")) failures.push("retrievalPlan sample selected coverage must be first and unique");
-        if ((evidenceCount > 0) !== (sample.evidenceBytes > 0)) failures.push("retrievalPlan sample evidence bytes must agree with governed evidence coverage");
-        if (selected?.coverage === "unavailable" && evidenceCount > 0) failures.push("retrievalPlan sample unavailable selected coverage cannot retain evidence");
-        if (sample.citationCount > evidenceCount * 16) failures.push("retrievalPlan sample citation count exceeds governed evidence bounds");
-        if (sample.partialCoverage !== sample.jurisdictions.slice(1).some((jurisdiction) => jurisdiction?.coverage !== "evidence")) failures.push("retrievalPlan sample partial coverage must match final jurisdiction usability");
-      }
-      aggregateFileSearchCallCount += Number.isSafeInteger(sample.fileSearchCallCount) ? sample.fileSearchCallCount : 0;
-      aggregateEvidenceBytes += Number.isSafeInteger(sample.evidenceBytes) ? sample.evidenceBytes : 0;
-      aggregateCitationCount += Number.isSafeInteger(sample.citationCount) ? sample.citationCount : 0;
-      aggregatePartialCoverageCount += sample.partialCoverage === true ? 1 : 0;
-      aggregateUnexpectedCount += Number.isSafeInteger(sample.unexpectedRealProviderCallCount) ? sample.unexpectedRealProviderCallCount : 0;
-      aggregateScopeMax = Math.max(aggregateScopeMax, Number.isFinite(sample.authorizedScopeSize) ? sample.authorizedScopeSize : 0);
-      aggregatePlanMax = Math.max(aggregatePlanMax, Number.isFinite(sample.planSize) ? sample.planSize : 0);
-      aggregateStoreMax = Math.max(aggregateStoreMax, Number.isFinite(sample.fileSearchStoreCount) ? sample.fileSearchStoreCount : 0);
-    }
-    if (retrieval.fileSearchCallCount !== aggregateFileSearchCallCount
-      || retrieval.evidenceBytes !== aggregateEvidenceBytes
-      || retrieval.citationCount !== aggregateCitationCount
-      || retrieval.partialCoverageCount !== aggregatePartialCoverageCount
-      || retrieval.unexpectedRealProviderCallCount !== aggregateUnexpectedCount
-      || retrieval.scopeSizeMax !== aggregateScopeMax
-      || retrieval.planSizeMax !== aggregatePlanMax
-      || retrieval.storeCountMax !== aggregateStoreMax
-      || !sameNumbers(retrieval.fileSearch?.samplesMs, retrieval.samples.map((sample) => sample.fileSearchLatencyMs))
-      || !sameNumbers(retrieval.total?.samplesMs, retrieval.samples.map((sample) => sample.totalLatencyMs))) {
-      failures.push("retrievalPlan aggregate evidence must match its exact samples");
-    }
-    if (Number.isFinite(retrieval.fileSearch?.p95Ms) && Number.isFinite(retrieval.calibration?.fileSearchP95LimitMs) && retrieval.fileSearch.p95Ms > retrieval.calibration.fileSearchP95LimitMs) failures.push("retrievalPlan File Search p95 exceeds calibration");
-    if (Number.isFinite(retrieval.total?.p95Ms) && Number.isFinite(retrieval.calibration?.totalP95LimitMs) && retrieval.total.p95Ms > retrieval.calibration.totalP95LimitMs) failures.push("retrievalPlan total p95 exceeds calibration");
-    const fileSearchOutcome = Number.isFinite(retrieval.fileSearch?.p95Ms) && Number.isFinite(retrieval.calibration?.fileSearchP95LimitMs) && retrieval.fileSearch.p95Ms <= retrieval.calibration.fileSearchP95LimitMs ? "pass" : "fail";
-    const totalOutcome = Number.isFinite(retrieval.total?.p95Ms) && Number.isFinite(retrieval.calibration?.totalP95LimitMs) && retrieval.total.p95Ms <= retrieval.calibration.totalP95LimitMs ? "pass" : "fail";
-    if (retrieval.calibration?.fileSearchOutcome !== fileSearchOutcome || retrieval.calibration?.fileSearchOutcome !== "pass") failures.push("retrievalPlan File Search outcome must match its calibrated pass/fail result");
-    if (retrieval.calibration?.totalOutcome !== totalOutcome || retrieval.calibration?.totalOutcome !== "pass") failures.push("retrievalPlan total outcome must match its calibrated pass/fail result");
   }
   return failures.filter((failure) => typeof failure === "string");
 }

@@ -14,30 +14,19 @@ vi.mock("next/image", () => ({
 
 vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
   ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
-    <button
-      type="button"
-      onClick={() =>
-        onChange({
-          id: "ghana-id",
-          name: "Ghana",
-          slug: "ghana",
-          kind: "geographic",
-          isDefault: true,
-          legacyCountryCode: "GH",
-        })
-      }
-    >
-      Choose Ghana unified
-    </button>
+    <div>
+      <span>Research jurisdiction</span>
+      <button
+        type="button"
+        onClick={() => onChange({ id: "ghana-id", name: "Ghana", slug: "ghana", kind: "geographic", isDefault: true })}
+      >
+        Choose Ghana
+      </button>
+    </div>
   ),
 }));
 
 afterEach(cleanup);
-
-const jurisdictions = [
-  { code: "GH", name: "Ghana", slug: "ghana", isDefault: true },
-  { code: "NG", name: "Nigeria", slug: "nigeria", isDefault: false },
-];
 
 function landingProps(overrides: Partial<React.ComponentProps<typeof LandingPage>> = {}) {
   return {
@@ -50,258 +39,98 @@ function landingProps(overrides: Partial<React.ComponentProps<typeof LandingPage
     savedChats: [],
     onResumeChat: vi.fn(),
     isAuthenticated: false,
-    country: "GH",
-    onCountryChange: vi.fn(),
-    jurisdictions,
-    unifiedJurisdictionsEnabled: false,
-    researchJurisdiction: null,
+    researchJurisdiction: {
+      id: "ghana-id",
+      name: "Ghana",
+      slug: "ghana",
+      kind: "geographic" as const,
+      isDefault: true,
+    },
     onResearchJurisdictionChange: vi.fn(),
     ...overrides,
   };
 }
 
 describe("professional landing research shell", () => {
-  it("presents one semantic main with approved positioning and destinations", () => {
+  it("presents one semantic main with the approved destinations and notice", () => {
     render(<LandingPage {...landingProps()} />);
 
     expect(screen.getAllByRole("main")).toHaveLength(1);
-    expect(
-      screen.getByRole("heading", { level: 1, name: "Understand the law where you are." }),
-    ).toBeVisible();
-    expect(
-      screen.getByText(
-        "Ask a question in plain language. Receive a clear, jurisdiction-specific answer with the legal sources and citations needed to verify it.",
-      ),
-    ).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1, name: "Understand the law where you are." })).toBeVisible();
     expect(screen.getByRole("form", { name: "Legal research" })).toBeVisible();
     expect(screen.getByText("Research jurisdiction")).toBeVisible();
-    expect(screen.getByText("Your legal question")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeVisible();
-    const legalNotice = screen.getByRole("complementary", {
-      name: "Legal information disclaimer",
-    });
-    expect(within(legalNotice).getByText("Legal information, not legal advice")).toBeVisible();
-    expect(legalNotice).toHaveTextContent(
-      "Law of the Land helps you understand published legal sources. It cannot assess every fact in your situation or replace advice from a qualified legal professional.",
-    );
-
-    const primaryNavigation = screen.getByRole("navigation", { name: "Primary navigation" });
-    expect(primaryNavigation).toContainElement(
-      screen.getByRole("link", { name: "Jurisdictions" }),
-    );
-    expect(screen.getByRole("link", { name: "Jurisdictions" })).toHaveAttribute(
-      "href",
-      "#jurisdictions",
-    );
-    expect(screen.getByRole("link", { name: "How it works" })).toHaveAttribute(
-      "href",
-      "#how-it-works",
-    );
-    expect(screen.getByRole("link", { name: "For professionals" })).toHaveAttribute(
-      "href",
-      "#for-professionals",
-    );
+    expect(screen.getByRole("link", { name: "Jurisdictions" })).toHaveAttribute("href", "#jurisdictions");
     expect(screen.getByRole("link", { name: "Plans" })).toHaveAttribute("href", "#plans");
+    expect(screen.getByRole("complementary", { name: "Legal information disclaimer" })).toHaveTextContent(
+      "Legal information, not legal advice",
+    );
   });
 
-  it("uses the governed catalog and submits the controlled research question", () => {
+  it("uses the unified picker and submits the controlled question", () => {
     const props = landingProps();
-
     render(<LandingPage {...props} />);
 
-    const selector = screen.getByRole("combobox", { name: "Research jurisdiction" });
-    expect(selector).toHaveValue("GH");
-    expect(screen.getByRole("option", { name: "Ghana" })).toBeVisible();
-    expect(screen.getByRole("option", { name: "Nigeria" })).toBeVisible();
-    fireEvent.change(selector, { target: { value: "NG" } });
-    expect(props.onCountryChange).toHaveBeenCalledWith("NG");
-
+    fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
+    expect(props.onResearchJurisdictionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "ghana-id" }),
+    );
     fireEvent.change(screen.getByRole("textbox", { name: "Your legal question" }), {
       target: { value: "What are the notice rules?" },
     });
     expect(props.onQueryChange).toHaveBeenCalledWith("What are the notice rules?");
-
     fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
-    expect(props.onSearch).toHaveBeenCalledTimes(1);
+    expect(props.onSearch).toHaveBeenCalledOnce();
+  });
+
+  it("requires a stable jurisdiction selection before research", () => {
+    render(<LandingPage {...landingProps({ researchJurisdiction: null })} />);
+    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
   });
 
   it("shows up to three authenticated recent sessions and resumes the selected session", () => {
     const props = landingProps({
       isAuthenticated: true,
-      savedChats: [
-        {
-          id: "chat-tenancy",
-          title: "Tenancy",
-          lastMessage: "Notice periods",
-          timestamp: new Date("2026-07-29T12:00:00Z"),
-          messageCount: 2,
-          messages: [],
-        },
-        {
-          id: "chat-consumer",
-          title: "Consumer rights",
-          lastMessage: "Refund rules",
-          timestamp: new Date("2026-07-28T12:00:00Z"),
-          messageCount: 2,
-          messages: [],
-        },
-        {
-          id: "chat-employment",
-          title: "Employment",
-          lastMessage: "Notice requirements",
-          timestamp: new Date("2026-07-27T12:00:00Z"),
-          messageCount: 2,
-          messages: [],
-        },
-        {
-          id: "chat-hidden",
-          title: "Fourth session",
-          lastMessage: "Should not render",
-          timestamp: new Date("2026-07-26T12:00:00Z"),
-          messageCount: 2,
-          messages: [],
-        },
-      ],
+      savedChats: ["Tenancy", "Consumer rights", "Employment", "Fourth session"].map((title, index) => ({
+        id: `chat-${index}`,
+        title,
+        lastMessage: "Answer",
+        timestamp: new Date(index),
+        messageCount: 2,
+        messages: [],
+      })),
     });
-
     render(<LandingPage {...props} />);
 
     const recentResearch = screen.getByRole("region", { name: "Recent research" });
     expect(within(recentResearch).getByRole("button", { name: "Tenancy" })).toBeVisible();
-    expect(within(recentResearch).getByRole("button", { name: "Consumer rights" })).toBeVisible();
-    expect(within(recentResearch).getByRole("button", { name: "Employment" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Fourth session" })).not.toBeInTheDocument();
-
     fireEvent.click(within(recentResearch).getByRole("button", { name: "Consumer rights" }));
-    expect(props.onResumeChat).toHaveBeenCalledWith("chat-consumer");
+    expect(props.onResumeChat).toHaveBeenCalledWith("chat-1");
   });
 
-  it("renders the approved editorial sections from the governed jurisdiction register", () => {
+  it("shows search-first coverage instead of the legacy full register", () => {
     render(<LandingPage {...landingProps()} />);
 
-    for (const heading of [
-      "Clear explanations. Verifiable sources.",
-      "Built for everyday questions and professional research.",
-      "Coverage grows through governed publication.",
-      "Research that remains available when you return.",
-    ]) {
-      expect(screen.getByRole("heading", { name: heading })).toBeVisible();
-    }
-
-    const coverage = screen.getByRole("region", { name: "Published jurisdiction coverage" });
-    expect(within(coverage).getByText("Ghana")).toBeVisible();
-    expect(within(coverage).getByText("Nigeria")).toBeVisible();
-    expect(screen.queryByText(/countries covered/i)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Illustrative source trail")).toHaveTextContent(
-      "Act or regulation \u00b7 Section or article",
-    );
+    expect(screen.getByText(/Search by place or organization/i)).toBeVisible();
+    expect(screen.queryByText("Nigeria")).not.toBeInTheDocument();
   });
 
-  it("uses only valid page destinations and explains continuity to guests", () => {
-    render(<LandingPage {...landingProps()} />);
-
+  it("links guest and authenticated plan destinations correctly", () => {
+    const { rerender } = render(<LandingPage {...landingProps()} />);
     expect(screen.getByRole("link", { name: "Review plans" })).toHaveAttribute(
       "href",
       "/signin?redirect=%2Fsettings%2Fbilling",
     );
-    expect(screen.getByRole("link", { name: "Choose a jurisdiction" })).toHaveAttribute(
-      "href",
-      "#research",
-    );
-    expect(screen.getByRole("form", { name: "Legal research" })).toHaveAttribute(
-      "tabindex",
-      "-1",
-    );
-    expect(screen.getByText(/Sign in to save research threads/i)).toBeVisible();
-    expect(screen.queryByRole("link", { name: "Session controls" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /privacy/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /terms/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /contact/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Legal notice" })).toHaveAttribute(
-      "href",
-      "#legal-information-notice",
-    );
+
+    rerender(<LandingPage {...landingProps({ isAuthenticated: true })} />);
+    expect(screen.getByRole("link", { name: "Review plans" })).toHaveAttribute("href", "/settings/billing");
+    expect(screen.getByRole("link", { name: "Session controls" })).toHaveAttribute("href", "/settings/sessions");
   });
 
   it("uses the brand logo in the footer home link", () => {
     render(<LandingPage {...landingProps()} />);
-
-    const homeLinks = screen.getAllByRole("link", { name: "Law of the Land home" });
-    const footerHomeLink = homeLinks.at(-1);
-
+    const footerHomeLink = screen.getAllByRole("link", { name: "Law of the Land home" }).at(-1);
     expect(footerHomeLink).toBeDefined();
     expect(within(footerHomeLink!).getByAltText("")).toBeVisible();
-  });
-
-  it("links authenticated plans and session controls to settings", () => {
-    render(<LandingPage {...landingProps({ isAuthenticated: true })} />);
-
-    expect(screen.getByRole("link", { name: "Review plans" })).toHaveAttribute(
-      "href",
-      "/settings/billing",
-    );
-    expect(screen.getByRole("link", { name: "Session controls" })).toHaveAttribute(
-      "href",
-      "/settings/sessions",
-    );
-  });
-
-  it("explains when no governed jurisdiction is available and blocks research", () => {
-    render(<LandingPage {...landingProps({ country: "", jurisdictions: [] })} />);
-
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Legal research is not available for a jurisdiction right now. Please check again later.",
-    );
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
-    expect(
-      screen.getAllByText(
-        "Legal research is not available for a jurisdiction right now. Please check again later.",
-      ),
-    ).toHaveLength(2);
-  });
-
-  it("labels the published register while jurisdiction data is loading", () => {
-    render(<LandingPage {...landingProps({ country: "", jurisdictions: undefined })} />);
-
-    expect(screen.getByText("Loading the published jurisdiction register\u2026")).toBeVisible();
-  });
-
-  it("uses search-first selection without rendering a complete coverage register", () => {
-    const props = landingProps({
-      unifiedJurisdictionsEnabled: true,
-      jurisdictions: undefined,
-      country: "",
-    });
-    render(<LandingPage {...props} />);
-
-    expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Choose Ghana unified" }));
-    expect(props.onResearchJurisdictionChange).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "ghana-id", legacyCountryCode: "GH" }),
-    );
-    expect(screen.queryByText("Nigeria")).not.toBeInTheDocument();
-    expect(screen.getByText(/Search by place or organization/i)).toBeVisible();
-  });
-
-  it("allows a selected code-less organization to start ID-based research", () => {
-    render(
-      <LandingPage
-        {...landingProps({
-          unifiedJurisdictionsEnabled: true,
-          jurisdictions: undefined,
-          country: "",
-          researchJurisdiction: {
-            id: "who-id",
-            name: "World Health Organization",
-            slug: "world-health-organization",
-            kind: "organizational",
-            isDefault: false,
-          },
-        })}
-      />,
-    );
-
-    expect(screen.queryByText(/ID-based chat rollout/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeEnabled();
   });
 });

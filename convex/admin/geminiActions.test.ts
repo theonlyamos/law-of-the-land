@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeGeminiJob, executionOptionsForJob, persistGeminiProviderResult } from "./geminiActions";
+import {
+  executeGeminiJob,
+  executionOptionsForJob,
+  persistGeminiProviderResult,
+  truncateProviderRawResponse,
+} from "./geminiActions";
 import { ProviderError } from "./integrations/geminiFileSearch";
 
 function adapter() {
@@ -16,6 +21,16 @@ function adapter() {
 }
 
 describe("Gemini durable job executor", () => {
+  it("bounds provider diagnostics by UTF-8 bytes without corrupting text", () => {
+    const shortResponse = '{"error":"permission denied"}';
+    expect(truncateProviderRawResponse(shortResponse)).toBe(shortResponse);
+
+    const bounded = truncateProviderRawResponse("€".repeat(30_000));
+    expect(new TextEncoder().encode(bounded).byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(bounded).toMatch(/\n\.\.\.\[truncated\]$/);
+    expect(bounded).not.toContain("�");
+  });
+
   it("requires an upload-size policy only for a fresh index execution", () => {
     const previous = process.env.ADMIN_MAX_DOCUMENT_BYTES;
     delete process.env.ADMIN_MAX_DOCUMENT_BYTES;
