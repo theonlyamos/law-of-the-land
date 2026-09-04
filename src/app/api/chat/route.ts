@@ -121,25 +121,65 @@ function boundedIdentifier(value: unknown, maximum = MAX_ID_LENGTH): value is st
     && value === value.trim();
 }
 
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("CHAT_REQUEST_ABORTED");
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function readBoundedBody(
   request: Request | Response,
   maximumBytes: number,
+  signal: AbortSignal,
 ): Promise<Uint8Array | null> {
   const declared = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > maximumBytes) return null;
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
+  const cancelRead = () => {
+    void reader.cancel(signal.reason).catch(() => undefined);
+  };
+  if (signal.aborted) {
+    cancelRead();
+    throw abortReason(signal);
+  }
+  signal.addEventListener("abort", cancelRead, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > maximumBytes) {
-      await reader.cancel();
-      return null;
+  try {
+    while (true) {
+      const { done, value } = await raceWithAbort(reader.read(), signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximumBytes) {
+        await raceWithAbort(reader.cancel(), signal);
+        return null;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal.removeEventListener("abort", cancelRead);
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -262,18 +302,21 @@ async function loadManifest(
 ): Promise<ResearchManifest | null> {
   const site = process.env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/$/u, "");
   if (!site) return null;
-  const response = await fetch(`${site}/private/chat-research-manifest`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ jurisdictionId }),
-    cache: "no-store",
+  const response = await raceWithAbort(
+    fetch(`${site}/private/chat-research-manifest`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ jurisdictionId }),
+      cache: "no-store",
+      signal,
+    }),
     signal,
-  });
+  );
   if (!response.ok) return null;
-  const bytes = await readBoundedBody(response, MAX_MANIFEST_BODY_BYTES);
+  const bytes = await readBoundedBody(response, MAX_MANIFEST_BODY_BYTES, signal);
   return bytes ? parseManifest(bytes, jurisdictionId) : null;
 }
 
@@ -344,36 +387,26 @@ function failureInput(
 async function completeWithinDeadline(
   input: CompletionInput,
   terminalDeadlineAt: number,
-  requestSignal: AbortSignal,
+  signal: AbortSignal,
 ): Promise<unknown> {
-  const remainingMs = terminalDeadlineAt - Date.now();
-  if (remainingMs <= 0) throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED")), remainingMs);
-  });
-  const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(new Error("CHAT_REQUEST_ABORTED"));
-    if (requestSignal.aborted) onAbort();
-    else requestSignal.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    const serviceProof = await createTelemetryServiceProof(
-      await completeGovernedInteractionProofParts(input),
-    );
-    if (Date.now() >= terminalDeadlineAt || requestSignal.aborted) {
-      throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
-    }
-    return await Promise.race([
-      fetchAuthMutation(completeGovernedInteraction, { ...input, serviceProof }),
-      deadline,
-      aborted,
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    if (onAbort) requestSignal.removeEventListener("abort", onAbort);
+  if (Date.now() >= terminalDeadlineAt) {
+    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
   }
+  const proofParts = await raceWithAbort(
+    completeGovernedInteractionProofParts(input),
+    signal,
+  );
+  const serviceProof = await raceWithAbort(
+    createTelemetryServiceProof(proofParts),
+    signal,
+  );
+  if (Date.now() >= terminalDeadlineAt) {
+    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+  }
+  return await raceWithAbort(
+    fetchAuthMutation(completeGovernedInteraction, { ...input, serviceProof }),
+    signal,
+  );
 }
 
 function parsePublicCitation(value: unknown): PublicCitation | null {
@@ -430,8 +463,15 @@ function streamResponse(input: {
   requestStartedAt: number;
   modelDeadlineAt: number;
   terminalDeadlineAt: number;
-  modelAbort: AbortController;
+  clientSignal: AbortSignal;
+  streamCutoffSignal: AbortSignal;
+  terminalSignal: AbortSignal;
+  providerSignal: AbortSignal;
+  streamSignal: AbortSignal;
+  abortClient: (reason: unknown) => void;
+  abortStream: (reason: unknown) => void;
   modelTimer: ReturnType<typeof setTimeout>;
+  terminalTimer: ReturnType<typeof setTimeout>;
   request: Request;
   detachRequestAbort: () => void;
 }) {
@@ -441,7 +481,7 @@ function streamResponse(input: {
     start(controller) {
       const onRequestAbort = () => {
         cancelled = true;
-        if (!input.modelAbort.signal.aborted) input.modelAbort.abort(new Error("CHAT_REQUEST_ABORTED"));
+        input.abortClient(new Error("CHAT_REQUEST_ABORTED"));
       };
       input.request.signal.addEventListener("abort", onRequestAbort, { once: true });
       const send = (event: StreamEvent) => {
@@ -450,7 +490,7 @@ function streamResponse(input: {
           controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
         } catch {
           cancelled = true;
-          if (!input.modelAbort.signal.aborted) input.modelAbort.abort(new Error("CHAT_STREAM_CANCELLED"));
+          input.abortClient(new Error("CHAT_STREAM_CANCELLED"));
         }
       };
       void (async () => {
@@ -464,8 +504,10 @@ function streamResponse(input: {
             stores: input.manifest.stores,
             history: input.body.messages,
           }, {
-            signal: input.modelAbort.signal,
-            deadlineAt: input.modelDeadlineAt,
+            signal: input.providerSignal,
+            deadlineAt: input.terminalDeadlineAt,
+            streamSignal: input.streamSignal,
+            streamDeadlineAt: input.modelDeadlineAt,
             onDelta: (text) => send({ type: "delta", text }),
           });
           clearTimeout(input.modelTimer);
@@ -489,7 +531,7 @@ function streamResponse(input: {
             await completeWithinDeadline(
               terminalInput,
               input.terminalDeadlineAt,
-              input.request.signal,
+              input.providerSignal,
             ),
             input.body.jurisdictionId,
           );
@@ -503,11 +545,11 @@ function streamResponse(input: {
           });
           return;
         } catch (error) {
-          const aborted = cancelled || input.request.signal.aborted;
-          const category = input.modelAbort.signal.aborted && !aborted
+          const aborted = cancelled || input.request.signal.aborted || input.clientSignal.aborted;
+          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
             ? "timeout"
             : classifyFailure(error);
-          if (!input.modelAbort.signal.aborted) input.modelAbort.abort(new Error("CHAT_INTERACTION_FAILED"));
+          input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
           try {
             await completeWithinDeadline(
               failureInput(
@@ -520,7 +562,7 @@ function streamResponse(input: {
                 aborted ? undefined : category,
               ),
               input.terminalDeadlineAt,
-              aborted ? new AbortController().signal : input.request.signal,
+              aborted ? input.terminalSignal : input.providerSignal,
             );
           } catch {
             // The client still receives only the generic terminal state.
@@ -528,6 +570,7 @@ function streamResponse(input: {
           if (!aborted) send({ type: "error", error: CHAT_FAILURE });
         } finally {
           clearTimeout(input.modelTimer);
+          clearTimeout(input.terminalTimer);
           input.request.signal.removeEventListener("abort", onRequestAbort);
           input.detachRequestAbort();
           try {
@@ -540,7 +583,7 @@ function streamResponse(input: {
     },
     cancel(reason) {
       cancelled = true;
-      if (!input.modelAbort.signal.aborted) input.modelAbort.abort(reason);
+      input.abortClient(reason);
     },
   }), {
     headers: {
@@ -562,24 +605,38 @@ export async function POST(request: Request): Promise<Response> {
   const requestStartedAt = Date.now();
   const modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
   const terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
-  const modelAbort = new AbortController();
-  const abortModel = () => {
-    if (!modelAbort.signal.aborted) modelAbort.abort(new Error("CHAT_REQUEST_ABORTED"));
+  const clientAbort = new AbortController();
+  const streamCutoffAbort = new AbortController();
+  const terminalAbort = new AbortController();
+  const abortClient = (reason: unknown) => {
+    if (!clientAbort.signal.aborted) clientAbort.abort(reason);
   };
-  if (request.signal.aborted) abortModel();
-  else request.signal.addEventListener("abort", abortModel, { once: true });
-  const detachRequestAbort = () => request.signal.removeEventListener("abort", abortModel);
+  const abortStream = (reason: unknown) => {
+    if (!streamCutoffAbort.signal.aborted) streamCutoffAbort.abort(reason);
+  };
+  const onRequestAbort = () => abortClient(new Error("CHAT_REQUEST_ABORTED"));
+  if (request.signal.aborted) onRequestAbort();
+  else request.signal.addEventListener("abort", onRequestAbort, { once: true });
+  const detachRequestAbort = () => request.signal.removeEventListener("abort", onRequestAbort);
+  const providerSignal = AbortSignal.any([clientAbort.signal, terminalAbort.signal]);
+  const streamSignal = AbortSignal.any([providerSignal, streamCutoffAbort.signal]);
   const modelTimer = setTimeout(() => {
-    if (!modelAbort.signal.aborted) modelAbort.abort(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
+    abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
   }, Math.max(0, modelDeadlineAt - Date.now()));
+  const terminalTimer = setTimeout(() => {
+    if (!terminalAbort.signal.aborted) {
+      terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
+    }
+  }, Math.max(0, terminalDeadlineAt - Date.now()));
   const stopEarly = (response: Response) => {
     clearTimeout(modelTimer);
+    clearTimeout(terminalTimer);
     detachRequestAbort();
     return response;
   };
 
   try {
-    if (!(await isAuthenticated())) {
+    if (!(await raceWithAbort(isAuthenticated(), streamSignal))) {
       return stopEarly(jsonError("Sign in to ask questions.", 401));
     }
     const limit = rateLimit(`chat:${clientKey(request)}`, REQUESTS_PER_MINUTE);
@@ -590,7 +647,7 @@ export async function POST(request: Request): Promise<Response> {
         { "retry-after": String(limit.retryAfterSeconds) },
       ));
     }
-    const bodyBytes = await readBoundedBody(request, MAX_REQUEST_BODY_BYTES);
+    const bodyBytes = await readBoundedBody(request, MAX_REQUEST_BODY_BYTES, streamSignal);
     const body = bodyBytes ? parseBody(bodyBytes) : null;
     if (!body) {
       return stopEarly(jsonError(
@@ -598,18 +655,24 @@ export async function POST(request: Request): Promise<Response> {
         400,
       ));
     }
-    const allowance = await fetchAuthQuery(api.usage.checkAllowance, {});
+    const allowance = await raceWithAbort(
+      fetchAuthQuery(api.usage.checkAllowance, {}),
+      streamSignal,
+    );
     if (!allowance.allowed || !allowance.canRecord) {
       return stopEarly(jsonError(
         "You have reached your question limit for today. It resets tomorrow.",
         402,
       ));
     }
-    const token = await getToken();
+    const token = await raceWithAbort(getToken(), streamSignal);
     if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
     let manifest: ResearchManifest | null = null;
     try {
-      manifest = await loadManifest(body.jurisdictionId, token, modelAbort.signal);
+      manifest = await raceWithAbort(
+        loadManifest(body.jurisdictionId, token, streamSignal),
+        streamSignal,
+      );
     } catch {
       manifest = null;
     }
@@ -617,7 +680,10 @@ export async function POST(request: Request): Promise<Response> {
 
     const routeNonce = createOpaqueTelemetryToken();
     try {
-      await fetchAuthMutation(api.usage.recordQuestion, {});
+      await raceWithAbort(
+        fetchAuthMutation(api.usage.recordQuestion, {}),
+        streamSignal,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message.includes("QUOTA_EXCEEDED")) {
@@ -636,8 +702,15 @@ export async function POST(request: Request): Promise<Response> {
       requestStartedAt,
       modelDeadlineAt,
       terminalDeadlineAt,
-      modelAbort,
+      clientSignal: clientAbort.signal,
+      streamCutoffSignal: streamCutoffAbort.signal,
+      terminalSignal: terminalAbort.signal,
+      providerSignal,
+      streamSignal,
+      abortClient,
+      abortStream,
       modelTimer,
+      terminalTimer,
       request,
       detachRequestAbort,
     });

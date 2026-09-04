@@ -212,6 +212,70 @@ afterEach(() => {
 });
 
 describe("POST /api/chat request boundary", () => {
+  it("bounds a stalled authentication preflight by the shared model cutoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    let releaseAuthentication!: (authenticated: boolean) => void;
+    authMocks.isAuthenticated.mockReturnValue(new Promise((resolve) => {
+      releaseAuthentication = resolve;
+    }));
+
+    const responsePromise = POST(request());
+    await vi.advanceTimersByTimeAsync(55_000);
+    let response: Response | null = null;
+    try {
+      response = await Promise.race([responsePromise, Promise.resolve(null)]);
+      expect(response).not.toBeNull();
+      expect(response?.status).toBe(500);
+    } finally {
+      if (!response) {
+        releaseAuthentication(true);
+        await responsePromise;
+      }
+    }
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("cancels and bounds a stalled request body read by the shared model cutoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    const cancelBody = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+        controller.enqueue(new TextEncoder().encode('{"query":'));
+      },
+      cancel: cancelBody,
+    });
+    const stalledRequest = new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: {
+        accept: "application/x-ndjson",
+        "content-type": "application/json",
+        "x-forwarded-for": crypto.randomUUID(),
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const responsePromise = POST(stalledRequest);
+    await vi.advanceTimersByTimeAsync(55_000);
+    let response: Response | null = null;
+    try {
+      response = await Promise.race([responsePromise, Promise.resolve(null)]);
+      expect(response).not.toBeNull();
+      expect(response?.status).toBe(500);
+      expect(cancelBody).toHaveBeenCalledTimes(1);
+    } finally {
+      if (!response) {
+        bodyController.close();
+        await responsePromise;
+      }
+    }
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
   it("rejects unauthenticated requests before reading or charging them", async () => {
     authMocks.isAuthenticated.mockResolvedValue(false);
 
@@ -540,6 +604,40 @@ describe("POST /api/chat streamed governed interaction", () => {
       failureCategory: "timeout",
       elapsedMs: 55_000,
     });
+  });
+
+  it("uses the terminal reserve for the canonical read after the stream completes near 55 seconds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    let streamSignal: AbortSignal | undefined;
+    let canonicalSignal: AbortSignal | undefined;
+    interactionMocks.create.mockImplementation(async (_input, options) => {
+      streamSignal = options.signal;
+      return (async function* () {
+        await new Promise((resolve) => setTimeout(resolve, 54_900));
+        for await (const event of successfulStream()) yield event;
+      })();
+    });
+    interactionMocks.get.mockImplementation(async (_id, _params, options) => {
+      canonicalSignal = options.signal;
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(canonicalInteraction()), 1_100);
+        options.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("canonical read aborted"));
+        }, { once: true });
+      });
+    });
+
+    const response = await POST(request());
+    const streamEventsPromise = events(response);
+    await vi.advanceTimersByTimeAsync(56_000);
+    const streamEvents = await streamEventsPromise;
+
+    expect(streamSignal?.aborted).toBe(true);
+    expect(canonicalSignal).not.toBe(streamSignal);
+    expect(canonicalSignal?.aborted).toBe(false);
+    expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
   it("emits no done when terminal validation exhausts the shared 60-second deadline", async () => {

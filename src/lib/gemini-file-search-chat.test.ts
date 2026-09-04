@@ -129,9 +129,13 @@ async function run(
   const client = new FakeInteractionsClient(events, final);
   const chat = new GeminiFileSearchChat(client, { GOOGLE_AI_MODEL: "configured-model" });
   const deltas: string[] = [];
+  const signal = new AbortController().signal;
+  const deadlineAt = Date.now() + 10_000;
   const result = await chat.run(request, {
-    signal: new AbortController().signal,
-    deadlineAt: Date.now() + 10_000,
+    signal,
+    deadlineAt,
+    streamSignal: signal,
+    streamDeadlineAt: deadlineAt,
     onDelta: (delta) => { deltas.push(delta); },
   });
   return { client, deltas, result };
@@ -190,19 +194,22 @@ describe("GeminiFileSearchChat", () => {
     });
   });
 
-  it("passes the route signal to the streamed creation and canonical read", async () => {
-    const controller = new AbortController();
+  it("uses the stream cutoff for creation and the overall deadline for the canonical read", async () => {
+    const streamController = new AbortController();
+    const overallController = new AbortController();
     const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
     const chat = new GeminiFileSearchChat(client, {});
 
     await chat.run(input(), {
-      signal: controller.signal,
+      signal: overallController.signal,
       deadlineAt: Date.now() + 10_000,
+      streamSignal: streamController.signal,
+      streamDeadlineAt: Date.now() + 5_000,
       onDelta: () => {},
     });
 
-    expect(client.createOptions).toEqual([{ signal: controller.signal }]);
-    expect(client.getOptions).toEqual([{ signal: controller.signal }]);
+    expect(client.createOptions).toEqual([{ signal: streamController.signal }]);
+    expect(client.getOptions).toEqual([{ signal: overallController.signal }]);
   });
 
   it("keeps a bounded question independent of citation identifier limits", async () => {
@@ -301,11 +308,16 @@ describe("GeminiFileSearchChat", () => {
     await expect(chat.run(input(), {
       signal: controller.signal,
       deadlineAt: Date.now() + 10_000,
+      streamSignal: controller.signal,
+      streamDeadlineAt: Date.now() + 10_000,
       onDelta: () => {},
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
+    const activeSignal = new AbortController().signal;
     await expect(chat.run(input(), {
-      signal: new AbortController().signal,
+      signal: activeSignal,
       deadlineAt: Date.now() - 1,
+      streamSignal: activeSignal,
+      streamDeadlineAt: Date.now() - 1,
       onDelta: () => {},
     })).rejects.toThrow("GOVERNED_CHAT_DEADLINE_EXPIRED");
     expect(client.requests).toHaveLength(0);
@@ -319,6 +331,8 @@ describe("GeminiFileSearchChat", () => {
     await expect(chat.run(input(), {
       signal: controller.signal,
       deadlineAt: Date.now() + 10_000,
+      streamSignal: controller.signal,
+      streamDeadlineAt: Date.now() + 10_000,
       onDelta: () => { controller.abort(); },
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(client.getIds).toEqual([]);

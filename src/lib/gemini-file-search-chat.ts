@@ -248,13 +248,16 @@ export class GeminiFileSearchChat {
     options: {
       signal: AbortSignal;
       deadlineAt: number;
+      streamSignal: AbortSignal;
+      streamDeadlineAt: number;
       onDelta: (text: string) => void | Promise<void>;
     },
   ): Promise<GovernedChatResult> {
     validateInput(input);
     checkAbortOrDeadline(options.signal, options.deadlineAt);
+    checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
     const stream = await this.client.interactions.create(requestFor(this.model, input), {
-      signal: options.signal,
+      signal: options.streamSignal,
     });
     const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
     const fileSearchCallIds = new Map<string, Set<string>>();
@@ -264,7 +267,7 @@ export class GeminiFileSearchChat {
     let streamedBytes = 0;
 
     for await (const event of stream) {
-      checkAbortOrDeadline(options.signal, options.deadlineAt);
+      checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
       if (completed) return invalidResponse();
       if (event.event_type === "error") return invalidResponse();
       if (event.event_type === "interaction.created") {
@@ -323,8 +326,9 @@ export class GeminiFileSearchChat {
       return invalidResponse();
     }
 
-    checkAbortOrDeadline(options.signal, options.deadlineAt);
+    checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
     if (!completed || !interactionId) return invalidResponse();
+    checkAbortOrDeadline(options.signal, options.deadlineAt);
     const interaction = await this.client.interactions.get(interactionId, undefined, { signal: options.signal });
     checkAbortOrDeadline(options.signal, options.deadlineAt);
     if (interaction.id !== interactionId) return invalidResponse();
