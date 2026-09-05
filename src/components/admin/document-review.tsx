@@ -25,7 +25,8 @@ export type ReviewItem = {
   sha256: string;
   sourceHost: string;
   effectiveDate?: string;
-  status: "ready_for_review" | "approved" | "published" | "superseded";
+  status: "ready_for_review" | "approved" | "publishing" | "published" | "superseded";
+  failureSummary?: string;
   submittedBy: string;
   submittedAt?: number;
   previousVersion?: { versionNumber: number; filename: string; sha256: string; effectiveDate?: string };
@@ -38,7 +39,7 @@ function actionKey(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
+export function DocumentReview({ items, onPublicationQueued }: { items: readonly ReviewItem[]; onPublicationQueued?: () => void }) {
   const router = useRouter();
   const approve = useMutation(api.admin.reviews.approveVersion);
   const reject = useMutation(api.admin.reviews.rejectVersion);
@@ -80,6 +81,8 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
       idempotencyKey: risk.key,
     });
     setMessage(`${risk.action[0].toUpperCase()}${risk.action.slice(1)} queued for version ${risk.item.versionNumber}.`);
+    if (risk.action !== "unpublish") onPublicationQueued?.();
+    router.refresh();
   }
 
   if (items.length === 0) {
@@ -97,7 +100,7 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
               <h2 className="mt-2 text-[clamp(1.6rem,4vw,2.7rem)] font-semibold leading-tight tracking-[-0.04em]">{item.resourceTitle}</h2>
               <p className="mt-2 text-sm text-[oklch(40%_0.035_252)]">{item.officialCitation}</p>
             </div>
-            <span className="w-fit border border-[oklch(61%_0.075_68)] bg-[oklch(92%_0.045_76)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em]">{item.status.replaceAll("_", " ")}</span>
+            <span className="w-fit border border-[oklch(61%_0.075_68)] bg-[oklch(92%_0.045_76)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em]">{item.status === "publishing" ? item.failureSummary ? "Publishing needs review" : "Queued for publishing" : item.status === "ready_for_review" ? "Unapproved" : item.status.replaceAll("_", " ")}</span>
           </header>
 
           <div className="mt-7 grid gap-8 xl:grid-cols-[1.15fr_.85fr]">
@@ -144,6 +147,11 @@ export function DocumentReview({ items }: { items: readonly ReviewItem[] }) {
                     <div className="flex flex-wrap gap-3"><button type="submit" name="decision" value="approve" className="min-h-11 bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)]">Approve version</button><button type="submit" name="decision" value="reject" className="min-h-11 px-4 text-sm font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">Reject version</button></div>
                   </form>
                 </PermissionBoundary>
+              ) : item.status === "publishing" ? (
+                <div className="space-y-3 text-sm" role="status">
+                  <p>{item.failureSummary ?? "Publication is queued or indexing is in progress. The document will be published once Gemini confirms indexing."}</p>
+                  <a href="/admin/operations" className="font-semibold underline underline-offset-4">View publishing jobs</a>
+                </div>
               ) : (
                 <PermissionBoundary resource="document" action={item.status === "superseded" ? "rollback" : "publish"} fallback={<p className="text-sm">Read-only review evidence. Your role cannot change publication state.</p>}>
                   <button type="button" onClick={() => setRisk({ item, action: item.status === "approved" ? "publish" : item.status === "published" ? "unpublish" : "rollback", key: actionKey(item.status) })} className="min-h-11 bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)]">{item.status === "approved" ? "Publish version" : item.status === "published" ? "Unpublish version" : "Roll back to version"}</button>

@@ -146,6 +146,19 @@ afterEach(() => {
 });
 
 describe("governed document publication", () => {
+  it("includes queued publications and their failure details only in the publishing docket", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { ids } = await seedCatalog(t, "manager", ["approved"]);
+    await t.run(async (ctx) => ctx.db.patch(ids[0], { status: "publishing", failureSummary: "Indexing needs review" }));
+    const publishing = await reviewer.client.query(listReviewQueue, { status: "publishing", paginationOpts: { numItems: 12, cursor: null } });
+    expect(publishing.page).toHaveLength(1);
+    expect(publishing.page[0]).toMatchObject({ id: ids[0], status: "publishing", failureSummary: "Indexing needs review" });
+    const approved = await reviewer.client.query(listReviewQueue, { status: "approved", paginationOpts: { numItems: 12, cursor: null } });
+    expect(approved.page).toHaveLength(0);
+  });
+
   it("submits a verified Convex original for review without provider evidence or jobs", async () => {
     const t = createBackend();
     await enablePanel(t);
