@@ -769,6 +769,9 @@ describe("legal resource governance", () => {
       return versionId;
     });
 
+    const publishedRows = await manager.client.query(listResources, { jurisdictionId, paginationOpts: { numItems: 10, cursor: null } });
+    expect(publishedRows.page.find((row: { _id: string }) => row._id === resourceId)).toMatchObject({ hasPublishedVersion: true });
+
     await expect(manager.client.mutation(markResourceRepealed, {
       id: resourceId,
       repealDate: "2026-02-01",
@@ -828,7 +831,7 @@ describe("legal resource governance", () => {
       await manager.client.mutation(createResource, {
         jurisdictionId,
         type: "act",
-        title: `Act ${index}`,
+        title: index === 2 ? "Labour Act" : `Act ${index}`,
         issuer: "Parliament",
         officialCitation: `Act ${index}`,
         sourceUrl: `https://example.gov.gh/acts/${index}`,
@@ -844,6 +847,16 @@ describe("legal resource governance", () => {
     });
     expect(first.page).toHaveLength(2);
     expect(first.isDone).toBe(false);
+    const named = await auditor.client.query(listResources, {
+      name: "  lABOUR  ", jurisdictionId, status: "active",
+      paginationOpts: { numItems: 2, cursor: null },
+    });
+    expect(named.page.map((row: { title: string }) => row.title)).toEqual(["Labour Act"]);
+    expect(named.page[0]).toMatchObject({ jurisdictionName: "Ghana", hasPublishedVersion: false });
+    const archivedSearch = await auditor.client.query(listResources, {
+      name: "ACT", status: "archived", paginationOpts: { numItems: 2, cursor: null },
+    });
+    expect(archivedSearch.page).toHaveLength(0);
     await expect(
       manager.client.query(listResources, {
         jurisdictionId,

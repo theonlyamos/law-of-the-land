@@ -41,6 +41,19 @@ const item = {
 };
 
 describe("document review workbench", () => {
+  it("shows queued publication without offering another publication action", () => {
+    render(<AdminPermissionProvider permissions={["document:publish", "document:rollback"]}><DocumentReview items={[{ ...item, status: "publishing" }]} /></AdminPermissionProvider>);
+    expect(screen.getByText("Queued for publishing")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Publish version|Roll back/ })).toBeNull();
+    expect(screen.getByRole("link", { name: "View publishing jobs" })).toHaveAttribute("href", "/admin/operations");
+  });
+
+  it("distinguishes a blocked publication from normal indexing", () => {
+    render(<DocumentReview items={[{ ...item, status: "publishing", failureSummary: "Search is paused until this job is reviewed." }]} />);
+    expect(screen.getByText("Publishing needs review")).toBeVisible();
+    expect(screen.getByText("Search is paused until this job is reviewed.")).toBeVisible();
+  });
+
   it("shows safe evidence, body-free diff, immutable decisions, and reviewer actions", () => {
     render(<AdminPermissionProvider permissions={["document:review", "document:publish", "document:rollback"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     expect(screen.getByRole("heading", { name: "Data Protection Act" })).toBeVisible();

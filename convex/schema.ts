@@ -184,6 +184,7 @@ export default defineSchema({
       "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
+    .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId"] })
     .index("by_activeVersionId", ["activeVersionId"])
     .index("by_jurisdictionId_and_activeVersionId", [
       "jurisdictionId",

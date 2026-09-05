@@ -468,14 +468,27 @@ export const archiveJurisdiction = mutation({
 
 export const listResources = query({
   args: {
+    name: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
     status: v.optional(resourceStatusValidator),
     paginationOpts: paginationOptsValidator,
   },
-  returns: paginationResultValidator(resourceDocValidator),
+  returns: paginationResultValidator(v.object({
+    ...resourceDocValidator.fields,
+    jurisdictionName: v.string(),
+    hasPublishedVersion: v.boolean(),
+  })),
   handler: async (ctx, args) => {
     await requireEnabledAdminCatalogRead(ctx, "resource");
     validatePageSize(args.paginationOpts.numItems);
+    const name = args.name?.trim();
+    if (name && (name.length > 200 || name.split(/\s+/u).length > 16)) throw new ConvexError("RESOURCE_SEARCH_INVALID");
+    const searchSource = name ? ctx.db.query("legalResources").withSearchIndex("search_title", (q) => {
+        let search = q.search("title", name);
+        if (args.status) search = search.eq("status", args.status);
+        if (args.jurisdictionId) search = search.eq("jurisdictionId", args.jurisdictionId);
+        return search;
+      }) : null;
     const source = args.jurisdictionId && args.status
       ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status", (q) =>
           q.eq("jurisdictionId", args.jurisdictionId!).eq("status", args.status!),
@@ -487,7 +500,19 @@ export const listResources = query({
               q.eq("jurisdictionId", args.jurisdictionId!),
             )
           : ctx.db.query("legalResources");
-    return await source.paginate(args.paginationOpts);
+    const result = await (searchSource ?? source).paginate(args.paginationOpts);
+    const jurisdictions = new Map(await Promise.all(
+      [...new Set(result.page.map((row) => row.jurisdictionId))].map(async (id) => [id, await ctx.db.get(id)] as const),
+    ));
+    const page = await Promise.all(result.page.map(async (row) => {
+      const version = row.activeVersionId ? await ctx.db.get(row.activeVersionId) : null;
+      return {
+        ...row,
+        jurisdictionName: jurisdictions.get(row.jurisdictionId)?.name ?? "Unknown jurisdiction",
+        hasPublishedVersion: version?.resourceId === row._id && version.status === "published",
+      };
+    }));
+    return { ...result, page };
   },
 });
 
