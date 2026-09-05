@@ -17,14 +17,14 @@
     "test:budgets": "node scripts/check-admin-budgets.mjs --require-session && node -e \"require('node:fs').rmSync('artifacts/admin-performance.json', { force: true })\" && playwright test e2e/performance.spec.ts && node scripts/check-admin-budgets.mjs artifacts/admin-performance.json"
   },
   "dependencies": {
-    "@convex-dev/better-auth": "^0.12.2",
+    "@convex-dev/better-auth": "0.12.5",
     "@convex-dev/polar": "^0.9.1",
     "@google/genai": "^2.21.0",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-icons": "^1.3.2",
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-slot": "^1.2.4",
-    "better-auth": "~1.6.9",
+    "better-auth": "1.6.30",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "convex": "^1.39.1",
@@ -64,5 +64,8 @@
   "overrides": {
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.4"
+  },
+  "patchedDependencies": {
+    "@convex-dev/better-auth@0.12.5": "patches/@convex-dev%2Fbetter-auth@0.12.5.patch"
   }
 }
