@@ -30,3 +30,22 @@ it("submits immediately and cancels the pending debounce", () => {
   act(() => vi.advanceTimersByTime(400));
   expect(replace).toHaveBeenCalledTimes(1);
 });
+
+it("syncs URL changes and cancels a stale search when filters are cleared", () => {
+  vi.useFakeTimers();
+  const { rerender } = render(<DocumentFilters name="Labour" status="active" />);
+  const input = screen.getByRole("searchbox");
+  fireEvent.change(input, { target: { value: "Labour Act" } });
+  rerender(<DocumentFilters name="" status="" />);
+  expect(input).toHaveValue("");
+  expect(screen.getByRole("combobox")).toHaveValue("");
+  act(() => vi.advanceTimersByTime(400));
+  expect(replace).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "archived" } });
+  expect(replace).toHaveBeenLastCalledWith("/admin/documents?status=archived", { scroll: false });
+  rerender(<DocumentFilters name="Constitution" status="repealed" />);
+  expect(input).toHaveValue("Constitution");
+  expect(screen.getByRole("combobox")).toHaveValue("repealed");
+  fireEvent.submit(screen.getByRole("search"));
+  expect(replace).toHaveBeenLastCalledWith("/admin/documents?name=Constitution&status=repealed", { scroll: false });
+});
