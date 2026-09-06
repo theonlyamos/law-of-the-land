@@ -573,7 +573,7 @@ describe("durable Gemini jobs", () => {
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
   });
 
-  it("keeps polling at 30 minutes and requires review after one hour", async () => {
+  it("keeps polling at 60 minutes and requires review after 120 minutes", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = Date.UTC(2026, 8, 4, 12);
@@ -608,9 +608,9 @@ describe("durable Gemini jobs", () => {
           .withIndex("by_resourceId", (q) => q.eq("resourceId", elapsedWindow.resourceId))
           .unique();
         if (!lock) throw new Error("expected lifecycle lock");
-        await ctx.db.patch(lock._id, { expiresAt: startedAt + 61 * 60_000 });
+        await ctx.db.patch(lock._id, { expiresAt: startedAt + 121 * 60_000 });
       });
-      vi.setSystemTime(startedAt + 30 * 60_000);
+      vi.setSystemTime(startedAt + 60 * 60_000);
       let elapsedLease = await claimLease(t, elapsedWindow.jobId);
       await t.mutation(applyGeminiProviderResult, {
         jobId: elapsedWindow.jobId,
@@ -622,7 +622,7 @@ describe("durable Gemini jobs", () => {
       });
       await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.not.toHaveProperty("failureSummary");
 
-      vi.setSystemTime(startedAt + 60 * 60_000);
+      vi.setSystemTime(startedAt + 120 * 60_000);
       elapsedLease = await claimLease(t, elapsedWindow.jobId);
       await t.mutation(applyGeminiProviderResult, {
         jobId: elapsedWindow.jobId,
@@ -630,7 +630,7 @@ describe("durable Gemini jobs", () => {
         result: { kind: "index_pending" },
       });
       await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.toMatchObject({
-        failureSummary: "Gemini did not confirm the index update within 1 hour. Search is paused until an administrator reviews the job.",
+        failureSummary: "Gemini did not confirm the index update within 120 minutes. Search is paused until an administrator reviews the job.",
       });
     } finally {
       vi.useRealTimers();
