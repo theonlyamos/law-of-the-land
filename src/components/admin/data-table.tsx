@@ -34,6 +34,7 @@ type DataTableProps = {
   columns: readonly AdminDataColumn[];
   rows: readonly AdminDataRow[];
   filters?: readonly AdminDataFilter[];
+  filterHeader?: ReactNode;
   currentCursor: string | null;
   previousCursors: readonly string[];
   nextCursor: string;
@@ -145,6 +146,7 @@ export function DataTable({
   columns,
   rows,
   filters = [],
+  filterHeader,
   currentCursor,
   previousCursors,
   nextCursor,
@@ -162,7 +164,7 @@ export function DataTable({
 
   return (
     <section className="@container" aria-label={`${ariaLabel} records`}>
-      {filters.length > 0 ? (
+      {filterHeader ?? (filters.length > 0 ? (
         <form
           action={basePath}
           method="get"
@@ -203,7 +205,7 @@ export function DataTable({
             Apply exact lookup
           </button>
         </form>
-      ) : null}
+      ) : null)}
 
       {state === "loading" ? (
         <DataState

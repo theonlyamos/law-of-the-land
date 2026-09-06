@@ -244,7 +244,8 @@ const queueRowValidator = v.object({
   sourceHost: v.string(),
   effectiveDate: v.optional(v.string()),
   repealDate: v.optional(v.string()),
-  status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("published"), v.literal("superseded")),
+  status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded")),
+  failureSummary: v.optional(v.string()),
   submittedBy: v.string(),
   submittedAt: v.optional(v.number()),
   previousVersion: v.optional(v.object({
@@ -258,7 +259,7 @@ const queueRowValidator = v.object({
 
 export const listReviewQueue = query({
   args: {
-    status: v.optional(v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("published"), v.literal("superseded"))),
+    status: v.optional(v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded"))),
     paginationOpts: paginationOptsValidator,
   },
   returns: paginationResultValidator(queueRowValidator),
@@ -291,6 +292,7 @@ export const listReviewQueue = query({
         sourceHost: new URL(version.sourceUrl).host,
         effectiveDate: version.effectiveDate,
         status,
+        failureSummary: version.failureSummary,
         submittedBy: version.submittedBy,
         submittedAt: version.submittedAt,
         ...(previous ? { previousVersion: { versionNumber: previous.versionNumber, filename: previous.filename, sha256: previous.sha256, effectiveDate: previous.effectiveDate } } : {}),

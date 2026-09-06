@@ -1,8 +1,6 @@
-import { api } from "../../../../convex/_generated/api";
 import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
-import { DocumentReview, type ReviewItem } from "@/components/admin/document-review";
+import { ReviewDocket } from "@/components/admin/review-docket";
 import { authorizeAdminPage } from "@/lib/admin/server";
-import { fetchAuthQuery } from "@/lib/auth-server";
 import { redirect } from "next/navigation";
 
 export default async function ReviewQueuePage() {
@@ -14,15 +12,6 @@ export default async function ReviewQueuePage() {
   ) {
     redirect("/admin/forbidden");
   }
-  const dockets = await Promise.all(
-    (["ready_for_review", "approved", "published", "superseded"] as const).map((status) =>
-      fetchAuthQuery(api.admin.reviews.listReviewQueue, {
-        status,
-        paginationOpts: { numItems: 12, cursor: null },
-      }),
-    ),
-  );
-  const items = dockets.flatMap((docket) => docket.page) as ReviewItem[];
 
   return (
     <article className="mx-auto max-w-[88rem]">
@@ -34,9 +23,8 @@ export default async function ReviewQueuePage() {
         <p className="text-sm leading-6 text-[oklch(40%_0.035_252)]">Inspect the immutable original metadata, record a legal decision, then publish the approved version through Gemini.</p>
       </header>
       <div className="mt-10">
-        <DocumentReview items={items} />
+        <ReviewDocket />
       </div>
-      {dockets.some((docket) => !docket.isDone) ? <p className="mt-10 border-t border-[oklch(75%_0.025_78)] pt-5 text-sm">More docket entries are available through the bounded review cursors.</p> : null}
     </article>
   );
 }

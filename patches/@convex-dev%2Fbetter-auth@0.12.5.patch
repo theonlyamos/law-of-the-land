@@ -1,0 +1,29 @@
+diff --git a/dist/react/index.d.ts b/dist/react/index.d.ts
+index 652857c519c97b92f4819cbb8f25bea33be20982..08e86cc29ec8a2d36ac768a6de14a85a775ed1b2 100644
+--- a/dist/react/index.d.ts
++++ b/dist/react/index.d.ts
+@@ -1,18 +1,16 @@
+ import type { PropsWithChildren, ReactNode } from "react";
+ import type { AuthTokenFetcher } from "convex/browser";
+ import type { FunctionReference } from "convex/server";
+-import type { BetterAuthClientPlugin } from "better-auth";
+ import type { createAuthClient } from "better-auth/react";
+-import type { convexClient, crossDomainClient } from "../client/plugins/index.js";
++import type { convexClient } from "../client/plugins/index.js";
+ import type { EmptyObject } from "convex-helpers";
+-type CrossDomainClient = ReturnType<typeof crossDomainClient>;
+ type ConvexClient = ReturnType<typeof convexClient>;
+-type PluginsWithCrossDomain = (CrossDomainClient | ConvexClient | BetterAuthClientPlugin)[];
+-type PluginsWithoutCrossDomain = (ConvexClient | BetterAuthClientPlugin)[];
+-type AuthClientWithPlugins<Plugins extends PluginsWithCrossDomain | PluginsWithoutCrossDomain> = ReturnType<typeof createAuthClient<BetterAuthClientPlugin & {
+-    plugins: Plugins;
++// Temporary compatibility fix for get-convex/better-auth#420.
++// Infer from the required plugin, then expose only the runtime consumer contract.
++type ConvexAuthClient = ReturnType<typeof createAuthClient<{
++    plugins: [ConvexClient];
+ }>>;
+-export type AuthClient = AuthClientWithPlugins<PluginsWithCrossDomain> | AuthClientWithPlugins<PluginsWithoutCrossDomain>;
++export type AuthClient = Pick<ConvexAuthClient, "useSession" | "getSession" | "convex">;
+ type IConvexReactClient = {
+     setAuth(fetchToken: AuthTokenFetcher): void;
+     clearAuth(): void;

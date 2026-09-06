@@ -4,6 +4,7 @@ import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
 import { DataTable, readAdminTableNavigation, type AdminTableSearchParams } from "@/components/admin/data-table";
 import { CatalogStatus } from "@/components/admin/resource-register";
 import { ResourceEditor } from "@/components/admin/catalog-actions";
+import { DocumentFilters } from "@/components/admin/document-filters";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
 import Link from "next/link";
@@ -23,6 +24,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const parameters = await searchParams;
   const navigation = readAdminTableNavigation(parameters);
   const status = single(parameters.status);
+  const name = single(parameters.name).trim();
   const jurisdictionCode = single(parameters.jurisdictionCode);
   const jurisdictionCursor = single(parameters.jurisdictionCursor) || null;
   const validStatus = status === "" || STATUSES.includes(status as (typeof STATUSES)[number]);
@@ -40,11 +42,12 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
     try {
       result = await fetchAuthQuery(api.admin.resources.listResources, {
         paginationOpts: { numItems: 30, cursor: navigation.cursor },
+        ...(name ? { name } : {}),
         ...(status ? { status: status as (typeof STATUSES)[number] } : {}),
       });
     } catch { failed = true; }
   }
-  const rows = (result && "page" in result ? result.page : []) as Doc<"legalResources">[];
+  const rows = (result && "page" in result ? result.page : []) as (Doc<"legalResources"> & { jurisdictionName: string; hasPublishedVersion: boolean })[];
   let jurisdictionOptions: Array<{ id: string; code: string; name: string }> = [];
   let jurisdictionNextCursor = "";
   let jurisdictionIsDone = true;
@@ -85,21 +88,22 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         <DataTable
           ariaLabel="Legal resources"
           basePath="/admin/documents"
+          filterHeader={<DocumentFilters name={name} status={status} />}
           columns={COLUMNS}
           rows={rows.map((row) => ({ id: row._id, cells: {
             instrument: <span className="grid gap-1"><Link href={`/admin/documents/${row._id}`} className="inline-flex min-h-11 items-center font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">{row.title}</Link><span className="text-xs">{row.type} / {row.officialCitation}</span></span>,
-            jurisdiction: row.jurisdictionId,
+            jurisdiction: row.jurisdictionName,
             authority: <span className="grid gap-1"><span>{row.issuer}</span><a className="break-all text-xs underline underline-offset-4" href={row.sourceUrl} rel="noreferrer" target="_blank">Official source</a></span>,
-            state: <CatalogStatus status={row.status} />,
+            state: <CatalogStatus status={row.status === "active" && !row.hasPublishedVersion ? "unpublished" : row.status} />,
             effective: <span>{row.effectiveDate}{row.repealDate ? ` - ${row.repealDate}` : ""}</span>,
           }}))}
-          filters={[{ name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }]}
+          filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }]}
           currentCursor={navigation.cursor}
           previousCursors={navigation.previousCursors}
           nextCursor={result && "continueCursor" in result ? result.continueCursor : ""}
           isDone={result && "isDone" in result ? result.isDone : true}
           state={failed ? "error" : "ready"}
-          emptyMessage="No canonical legal resources match this state."
+          emptyMessage="No documents match this name and catalog state."
           errorMessage="Legal resources could not be loaded. Check the filter and pagination link."
         />
       </div>
