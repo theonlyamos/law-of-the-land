@@ -437,7 +437,7 @@ export type ChatResearchStores = {
   partialCoverage: boolean;
 };
 
-async function readyStoreName(
+export async function readyStoreName(
   ctx: QueryCtx,
   jurisdictionId: Id<"jurisdictions">,
 ): Promise<string | null> {

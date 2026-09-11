@@ -5,8 +5,23 @@ import { authComponent, createAuth } from "./auth";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
 import type { ChatResearchStores } from "./jurisdictions";
+import { verifyWidgetServiceProof } from "./lib/widgetProof";
 
 const http = httpRouter();
+
+for (const [operation, functionName] of Object.entries({ session: "createSession", begin: "beginTurn", finish: "finishTurn", read: "readTurn", cancel: "cancelTurn", revoke: "revokeSession" })) {
+  http.route({ path: `/private/widget/${operation}`, method: "POST", handler: httpAction(async (ctx, request) => {
+    const bytes = await readBoundedBody(request, operation === "finish" ? 131072 : 33792);
+    if (!bytes) return noStore(413);
+    try {
+      if (!await verifyWidgetServiceProof(operation, Number(request.headers.get("x-widget-issued-at")), bytes, request.headers.get("x-widget-signature") ?? "")) return noStore(401);
+      const body: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      if (!body || typeof body !== "object" || Array.isArray(body)) return noStore(400);
+      const result: unknown = await ctx.runMutation(makeFunctionReference<"mutation">(`widgetRuntime:${functionName}`), body as Record<string, import("convex/values").Value>);
+      return Response.json(result, { headers: { "cache-control": "no-store" } });
+    } catch { return noStore(400); }
+  }) });
+}
 
 authComponent.registerRoutes(http, createAuth);
 

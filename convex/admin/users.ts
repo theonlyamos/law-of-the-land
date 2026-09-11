@@ -1193,7 +1193,7 @@ export const recordAdminStepUpProof = internalMutation({
     ]);
     if (
       !actor ||
-      parseAdminRoles(actor.role).length === 0 ||
+      (parseAdminRoles(actor.role).length === 0 && !["document_publish", "document_unpublish", "document_rollback", "organization_visibility"].includes(args.action)) ||
       actor.twoFactorEnabled !== true ||
       !session ||
       session.userId !== args.actorId ||
@@ -1250,12 +1250,23 @@ export const recordAdminStepUpProof = internalMutation({
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
       }
+    } else if (args.action === "organization_visibility") {
+      const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.targetId);
+      const jurisdiction = jurisdictionId ? await ctx.db.get(jurisdictionId) : null;
+      const organization = jurisdiction?.organizationId ? await ctx.db.get(jurisdiction.organizationId) : null;
+      const membership = organization ? await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", organization._id).eq("userId", args.actorId)).unique() : null;
+      if (typeof session.impersonatedBy === "string" || jurisdiction?.kind !== "organizational" || organization?.status !== "active" || membership?.status !== "active" || membership.role !== "manager") throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     } else if (args.action.startsWith("document_")) {
       const permission = args.action === "document_rollback" ? "rollback" : "publish";
       const version = await ctx.db.get(args.targetId as Id<"documentVersions">);
+      const resource = version ? await ctx.db.get(version.resourceId) : null;
+      const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
+      const organization = jurisdiction?.organizationId ? await ctx.db.get(jurisdiction.organizationId) : null;
+      const membership = organization ? await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", organization._id).eq("userId", args.actorId)).unique() : null;
+      const scopedReview = jurisdiction?.kind === "organizational" && organization?.status === "active" && membership?.status === "active" && membership.role === "reviewer";
       if (
         typeof session.impersonatedBy === "string" ||
-        !hasRolePermission(parseAdminRoles(actor.role), "document", permission) ||
+        (!hasRolePermission(parseAdminRoles(actor.role), "document", permission) && !scopedReview) ||
         !version
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");

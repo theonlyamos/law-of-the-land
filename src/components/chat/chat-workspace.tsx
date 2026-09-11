@@ -5,8 +5,8 @@ import { AssistantMessageFooter } from "./assistant-message-footer";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { AssistantMessage, assistantMarkdown } from "./assistant-message";
 import { useRouter } from "next/navigation";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
@@ -41,20 +41,6 @@ import {
 } from "./chat-message-state";
 
 const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
-
-function assistantMarkdown(content: string): string {
-  if (!content.includes("\\n\\n") && !content.includes("\\r\\n\\r\\n")) return content;
-  return content.replaceAll("\\r\\n", "\n").replaceAll("\\n", "\n");
-}
-
-const assistantMarkdownComponents = {
-  ol: ({ children, start }: { children?: ReactNode; start?: number }) => (
-    <ol start={start} style={{ listStyleType: "decimal" }}>{children}</ol>
-  ),
-  ul: ({ children }: { children?: ReactNode }) => (
-    <ul style={{ listStyleType: "disc" }}>{children}</ul>
-  ),
-};
 
 type ChatResponse = {
   result: string;
@@ -889,9 +875,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   ) : (
                     <div className="min-w-0 text-sm leading-7">
                       <div className="markdown-content">
-                        <ReactMarkdown components={assistantMarkdownComponents}>
-                          {assistantMarkdown(message.content)}
-                        </ReactMarkdown>
+                        <AssistantMessage content={message.content} />
                       </div>
                       {message.citations?.length ? (
                         <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">

@@ -113,6 +113,7 @@ export type GovernedChatResult = {
 };
 
 export type GovernedChatInput = {
+  maxOutputTokens?: number;
   query: string;
   stores: readonly ChatStore[];
   history: ReadonlyArray<{ role: "user" | "assistant"; content: string }>;
@@ -233,7 +234,7 @@ function requestFor(
       file_search_store_names: input.stores.map((store) => store.storeName),
     }],
     generation_config: {
-      max_output_tokens: 8_192,
+      max_output_tokens: input.maxOutputTokens ?? 8_192,
     },
   };
 }
@@ -358,6 +359,7 @@ export class GeminiFileSearchChat {
       onStreamComplete?: () => void;
     },
   ): Promise<GovernedChatResult> {
+    if (input.maxOutputTokens !== undefined && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 8192)) throw new Error("Invalid output token limit");
     validateInput(input);
     checkAbortOrDeadline(options.signal, options.deadlineAt);
     checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);

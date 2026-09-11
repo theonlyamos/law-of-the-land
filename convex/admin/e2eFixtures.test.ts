@@ -41,6 +41,8 @@ const original = { ...process.env };
 const fixtureCommitSha = "a31a6533e68f206dfe9dc9219d77ea751b672d29";
 
 afterEach(() => {
+  if (original.WIDGET_CHAT_ENABLED === undefined) delete process.env.WIDGET_CHAT_ENABLED;
+  else process.env.WIDGET_CHAT_ENABLED = original.WIDGET_CHAT_ENABLED;
   for (const key of ["ADMIN_E2E_FIXTURE_MODE", "ADMIN_E2E_TARGET_ENV", "ADMIN_E2E_ISOLATED_TARGET_MARKER", "ADMIN_E2E_PROVIDER_STUB_MODE", "ADMIN_E2E_FIXTURE_SECRET", "ADMIN_E2E_ACCOUNT_PASSWORD", "ADMIN_E2E_APPROVED_COMMIT_SHA", "ADMIN_E2E_DEPLOYED_COMMIT_SHA", "ADMIN_PANEL_ENABLED", "ADMIN_ENVIRONMENT", "BILLING_ENABLED", "PLACE_CLAIM_SECRET", "TELEMETRY_INGEST_SECRET"]) {
     if (original[key] === undefined) delete process.env[key];
     else process.env[key] = original[key];
@@ -90,6 +92,24 @@ function enableFixtureMode() {
 }
 
 describe("isolated admin E2E fixture control plane", () => {
+  it("cleans widget credentials, usage and organization documents before deleting their owners", async () => {
+    enableFixtureMode();
+    process.env.WIDGET_CHAT_ENABLED = "true";
+    const t = backend();
+    await t.run(ctx => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
+    const fixture = await t.action(bootstrap, { tag: "e2e_widgetcleanup123" });
+    const publicId = fixture.records.widget.publicId;
+    const tokenHash = "a".repeat(43);
+    const session = await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:createSession"), { publicId, parentOrigin: "https://allowed.widget.test", tokenHash, ipKey: "fixture-ip" });
+    expect(session.error).toBeUndefined();
+    await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:beginTurn"), { publicId, tokenHash, ipKey: "fixture-ip", requestId: crypto.randomUUID(), query: "Fixture question" });
+    await drainCleanup(t, fixture.tag);
+    await t.run(async ctx => {
+      for (const table of ["jurisdictionWidgets", "organizationWidgetAllowances", "widgetSessions", "widgetTurns", "widgetRateBuckets", "widgetUsageBuckets", "legalResources", "documentVersions"] as const) {
+        expect(await ctx.db.query(table).take(1)).toEqual([]);
+      }
+    });
+  });
   it("provides dormant fixture-run ownership with exact tag and environment indexes", async () => {
     const t = backend();
     const now = Date.now();

@@ -37,6 +37,7 @@ export type BrowserFixtureManifest = {
   variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; cookie: string }>;
   jurisdictionUsers: Record<"member" | "formerMember", { userId: string; cookie: string }>;
   records: {
+    widget?: { organizationId: string; publicId: string };
     chatId: string; resourceId: string; publishedVersionId: string; reviewVersionId: string;
     separationVersionId: string; conversationGrantId: string; jurisdictionId: string; userId: string;
     geminiStoreName: string; geminiDocumentName: string; geminiOperationName: string; providerJobId: string;
@@ -113,16 +114,17 @@ export async function roleCookie(role: FixedAdminRole) {
   return cookie;
 }
 
-export async function installSessionCookie(context: BrowserContext, cookie: string) {
+export async function installSessionCookie(context: BrowserContext, cookie: string, secure = false) {
   const separator = cookie.indexOf("=");
   if (separator < 1) throw new Error("Fixture cookie must use name=value format.");
   await context.clearCookies();
   await context.addCookies([{
-    name: cookie.slice(0, separator),
+    name: `${secure && !cookie.startsWith("__Secure-") ? "__Secure-" : ""}${cookie.slice(0, separator)}`,
     value: cookie.slice(separator + 1).split(";", 1)[0],
     domain: "127.0.0.1",
     path: "/",
     httpOnly: true,
+    secure,
     sameSite: "Lax",
   }]);
 }

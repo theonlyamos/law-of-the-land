@@ -1,4 +1,5 @@
 import { AdminShell } from "@/components/admin/admin-shell";
+import { AccountProviders } from "@/components/providers/account-providers";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
@@ -11,7 +12,7 @@ export default async function AdminLayout({
   // This destination contains no privileged data. Exempting it prevents the
   // denied-session redirect from re-entering the guarded layout indefinitely.
   if (pathname === "/admin/forbidden") {
-    return children;
+    return <AccountProviders>{children}</AccountProviders>;
   }
 
   const access = await authorizeAdminPage();
@@ -20,8 +21,8 @@ export default async function AdminLayout({
   }
 
   return (
-    <AdminShell currentAdmin={access.currentAdmin} currentPath={pathname ?? undefined}>
+    <AccountProviders><AdminShell currentAdmin={access.currentAdmin} currentPath={pathname ?? undefined}>
       {children}
-    </AdminShell>
+    </AdminShell></AccountProviders>
   );
 }

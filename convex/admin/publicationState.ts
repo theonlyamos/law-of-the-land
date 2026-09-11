@@ -1,3 +1,4 @@
+import { bumpContentRevision } from "../lib/widgetAuthority";
 import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
@@ -231,11 +232,12 @@ async function clearResolvedJurisdictionDrift(
     const candidateJurisdictionId = await unresolvedJobJurisdiction(ctx, candidate);
     if (candidateJurisdictionId === null || candidateJurisdictionId === jurisdiction._id) return;
   }
-  await ctx.db.patch(jurisdiction._id, { providerSyncState: "synced", updatedAt: now });
+  await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, providerSyncState: "synced", updatedAt: now });
 }
 
 export async function applyPublicationJobFailure(ctx: MutationCtx, job: Doc<"integrationJobs">, now: number): Promise<void> {
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
+  await bumpContentRevision(ctx, workflow.jurisdiction._id);
   if (workflow.kind === "delete") {
     if (workflow.payload.operation !== "unpublish") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
     await ctx.db.patch(workflow.target._id, { failureSummary: undefined, updatedAt: now });
@@ -254,6 +256,7 @@ export type ReplacementDelete = { previousVersionId: Id<"documentVersions">; pay
 
 export async function applyGeminiIndexCompletion(ctx: MutationCtx, job: Doc<"integrationJobs">, documentName: string, now: number): Promise<ReplacementDelete | null> {
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
+  await bumpContentRevision(ctx, workflow.jurisdiction._id);
   if (workflow.kind !== "index" || !job.providerOperationName || job.recoveryKind !== "poll_operation" || !isGeminiDocumentName(documentName) || !documentName.startsWith(`${workflow.storeName}/documents/`) || workflow.previous?.geminiDocumentName === documentName) throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
   await ctx.db.patch(workflow.version._id, { geminiDocumentName: documentName, geminiIndexedAt: now, updatedAt: now });
   if (workflow.previous) {
@@ -275,6 +278,7 @@ export async function transferPublicationLock(ctx: MutationCtx, indexJob: Doc<"i
 
 export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"integrationJobs">, now: number): Promise<void> {
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
+  await bumpContentRevision(ctx, workflow.jurisdiction._id);
   if (workflow.kind !== "delete") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
   if (workflow.payload.operation === "unpublish") {
     await ctx.db.patch(workflow.target._id, { status: "unpublished", geminiDocumentName: undefined, geminiIndexedAt: undefined, unpublishedAt: now, failureSummary: undefined, updatedAt: now });

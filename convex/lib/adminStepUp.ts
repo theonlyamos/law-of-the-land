@@ -11,6 +11,7 @@ export const ADMIN_STEP_UP_ACTIONS = new Set([
   "jurisdiction_store_delete",
   "admin_panel_set",
   "unified_jurisdictions_set",
+  "organization_visibility",
 ] as const);
 
 export const ADMIN_STEP_UP_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;

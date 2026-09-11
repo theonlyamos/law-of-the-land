@@ -1,5 +1,7 @@
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/embed/server", async importOriginal => ({ ...await importOriginal<typeof import("./lib/embed/server")>(), publicWidgetConfig: vi.fn().mockResolvedValue(null) }));
 import { NextRequest } from "next/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { proxy } from "./proxy";
 
 describe("admin route proxy experience gate", () => {
@@ -42,4 +44,17 @@ describe("admin route proxy experience gate", () => {
       "/admin/forbidden",
     );
   });
+});
+
+it("keeps unavailable embed pages frame-denied and cookie-neutral", async () => {
+  vi.stubEnv("WIDGET_CHAT_ENABLED", "false");
+  try {
+    const response = await proxy(new NextRequest("https://app.example/embed/widget?parentOrigin=https%3A%2F%2Fforeign.example", { headers: { cookie: "better-auth.session_token=account-token" } }));
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const guestApi = await proxy(new NextRequest("https://app.example/api/embed/widget/session"));
+    expect(guestApi.status).toBe(200); expect(guestApi.headers.get("location")).toBeNull();
+  } finally { vi.unstubAllEnvs(); }
 });

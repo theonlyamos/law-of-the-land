@@ -7,6 +7,7 @@ import { isGeminiDocumentName, isGeminiFileSearchStoreName } from "../lib/gemini
 import { validateAuditReason, writeAudit } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 import { hashJobValue, persistJob } from "./jobs";
+import { bumpContentRevision } from "../lib/widgetAuthority";
 
 const resultValidator = v.object({
   jobId: v.id("integrationJobs"),
@@ -14,7 +15,7 @@ const resultValidator = v.object({
   duplicate: v.boolean(),
   correlationId: v.string(),
 });
-type Actor = { userId: string; roles: AdminRole[] };
+type Actor = { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: AdminRole[] };
 type Operation = "publish" | "unpublish" | "rollback";
 const LIFECYCLE_LOCK_MS = 24 * 60 * 60_000;
 const UNCERTAIN_RECHECK_MS = 15 * 60_000;
@@ -60,7 +61,7 @@ async function existingPublication(ctx: MutationCtx, actor: Actor, input: { vers
   return { jobId: job._id, type: operation === "unpublish" ? "gemini_delete" as const : "gemini_index" as const, duplicate: true, correlationId: job.correlationId };
 }
 
-async function consumeStepUp(ctx: MutationCtx, actorId: string, sessionId: string, action: string, targetId: string, idempotencyKey: string) {
+export async function consumeStepUp(ctx: MutationCtx, actorId: string, sessionId: string, action: string, targetId: string, idempotencyKey: string) {
   const proofs = await ctx.db.query("adminStepUpProofs")
     .withIndex("by_actorId_sessionId_action_targetId_idempotencyKey", (q) => q.eq("actorId", actorId).eq("sessionId", sessionId).eq("action", action).eq("targetId", targetId).eq("idempotencyKey", idempotencyKey)).take(2);
   if (proofs.length !== 1 || proofs[0].consumedAt !== undefined || proofs[0].expiresAt <= Date.now() || Date.now() - proofs[0].issuedAt > 300_000) throw new ConvexError("ADMIN_STEP_UP_REQUIRED");
@@ -127,10 +128,12 @@ async function claimLifecycleLock(ctx: MutationCtx, input: { resourceId: Id<"leg
     if (locks[0].expiresAt > Date.now() || !(await cancelExpiredLock(ctx, locks[0]))) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
   }
   const now = Date.now();
-  return await ctx.db.insert("documentLifecycleLocks", { ...input, expiresAt: now + LIFECYCLE_LOCK_MS, createdAt: now, updatedAt: now });
+  const resource = await ctx.db.get(input.resourceId);
+  if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
+  return await ctx.db.insert("documentLifecycleLocks", { ...input, jurisdictionId: resource.jurisdictionId, expiresAt: now + LIFECYCLE_LOCK_MS, createdAt: now, updatedAt: now });
 }
 
-async function queuePublication(ctx: MutationCtx, actor: Actor, args: { versionId: Id<"documentVersions">; confirmation: string; reason: string; idempotencyKey: string }, operation: Operation) {
+export async function queuePublication(ctx: MutationCtx, actor: Actor, args: { versionId: Id<"documentVersions">; confirmation: string; reason: string; idempotencyKey: string }, operation: Operation) {
   validateAuditReason(args.reason);
   validKey(args.idempotencyKey);
   const identity = await ctx.auth.getUserIdentity();
@@ -155,6 +158,7 @@ async function queuePublication(ctx: MutationCtx, actor: Actor, args: { versionI
   if (operation === "rollback" && (!previousVersionId || previousVersionId === version._id)) throw new ConvexError("DOCUMENT_ROLLBACK_TARGET_INVALID");
   await consumeStepUp(ctx, actor.userId, identity.sessionId, `document_${operation}`, version._id, args.idempotencyKey);
   const lockId = await claimLifecycleLock(ctx, { resourceId: resource._id, versionId: version._id, operation, actorId: actor.userId, idempotencyKey: args.idempotencyKey });
+  await bumpContentRevision(ctx, jurisdiction._id);
   try {
     const queued = await persistJob(ctx, {
       type: operation === "unpublish" ? "gemini_delete_document" : "gemini_index_document",
@@ -170,13 +174,13 @@ async function queuePublication(ctx: MutationCtx, actor: Actor, args: { versionI
             reasonDigest,
           },
       idempotencyKey: args.idempotencyKey,
-    }, { id: actor.userId, roles: actor.roles });
+    }, { id: actor.userId, roles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole });
     const job = await ctx.db.get(queued.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     await ctx.db.patch(lockId, { jobId: job._id, updatedAt: Date.now() });
     await ctx.scheduler.runAfter(LIFECYCLE_LOCK_MS, expireLifecycleLockRef, { lockId });
     if (operation !== "unpublish") await ctx.db.patch(version._id, { status: "publishing", failureSummary: undefined, updatedAt: Date.now() });
-    await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, action: `document.${operation}.queued`, targetType: "documentVersion", targetId: version._id, reason: args.reason, correlationId: job.correlationId, outcome: "success" });
+    await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole, action: `document.${operation}.queued`, targetType: "documentVersion", targetId: version._id, reason: args.reason, correlationId: job.correlationId, outcome: "success" });
     return { jobId: job._id, type: operation === "unpublish" ? "gemini_delete" as const : "gemini_index" as const, duplicate: false, correlationId: job.correlationId };
   } catch (error) {
     const lock = await ctx.db.get(lockId);

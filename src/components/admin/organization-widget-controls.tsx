@@ -1,0 +1,26 @@
+"use client";
+import { useState } from "react";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
+import { organizationApi } from "@/lib/organization-api";
+import { PermissionBoundary } from "./permission-boundary";
+export function OrganizationWidgetControls({ organizationId }: { organizationId: string }) {
+  const role = useMutation(api.admin.organizations.setOrganizationMemberRole), member = useMutation(api.admin.organizations.setOrganizationMemberStatus);
+  const [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
+  const field = "min-h-11 w-full border border-slate-400 bg-transparent px-3";
+  return <PermissionBoundary resource="organization" action="write"><details className="mt-3"><summary className="cursor-pointer text-sm underline">Manage website chat access</summary><div className="mt-4 min-w-60 space-y-5">
+    <WidgetAllowanceControl organizationId={organizationId} />
+    <form className="grid gap-3" onSubmit={async event => { event.preventDefault(); const f = new FormData(event.currentTarget), userId = String(f.get("userId")), reason = String(f.get("reason")), selectedRole = String(f.get("role")); if (!["member", "manager", "reviewer"].includes(selectedRole)) return; setBusy(true); try { await member({ organizationId: organizationId as Id<"organizations">, userId, status: "active", reason }); await role({ organizationId: organizationId as Id<"organizations">, memberUserId: userId, role: selectedRole as "member" | "manager" | "reviewer", reason }); setMessage("Organization role saved."); } catch { setMessage("Role assignment couldn't be confirmed. Check membership before trying again."); } finally { setBusy(false); } }}><p className="text-sm font-semibold">Assign an organization role</p><label className="grid gap-1 text-xs">Existing user ID<input name="userId" required maxLength={256} className={field} /></label><label className="grid gap-1 text-xs">Role<select name="role" className={field}><option value="member">Member — view</option><option value="manager">Manager — content and widget settings</option><option value="reviewer">Reviewer — approve and publish</option></select></label><label className="grid gap-1 text-xs">Reason<input name="reason" required minLength={3} maxLength={500} className={field} /></label><button disabled={busy} className="min-h-11 border px-3 font-semibold">Activate membership and assign role</button></form>{message && <p role="status" className="text-sm">{message}</p>}</div></details></PermissionBoundary>;
+}
+
+export function WidgetAllowanceControl({ organizationId, jurisdictionId }: { organizationId?: string; jurisdictionId?: string }) {
+  const allowance = useMutation(organizationApi.widgets.setWidgetAllowance);
+  const [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
+  const field = "min-h-11 w-full border border-slate-400 bg-transparent px-3";
+  const target = organizationId ? { organizationId: organizationId as Id<"organizations"> } : { jurisdictionId: jurisdictionId as Id<"jurisdictions"> };
+  return <PermissionBoundary resource={organizationId ? "organization" : "jurisdiction"} action="write"><div className="space-y-3">
+    <form className="grid gap-3" onSubmit={async event => { event.preventDefault(); const f = new FormData(event.currentTarget); setBusy(true); try { await allowance({ ...target, platformDailyLimit: Number(f.get("daily")), platformMonthlyLimit: Number(f.get("monthly")), maxConcurrent: 3, reason: String(f.get("reason")) }); setMessage("Platform allowance saved."); } catch { setMessage("Allowance couldn't be saved. Check limits and your access."); } finally { setBusy(false); } }}><p className="text-sm font-semibold">Platform allowance</p><label className="grid gap-1 text-xs">Daily questions<input type="number" name="daily" min={0} max={1000000} defaultValue={100} required className={field} /></label><label className="grid gap-1 text-xs">Monthly questions<input type="number" name="monthly" min={0} max={1000000} defaultValue={1000} required className={field} /></label><label className="grid gap-1 text-xs">Reason<input name="reason" required minLength={3} maxLength={500} className={field} /></label><button disabled={busy} className="min-h-11 border px-3 font-semibold">Set allowance</button></form>
+    {message && <p role="status" className="text-sm">{message}</p>}
+  </div></PermissionBoundary>;
+}

@@ -1,3 +1,4 @@
+import { bumpWidgetAccessVersion, bumpContentRevision } from "../lib/widgetAuthority";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -9,6 +10,7 @@ import {
 } from "../lib/jurisdictionDomain";
 import { activeOrganizationIdsForUser } from "../lib/jurisdictionAccess";
 import { authComponent } from "../auth";
+import { organizationRoleValidator } from "../lib/widgetContracts";
 import {
   requireEnabledAdminCatalogRead,
   requireEnabledAdminPermission,
@@ -39,6 +41,7 @@ const organizationDocValidator = v.object({
   updatedAt: v.number(),
 });
 const membershipDocValidator = v.object({
+  role: v.optional(organizationRoleValidator),
   _id: v.id("organizationMemberships"),
   _creationTime: v.number(),
   organizationId: v.id("organizations"),
@@ -281,6 +284,7 @@ export const updateOrganization = mutation({
       updatedAt: now,
     };
     await ctx.db.patch(organization._id, patch);
+    if (jurisdiction) { await bumpWidgetAccessVersion(ctx, jurisdiction._id); await bumpContentRevision(ctx, jurisdiction._id); }
     if (jurisdiction) {
       await ctx.db.patch(jurisdiction._id, {
         name,
@@ -332,6 +336,7 @@ export const archiveOrganization = mutation({
     }
     const patch = { status: "archived" as const, updatedBy: actor.userId, updatedAt: Date.now() };
     await ctx.db.patch(organization._id, patch);
+    if (jurisdiction) { await bumpWidgetAccessVersion(ctx, jurisdiction._id); await bumpContentRevision(ctx, jurisdiction._id); }
     await auditOrganizationChange(ctx, actor, {
       action: "organization.archived",
       targetType: "organization",
@@ -404,5 +409,21 @@ export const setOrganizationMemberStatus = mutation({
     const created = await ctx.db.get("organizationMemberships", createdMembershipId!);
     if (!created) throw new ConvexError("ORGANIZATION_MEMBERSHIP_STATE_INVALID");
     return created;
+  },
+});
+
+export const setOrganizationMemberRole = mutation({
+  args: { organizationId: v.id("organizations"), memberUserId: v.string(), role: organizationRoleValidator, reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "organization", "write");
+    const reason = validateAuditReason(args.reason);
+    const organization = await ctx.db.get(args.organizationId);
+    const user = await authComponent.getAnyUserById(ctx, args.memberUserId);
+    const membership = await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", args.organizationId).eq("userId", args.memberUserId)).unique();
+    if (!organization || organization.status !== "active" || !user || !membership || membership.status !== "active") throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
+    await ctx.db.patch(membership._id, { role: args.role, updatedAt: Date.now() });
+    await auditOrganizationChange(ctx, actor, { action: "organization.member_role_set", targetType: "organizationMembership", targetId: membership._id, reason, before: membership.role ?? "member", after: args.role });
+    return null;
   },
 });

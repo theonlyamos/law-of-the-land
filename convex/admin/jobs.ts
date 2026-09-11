@@ -85,7 +85,7 @@ const knownStoreResultValidator = v.union(
   v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
 );
 const jobDocumentValidator = v.object({
-  _id: v.id("integrationJobs"),
+  _id: v.id("integrationJobs"), organizationId: v.optional(v.id("organizations")), organizationRole: v.optional(v.union(v.literal("member"), v.literal("manager"), v.literal("reviewer"))),
   _creationTime: v.number(),
   type: jobTypeValidator,
   targetType: v.string(),
@@ -236,7 +236,7 @@ async function releaseGeminiExecutionPermit(
   ) {
     throw new ConvexError("GEMINI_EXECUTION_PERMIT_INVALID");
   }
-  await ctx.db.patch(jurisdiction._id, { geminiExecutionPermit: undefined });
+  await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, geminiExecutionPermit: undefined });
 }
 
 async function releaseExpiredGeminiExecutionPermit(
@@ -260,7 +260,7 @@ async function releaseExpiredGeminiExecutionPermit(
     permit.leaseExpiresAt === job.leaseExpiresAt &&
     permit.leaseExpiresAt <= now
   ) {
-    await ctx.db.patch(jurisdiction._id, { geminiExecutionPermit: undefined });
+    await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, geminiExecutionPermit: undefined });
   }
 }
 
@@ -368,7 +368,7 @@ type EnqueueInput = {
 export async function persistJob(
   ctx: MutationCtx,
   args: EnqueueInput,
-  actor: { id: string; roles: AdminRole[] },
+  actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; id: string; roles: AdminRole[] },
 ) {
     if (!SAFE_TARGET_TYPE.test(args.targetType)) throw new ConvexError("INTEGRATION_TARGET_INVALID");
     const targetType = args.targetType;
@@ -402,7 +402,7 @@ export async function persistJob(
       targetId,
       payload,
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole,
       idempotencyKey,
       requestFingerprint: fingerprint,
       correlationId,
@@ -488,7 +488,7 @@ async function activeGeminiStoreJob(
 export async function queueGeminiStoreProvision(
   ctx: MutationCtx,
   jurisdiction: Doc<"jurisdictions">,
-  actor: { id: string; roles: AdminRole[] },
+  actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; id: string; roles: AdminRole[] },
   idempotencyKey: string,
 ) {
   if (jurisdiction.status === "archived") throw new ConvexError("JURISDICTION_ARCHIVED");
@@ -508,7 +508,7 @@ export async function queueGeminiStoreProvision(
     },
     idempotencyKey,
   }, actor);
-  await ctx.db.patch(jurisdiction._id, {
+  await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
     geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
     providerSyncState: "pending",
     updatedBy: actor.id,
@@ -644,7 +644,7 @@ export const deleteJurisdictionGeminiStore = mutation({
     }, { id: actor.userId, roles: actor.roles });
     const job = await ctx.db.get(queued.jobId);
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
-    await ctx.db.patch(jurisdiction._id, {
+    await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
       providerSyncState: "drifted",
       updatedBy: actor.userId,
       updatedAt: Date.now(),
@@ -800,7 +800,7 @@ async function markGeminiJurisdictionDrifted(
 ) {
   if (job.type === "gemini_create_store" || job.type === "gemini_delete_store") {
     const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
-    if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
+    if (jurisdiction) await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, providerSyncState: "drifted", updatedAt: Date.now() });
     return;
   }
   const version = await ctx.db.get(job.targetId as Id<"documentVersions">);
@@ -826,7 +826,7 @@ async function markGeminiJurisdictionDrifted(
   }
   const resource = version ? await ctx.db.get(version.resourceId) : null;
   const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
-  if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "drifted", updatedAt: Date.now() });
+  if (jurisdiction) await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, providerSyncState: "drifted", updatedAt: Date.now() });
 }
 
 async function succeedGeminiJob(
@@ -881,7 +881,7 @@ export const applyGeminiProviderResult = internalMutation({
       if (jurisdiction.geminiFileSearchStoreName && jurisdiction.geminiFileSearchStoreName !== storeName) {
         throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
       }
-      await ctx.db.patch(jurisdiction._id, {
+      await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
         geminiFileSearchStoreName: storeName,
         geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
         providerSyncState: "synced",
@@ -910,7 +910,7 @@ export const applyGeminiProviderResult = internalMutation({
       if (references.length !== 1 || references[0]._id !== jurisdiction._id) {
         throw new ConvexError("GEMINI_STORE_OWNERSHIP_INVALID");
       }
-      await ctx.db.patch(jurisdiction._id, {
+      await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
         geminiFileSearchStoreName: undefined,
         geminiEmbeddingModel: undefined,
         providerSyncState: "pending",
@@ -1133,7 +1133,7 @@ async function claimJobDocument(
       updatedAt: now,
     };
     if (jurisdiction) {
-      await ctx.db.patch(jurisdiction._id, {
+      await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
         geminiExecutionPermit: { jobId: job._id, leaseExpiresAt },
       });
     }
@@ -1377,7 +1377,7 @@ export const recordProviderFailure = internalMutation({
     }
     if (status === "failed" && job.type === "gemini_create_store") {
       const jurisdiction = await ctx.db.get(job.targetId as Id<"jurisdictions">);
-      if (jurisdiction) await ctx.db.patch(jurisdiction._id, { providerSyncState: "failed", updatedAt: now });
+      if (jurisdiction) await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, providerSyncState: "failed", updatedAt: now });
     }
     const unresolvedProviderMutation = ambiguousSideEffect &&
       job.providerOperationName === undefined &&
@@ -1543,7 +1543,7 @@ async function existingJobControl(
 
 async function recordJobControl(
   ctx: MutationCtx,
-  actor: { userId: string; roles: AdminRole[] },
+  actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: AdminRole[] },
   input: { action: "job_retry" | "job_cancel"; job: Doc<"integrationJobs">; reason: string; idempotencyKey: string; fingerprint: string; status: Doc<"integrationJobs">["status"] },
 ) {
   const now = Date.now();
@@ -1566,12 +1566,8 @@ async function recordJobControl(
   return { jobId: input.job._id, status: input.status, correlationId };
 }
 
-export const retryJob = mutation({
-  args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
-  returns: controlledJobResultValidator,
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    const actor = await requireEnabledAdminPermission(ctx, "operations", "retry");
+export async function retryJobForActor(ctx: MutationCtx, args: { jobId: Id<"integrationJobs">; reason: string; idempotencyKey: string }, actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: AdminRole[] }) {    const now = Date.now();
+
     const reason = validateAuditReason(args.reason);
     const idempotencyKey = validateOperationKey(args.idempotencyKey);
     const fingerprint = JSON.stringify({ jobId: args.jobId, reason });
@@ -1626,9 +1622,12 @@ export const retryJob = mutation({
       throw new ConvexError("Integration job is not retryable");
     }
     return await recordJobControl(ctx, actor, { action: "job_retry", job, reason, idempotencyKey, fingerprint, status });
-  },
+}
+export const retryJob = mutation({
+  args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
+  returns: controlledJobResultValidator,
+  handler: async (ctx, args) => retryJobForActor(ctx, args, await requireEnabledAdminPermission(ctx, "operations", "retry")),
 });
-
 export const cancelJob = mutation({
   args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
   returns: controlledJobResultValidator,

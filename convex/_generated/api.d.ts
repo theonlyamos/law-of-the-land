@@ -49,16 +49,24 @@ import type * as lib_geminiFileSearchNames from "../lib/geminiFileSearchNames.js
 import type * as lib_jurisdictionAccess from "../lib/jurisdictionAccess.js";
 import type * as lib_jurisdictionDomain from "../lib/jurisdictionDomain.js";
 import type * as lib_legacyJurisdictionCompatibility from "../lib/legacyJurisdictionCompatibility.js";
+import type * as lib_organizationAccess from "../lib/organizationAccess.js";
 import type * as lib_placeClaim from "../lib/placeClaim.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
 import type * as lib_requireUser from "../lib/requireUser.js";
 import type * as lib_researchScope from "../lib/researchScope.js";
 import type * as lib_telemetryProof from "../lib/telemetryProof.js";
 import type * as lib_unifiedJurisdictionRollout from "../lib/unifiedJurisdictionRollout.js";
+import type * as lib_widgetAuthority from "../lib/widgetAuthority.js";
+import type * as lib_widgetContracts from "../lib/widgetContracts.js";
+import type * as lib_widgetProof from "../lib/widgetProof.js";
+import type * as organizationContent from "../organizationContent.js";
+import type * as organizations from "../organizations.js";
 import type * as polar from "../polar.js";
 import type * as telemetry from "../telemetry.js";
 import type * as usage from "../usage.js";
 import type * as users from "../users.js";
+import type * as widgetRuntime from "../widgetRuntime.js";
+import type * as widgets from "../widgets.js";
 
 import type {
   ApiFromModules,
@@ -108,16 +116,24 @@ declare const fullApi: ApiFromModules<{
   "lib/jurisdictionAccess": typeof lib_jurisdictionAccess;
   "lib/jurisdictionDomain": typeof lib_jurisdictionDomain;
   "lib/legacyJurisdictionCompatibility": typeof lib_legacyJurisdictionCompatibility;
+  "lib/organizationAccess": typeof lib_organizationAccess;
   "lib/placeClaim": typeof lib_placeClaim;
   "lib/requireAdmin": typeof lib_requireAdmin;
   "lib/requireUser": typeof lib_requireUser;
   "lib/researchScope": typeof lib_researchScope;
   "lib/telemetryProof": typeof lib_telemetryProof;
   "lib/unifiedJurisdictionRollout": typeof lib_unifiedJurisdictionRollout;
+  "lib/widgetAuthority": typeof lib_widgetAuthority;
+  "lib/widgetContracts": typeof lib_widgetContracts;
+  "lib/widgetProof": typeof lib_widgetProof;
+  organizationContent: typeof organizationContent;
+  organizations: typeof organizations;
   polar: typeof polar;
   telemetry: typeof telemetry;
   usage: typeof usage;
   users: typeof users;
+  widgetRuntime: typeof widgetRuntime;
+  widgets: typeof widgets;
 }>;
 
 /**
