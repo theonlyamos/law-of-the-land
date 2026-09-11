@@ -16,7 +16,7 @@ Set these secrets through your deployment's secret manager; never put their valu
 | `SITE_URL` | Next and Convex | Exact canonical HTTPS app origin for request-origin checks, frame policy, and the saved-widget test |
 | `ADMIN_MAX_DOCUMENT_BYTES` | Convex | Existing required positive document upload limit in bytes |
 | `GOOGLE_AI_API_KEY` | Next | Existing Gemini integration key |
-| `GOOGLE_AI_MODEL` | Next | Existing optional model override |
+| `GEMINI_AI_MODEL` | Next | Existing optional model override |
 
 Production admission currently supports Vercel's trusted `x-vercel-forwarded-for` ingress header and requires `VERCEL=1`. Generic forwarded headers are never accepted. Other hosting environments fail closed until a deployment-owned trusted-IP adapter is implemented and tested. See [Vercel request headers](https://vercel.com/docs/headers/request-headers). Unit tests use a fixed loopback identity; that fallback is unavailable in production builds.
 
