@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { mutation, query } from "./_generated/server";
-import { organizationScopeModeValidator } from "./lib/jurisdictionDomain";
+import { MAX_SCOPE_LINKS, organizationScopeModeValidator } from "./lib/jurisdictionDomain";
 import {
   requireOrganizationAccess,
   requireOrganizationJurisdiction,
@@ -171,7 +171,8 @@ export const get = query({
         "by_organizationalJurisdictionId_and_geographicJurisdictionId",
         (q) => q.eq("organizationalJurisdictionId", profile._id),
       )
-      .take(5);
+      .take(MAX_SCOPE_LINKS + 1);
+    if (links.length > MAX_SCOPE_LINKS) throw new ConvexError("GEOGRAPHIC_SCOPE_INVALID");
     const geographicJurisdictions = await Promise.all(
       links.map(async (link) => {
         const geo = await ctx.db.get(link.geographicJurisdictionId);
@@ -234,8 +235,8 @@ export const update = mutation({
         "by_organizationalJurisdictionId_and_geographicJurisdictionId",
         (q) => q.eq("organizationalJurisdictionId", profile._id),
       )
-      .take(5);
-    if (links.length > 4) throw new ConvexError("GEOGRAPHIC_SCOPE_INVALID");
+      .take(MAX_SCOPE_LINKS + 1);
+    if (links.length > MAX_SCOPE_LINKS) throw new ConvexError("GEOGRAPHIC_SCOPE_INVALID");
     for (const link of links) await ctx.db.delete(link._id);
     for (const geo of geographies)
       await ctx.db.insert("organizationGeographicScopes", {

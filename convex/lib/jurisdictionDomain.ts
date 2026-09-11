@@ -26,6 +26,7 @@ export type GeographicLevel =
   | "other_locality";
 
 export const MAX_GEOGRAPHIC_DEPTH = 8;
+export const MAX_SCOPE_LINKS = 8;
 export const MAX_SELECTOR_PAGE_SIZE = 20;
 export const MAX_RETRIEVAL_LIBRARIES = 4;
 export const MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS = 100;

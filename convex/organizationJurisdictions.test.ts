@@ -4,9 +4,28 @@ import {
   addOrganizationMember,
   createWidgetBackend,
   seedPublicWidget,
+  seedGeographicWidget,
 } from "./widgetTestHelpers.fixture";
 
 afterEach(() => vi.unstubAllEnvs());
+it("reads and reduces an eight-geography scope while rejecting a ninth link", async () => {
+  const t = createWidgetBackend(), f = await seedPublicWidget(t);
+  const owner = await addOrganizationMember(t, f.organizationId, "manager");
+  await t.run(ctx => ctx.db.patch(f.organizationId, { ownerUserId: owner.userId }));
+  const geographies = [];
+  for (let i = 0; i < 9; i++) geographies.push((await seedGeographicWidget(t)).jurisdictionId);
+  const update = makeFunctionReference<"mutation">("organizationJurisdictions:update");
+  const get = makeFunctionReference<"query">("organizationJurisdictions:get");
+  const target = { organizationId: f.organizationId, jurisdictionId: f.jurisdictionId };
+  const input = { ...target, name: "Regional policies", scopeMode: "linked_geographies", geographicJurisdictionIds: geographies.slice(0, 8), reason: "Update geographic coverage" };
+  await owner.client.mutation(update, input);
+  expect((await owner.client.query(get, target)).geographicJurisdictions).toHaveLength(8);
+  await expect(owner.client.mutation(update, { ...input, geographicJurisdictionIds: geographies })).rejects.toThrow("INVALID_SCOPE_MODE");
+  await owner.client.mutation(update, { ...input, name: "Local policies", geographicJurisdictionIds: geographies.slice(0, 1) });
+  const reduced = await owner.client.query(get, target);
+  expect(reduced.jurisdiction.name).toBe("Local policies");
+  expect(reduced.geographicJurisdictions).toHaveLength(1);
+});
 it("creates independent sibling libraries and retries without duplicate provider jobs", async () => {
   vi.stubEnv("ADMIN_ENVIRONMENT", "test");
   const t = createWidgetBackend(),

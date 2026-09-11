@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import { MAX_SCOPE_LINKS } from "@/convex/lib/jurisdictionDomain";
 import type { Id } from "@/convex/_generated/dataModel";
 import { DataTable } from "@/components/admin/data-table";
 import { StepUpDialog } from "@/components/admin/step-up-dialog";
@@ -168,7 +169,7 @@ function JurisdictionForm({
             );
         } catch {
           setError(
-            "Could not save this jurisdiction. Use a unique name and up to four eligible geographic libraries. An organization can have up to twenty current jurisdictions.",
+            `Could not save this jurisdiction. Use a unique name and up to ${MAX_SCOPE_LINKS} eligible geographic libraries. An organization can have up to twenty current jurisdictions.`,
           );
         } finally {
           setBusy(false);
@@ -295,7 +296,7 @@ function GeographicSelection({
               type="checkbox"
               checked={selected.some((item) => item.id === row.id)}
               disabled={
-                selected.length >= 4 &&
+                selected.length >= MAX_SCOPE_LINKS &&
                 !selected.some((item) => item.id === row.id)
               }
               onChange={(e) =>

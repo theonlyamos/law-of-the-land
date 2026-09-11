@@ -13,6 +13,7 @@ import type { AdminRole } from "../lib/adminPermissions";
 import { isGeminiFileSearchStoreName } from "../lib/geminiFileSearchNames";
 import {
   MAX_GEOGRAPHIC_DEPTH,
+  MAX_SCOPE_LINKS,
   allowedParentLevelsByLevel,
   geographicLevelValidator,
   jurisdictionDocumentValidator,
@@ -37,7 +38,6 @@ import {
 import { queueGeminiStoreProvision } from "./jobs";
 
 const MAX_TEXT_LENGTH = 300;
-const MAX_SCOPE_LINKS = 8;
 const MAX_PROFILE_ROWS = 2;
 const MAX_ARCHIVAL_CHILD_SCAN = 100;
 const MAX_GEOGRAPHIC_ALIASES = 20;
