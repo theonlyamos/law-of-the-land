@@ -1,3 +1,4 @@
+import { discoveryText as organizationDiscoveryText } from "../lib/organizationManagement";
 import { ConvexError, v } from "convex/values";
 import { components } from "../_generated/api";
 import {
@@ -847,3 +848,37 @@ export const bootstrapSuperAdmins = internalMutation({
     return { promoted, unchanged };
   },
 });
+
+export const backfillOrganizationDiscovery = internalMutation({ args: {cursor:v.union(v.string(),v.null())}, handler: async(ctx,args)=>{
+  const result=await ctx.db.query("jurisdictions").paginate({numItems:50,cursor:args.cursor});
+  let updated=0;
+  for(const row of result.page){
+    if(row.kind!=="organizational"||!row.organizationId)continue;
+    const organization=await ctx.db.get(row.organizationId);
+    if(!organization)throw new ConvexError("ORGANIZATION_NOT_FOUND");
+    const discoveryText=organizationDiscoveryText(organization.name,row.name);
+    if(row.discoveryText!==discoveryText){await ctx.db.patch(row._id,{discoveryText});updated++;}
+  }
+  return {continueCursor:result.continueCursor,isDone:result.isDone,updated};
+} });
+export const inspectOrganizationManagementMigration=internalQuery({args:{cursor:v.union(v.string(),v.null())},handler:async(ctx,args)=>{
+  const result=await ctx.db.query("organizations").paginate({numItems:20,cursor:args.cursor});
+  const issues: {organizationId:Id<"organizations">;issue:string}[]=[];
+  for(const org of result.page){
+    if(!org.ownerUserId)issues.push({organizationId:org._id,issue:"owner_required"});
+    else {
+      const owner=await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId",q=>q.eq("organizationId",org._id).eq("userId",org.ownerUserId!)).take(2);
+      if(owner.length!==1||owner[0].status!=="active"||owner[0].role!=="manager")issues.push({organizationId:org._id,issue:"invalid_owner_membership"});
+    }
+    const rows=(await Promise.all((["draft","enabled"] as const).map(status=>ctx.db.query("jurisdictions").withIndex("by_organizationId_and_status_and_name",q=>q.eq("organizationId",org._id).eq("status",status)).take(21)))).flat();
+    if(rows.length>20)issues.push({organizationId:org._id,issue:"jurisdiction_limit"});
+    const names=new Set<string>();
+    for(const row of rows){
+      const name=row.name.normalize("NFKC").trim().replace(/\s+/g," ").toLowerCase();
+      const profiles=await ctx.db.query("organizationalJurisdictions").withIndex("by_jurisdictionId",q=>q.eq("jurisdictionId",row._id)).take(2);
+      if(row.kind!=="organizational"||names.has(name)||row.discoveryText!==organizationDiscoveryText(org.name,row.name)||profiles.length!==1)issues.push({organizationId:org._id,issue:"invalid_jurisdiction_or_discovery"});
+      names.add(name);
+    }
+  }
+  return {continueCursor:result.continueCursor,isDone:result.isDone,issues};
+} });

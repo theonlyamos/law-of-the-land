@@ -35,11 +35,12 @@ const MAX_NESTED_CURSOR_LENGTH = 2048;
 
 type SearchPhase = "members" | "public";
 type SearchCursor = {
-  v: 1;
+  v: 2;
   kind: JurisdictionKind;
   q: string;
   phase: SearchPhase;
   memberOffset?: number;
+  memberCursor?: string | null;
   publicCursor?: string | null;
 };
 
@@ -49,6 +50,8 @@ type ResearchJurisdiction = {
   slug: string;
   kind: JurisdictionKind;
   isDefault: boolean;
+  organization?: { id: Id<"organizations">; name: string };
+  visibility?: "public" | "members";
 };
 
 function invalidCursor(): never {
@@ -117,10 +120,10 @@ function decodeCursor(
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalidCursor();
   const candidate = parsed as Record<string, unknown>;
-  const allowed = new Set(["v", "kind", "q", "phase", "memberOffset", "publicCursor"]);
+  const allowed = new Set(["v", "kind", "q", "phase", "memberOffset", "memberCursor", "publicCursor"]);
   if (Object.keys(candidate).some((key) => !allowed.has(key))) invalidCursor();
   if (
-    candidate.v !== 1 ||
+    candidate.v !== 2 ||
     candidate.kind !== kind ||
     candidate.q !== fingerprint ||
     (candidate.phase !== "members" && candidate.phase !== "public")
@@ -148,16 +151,19 @@ function decodeCursor(
       invalidCursor();
     }
   }
+  if (candidate.memberCursor != null && (typeof candidate.memberCursor !== "string" || candidate.memberCursor.length > MAX_NESTED_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+$/.test(candidate.memberCursor))) invalidCursor();
   return candidate as SearchCursor;
 }
 
-function projectResearchJurisdiction(row: Doc<"jurisdictions">): ResearchJurisdiction {
+async function projectResearchJurisdiction(ctx: QueryCtx, row: Doc<"jurisdictions">): Promise<ResearchJurisdiction> {
+  const organization = row.organizationId ? await ctx.db.get(row.organizationId) : null;
   return {
     id: row._id,
     name: row.name,
     slug: row.slug,
     kind: row.kind as JurisdictionKind,
     isDefault: row.isDefault,
+    ...(organization ? { organization: { id: organization._id, name: organization.name }, visibility: row.visibility ?? "members" } : {}),
   };
 }
 
@@ -217,9 +223,11 @@ async function publicSearchPage(
   normalizedQuery: string,
   nestedCursor: string | null,
   fingerprint: string,
+  memberIds: ReadonlySet<Id<"organizations">> = new Set(),
 ) {
   const paginationOptions = { numItems: MAX_SELECTOR_PAGE_SIZE, cursor: nestedCursor };
-  const result = normalizedQuery
+  const organizationSearch = kind === "organizational" && !!normalizedQuery;
+  const result = organizationSearch ? await ctx.db.query("jurisdictions").withSearchIndex("search_discoveryText", q => q.search("discoveryText", normalizedQuery).eq("kind", "organizational").eq("status", "enabled").eq("visibility", "public")).paginate(paginationOptions) : normalizedQuery
     ? await ctx.db
         .query("jurisdictions")
         .withSearchIndex("search_name", (q) =>
@@ -236,61 +244,29 @@ async function publicSearchPage(
           q.eq("kind", kind).eq("status", "enabled").eq("visibility", "public"),
         )
         .paginate(paginationOptions);
-  await Promise.all(result.page.map((row) => assertTypedRelationship(ctx, row, kind)));
+  const visible = (await Promise.all(result.page.map(async row => {
+    if (row.organizationId) {
+      if (memberIds.has(row.organizationId)) return null;
+      const organization = await ctx.db.get(row.organizationId);
+      if (organization?.status !== "active") return null;
+    }
+    await assertTypedRelationship(ctx, row, kind);
+    return row;
+  }))).filter(row => row !== null);
   return {
-    page: result.page.map(projectResearchJurisdiction),
+    page: await Promise.all(visible.map(row => projectResearchJurisdiction(ctx, row))),
     group: kind === "geographic" ? ("geographic" as const) : ("public_organizations" as const),
     isDone: result.isDone,
     continueCursor: result.isDone
       ? null
       : encodeCursor({
-          v: 1,
+          v: 2,
           kind,
           q: fingerprint,
           phase: "public",
           publicCursor: encodeBase64Url(result.continueCursor),
         }),
   };
-}
-
-async function memberOrganizationMatches(
-  ctx: QueryCtx,
-  userId: string,
-  normalizedQuery: string,
-): Promise<ResearchJurisdiction[]> {
-  const organizationIds = await activeOrganizationIdsForUser(ctx, userId);
-  const normalizedNeedle = normalizedQuery.toLocaleLowerCase("en");
-  const candidates = await Promise.all(
-    [...organizationIds].map(async (organizationId) => {
-      const [organization, rows] = await Promise.all([
-        ctx.db.get("organizations", organizationId),
-        ctx.db
-          .query("jurisdictions")
-          .withIndex("by_organizationId", (q) => q.eq("organizationId", organizationId))
-          .take(2),
-      ]);
-      if (!organization || organization.status !== "active" || rows.length > 1) {
-        throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
-      }
-      const row = rows[0];
-      if (!row) return null;
-      if (
-        row.kind !== "organizational" ||
-        row.organizationId !== organizationId ||
-        row.status !== "enabled"
-      ) {
-        throw new ConvexError("JURISDICTION_SELECTOR_STATE_INVALID");
-      }
-      await assertTypedRelationship(ctx, row, "organizational");
-      if (row.visibility !== "members") return null;
-      const normalizedName = row.name.normalize("NFKC").toLocaleLowerCase("en");
-      if (normalizedNeedle && !normalizedName.includes(normalizedNeedle)) return null;
-      return projectResearchJurisdiction(row);
-    }),
-  );
-  return candidates
-    .filter((row): row is ResearchJurisdiction => row !== null)
-    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
 const researchJurisdictionValidator = v.union(
@@ -301,6 +277,8 @@ const researchJurisdictionValidator = v.union(
     slug: v.string(),
     kind: jurisdictionKindValidator,
     isDefault: v.boolean(),
+    organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
+    visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
   }),
 );
 
@@ -331,7 +309,7 @@ export const resolveResearchSelection = query({
       const kind = selected.kind;
       if (kind !== "geographic" && kind !== "organizational") return null;
       await assertTypedRelationship(ctx, selected, kind);
-      return projectResearchJurisdiction(selected);
+      return projectResearchJurisdiction(ctx, selected);
     } catch {
       return null;
     }
@@ -348,8 +326,10 @@ export const searchAccessible = query({
   returns: jurisdictionSearchPageValidator,
   handler: async (ctx, args) => {
     const normalizedQuery = normalizeSearchQuery(args.query);
-    const fingerprint = await queryFingerprint(normalizedQuery);
     const userId = args.kind === "organizational" ? await optionalUserId(ctx) : null;
+    const memberIds = userId ? await activeOrganizationIdsForUser(ctx, userId) : new Set<Id<"organizations">>();
+    const sortedIds = [...memberIds].sort();
+    const fingerprint = await queryFingerprint(JSON.stringify([normalizedQuery, userId, sortedIds]));
     const cursor = args.cursor
       ? decodeCursor(args.cursor, args.kind, fingerprint)
       : null;
@@ -367,39 +347,22 @@ export const searchAccessible = query({
 
     if (cursor?.phase === "members" && !userId) invalidCursor();
     if (userId && (!cursor || cursor.phase === "members")) {
-      const matches = await memberOrganizationMatches(ctx, userId, normalizedQuery);
-      const offset = cursor?.memberOffset ?? 0;
-      if (offset > matches.length) invalidCursor();
-      const page = matches.slice(offset, offset + MAX_SELECTOR_PAGE_SIZE);
-      if (page.length > 0) {
-        const nextOffset = offset + page.length;
-        return {
-          page,
-          group: "your_organizations" as const,
-          isDone: false,
-          continueCursor: encodeCursor(
-            nextOffset < matches.length
-              ? {
-                  v: 1,
-                  kind: "organizational",
-                  q: fingerprint,
-                  phase: "members",
-                  memberOffset: nextOffset,
-                }
-              : {
-                  v: 1,
-                  kind: "organizational",
-                  q: fingerprint,
-                  phase: "public",
-                  publicCursor: null,
-                },
-          ),
-        };
+      let offset = cursor?.memberOffset ?? 0;
+      if (offset > sortedIds.length) invalidCursor();
+      for (let probes = 0; offset < sortedIds.length && probes < 5; probes++, offset++) {
+        const organizationId = sortedIds[offset], organization = await ctx.db.get(organizationId);
+        if (organization?.status !== "active") continue;
+        const paginationOpts = { numItems: MAX_SELECTOR_PAGE_SIZE, cursor: offset === cursor?.memberOffset && cursor.memberCursor ? decodeBase64Url(cursor.memberCursor) : null };
+        const build = () => normalizedQuery
+          ? ctx.db.query("jurisdictions").withSearchIndex("search_discoveryText", q => q.search("discoveryText", normalizedQuery).eq("organizationId", organizationId).eq("status", "enabled"))
+          : ctx.db.query("jurisdictions").withIndex("by_organizationId_and_status_and_name", q => q.eq("organizationId", organizationId).eq("status", "enabled"));
+        if (!(await build().take(1)).length) continue;
+        const result = await build().paginate(paginationOpts);
+        await Promise.all(result.page.map(row => assertTypedRelationship(ctx, row, "organizational")));
+        return { page: await Promise.all(result.page.map(row => projectResearchJurisdiction(ctx, row))), group: "your_organizations" as const, isDone: false,
+          continueCursor: encodeCursor({ v: 2, kind: args.kind, q: fingerprint, phase: "members", memberOffset: result.isDone ? offset + 1 : offset, memberCursor: result.isDone ? null : encodeBase64Url(result.continueCursor) }) };
       }
-    }
-
-    if (userId && cursor?.phase === "public") {
-      await activeOrganizationIdsForUser(ctx, userId);
+      if (offset < sortedIds.length) return { page: [], group: "your_organizations" as const, isDone: false, continueCursor: encodeCursor({ v: 2, kind: args.kind, q: fingerprint, phase: "members", memberOffset: offset }) };
     }
 
     return await publicSearchPage(
@@ -408,6 +371,7 @@ export const searchAccessible = query({
       normalizedQuery,
       cursor?.publicCursor ? decodeBase64Url(cursor.publicCursor) : null,
       fingerprint,
+      memberIds,
     );
   },
 });

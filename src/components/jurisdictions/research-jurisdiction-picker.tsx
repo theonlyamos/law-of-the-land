@@ -16,6 +16,7 @@ type SearchPage = {
 
 interface ResultSection {
   group: SearchGroup;
+  organization?: { id: string; name: string };
   rows: ResearchJurisdiction[];
 }
 
@@ -46,13 +47,15 @@ function appendPage(
     seen.add(row.id);
     return true;
   });
-  const existing = sections.findIndex((section) => section.group === group);
-  if (existing < 0) return [...sections, { group, rows: unique }];
-  return sections.map((section, index) =>
-    index === existing ? { ...section, rows: [...section.rows, ...unique] } : section,
-  );
+  const result = sections.map(section => ({ ...section, rows: [...section.rows] }));
+  for (const row of unique) {
+    let section = result.find(item => item.group === group && item.organization?.id === row.organization?.id);
+    if (!section) { section = { group, organization: row.organization, rows: [] }; result.push(section); }
+    section.rows.push(row);
+  }
+  if (!result.length) result.push({group, rows:[]});
+  return result;
 }
-
 export function ResearchJurisdictionPicker({
   value,
   onChange,
@@ -95,9 +98,7 @@ export function ResearchJurisdictionPicker({
         })) as SearchPage;
         if (controller.signal.aborted || generation !== requestGeneration.current) return;
         setSections((current) =>
-          append ? appendPage(current, result.group, result.page) : [
-            { group: result.group, rows: result.page.slice(0, 20) },
-          ],
+          appendPage(append ? current : [], result.group, result.page),
         );
         setCursor(result.continueCursor);
         setIsDone(result.isDone);
@@ -208,22 +209,22 @@ export function ResearchJurisdictionPicker({
               setActiveIndex(-1);
             }
           }}
-          placeholder={kind ? "Search by jurisdiction name" : "Choose a type first"}
+          placeholder={kind ? kind === "organizational" ? "Search organizations or jurisdictions" : "Search by jurisdiction name" : "Choose a type first"}
           className="min-h-11 w-full border border-input bg-transparent px-3 text-inherit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
       </div>
 
       {value ? (
         <p className="text-sm font-medium" aria-live="polite">
-          Selected: {value.name}
+          Selected: {value.organization ? `${value.organization.name} / ` : ""}{value.name}
         </p>
       ) : null}
 
       <div id={listboxId} role="listbox" aria-label="Jurisdiction results" className="grid gap-3">
         {sections.map((section) => (
-          <div key={section.group} role="group" aria-label={GROUP_LABELS[section.group]}>
+          <div key={`${section.group}:${section.organization?.id ?? "geographic"}`} role="group" aria-label={section.organization?.name ?? GROUP_LABELS[section.group]}>
             <p className="mb-2 text-xs font-bold uppercase tracking-wide">
-              {GROUP_LABELS[section.group]}
+              {section.organization?.name ?? GROUP_LABELS[section.group]}
             </p>
             <ul className="grid gap-1">
               {section.rows.map((row) => {
@@ -234,7 +235,7 @@ export function ResearchJurisdictionPicker({
                     id={`${listboxId}-${index}`}
                     key={row.id}
                     role="option"
-                    aria-label={`${row.name}, ${kindLabel}, ${row.slug}`}
+                    aria-label={`${row.organization ? `${row.organization.name}, ` : ""}${row.name}, ${kindLabel}, ${row.slug}`}
                     aria-selected={value?.id === row.id}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => choose(row)}
@@ -246,7 +247,7 @@ export function ResearchJurisdictionPicker({
                   >
                     <span className="block font-medium">{row.name}</span>
                     <span className="block text-xs text-muted-foreground">
-                      {kindLabel} <span aria-hidden>·</span> {row.slug}
+                      {row.organization ? (row.visibility === "public" ? "Public" : "Private · Your organization") : kindLabel} <span aria-hidden>·</span> {row.slug}
                     </span>
                   </li>
                 );

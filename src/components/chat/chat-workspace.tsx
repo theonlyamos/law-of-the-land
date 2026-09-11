@@ -279,6 +279,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     ? {
         id: sessionData.jurisdictionId,
         name: sessionData.jurisdictionName ?? "Jurisdiction",
+        organization: resolvedInitialSelection?.organization,
         slug: "",
         kind: sessionData.jurisdictionKind ?? "geographic",
         isDefault: false,
@@ -771,6 +772,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
               {isChatLoading ? "" : sessionData?.title ?? "New chat"}
             </h1>
+            {chatResearchJurisdiction && <p className="max-w-[55%] truncate text-xs text-muted-foreground" title={`${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`}>{chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}{chatResearchJurisdiction.name}</p>}
           </div>
         </div>
 

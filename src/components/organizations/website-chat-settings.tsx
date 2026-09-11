@@ -6,38 +6,427 @@ import type { FunctionReturnType } from "convex/server";
 import { organizationApi } from "@/lib/organization-api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
+import { fieldClass, buttonClass } from "@/components/admin/form-styles";
 
 import { Textarea } from "@/components/ui/textarea";
 import { GuestChat } from "@/components/embed/guest-chat";
 import { SavedWidgetTest } from "@/components/embed/saved-widget-test";
-type WidgetTarget = { organizationId: Id<"organizations">; jurisdictionId?: never } | { jurisdictionId: Id<"jurisdictions">; organizationId?: never };
-export function WebsiteChatSettings(target: WidgetTarget) {
+type WidgetTarget = {
+  jurisdictionId: Id<"jurisdictions">;
+  organizationId?: Id<"organizations">;
+};
+export function ChatWidgetSettings(target: WidgetTarget) {
   const { isAuthenticated } = useConvexAuth();
-  const data = useQuery(organizationApi.widgets.getSettings, isAuthenticated ? target : "skip");
-  return data ? <SettingsForm key={target.organizationId ?? target.jurisdictionId} target={target} data={data} /> : <p role="status">Loading website chat…</p>;
+  const data = useQuery(
+    organizationApi.widgets.getSettings,
+    isAuthenticated ? target : "skip",
+  );
+  return data ? (
+    <SettingsForm key={target.jurisdictionId} target={target} data={data} />
+  ) : (
+    <p role="status">Loading chat widget…</p>
+  );
 }
-function SettingsForm({ target, data }: { target: WidgetTarget; data: FunctionReturnType<typeof organizationApi.widgets.getSettings> }) {
+function SettingsForm({
+  target,
+  data,
+}: {
+  target: WidgetTarget;
+  data: FunctionReturnType<typeof organizationApi.widgets.getSettings>;
+}) {
   const save = useMutation(organizationApi.widgets.saveSettings);
-  const [draft, setDraft] = useState(data.settings), [origins, setOrigins] = useState(data.settings.allowedOrigins.join("\n"));
-  const [daily, setDaily] = useState(data.dailyLimit), [monthly, setMonthly] = useState(data.monthlyLimit), [tab, setTab] = useState("Appearance"), [busy, setBusy] = useState(false), [notice, setNotice] = useState(""), [testing, setTesting] = useState(false);
-  const dirty = JSON.stringify({ ...draft, allowedOrigins: origins.split("\n").map(v => v.trim()).filter(Boolean) }) !== JSON.stringify(data.settings) || daily !== data.dailyLimit || monthly !== data.monthlyLimit;
-  const snippet = data.publicId ? `<script src="${typeof window === "undefined" ? "" : window.location.origin}/widget.js" data-embed-id="${data.publicId}" async></script>` : "Save your settings to generate the installation code.";
+  const [draft, setDraft] = useState(data.settings),
+    [origins, setOrigins] = useState(data.settings.allowedOrigins.join("\n"));
+  const [tab, setTab] = useState("Appearance"),
+    [busy, setBusy] = useState(false),
+    [notice, setNotice] = useState(""),
+    [testing, setTesting] = useState(false);
+  const dirty =
+    JSON.stringify({
+      ...draft,
+      allowedOrigins: origins
+        .split("\n")
+        .map((v) => v.trim())
+        .filter(Boolean),
+    }) !== JSON.stringify(data.settings);
+  const snippet = data.publicId
+    ? `<script src="${typeof window === "undefined" ? "" : window.location.origin}/widget.js" data-embed-id="${data.publicId}" async></script>`
+    : "Save your settings to generate the installation code.";
   async function submit(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setNotice("");
-    try { const settings = normalizeWidgetSettings({ ...draft, suggestedQuestions: draft.suggestedQuestions.map(q => q?.trim() ?? "").filter(Boolean), allowedOrigins: origins.split("\n").map(v => v.trim()).filter(Boolean) }); await save({ ...target, settings, dailyLimit: daily, monthlyLimit: monthly }); setDraft(settings); setOrigins(settings.allowedOrigins.join("\n")); setNotice("Settings saved. Your installed widget will use these settings the next time the page loads."); }
-    catch { setNotice("Settings couldn't be saved. Check website addresses, required fields, and allowance limits. Enabling chat requires indexed published documents and an allowance."); }
-    finally { setBusy(false); }
+    event.preventDefault();
+    if (tab === "Usage") return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const settings = normalizeWidgetSettings({
+        ...draft,
+        suggestedQuestions: draft.suggestedQuestions
+          .map((q) => q?.trim() ?? "")
+          .filter(Boolean),
+        allowedOrigins: origins
+          .split("\n")
+          .map((v) => v.trim())
+          .filter(Boolean),
+      });
+      await save({ ...target, settings });
+      setDraft(settings);
+      setOrigins(settings.allowedOrigins.join("\n"));
+      setNotice(
+        "Settings saved. Your installed widget will use these settings the next time the page loads.",
+      );
+    } catch {
+      setNotice(
+        "Settings couldn't be saved. Check website addresses, required fields, and allowance limits. Enabling chat requires indexed published documents and an allowance.",
+      );
+    } finally {
+      setBusy(false);
+    }
   }
-  return <div className="space-y-6"><header className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm text-muted-foreground">{data.jurisdictionName}</p><h1 className="text-3xl font-semibold tracking-tight">Website chat</h1><p className="mt-2 text-sm text-muted-foreground">Answer visitors using your published documents.</p></div><span className="rounded-full border px-3 py-1 text-sm">{data.settings.enabled ? "Enabled" : "Disabled"}</span></header>
-    <p className="rounded-lg border bg-muted/40 p-4 text-sm">{data.readiness} {!data.platformDailyLimit && "Contact your platform administrator to activate an allowance."}</p>
-    <div className="flex flex-wrap gap-2 border-b pb-3" aria-label="Website chat sections">{["Appearance", "Websites", "Installation", "Usage"].map(name => <Button type="button" key={name} variant={tab === name ? "secondary" : "ghost"} aria-pressed={tab === name} onClick={() => setTab(name)}>{name}</Button>)}</div>
-    <form onSubmit={submit} className="space-y-6"><div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)]"><fieldset disabled={!data.canManage || busy} className="min-w-0 space-y-5">
-      {tab === "Appearance" && <><label className="grid gap-2 text-sm font-medium">Chat title<input className="min-h-11 w-full rounded-md border bg-background px-3 font-normal" required maxLength={80} value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} /></label><label className="grid gap-2 text-sm font-medium">Welcome message<Textarea maxLength={300} value={draft.welcomeMessage} onChange={e => setDraft({ ...draft, welcomeMessage: e.target.value })} /></label>{[0, 1, 2].map(index => <label key={index} className="grid gap-2 text-sm font-medium">Suggested question {index + 1}<input className="min-h-11 w-full rounded-md border bg-background px-3 font-normal" maxLength={160} value={draft.suggestedQuestions[index] ?? ""} onChange={e => { const questions = [0, 1, 2].map(i => draft.suggestedQuestions[i] ?? ""); questions[index] = e.target.value; setDraft({ ...draft, suggestedQuestions: questions }); }} /></label>)}<label className="flex min-h-11 items-center justify-between gap-3 text-sm font-medium">Accent color<input aria-label="Accent color" type="color" value={draft.accent} onChange={e => setDraft({ ...draft, accent: e.target.value })} className="h-10 w-16 rounded border" /></label><label className="grid gap-2 text-sm font-medium">Launcher position<select value={draft.side} onChange={e => setDraft({ ...draft, side: e.target.value as "left" | "right" })} className="min-h-11 rounded-md border bg-background px-3"><option value="right">Bottom right</option><option value="left">Bottom left</option></select></label></>}
-      {tab === "Websites" && <><label className="grid gap-2 text-sm font-medium">Allowed websites<Textarea rows={6} value={origins} placeholder="https://www.example.org" onChange={e => setOrigins(e.target.value)} aria-describedby="website-help" /></label><p id="website-help" className="text-sm text-muted-foreground">Enter one HTTPS website origin per line, up to 10. Include www if your website uses it. Page paths and wildcards aren't supported.</p><label className="flex min-h-11 items-center gap-3 text-sm"><input type="checkbox" checked={draft.enabled} onChange={e => setDraft({ ...draft, enabled: e.target.checked })} className="h-5 w-5 accent-primary" />Enable website chat</label><p className="text-sm text-muted-foreground">Enabling chat lets anyone on an approved website receive answers and citations from published documents, even when this jurisdiction is private. Private jurisdictions stay hidden from public browsing. Website restrictions do not authenticate visitors.</p><p className="text-sm text-muted-foreground">Disable website chat to stop visitor access and invalidate existing sessions. Changing jurisdiction visibility does not disable the widget.</p></>}
-      {tab === "Installation" && <><h2 className="font-semibold">Add to your website</h2><p className="text-sm">Save your settings, then place this snippet before the closing body tag on the pages where visitors should see chat.</p><pre className="overflow-x-auto rounded-lg border bg-muted p-4 text-xs whitespace-pre-wrap break-all">{snippet}</pre><Button type="button" variant="outline" disabled={!data.publicId} onClick={async () => { try { await navigator.clipboard.writeText(snippet); setNotice("Installation code copied."); } catch { setNotice("Select and copy the installation code above."); } }}>Copy code</Button><p className="text-sm text-muted-foreground">If your site restricts content, allow this app's origin in script-src, style-src, connect-src, and frame-src. Add this snippet once per page.</p></>}
-      {tab === "Usage" && <><div className="grid grid-cols-2 gap-4"><div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">Today</p><p className="text-2xl font-semibold">{data.usage.day} / {data.dailyLimit}</p></div><div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">This month</p><p className="text-2xl font-semibold">{data.usage.month} / {data.monthlyLimit}</p></div></div><label className="grid gap-2 text-sm font-medium">Daily question limit<input className="min-h-11 w-full rounded-md border bg-background px-3 font-normal" type="number" min={0} max={data.platformDailyLimit} value={daily} onChange={e => setDaily(Number(e.target.value))} /></label><label className="grid gap-2 text-sm font-medium">Monthly question limit<input className="min-h-11 w-full rounded-md border bg-background px-3 font-normal" type="number" min={0} max={data.platformMonthlyLimit} value={monthly} onChange={e => setMonthly(Number(e.target.value))} /></label><p className="text-sm text-muted-foreground">Your platform allowance is {data.platformDailyLimit} questions/day and {data.platformMonthlyLimit}/month. Limits reset at midnight UTC and the first day of each month. An accepted question counts even if generation fails; checking an answer doesn't count again.</p></>}
-    </fieldset><aside className="min-w-0 space-y-3"><div className="flex items-center justify-between"><h2 className="text-sm font-medium">Design preview</h2><span className="text-xs text-muted-foreground">{dirty ? "Unsaved changes" : "Current appearance"}</span></div><div className="overflow-hidden rounded-xl border shadow-sm"><GuestChat preview config={{ ...draft, publicId: "design-preview", jurisdictionName: data.jurisdictionName }} /></div></aside></div>
-    <div className="flex flex-wrap items-center gap-3 border-t pt-4"><Button type="submit" disabled={!data.canManage || busy || (!dirty && !!data.publicId)}>{busy ? "Saving…" : "Save changes"}</Button><Button type="button" variant="outline" disabled={!data.publicId || !data.settings.enabled} onClick={() => setTesting(v => !v)}>{testing ? "Close test" : "Test saved widget"}</Button><span className="text-sm text-muted-foreground">{!data.publicId ? "Save to create your widget." : dirty ? "You have unsaved changes." : "All changes saved."}</span></div>{notice && <p role="status" className="text-sm">{notice}</p>}
-    </form>{testing && data.publicId && <SavedWidgetTest publicId={data.publicId} onClose={() => setTesting(false)} />}
-  </div>;
+  return (
+    <div className="space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-sm text-muted-foreground">
+            {data.jurisdictionName}
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight">Chat widget</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Answer visitors using your published documents.
+          </p>
+        </div>
+        <span className="rounded-none border px-3 py-1 text-sm">
+          {data.settings.enabled ? "Enabled" : "Disabled"}
+        </span>
+      </header>
+      <p className="rounded-none border bg-muted/40 p-4 text-sm">
+        {data.readiness}{" "}
+        {!data.platformDailyLimit &&
+          "Contact your platform administrator to activate an allowance."}
+      </p>
+      <div
+        className="flex flex-wrap gap-2 border-b pb-3"
+        aria-label="Chat widget sections"
+      >
+        {["Appearance", "Websites", "Installation", "Usage"].map((name) => (
+          <Button
+            type="button"
+            key={name}
+            variant={tab === name ? "secondary" : "ghost"}
+            aria-pressed={tab === name}
+            onClick={() => setTab(name)}
+          >
+            {name}
+          </Button>
+        ))}
+      </div>
+      <form onSubmit={submit} className="space-y-6">
+        <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)]">
+          <fieldset
+            disabled={!data.canManage || busy}
+            className="min-w-0 space-y-5"
+          >
+            {tab === "Appearance" && (
+              <>
+                <label className="grid gap-2 text-sm font-medium">
+                  Chat title
+                  <input
+                    className={fieldClass}
+                    required
+                    maxLength={80}
+                    value={draft.title}
+                    onChange={(e) =>
+                      setDraft({ ...draft, title: e.target.value })
+                    }
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-medium">
+                  Welcome message
+                  <Textarea
+                    className={`${fieldClass} rounded-none py-3`}
+                    maxLength={300}
+                    value={draft.welcomeMessage}
+                    onChange={(e) =>
+                      setDraft({ ...draft, welcomeMessage: e.target.value })
+                    }
+                  />
+                </label>
+                {[0, 1, 2].map((index) => (
+                  <label key={index} className="grid gap-2 text-sm font-medium">
+                    Suggested question {index + 1}
+                    <input
+                      className={fieldClass}
+                      maxLength={160}
+                      value={draft.suggestedQuestions[index] ?? ""}
+                      onChange={(e) => {
+                        const questions = [0, 1, 2].map(
+                          (i) => draft.suggestedQuestions[i] ?? "",
+                        );
+                        questions[index] = e.target.value;
+                        setDraft({ ...draft, suggestedQuestions: questions });
+                      }}
+                    />
+                  </label>
+                ))}
+                <label className="flex min-h-11 items-center justify-between gap-3 text-sm font-medium">
+                  Accent color
+                  <input
+                    aria-label="Accent color"
+                    type="color"
+                    value={draft.accent}
+                    onChange={(e) =>
+                      setDraft({ ...draft, accent: e.target.value })
+                    }
+                    className="h-10 w-16 rounded border"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-medium">
+                  Launcher position
+                  <select
+                    value={draft.side}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        side: e.target.value as "left" | "right",
+                      })
+                    }
+                    className={fieldClass}
+                  >
+                    <option value="right">Bottom right</option>
+                    <option value="left">Bottom left</option>
+                  </select>
+                </label>
+              </>
+            )}
+            {tab === "Websites" && (
+              <>
+                <label className="grid gap-2 text-sm font-medium">
+                  Allowed websites
+                  <Textarea
+                    className={`${fieldClass} rounded-none py-3`}
+                    rows={6}
+                    value={origins}
+                    placeholder="https://www.example.org"
+                    onChange={(e) => setOrigins(e.target.value)}
+                    aria-describedby="website-help"
+                  />
+                </label>
+                <p id="website-help" className="text-sm text-muted-foreground">
+                  Enter one HTTPS website origin per line, up to 10. Include www
+                  if your website uses it. Page paths and wildcards aren't
+                  supported.
+                </p>
+                <label className="flex min-h-11 items-center gap-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={draft.enabled}
+                    onChange={(e) =>
+                      setDraft({ ...draft, enabled: e.target.checked })
+                    }
+                    className="h-5 w-5 accent-primary"
+                  />
+                  Enable chat widget
+                </label>
+                <p className="text-sm text-muted-foreground">
+                  Enabling chat lets anyone on an approved website receive
+                  answers and citations from published documents, even when this
+                  jurisdiction is private. Private jurisdictions stay hidden
+                  from public browsing. Website restrictions do not authenticate
+                  visitors.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Disable chat widget to stop visitor access and invalidate
+                  existing sessions. Changing jurisdiction visibility does not
+                  disable the widget.
+                </p>
+              </>
+            )}
+            {tab === "Installation" && (
+              <>
+                <h2 className="font-semibold">Add to your website</h2>
+                <p className="text-sm">
+                  Save your settings, then place this snippet before the closing
+                  body tag on the pages where visitors should see chat.
+                </p>
+                <pre className="overflow-x-auto rounded-none border bg-muted p-4 text-xs whitespace-pre-wrap break-all">
+                  {snippet}
+                </pre>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!data.publicId}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(snippet);
+                      setNotice("Copied.");
+                    } catch {
+                      setNotice("Select and copy the installation code above.");
+                    }
+                  }}
+                >
+                  Copy embed code
+                </Button>
+                <p className="text-sm text-muted-foreground">
+                  If your site restricts content, allow this app's origin in
+                  script-src, style-src, connect-src, and frame-src. Add this
+                  snippet once per page.
+                </p>
+              </>
+            )}
+            {tab === "Usage" && <WidgetUsage target={target} />}
+          </fieldset>
+          <aside className="min-w-0 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-medium">Design preview</h2>
+              <span className="text-xs text-muted-foreground">
+                {dirty ? "Unsaved changes" : "Current appearance"}
+              </span>
+            </div>
+            <div className="overflow-hidden rounded-xl border shadow-sm">
+              <GuestChat
+                preview
+                config={{
+                  ...draft,
+                  publicId: "design-preview",
+                  jurisdictionName: data.jurisdictionName,
+                }}
+              />
+            </div>
+          </aside>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+          <Button
+            className={`${buttonClass} rounded-none`}
+            type="submit"
+            hidden={tab === "Usage"}
+            disabled={!data.canManage || busy || (!dirty && !!data.publicId)}
+          >
+            {busy ? "Saving…" : "Save changes"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!data.publicId || !data.settings.enabled}
+            onClick={() => setTesting((v) => !v)}
+          >
+            {testing ? "Close test" : "Test saved widget"}
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            {!data.publicId
+              ? "Save to create your widget."
+              : dirty
+                ? "You have unsaved changes."
+                : "All changes saved."}
+          </span>
+        </div>
+        {notice && (
+          <p role="status" className="text-sm">
+            {notice}
+          </p>
+        )}
+      </form>
+      {testing && data.publicId && (
+        <SavedWidgetTest
+          publicId={data.publicId}
+          onClose={() => setTesting(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function WidgetUsage({ target }: { target: WidgetTarget }) {
+  const data = useQuery(organizationApi.widgets.getUsage, target);
+  return data ? (
+    <UsageLimits key={target.jurisdictionId} target={target} data={data} />
+  ) : (
+    <p role="status">Loading usage…</p>
+  );
+}
+function UsageLimits({
+  target,
+  data,
+}: {
+  target: WidgetTarget;
+  data: FunctionReturnType<typeof organizationApi.widgets.getUsage>;
+}) {
+  const save = useMutation(organizationApi.widgets.saveUsageLimits),
+    [daily, setDaily] = useState(data.dailyLimit),
+    [monthly, setMonthly] = useState(data.monthlyLimit),
+    [busy, setBusy] = useState(false),
+    [message, setMessage] = useState("");
+  return (
+    <div className="space-y-5">
+      <p className="text-sm">
+        {data.shared
+          ? "All chat widgets in this organization share these limits and usage."
+          : "These limits apply to this jurisdiction's chat widget."}
+      </p>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="border p-4">
+          <p className="text-sm">Today</p>
+          <p className="text-2xl font-semibold">
+            {data.day} / {data.dailyLimit}
+          </p>
+        </div>
+        <div className="border p-4">
+          <p className="text-sm">This month</p>
+          <p className="text-2xl font-semibold">
+            {data.month} / {data.monthlyLimit}
+          </p>
+        </div>
+      </div>
+      <label className="grid gap-2 text-sm font-medium">
+        Daily question limit
+        <input
+          type="number"
+          min={0}
+          max={data.platformDailyLimit}
+          value={daily}
+          onChange={(e) => setDaily(Number(e.target.value))}
+          className="min-h-11 border bg-transparent px-3"
+        />
+      </label>
+      <label className="grid gap-2 text-sm font-medium">
+        Monthly question limit
+        <input
+          type="number"
+          min={0}
+          max={data.platformMonthlyLimit}
+          value={monthly}
+          onChange={(e) => setMonthly(Number(e.target.value))}
+          className="min-h-11 border bg-transparent px-3"
+        />
+      </label>
+      <p className="text-sm">
+        Platform allowance: {data.platformDailyLimit} questions/day and{" "}
+        {data.platformMonthlyLimit}/month. Limits reset at midnight UTC and the
+        first day of each month. Accepted questions count even if generation
+        fails.
+      </p>
+      <Button
+        type="button"
+        disabled={
+          !data.canManage ||
+          busy ||
+          (daily === data.dailyLimit && monthly === data.monthlyLimit)
+        }
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await save({ ...target, dailyLimit: daily, monthlyLimit: monthly });
+            setMessage("Usage limits saved.");
+          } catch {
+            setMessage(
+              "Could not save usage limits. Stay within the platform allowance and retry.",
+            );
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Saving…" : "Save usage limits"}
+      </Button>
+      {message && <p role="status">{message}</p>}
+    </div>
+  );
 }

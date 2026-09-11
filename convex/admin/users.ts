@@ -1,3 +1,4 @@
+import { organizationAccessForUser, organizationCapabilities } from "../lib/organizationAccess";
 import {
   makeFunctionReference,
   paginationOptsValidator,
@@ -1193,7 +1194,7 @@ export const recordAdminStepUpProof = internalMutation({
     ]);
     if (
       !actor ||
-      (parseAdminRoles(actor.role).length === 0 && !["document_publish", "document_unpublish", "document_rollback", "organization_visibility"].includes(args.action)) ||
+      (parseAdminRoles(actor.role).length === 0 && !["document_publish", "document_unpublish", "document_rollback", "organization_visibility", "organization_member_role", "organization_member_remove", "organization_owner_transfer", "organization_archive", "organization_restore"].includes(args.action)) ||
       actor.twoFactorEnabled !== true ||
       !session ||
       session.userId !== args.actorId ||
@@ -1250,6 +1251,14 @@ export const recordAdminStepUpProof = internalMutation({
       ) {
         throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
       }
+    } else if (["organization_member_role", "organization_member_remove", "organization_owner_transfer", "organization_archive", "organization_restore"].includes(args.action)) {
+      const isMemberAction = args.action.startsWith("organization_member") || args.action === "organization_owner_transfer";
+      const memberId = isMemberAction ? ctx.db.normalizeId("organizationMemberships", args.targetId) : null;
+      const targetMember = memberId ? await ctx.db.get(memberId) : null;
+      const organizationId = isMemberAction ? targetMember?.organizationId : ctx.db.normalizeId("organizations", args.targetId);
+      const access = organizationId ? await organizationAccessForUser(ctx, organizationId, args.actorId) : null;
+      const owner = access?.organization?.ownerUserId === args.actorId && access.membership?.status === "active" && access.membership.role === "manager";
+      if (typeof session.impersonatedBy === "string" || !owner || access?.organization?.status !== (args.action === "organization_restore" ? "archived" : "active") || (isMemberAction && targetMember?.status !== "active")) throw new ConvexError("ADMIN_STEP_UP_SCOPE_INVALID");
     } else if (args.action === "organization_visibility") {
       const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.targetId);
       const jurisdiction = jurisdictionId ? await ctx.db.get(jurisdictionId) : null;
@@ -1263,7 +1272,7 @@ export const recordAdminStepUpProof = internalMutation({
       const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
       const organization = jurisdiction?.organizationId ? await ctx.db.get(jurisdiction.organizationId) : null;
       const membership = organization ? await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", organization._id).eq("userId", args.actorId)).unique() : null;
-      const scopedReview = jurisdiction?.kind === "organizational" && organization?.status === "active" && membership?.status === "active" && membership.role === "reviewer";
+      const scopedReview = jurisdiction?.kind === "organizational" && organizationCapabilities(organization, membership, args.actorId).canReview;
       if (
         typeof session.impersonatedBy === "string" ||
         (!hasRolePermission(parseAdminRoles(actor.role), "document", permission) && !scopedReview) ||

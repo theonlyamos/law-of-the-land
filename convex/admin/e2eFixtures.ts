@@ -209,7 +209,8 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
       .take(20);
     for (const alias of aliases) { if (await deleteOwned(alias._id)) return deleted; }
   }
-  for (const organization of [publicOrganization, memberOrganization]) {
+  const selfServiceOrganizations = (await ctx.db.query("organizations").take(501)).filter(row => fixtureUserIds.has(row.createdBy));
+  for (const organization of [publicOrganization, memberOrganization, ...selfServiceOrganizations]) {
     if (!organization) continue;
     const sessions = (await ctx.db.query("widgetSessions").take(501)).filter(row => row.organizationId === organization._id);
     for (const session of sessions) {
@@ -228,6 +229,9 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     }
     for (const bucket of await ctx.db.query("widgetUsageBuckets").withIndex("by_organizationId_and_bucket", q => q.eq("organizationId", organization._id)).take(100)) {
       if (await deleteOwned(bucket._id)) return deleted;
+    }
+    for (const invitation of await ctx.db.query("organizationInvitations").withIndex("by_organizationId_and_state_and_expiresAt", q => q.eq("organizationId", organization._id)).take(100)) {
+      if (await deleteOwned(invitation._id)) return deleted;
     }
     const allowance = await ctx.db.query("organizationWidgetAllowances").withIndex("by_organizationId", q => q.eq("organizationId", organization._id)).unique();
     if (allowance && await deleteOwned(allowance._id)) return deleted;
@@ -274,7 +278,13 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
       if (counter && await deleteOwned(counter._id)) return deleted;
       if (await deleteOwned(resource._id)) return deleted;
     }
-    if (!typedJurisdictions.some(row => row._id === jurisdiction._id) && await deleteOwned(jurisdiction._id)) return deleted;
+    if (!typedJurisdictions.some(row => row._id === jurisdiction._id)) {
+      for (const profile of await ctx.db.query("organizationalJurisdictions").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", jurisdiction._id)).take(2)) {
+        for (const link of await ctx.db.query("organizationGeographicScopes").withIndex("by_organizationalJurisdictionId_and_geographicJurisdictionId", q => q.eq("organizationalJurisdictionId", profile._id)).take(9)) if (await deleteOwned(link._id)) return deleted;
+        if (await deleteOwned(profile._id)) return deleted;
+      }
+      if (await deleteOwned(jurisdiction._id)) return deleted;
+    }
   }
 
   for (const profile of organizationalProfiles) { if (await deleteOwned(profile._id)) return deleted; }
@@ -288,6 +298,7 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     if (await deleteOwned(organization._id)) return deleted;
   }
 
+  for (const organization of selfServiceOrganizations) if (await deleteOwned(organization._id)) return deleted;
   for (const user of fixtureUsers) {
     let dependencyDeleted = false;
     for (const model of ["session", "account", "twoFactor"] as const) {
@@ -622,7 +633,7 @@ export const bootstrapRecords = internalMutation({
     const publicOrganizationJurisdictionId = await ctx.db.insert("jurisdictions", {
       name: `${tag} Public Organization`, slug: fixtureSlug(tag, "public-organization"), status: "enabled", isDefault: false,
       geminiFileSearchStoreName: FIXTURE_PUBLIC_ORGANIZATION_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
-      providerSyncState: "synced", kind: "organizational", visibility: "public", organizationId: publicOrganizationId,
+      providerSyncState: "synced", kind: "organizational", visibility: "public", organizationId: publicOrganizationId, discoveryText: `${tag} Public Organization`,
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
     const publicOrganizationProfileId = await ctx.db.insert("organizationalJurisdictions", {
@@ -639,7 +650,7 @@ export const bootstrapRecords = internalMutation({
     const jurisdictionMemberOnlyId = await ctx.db.insert("jurisdictions", {
       name: `${tag} Member Organization`, slug: fixtureSlug(tag, "member-organization"), status: "enabled", isDefault: false,
       geminiFileSearchStoreName: FIXTURE_MEMBER_ORGANIZATION_GEMINI_STORE_NAME, geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
-      providerSyncState: "synced", kind: "organizational", visibility: "members", organizationId: memberOrganizationId,
+      providerSyncState: "synced", kind: "organizational", visibility: "members", organizationId: memberOrganizationId, discoveryText: `${tag} Member Organization`,
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
     const memberOrganizationProfileId = await ctx.db.insert("organizationalJurisdictions", {
@@ -1008,7 +1019,10 @@ async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   const jurisdiction = await ctx.db.get(resource.jurisdictionId);
-  if (!jurisdiction || ![tag, fixtureSlug(tag, "public-organization")].includes(jurisdiction.slug) || jurisdiction.createdBy !== `fixture:${tag}`) {
+  const fixedJurisdiction = jurisdiction && [tag, fixtureSlug(tag, "public-organization")].includes(jurisdiction.slug) && jurisdiction.createdBy === `fixture:${tag}`;
+  const organization = jurisdiction?.organizationId ? await ctx.db.get(jurisdiction.organizationId) : null;
+  const selfServiceJurisdiction = jurisdiction?.kind === "organizational" && owners.has(jurisdiction.createdBy) && organization && owners.has(organization.createdBy);
+  if (!fixedJurisdiction && !selfServiceJurisdiction) {
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   return { version, resource };

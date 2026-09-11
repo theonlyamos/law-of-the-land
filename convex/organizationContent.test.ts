@@ -2,6 +2,27 @@ import { makeFunctionReference } from "convex/server";
 import { expect, it } from "vitest";
 import { createWidgetBackend, seedPublicWidget, addOrganizationMember } from "./widgetTestHelpers.fixture";
 
+it("allows only the current owner to review their own submission", async () => {
+  const t = createWidgetBackend(), f = await seedPublicWidget(t);
+  const owner = await addOrganizationMember(t, f.organizationId, "manager");
+  await t.run(async ctx => {
+    await ctx.db.patch(f.organizationId, { ownerUserId: owner.userId });
+    await ctx.db.patch(f.resourceId, { activeVersionId: undefined });
+    await ctx.db.patch(f.versionId, { status: "ready_for_review", submittedBy: owner.userId });
+  });
+  const approve = makeFunctionReference<"mutation">("organizationContent:approveVersion");
+  const input = { versionId: f.versionId, reason: "Reviewed source and citations", evaluationRunId: "owner-evaluation", idempotencyKey: "owner_review_001", checklistAnswers: { sourceAuthentic: true, metadataAccurate: true, extractionReviewed: true, citationsVerified: true, evaluationPassed: true } };
+  await expect(owner.client.mutation(approve, { ...input, checklistAnswers: { ...input.checklistAnswers, sourceAuthentic: false } })).rejects.toThrow("DOCUMENT_CHECKLIST_INCOMPLETE");
+  await owner.client.mutation(approve, input);
+  expect(await t.run(ctx => ctx.db.get(f.versionId))).toMatchObject({ status: "approved", reviewedBy: owner.userId, submittedBy: owner.userId });
+  await t.run(async ctx => {
+    await ctx.db.patch(f.organizationId, { ownerUserId: undefined });
+    await ctx.db.patch(owner.membershipId, { role: "reviewer" });
+    await ctx.db.patch(f.versionId, { status: "ready_for_review" });
+  });
+  await expect(owner.client.mutation(approve, { ...input, idempotencyKey: "reviewer_self_001" })).rejects.toThrow("different reviewer");
+});
+
 it("rejects cross-organization resource writes and forged upload receipts", async () => {
   const t = createWidgetBackend(), a = await seedPublicWidget(t), b = await seedPublicWidget(t);
   const manager = await addOrganizationMember(t, a.organizationId, "manager");
@@ -39,5 +60,17 @@ it("finalizes only the verified original and permits an exact retry", async () =
     const version = await t.run(ctx => ctx.db.get("documentVersions", versionId));
     expect(version?.status).toBe("ready_for_review");
     await expect(manager.client.mutation(ref, { ...input, filename: "swapped.txt", issuedAt, signature })).rejects.toThrow("UPLOAD_PROOF_INVALID");
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it("isolates documents between sibling jurisdictions and rejects mixed route IDs",async()=>{
+  vi.stubEnv("ADMIN_MAX_DOCUMENT_BYTES","4194304");
+  try {
+    const t=createWidgetBackend(),a=await seedPublicWidget(t),b=await seedPublicWidget(t),manager=await addOrganizationMember(t,a.organizationId,"manager");
+    await t.run(ctx=>ctx.db.patch(b.jurisdictionId,{organizationId:a.organizationId}));
+    const list=makeFunctionReference<"query">("organizationContent:listResources"),get=makeFunctionReference<"query">("organizationContent:getResource");
+    const data=await manager.client.query(list,{organizationId:a.organizationId,jurisdictionId:a.jurisdictionId,paginationOpts:{numItems:20,cursor:null}});
+    expect(data.page.map((row:{_id:string})=>row._id)).toEqual([a.resourceId]);
+    await expect(manager.client.query(get,{organizationId:a.organizationId,jurisdictionId:a.jurisdictionId,resourceId:b.resourceId})).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
   } finally { vi.unstubAllEnvs(); }
 });

@@ -1,4 +1,4 @@
-# Public jurisdiction website chat
+# Public jurisdiction chat widget
 
 ## Operator setup
 
@@ -20,24 +20,38 @@ Set these secrets through your deployment's secret manager; never put their valu
 
 Production admission currently supports Vercel's trusted `x-vercel-forwarded-for` ingress header and requires `VERCEL=1`. Generic forwarded headers are never accepted. Other hosting environments fail closed until a deployment-owned trusted-IP adapter is implemented and tested. See [Vercel request headers](https://vercel.com/docs/headers/request-headers). Unit tests use a fixed loopback identity; that fallback is unavailable in production builds.
 
-Both typed geographical and organizational jurisdictions support website chat. Each widget uses one enabled jurisdiction and its dedicated Gemini store. Enabling website chat allows visitors on approved websites to query published documents regardless of browsing visibility. In Admin → Jurisdictions, the organization row's **Manage website chat access** control assigns existing users scoped roles and provisions the platform allowance. Geographical rows have **Website chat** and **Manage website chat allowance** controls. Start with 100 accepted questions/day, 1,000/month, and three concurrent generations. Unprovisioned widgets have zero allowance.
+Both typed geographical and organizational jurisdictions support chat widget. Each widget uses one enabled jurisdiction and its dedicated Gemini store. Enabling chat widget allows visitors on approved websites to query published documents regardless of browsing visibility. In Admin → Jurisdictions, the organization row's **Manage chat widget access** control assigns existing users scoped roles and provisions the platform allowance. Geographical rows have **Chat widget** and **Manage chat widget allowance** controls. Start with 100 accepted questions/day, 1,000/month, and three concurrent generations. Unprovisioned widgets have zero allowance.
 
-Members can view the workspace. Managers create/edit records, upload originals, change visibility, and configure the widget. Reviewers approve/reject and publish/unpublish/roll back. All require current organization membership and a two-factor-verified session. A manager cannot approve their own upload by acquiring the reviewer role later. Existing platform admin permissions remain separate. Role assignment does not grant platform roles.
+Members can view the workspace. Managers create/edit records, upload originals, change visibility, and configure widgets. Reviewers approve/reject and publish/unpublish/roll back. The owner has both management and review permissions, including review of their own uploads with the same required checklist, evaluation, and publication verification. Other users cannot approve their own upload by acquiring the reviewer role later. All require current organization membership and a two-factor-verified session. Organization roles never grant platform administration permissions.
 
 ## Geographical jurisdiction journey
 
-Use the existing Admin document upload, independent review, publication, and jurisdiction setup workflows. Once the geographical jurisdiction is enabled and has indexed published documents, open **Admin → Jurisdictions → Website chat**. Configure the same appearance, allowed websites, limits, and installation snippet used for organizational widgets. Jurisdiction-write permission is required for changes and allowance provisioning; jurisdiction-read permission provides a read-only view. Organization membership alone grants no control over geographical jurisdictions. Archiving the jurisdiction or disabling its widget stops guest access.
+Use the existing Admin document upload, independent review, publication, and jurisdiction setup workflows. Once the geographical jurisdiction is enabled and has indexed published documents, open **Admin → Jurisdictions → Chat widget**. Configure the same appearance, allowed websites, limits, and installation snippet used for organizational widgets. Jurisdiction-write permission is required for changes and allowance provisioning; jurisdiction-read permission provides a read-only view. Organization membership alone grants no control over geographical jurisdictions. Archiving the jurisdiction or disabling its widget stops guest access.
 
 The widget searches only the selected jurisdiction's documents. It does not automatically include geographical ancestors or linked organizational geographies. This keeps the displayed source and the retrieval boundary aligned for both types.
 
 ## Organization journey
 
-1. Open **Organizations**, choose the organization, and create a document record.
+1. Open **Organizations** from the landing page or account menu. Create an organization, or choose one you belong to. Create a named jurisdiction; it starts private and its library is provisioned automatically. Enable it when setup is ready, then create a document record.
 2. Upload an original. The organization upload proxy verifies its bytes and checksum before recording a reviewable version. Its limit is the lower of the configured document limit and 4 MiB, leaving room under the hosting request limit; existing administrator uploads are unchanged.
-3. A different reviewer inspects the original, completes the existing checklist/evaluation record, approves, and confirms publication with password verification. Indexing runs through the existing durable jobs. **Retry safely** only resumes known recovery operations; uncertain work is never blindly uploaded again.
-4. Choose public or private browsing visibility. Website chat works with either; drafts and inactive versions remain excluded.
-5. Open **Website chat**. Configure appearance, exact HTTPS website origins (maximum ten), and limits within the platform allowance. Enable and save. The design preview is inert; the saved-widget test uses the real allowance.
+3. The owner or a separate reviewer inspects the original, completes the existing checklist/evaluation record, approves, and confirms publication with password verification. Indexing runs through the existing durable jobs. **Retry safely** only resumes known recovery operations; uncertain work is never blindly uploaded again.
+4. Choose public or private browsing visibility. Chat widget works with either; drafts and inactive versions remain excluded.
+5. Open **Chat widget**. Configure appearance, exact HTTPS website origins (maximum ten), and limits within the platform allowance. Enable and save. The design preview is inert; the saved-widget test uses the real allowance.
 6. Copy the generated script before the closing body tag. Add it once per page. The public ID is not a secret.
+
+An organization can have up to twenty current jurisdictions. Each has separate documents, visibility, settings, and a widget. Research chat groups eligible jurisdictions under their organization and keeps one selected jurisdiction per conversation. Search accepts either organization or jurisdiction names. Widget retrieval always uses only its selected jurisdiction's store.
+
+All widgets belonging to an organization share one platform allowance, daily/monthly usage, and concurrency limit. Appearance/website saves never update allowance limits; use **Usage → Save usage limits**. Usage data loads only when that section opens. Geographic widgets retain their jurisdiction allowance.
+
+Owners manage invitations, roles, ownership transfer, and organization settings. Invitations use the existing email service, expire after seven days, and can only be accepted by the verified account matching the invited email. Delivery failures can be retried. Owners must transfer ownership before leaving. Archiving an organization withdraws discovery, research, publishing, and widget access; restoring it leaves widgets disabled.
+
+## Self-service organization rollout
+
+Deploy the additive schema/indexes first. Run internal `admin/migrations:inspectOrganizationManagementMigration` page by page, resolve invalid/over-capacity rows, then run `admin/migrations:backfillOrganizationDiscovery` until `isDone`. The backfill is idempotent and preserves existing IDs, documents, stores, conversations, and settings. It never infers ownership from `createdBy`. An authorized administrator explicitly assigns an initial owner from active managers using the organization access control.
+
+After backfill and index readiness, deploy compatible backend callers and UI together before permitting creation of sibling jurisdictions. Ownerless legacy managers retain jurisdiction management; owner-only controls become available after explicit assignment. Old organization-level document/widget links redirect when there is one current jurisdiction and open the jurisdiction register when there are several.
+
+Once any organization has multiple jurisdictions, roll back only to versions that support explicit jurisdiction targets. Keep additive fields and stable IDs. Do not restore a backend that assumes one jurisdiction per organization.
 
 Allowed websites are exact origins: `https://example.org` and `https://www.example.org` are separate. Wildcards, page paths, query strings and credentials are rejected. If the host uses CSP, permit the application origin in `script-src`, `style-src`, `connect-src`, and `frame-src`. The iframe response restricts `frame-ancestors` to saved origins plus the app origin and is never shared-cacheable.
 
@@ -45,7 +59,7 @@ The loader exposes only `window.LotlWidget.open()`, `.close()` and `.destroy()`.
 
 ## Private jurisdiction visitor access
 
-**Enable website chat** is the only visitor-access switch. An enabled widget answers from published documents for anyone on an approved website, whether its jurisdiction is public or private. Private jurisdictions remain hidden from ordinary public browsing and account research. Website restrictions control browser embedding, not visitor identity; answers and citations should be treated as publicly accessible.
+**Enable chat widget** is the only visitor-access switch. An enabled widget answers from published documents for anyone on an approved website, whether its jurisdiction is public or private. Private jurisdictions remain hidden from ordinary public browsing and account research. Website restrictions control browser embedding, not visitor identity; answers and citations should be treated as publicly accessible.
 
 The saved widget enablement is checked on session creation, admission, completion, and recovery. Disabling it revokes visitor access. Changing browsing visibility invalidates existing sessions through the access revision, but an enabled widget can create new sessions with either visibility. Existing quotas, citation validation, publication checks, and allowed-origin restrictions remain in force.
 
@@ -73,7 +87,7 @@ Existing organizational public IDs, sessions, usage, and allowance keys remain c
 
 ## Stop / rollback
 
-Set `WIDGET_CHAT_ENABLED=false` on **both** Next and Convex to halt new admissions, reads, and completions. Disable an individual widget to revoke its visitor access. Making a jurisdiction private does not disable its widget; turn website chat off to stop visitor access. Preserve published documents and audit/job history; do not delete stores as a widget rollback. Allow existing leases to age out and retain the cleanup cron jobs. A UI-only rollback can leave the additive schema in place.
+Set `WIDGET_CHAT_ENABLED=false` on **both** Next and Convex to halt new admissions, reads, and completions. Disable an individual widget to revoke its visitor access. Making a jurisdiction private does not disable its widget; turn chat widget off to stop visitor access. Preserve published documents and audit/job history; do not delete stores as a widget rollback. Allow existing leases to age out and retain the cleanup cron jobs. A UI-only rollback can leave the additive schema in place.
 
 ## Verification and remaining release gate
 

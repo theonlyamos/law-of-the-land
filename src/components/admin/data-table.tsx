@@ -35,6 +35,7 @@ type DataTableProps = {
   rows: readonly AdminDataRow[];
   filters?: readonly AdminDataFilter[];
   filterHeader?: ReactNode;
+  filterSubmitLabel?: string;
   currentCursor: string | null;
   previousCursors: readonly string[];
   nextCursor: string;
@@ -147,6 +148,7 @@ export function DataTable({
   rows,
   filters = [],
   filterHeader,
+  filterSubmitLabel = "Apply exact lookup",
   currentCursor,
   previousCursors,
   nextCursor,
@@ -202,7 +204,7 @@ export function DataTable({
             type="submit"
             className="inline-flex min-h-11 items-center justify-center bg-[oklch(28%_0.055_252)] px-5 text-sm font-semibold text-[oklch(97%_0.012_82)] transition-colors duration-150 hover:bg-[oklch(23%_0.055_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
           >
-            Apply exact lookup
+            {filterSubmitLabel}
           </button>
         </form>
       ) : null)}

@@ -1,7 +1,8 @@
-import { bumpWidgetAccessVersion, bumpContentRevision } from "../lib/widgetAuthority";
+import { archiveOrganizationForActor, updateOrganizationPresentation } from "../organizations";
+import { assertOwnerCapacity, organizationName as normalizeName, organizationWebsite as normalizeWebsite } from "../lib/organizationManagement";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import type { Doc, Id } from "../_generated/dataModel";
+import type { Id } from "../_generated/dataModel";
 import { mutation, query, type MutationCtx } from "../_generated/server";
 import {
   MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS,
@@ -17,8 +18,6 @@ import {
 } from "./featureFlags";
 import { validateAuditReason, writeAudit } from "./audit";
 
-const MAX_ORGANIZATION_NAME_LENGTH = 300;
-const MAX_ORGANIZATION_WEBSITE_LENGTH = 500;
 const ORGANIZATION_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_CATALOG_PAGE_SIZE = 20;
 const MAX_CATALOG_SEARCH_LENGTH = 100;
@@ -35,6 +34,7 @@ const organizationDocValidator = v.object({
   class: organizationClassValidator,
   website: v.optional(v.string()),
   status: organizationStatusValidator,
+  ownerUserId: v.optional(v.string()),
   createdBy: v.string(),
   updatedBy: v.string(),
   createdAt: v.number(),
@@ -73,37 +73,12 @@ function normalizeCatalogSearch(value: string | undefined): string | undefined {
   return normalized;
 }
 
-function normalizeName(value: string): string {
-  const normalized = value.trim();
-  if (!normalized || normalized.length > MAX_ORGANIZATION_NAME_LENGTH) {
-    throw new ConvexError("INVALID_ORGANIZATION_NAME");
-  }
-  return normalized;
-}
-
 function normalizeSlug(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (!ORGANIZATION_SLUG_PATTERN.test(normalized) || normalized.length > 80) {
     throw new ConvexError("INVALID_ORGANIZATION_SLUG");
   }
   return normalized;
-}
-
-function normalizeWebsite(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  if (value.trim() !== value || value.length > MAX_ORGANIZATION_WEBSITE_LENGTH) {
-    throw new ConvexError("INVALID_ORGANIZATION_WEBSITE");
-  }
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new ConvexError("INVALID_ORGANIZATION_WEBSITE");
-  }
-  if (url.protocol !== "https:" || url.username || url.password) {
-    throw new ConvexError("INVALID_ORGANIZATION_WEBSITE");
-  }
-  return url.toString();
 }
 
 async function assertUniqueOrganizationSlug(
@@ -118,32 +93,6 @@ async function assertUniqueOrganizationSlug(
   if (rows.some((row) => row._id !== exceptId)) {
     throw new ConvexError("ORGANIZATION_SLUG_EXISTS");
   }
-}
-
-async function assertUniqueJurisdictionSlug(
-  ctx: MutationCtx,
-  slug: string,
-  exceptId?: Id<"jurisdictions">,
-): Promise<void> {
-  const rows = await ctx.db
-    .query("jurisdictions")
-    .withIndex("by_slug", (q) => q.eq("slug", slug))
-    .take(2);
-  if (rows.some((row) => row._id !== exceptId)) {
-    throw new ConvexError("JURISDICTION_SLUG_EXISTS");
-  }
-}
-
-async function requireSingleOrganizationJurisdiction(
-  ctx: MutationCtx,
-  organizationId: Id<"organizations">,
-): Promise<Doc<"jurisdictions"> | null> {
-  const rows = await ctx.db
-    .query("jurisdictions")
-    .withIndex("by_organizationId", (q) => q.eq("organizationId", organizationId))
-    .take(2);
-  if (rows.length > 1) throw new ConvexError("ORGANIZATION_JURISDICTION_STATE_INVALID");
-  return rows[0] ?? null;
 }
 
 async function auditOrganizationChange(
@@ -264,16 +213,6 @@ export const updateOrganization = mutation({
     const slug = normalizeSlug(args.slug);
     const website = normalizeWebsite(args.website);
     await assertUniqueOrganizationSlug(ctx, slug, organization._id);
-    const jurisdiction = await requireSingleOrganizationJurisdiction(ctx, organization._id);
-    if (jurisdiction?.status === "enabled") {
-      throw new ConvexError("ORGANIZATION_JURISDICTION_ENABLED");
-    }
-    if (jurisdiction?.status === "archived") {
-      throw new ConvexError("ORGANIZATION_JURISDICTION_ARCHIVED");
-    }
-    if (jurisdiction) {
-      await assertUniqueJurisdictionSlug(ctx, slug, jurisdiction._id);
-    }
     const now = Date.now();
     const patch = {
       name,
@@ -283,16 +222,8 @@ export const updateOrganization = mutation({
       updatedBy: actor.userId,
       updatedAt: now,
     };
-    await ctx.db.patch(organization._id, patch);
-    if (jurisdiction) { await bumpWidgetAccessVersion(ctx, jurisdiction._id); await bumpContentRevision(ctx, jurisdiction._id); }
-    if (jurisdiction) {
-      await ctx.db.patch(jurisdiction._id, {
-        name,
-        slug,
-        updatedBy: actor.userId,
-        updatedAt: now,
-      });
-    }
+    await updateOrganizationPresentation(ctx, organization._id, { name, class: args.class, website }, actor.userId);
+    await ctx.db.patch(organization._id, { slug });
     await auditOrganizationChange(ctx, actor, {
       action: "organization.updated",
       targetType: "organization",
@@ -319,24 +250,8 @@ export const archiveOrganization = mutation({
     const organization = await ctx.db.get("organizations", args.id);
     if (!organization) throw new ConvexError("ORGANIZATION_NOT_FOUND");
     if (organization.status !== "active") throw new ConvexError("INVALID_ORGANIZATION_TRANSITION");
-    const [activeMemberships, jurisdiction] = await Promise.all([
-      ctx.db
-        .query("organizationMemberships")
-        .withIndex("by_organizationId_and_status", (q) =>
-          q.eq("organizationId", organization._id).eq("status", "active"),
-        )
-        .take(1),
-      requireSingleOrganizationJurisdiction(ctx, organization._id),
-    ]);
-    if (activeMemberships.length > 0) {
-      throw new ConvexError("ORGANIZATION_HAS_ACTIVE_MEMBERSHIPS");
-    }
-    if (jurisdiction?.status === "enabled") {
-      throw new ConvexError("ORGANIZATION_HAS_ENABLED_JURISDICTION");
-    }
     const patch = { status: "archived" as const, updatedBy: actor.userId, updatedAt: Date.now() };
-    await ctx.db.patch(organization._id, patch);
-    if (jurisdiction) { await bumpWidgetAccessVersion(ctx, jurisdiction._id); await bumpContentRevision(ctx, jurisdiction._id); }
+    await archiveOrganizationForActor(ctx, organization, actor.userId);
     await auditOrganizationChange(ctx, actor, {
       action: "organization.archived",
       targetType: "organization",
@@ -374,6 +289,7 @@ export const setOrganizationMemberStatus = mutation({
     if (!targetUser) throw new ConvexError("ORGANIZATION_MEMBER_NOT_FOUND");
     if (memberships.length > 1) throw new ConvexError("ORGANIZATION_MEMBERSHIP_STATE_INVALID");
     const current = memberships[0];
+    if (organization.ownerUserId === args.userId && args.status !== "active") throw new ConvexError("ORGANIZATION_OWNER_TRANSFER_REQUIRED");
     if (args.status === "active") {
       if (organization.status !== "active") throw new ConvexError("ORGANIZATION_ARCHIVED");
       if (current?.status !== "active") {
@@ -422,8 +338,21 @@ export const setOrganizationMemberRole = mutation({
     const user = await authComponent.getAnyUserById(ctx, args.memberUserId);
     const membership = await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", args.organizationId).eq("userId", args.memberUserId)).unique();
     if (!organization || organization.status !== "active" || !user || !membership || membership.status !== "active") throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
+    if (organization.ownerUserId === args.memberUserId && args.role !== "manager") throw new ConvexError("ORGANIZATION_OWNER_TRANSFER_REQUIRED");
     await ctx.db.patch(membership._id, { role: args.role, updatedAt: Date.now() });
     await auditOrganizationChange(ctx, actor, { action: "organization.member_role_set", targetType: "organizationMembership", targetId: membership._id, reason, before: membership.role ?? "member", after: args.role });
     return null;
   },
 });
+
+export const assignInitialOwner = mutation({ args: { organizationId: v.id("organizations"), memberUserId: v.string(), reason: v.string() }, returns: v.null(), handler: async (ctx, args) => {
+  const actor = await requireEnabledAdminPermission(ctx, "organization", "write"), reason = validateAuditReason(args.reason);
+  const organization = await ctx.db.get(args.organizationId);
+  const member = await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", args.organizationId).eq("userId", args.memberUserId)).unique();
+  const account = await authComponent.getAnyUserById(ctx, args.memberUserId);
+  if (!organization || organization.status !== "active" || organization.ownerUserId || member?.status !== "active" || member.role !== "manager" || !account || account.banned || !account.emailVerified) throw new ConvexError("ORGANIZATION_OWNER_ASSIGNMENT_INVALID");
+  await assertOwnerCapacity(ctx, args.memberUserId);
+  await ctx.db.patch(organization._id, { ownerUserId: args.memberUserId, updatedBy: actor.userId, updatedAt: Date.now() });
+  await auditOrganizationChange(ctx, actor, { action: "organization.owner_assigned", targetType: "organization", targetId: organization._id, reason, after: args.memberUserId });
+  return null;
+} });

@@ -4,7 +4,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { hasRolePermission } from "@/convex/lib/adminPermissions";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
-import { WebsiteChatSettings } from "@/components/organizations/website-chat-settings";
+import { ChatWidgetSettings } from "@/components/organizations/website-chat-settings";
 
 export default async function GeographicWebsiteChatPage({ params }: { params: Promise<{ jurisdictionId: string }> }) {
   const access = await authorizeAdminPage();
@@ -12,5 +12,5 @@ export default async function GeographicWebsiteChatPage({ params }: { params: Pr
   const { jurisdictionId } = await params;
   try { await fetchAuthQuery(api.widgets.getSettings, { jurisdictionId: jurisdictionId as Id<"jurisdictions"> }); }
   catch { notFound(); }
-  return <WebsiteChatSettings jurisdictionId={jurisdictionId as Id<"jurisdictions">} />;
+  return <ChatWidgetSettings jurisdictionId={jurisdictionId as Id<"jurisdictions">} />;
 }

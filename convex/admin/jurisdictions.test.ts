@@ -491,7 +491,7 @@ describe("typed jurisdiction administration", () => {
       scopeMode: "linked_geographies",
       geographicJurisdictionIds: [countryId],
       reason: "Duplicate organization rules",
-    })).rejects.toThrow("ORGANIZATION_JURISDICTION_EXISTS");
+    })).rejects.toThrow("ORGANIZATION_JURISDICTION_NAME_EXISTS");
     await expect(admin.client.mutation(archiveJurisdiction, {
       id: countryId,
       reason: "Retire scoped geography",

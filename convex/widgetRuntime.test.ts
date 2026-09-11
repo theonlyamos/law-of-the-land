@@ -37,6 +37,30 @@ it("keeps cancellation terminal and holds uncertain provider capacity", async ()
   expect((await t.mutation(finishRef, { turnId: first.turnId, attemptNonce: first.attemptNonce, outcome: "completed", answer: CHAT_NO_EVIDENCE, citations: [], providerFinished: false })).status).toBe("aborted");
   expect((await t.mutation(beginRef, { ...input, requestId: crypto.randomUUID(), query: "Again?" })).error.code).toBe("GENERATION_BUSY");
 });
+it("shares quota across sibling widgets while keeping their stores and citations separate", async () => {
+  const t = createWidgetBackend(), first = await seedPublicWidget(t), second = await seedPublicWidget(t);
+  await t.run(async ctx => {
+    await ctx.db.patch(second.jurisdictionId, { organizationId: first.organizationId, visibility: "members" });
+    await ctx.db.patch(second.widgetId, { organizationId: first.organizationId });
+    const allowance = await ctx.db.query("organizationWidgetAllowances").withIndex("by_organizationId", q => q.eq("organizationId", first.organizationId)).unique();
+    await ctx.db.patch(allowance!._id, { dailyLimit: 2 });
+  });
+  const turns = [];
+  for (const widget of [first, second]) {
+    const input = { publicId: widget.publicId, tokenHash: await hashOpaqueTelemetryValue(createOpaqueTelemetryToken()), ipKey: "sibling-ip", requestId: crypto.randomUUID() };
+    await t.mutation(sessionRef, { publicId: input.publicId, tokenHash: input.tokenHash, ipKey: input.ipKey, parentOrigin: "https://greenfield.example" });
+    const turn: Admission = await t.mutation(beginRef, { ...input, query: "What is the policy?" });
+    if (turn.kind !== "admitted") throw new Error("Expected sibling admission");
+    expect(turn.authority.store.storeName).toBe(widget.storeName);
+    expect(turn.authority.store.jurisdictionId).toBe(widget.jurisdictionId);
+    turns.push({ input, turn });
+  }
+  expect((await t.mutation(beginRef, { ...turns[1].input, requestId: crypto.randomUUID(), query: "Again?" })).error.code).toBe("ALLOWANCE_EXHAUSTED");
+  const foreign = await t.mutation(finishRef, { turnId: turns[0].turn.turnId, attemptNonce: turns[0].turn.attemptNonce, outcome: "completed", answer: "Wrong library", citations: [{ jurisdictionId: second.jurisdictionId, resourceId: second.resourceId, versionId: second.versionId, providerStoreName: second.storeName }], providerFinished: true });
+  expect(foreign.status).toBe("failed");
+  const buckets = await t.run(ctx => ctx.db.query("widgetUsageBuckets").withIndex("by_organizationId_and_bucket", q => q.eq("organizationId", first.organizationId)).take(3));
+  expect(buckets.map(row => row.count)).toEqual([2, 2]);
+});
 it("persists governed completion then revokes stale-library recovery", async () => {
   const { t, f, input } = await fixture();
   const first: Admission = await t.mutation(beginRef, { ...input, query: "Policy?" });

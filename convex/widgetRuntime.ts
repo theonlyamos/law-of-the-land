@@ -1,3 +1,4 @@
+import { consumeRateBucket as rate } from "./lib/rateBuckets";
 import { ConvexError, v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internalMutation, type MutationCtx } from "./_generated/server";
@@ -31,14 +32,7 @@ function codeFrom(caught: unknown): WidgetErrorCode {
   return "WIDGET_UNAVAILABLE";
 }
 function enabled() { if (process.env.WIDGET_CHAT_ENABLED !== "true") throw new ConvexError("WIDGET_UNAVAILABLE"); }
-async function rate(ctx: MutationCtx, namespace: string, key: string, limit: number, windowMs = 60_000): Promise<number> {
-  const now = Date.now(), window = Math.floor(now / windowMs);
-  const row = await ctx.db.query("widgetRateBuckets").withIndex("by_namespace_and_key_and_window", q => q.eq("namespace", namespace).eq("key", key).eq("window", window)).unique();
-  const expiresAt = (window + 1) * windowMs;
-  if (row) await ctx.db.patch(row._id, { count: Math.min(row.count + 1, limit + 1) });
-  else await ctx.db.insert("widgetRateBuckets", { namespace, key, window, count: 1, expiresAt });
-  return (row?.count ?? 0) >= limit ? Math.ceil((expiresAt - now) / 1000) : 0;
-}
+
 async function boundSession(ctx: MutationCtx, input: { publicId: string; tokenHash: string }) {
   enabled();
   if (!/^[A-Za-z0-9_-]{43}$/.test(input.tokenHash) || input.publicId.length > 100) throw new ConvexError("SESSION_INVALID");

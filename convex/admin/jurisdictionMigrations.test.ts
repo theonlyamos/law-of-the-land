@@ -809,3 +809,13 @@ describe("safe unified-jurisdiction migration", () => {
     })).resolves.toMatchObject({ processed: 4, updated: 1, unresolved: 1, mismatches: 1 });
   });
 });
+
+it("backfills organization discovery idempotently without changing identity or assigning owners",async()=>{
+  const {createWidgetBackend,seedPublicWidget}=await import("../widgetTestHelpers.fixture");
+  const t=createWidgetBackend(),f=await seedPublicWidget(t), backfill=makeFunctionReference<"mutation">("admin/migrations:backfillOrganizationDiscovery");
+  const original=await t.run(ctx=>ctx.db.get(f.jurisdictionId));
+  expect(await t.mutation(backfill,{cursor:null})).toMatchObject({isDone:true,updated:1});
+  expect(await t.mutation(backfill,{cursor:null})).toMatchObject({isDone:true,updated:0});
+  expect(await t.run(ctx=>ctx.db.get(f.jurisdictionId))).toMatchObject({name:original!.name,slug:original!.slug,geminiFileSearchStoreName:original!.geminiFileSearchStoreName,discoveryText:"Greenfield Greenfield"});
+  expect((await t.run(ctx=>ctx.db.get(f.organizationId)))?.ownerUserId).toBeUndefined();
+});

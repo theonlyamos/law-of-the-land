@@ -12,15 +12,19 @@ export function createWidgetBackend() {
   t.registerComponent("betterAuth", authSchema, modules);
   return t;
 }
-export async function addOrganizationMember(t: WidgetBackend, organizationId: Id<"organizations">, role: "member" | "manager" | "reviewer", authRole = "user") {
+export async function addAssuredOrganizationUser(t: WidgetBackend, authRole = "user") {
   const identity = await t.run(async ctx => {
     const now = Date.now();
-    const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: role, email: `${crypto.randomUUID()}@example.org`, emailVerified: true, createdAt: now, updatedAt: now, role: authRole, banned: false, twoFactorEnabled: true } } });
+    const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: "Organization user", email: `${crypto.randomUUID()}@example.org`, emailVerified: true, createdAt: now, updatedAt: now, role: authRole, banned: false, twoFactorEnabled: true } } });
     const session = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: { token: crypto.randomUUID(), userId: user._id, expiresAt: now + 3600_000, createdAt: now, updatedAt: now, adminTwoFactorVerifiedAt: now } } });
-    const membershipId = await ctx.db.insert("organizationMemberships", { organizationId, userId: user._id, role, status: "active", createdAt: now, updatedAt: now });
-    return { userId: user._id, sessionId: session._id, membershipId };
+    return { userId: user._id, sessionId: session._id, email: user.email };
   });
   return { ...identity, client: t.withIdentity({ subject: identity.userId, sessionId: identity.sessionId }) };
+}
+export async function addOrganizationMember(t: WidgetBackend, organizationId: Id<"organizations">, role: "member" | "manager" | "reviewer", authRole = "user") {
+  const user = await addAssuredOrganizationUser(t, authRole);
+  const membershipId = await t.run(ctx => ctx.db.insert("organizationMemberships", { organizationId, userId: user.userId, role, status: "active", createdAt: Date.now(), updatedAt: Date.now() }));
+  return { ...user, membershipId };
 }
 export async function seedPublicWidget(t: WidgetBackend) {
   return t.run(async ctx => {

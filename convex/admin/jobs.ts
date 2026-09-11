@@ -1,3 +1,4 @@
+import { organizationAccessForUser } from "../lib/organizationAccess";
 import { ConvexError, v } from "convex/values";
 import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -206,6 +207,10 @@ async function assertGeminiExecutionPermit(
 ): Promise<Doc<"jurisdictions"> | null> {
   const jurisdiction = await geminiJobJurisdiction(ctx, job);
   if (!jurisdiction) return null;
+  if (job.organizationId && job.type === "gemini_create_store") {
+    const access = await organizationAccessForUser(ctx, job.organizationId, job.actorId);
+    if (jurisdiction.organizationId !== job.organizationId || !access.canManage) throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
+  }
   const permit = jurisdiction.geminiExecutionPermit;
   if (
     job.leaseExpiresAt === undefined ||
@@ -1012,7 +1017,7 @@ export const applyGeminiProviderResult = internalMutation({
         targetId: replacement.previousVersionId,
         payload: replacement.payload,
         idempotencyKey: `replace-delete-${job._id}`,
-      }, { id: job.actorId, roles: job.actorRoles });
+      }, { id: job.actorId, roles: job.actorRoles, organizationId: job.organizationId, organizationRole: job.organizationRole });
       await transferPublicationLock(ctx, job, queued.jobId, args.result.documentName, now);
     }
     await succeedGeminiJob(ctx, job, executionJurisdiction, now);
@@ -1573,9 +1578,17 @@ export async function retryJobForActor(ctx: MutationCtx, args: { jobId: Id<"inte
     const fingerprint = JSON.stringify({ jobId: args.jobId, reason });
     const replay = await existingJobControl(ctx, actor.userId, idempotencyKey, "job_retry", args.jobId, fingerprint);
     if (replay) return replay;
-    const job = await ctx.db.get(args.jobId);
+    let job = await ctx.db.get(args.jobId);
     if (!job || !isGeminiJobDocument(job)) throw new ConvexError("Integration job was not found");
 
+    if (actor.organizationId) {
+      const jurisdiction = await geminiJobJurisdiction(ctx, job);
+      const access = await organizationAccessForUser(ctx, actor.organizationId, actor.userId);
+      if (jurisdiction?.organizationId !== actor.organizationId || jurisdiction.status === "archived" || job.type === "gemini_delete_store" || !(job.type === "gemini_create_store" ? access.canManage : access.canReview)) throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
+      const authority = { actorId: actor.userId, actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole };
+      await ctx.db.patch(job._id, authority);
+      job = { ...job, ...authority };
+    }
     let status: Doc<"integrationJobs">["status"];
     if (job.status === "manual_review") {
       let hasGeminiRecoveryTarget = job.recoveryKind === "apply_store_result" &&
