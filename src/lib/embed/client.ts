@@ -1,5 +1,5 @@
 import { z } from "zod";
-const source = z.object({ label: z.string().max(500), jurisdictionId: z.string(), jurisdictionName: z.string().max(500), jurisdictionKind: z.literal("organizational"), relation: z.literal("selected"), issuer: z.string(), officialCitation: z.string(), effectiveDate: z.string().nullable(), sourceUrl: z.string().nullable() });
+const source = z.object({ label: z.string().max(500), jurisdictionId: z.string(), jurisdictionName: z.string().max(500), jurisdictionKind: z.enum(["geographic", "organizational"]), relation: z.literal("selected"), issuer: z.string(), officialCitation: z.string(), effectiveDate: z.string().nullable(), sourceUrl: z.string().nullable() });
 export const doneSchema = z.object({ requestId: z.string().uuid(), answer: z.string().max(65536), citations: z.array(source).max(16), completedAt: z.number().finite() });
 export const errorSchema = z.object({ code: z.string().max(50), message: z.string().max(500), retryAfterSeconds: z.number().positive().optional() });
 export const turnSchema = z.object({ requestId: z.string().uuid(), status: z.enum(["pending", "completed", "failed", "aborted"]), result: doneSchema.optional(), error: errorSchema.optional(), retryAfterSeconds: z.number().optional() });

@@ -53,7 +53,7 @@ export function widgetErrorResponse(error: WidgetError): Response {
 export function widgetFailureResponse(caught: unknown) {
   const message = caught instanceof Error ? caught.message : "";
   const code = ["INVALID_REQUEST", "BODY_TOO_LARGE", "SESSION_INVALID", "WIDGET_UNAVAILABLE"].includes(message) ? message as WidgetErrorCode : "ANSWER_UNAVAILABLE";
-  return widgetErrorResponse({ code, message: code === "WIDGET_UNAVAILABLE" ? "This assistant isn't available right now. Please contact the organization for help." : code === "BODY_TOO_LARGE" ? "This question is too large to send." : "We couldn't complete this request. Please try again." });
+  return widgetErrorResponse({ code, message: code === "WIDGET_UNAVAILABLE" ? "This assistant isn't available right now. Please contact the website owner for help." : code === "BODY_TOO_LARGE" ? "This question is too large to send." : "We couldn't complete this request. Please try again." });
 }
 
 export async function readWidgetBody(request: Request, maximumBytes: number): Promise<Uint8Array> {

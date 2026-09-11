@@ -12,3 +12,9 @@ it("ignores provisional text and accepts only a matching terminal answer", async
   expect(frameMessage({ namespace: "lotl-widget", version: 1, embedId: "widget", instanceId: "instance", type: "init", payload: {} }, "widget", "instance", ["init"])).toBe(true);
   expect(frameMessage({ namespace: "lotl-widget", version: 1, embedId: "widget", instanceId: "instance", type: "init", payload: { token: "injected" } }, "widget", "instance", ["init"])).toBe(false);
 });
+
+it("accepts geographical citations in the completed answer contract", async () => {
+  const { doneSchema } = await import("./client");
+  const result = doneSchema.parse({ requestId: crypto.randomUUID(), answer: "City policy", completedAt: Date.now(), citations: [{ label: "Policy", jurisdictionId: "city", jurisdictionName: "Greenfield", jurisdictionKind: "geographic", relation: "selected", issuer: "City", officialCitation: "1", effectiveDate: null, sourceUrl: null }] });
+  expect(result.citations[0].jurisdictionKind).toBe("geographic");
+});

@@ -12,10 +12,10 @@ export function createWidgetBackend() {
   t.registerComponent("betterAuth", authSchema, modules);
   return t;
 }
-export async function addOrganizationMember(t: WidgetBackend, organizationId: Id<"organizations">, role: "member" | "manager" | "reviewer") {
+export async function addOrganizationMember(t: WidgetBackend, organizationId: Id<"organizations">, role: "member" | "manager" | "reviewer", authRole = "user") {
   const identity = await t.run(async ctx => {
     const now = Date.now();
-    const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: role, email: `${crypto.randomUUID()}@example.org`, emailVerified: true, createdAt: now, updatedAt: now, role: "user", banned: false, twoFactorEnabled: true } } });
+    const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: role, email: `${crypto.randomUUID()}@example.org`, emailVerified: true, createdAt: now, updatedAt: now, role: authRole, banned: false, twoFactorEnabled: true } } });
     const session = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: { token: crypto.randomUUID(), userId: user._id, expiresAt: now + 3600_000, createdAt: now, updatedAt: now, adminTwoFactorVerifiedAt: now } } });
     const membershipId = await ctx.db.insert("organizationMemberships", { organizationId, userId: user._id, role, status: "active", createdAt: now, updatedAt: now });
     return { userId: user._id, sessionId: session._id, membershipId };
@@ -40,4 +40,18 @@ export async function seedPublicWidget(t: WidgetBackend) {
     await ctx.db.insert("organizationWidgetAllowances", { organizationId, dailyLimit: 100, monthlyLimit: 1000, platformDailyLimit: 100, platformMonthlyLimit: 1000, maxConcurrent: 3, updatedAt: now, updatedBy: "fixture" });
     return { organizationId, jurisdictionId, resourceId, versionId, publicId, widgetId, storeName };
   });
+}
+
+export async function seedGeographicWidget(t: WidgetBackend) {
+  const f = await seedPublicWidget(t);
+  await t.run(async ctx => {
+    const profile = await ctx.db.query("organizationalJurisdictions").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", f.jurisdictionId)).unique();
+    await ctx.db.delete(profile!._id);
+    await ctx.db.patch(f.jurisdictionId, { kind: "geographic", organizationId: undefined });
+    await ctx.db.insert("geographicJurisdictions", { jurisdictionId: f.jurisdictionId, googlePlaceId: crypto.randomUUID(), level: "city", latitude: 0, longitude: 0, formattedAddress: "Greenfield", createdAt: Date.now(), updatedAt: Date.now() });
+    await ctx.db.patch(f.widgetId, { organizationId: undefined });
+    const allowance = await ctx.db.query("organizationWidgetAllowances").withIndex("by_organizationId", q => q.eq("organizationId", f.organizationId)).unique();
+    await ctx.db.patch(allowance!._id, { organizationId: undefined, jurisdictionId: f.jurisdictionId });
+  });
+  return f;
 }

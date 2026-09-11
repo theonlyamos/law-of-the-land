@@ -21,7 +21,7 @@
   function mount() {
     if (frame || destroyed) return;
     ready = false; retry.hidden = true; loading.hidden = false; closeButton.hidden = false; loading.textContent = 'Loading chat…';
-    frame = document.createElement('iframe'); frame.title = configuration?.title || 'Organization chat'; frame.referrerPolicy = 'no-referrer'; frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+    frame = document.createElement('iframe'); frame.title = configuration?.title || 'Jurisdiction chat'; frame.referrerPolicy = 'no-referrer'; frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox');
     frame.src = `${app}/embed/${encodeURIComponent(embedId)}?parentOrigin=${encodeURIComponent(location.origin)}&instanceId=${instanceId}`;
     frame.hidden = true; frame.addEventListener('error', failed, { once: true }); timer = setTimeout(failed, 10000); panel.append(frame);
   }

@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { resolveWidgetAuthority } from "./lib/widgetAuthority";
+import { resolveWidgetAuthority, widgetQuotaScope, widgetAllowance, widgetUsage } from "./lib/widgetAuthority";
 import { validateGovernedCitations } from "./chats";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { hashOpaqueTelemetryValue } from "./lib/telemetryProof";
@@ -20,7 +20,7 @@ export type Admission = { kind: "denied"; error: WidgetError } | { kind: "existi
 };
 function error(code: WidgetErrorCode, retryAfterSeconds?: number): WidgetError {
   const messages: Record<WidgetErrorCode, string> = {
-    INVALID_REQUEST: "Enter a question of 4,000 characters or fewer.", BODY_TOO_LARGE: "This question is too large to send.", WIDGET_UNAVAILABLE: "This assistant isn't available right now. Please contact the organization for help.",
+    INVALID_REQUEST: "Enter a question of 4,000 characters or fewer.", BODY_TOO_LARGE: "This question is too large to send.", WIDGET_UNAVAILABLE: "This assistant isn't available right now. Please contact the website owner for help.",
     SESSION_EXPIRED: "This conversation has expired.", SESSION_INVALID: "Start a new conversation to continue.", RATE_LIMITED: "Please wait before trying again.", ALLOWANCE_EXHAUSTED: "This assistant has reached its usage limit. Please try again after the limit resets.",
     GENERATION_BUSY: "Another answer is still being processed. Please wait before asking again.", REQUEST_CONFLICT: "This question couldn't be sent. Please try again.", LIBRARY_CHANGED: "The published documents changed during this conversation.", GENERATION_TIMEOUT: "We couldn't finish this answer.", ANSWER_UNAVAILABLE: "We couldn't finish this answer.", TURN_NOT_FOUND: "This answer could not be found.",
   };
@@ -46,7 +46,7 @@ async function boundSession(ctx: MutationCtx, input: { publicId: string; tokenHa
   if (!session || session.revokedAt !== undefined) throw new ConvexError("SESSION_INVALID");
   if (session.expiresAt <= Date.now() || session.deleteAfter <= Date.now()) throw new ConvexError("SESSION_EXPIRED");
   const authority = await resolveWidgetAuthority(ctx, input.publicId, session.parentOrigin);
-  if (authority.widget._id !== session.widgetId || authority.organizationId !== session.organizationId) throw new ConvexError("SESSION_INVALID");
+  if (authority.widget._id !== session.widgetId || authority.organizationId !== session.organizationId || (!authority.organizationId && authority.jurisdictionId !== session.jurisdictionId)) throw new ConvexError("SESSION_INVALID");
   if (session.contentRevision !== authority.contentRevision || session.accessVersion !== authority.accessVersion) {
     await ctx.db.patch(session._id, { revokedAt: Date.now() });
     throw new ConvexError("LIBRARY_CHANGED");
@@ -67,10 +67,11 @@ export const createSession = internalMutation({ args: { ...sessionArgs, parentOr
       if (binding.session.parentOrigin !== args.parentOrigin) return { error: error("SESSION_INVALID") };
       return { expiresAt: existing.expiresAt };
     }
-    const retry = await rate(ctx, "sessions", `${authority.organizationId}:${args.ipKey}`, 20, 600_000);
+    const scope = widgetQuotaScope(authority.organizationId ? { organizationId: authority.organizationId } : { jurisdictionId: authority.jurisdictionId });
+    const retry = await rate(ctx, "sessions", `${scope.organizationId ?? scope.jurisdictionId}:${args.ipKey}`, 20, 600_000);
     if (retry) return { error: error("RATE_LIMITED", retry) };
     const now = Date.now(), expiresAt = now + WIDGET_LIMITS.idleMs;
-    await ctx.db.insert("widgetSessions", { widgetId: authority.widget._id, organizationId: authority.organizationId, tokenHash: args.tokenHash, parentOrigin: args.parentOrigin, accessVersion: authority.accessVersion, contentRevision: authority.contentRevision, createdAt: now, lastUsedAt: now, expiresAt, deleteAfter: now + WIDGET_LIMITS.lifetimeMs });
+    await ctx.db.insert("widgetSessions", { widgetId: authority.widget._id, ...scope, tokenHash: args.tokenHash, parentOrigin: args.parentOrigin, accessVersion: authority.accessVersion, contentRevision: authority.contentRevision, createdAt: now, lastUsedAt: now, expiresAt, deleteAfter: now + WIDGET_LIMITS.lifetimeMs });
     return { expiresAt };
   } catch (caught) { if (!(caught instanceof ConvexError)) throw caught; return { error: error(codeFrom(caught)) }; }
 } });
@@ -79,7 +80,8 @@ export const beginTurn = internalMutation({ args: { ...turnArgs, query: v.string
   let binding: Awaited<ReturnType<typeof boundSession>>;
   try { binding = await boundSession(ctx, args); } catch (caught) { if (!(caught instanceof ConvexError)) throw caught; return { kind: "denied", error: error(codeFrom(caught)) }; }
   const { session, authority } = binding;
-  const retry = Math.max(await rate(ctx, "chat-session", session._id, 5), await rate(ctx, "chat-ip", `${session.organizationId}:${args.ipKey}`, 10));
+  const scope = widgetQuotaScope(session);
+  const retry = Math.max(await rate(ctx, "chat-session", session._id, 5), await rate(ctx, "chat-ip", `${scope.organizationId ?? scope.jurisdictionId}:${args.ipKey}`, 10));
   if (retry) return { kind: "denied", error: error("RATE_LIMITED", retry) };
   const query = args.query.trim(), queryDigest = await hashOpaqueTelemetryValue(query);
   const old = await ctx.db.query("widgetTurns").withIndex("by_sessionId_and_requestId", q => q.eq("sessionId", session._id).eq("requestId", args.requestId)).unique();
@@ -91,16 +93,18 @@ export const beginTurn = internalMutation({ args: { ...turnArgs, query: v.string
     }
     return { kind: "existing", turn: view(old) };
   }
-  const allowance = await ctx.db.query("organizationWidgetAllowances").withIndex("by_organizationId", q => q.eq("organizationId", session.organizationId)).unique();
+  const allowance = await widgetAllowance(ctx, scope);
   const now = Date.now(), date = new Date(now), dayKey = date.toISOString().slice(0, 10), monthKey = dayKey.slice(0, 7);
-  const day = await ctx.db.query("widgetUsageBuckets").withIndex("by_organizationId_and_bucket", q => q.eq("organizationId", session.organizationId).eq("bucket", dayKey)).unique();
-  const month = await ctx.db.query("widgetUsageBuckets").withIndex("by_organizationId_and_bucket", q => q.eq("organizationId", session.organizationId).eq("bucket", monthKey)).unique();
+  const day = await widgetUsage(ctx, scope, dayKey);
+  const month = await widgetUsage(ctx, scope, monthKey);
   const daily = Math.min(allowance?.dailyLimit ?? 0, allowance?.platformDailyLimit ?? 0), monthly = Math.min(allowance?.monthlyLimit ?? 0, allowance?.platformMonthlyLimit ?? 0);
   if ((day?.count ?? 0) >= daily || (month?.count ?? 0) >= monthly) {
     const reset = (month?.count ?? 0) >= monthly ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) : Date.parse(`${dayKey}T00:00:00Z`) + 86400000;
     return { kind: "denied", error: error("ALLOWANCE_EXHAUSTED", (reset - now) / 1000) };
   }
-  const slots = await ctx.db.query("widgetTurns").withIndex("by_organizationId_and_holdsSlot_and_leaseExpiresAt", q => q.eq("organizationId", session.organizationId).eq("holdsSlot", true).gt("leaseExpiresAt", now)).take((allowance?.maxConcurrent ?? 3) + 1);
+  const turns = ctx.db.query("widgetTurns");
+  const slots = await (scope.organizationId !== undefined ? turns.withIndex("by_organizationId_and_holdsSlot_and_leaseExpiresAt", q => q.eq("organizationId", scope.organizationId).eq("holdsSlot", true).gt("leaseExpiresAt", now))
+    : turns.withIndex("by_jurisdictionId_and_holdsSlot_and_leaseExpiresAt", q => q.eq("jurisdictionId", scope.jurisdictionId).eq("holdsSlot", true).gt("leaseExpiresAt", now))).take((allowance?.maxConcurrent ?? 3) + 1);
   if (slots.length >= (allowance?.maxConcurrent ?? 3) || slots.some(turn => turn.sessionId === session._id)) return { kind: "denied", error: error("GENERATION_BUSY", (Math.min(...slots.map(t => t.leaseExpiresAt)) - now) / 1000) };
   const history = await ctx.db.query("widgetTurns").withIndex("by_sessionId_and_status_and_createdAt", q => q.eq("sessionId", session._id).eq("status", "completed")).order("desc").take(WIDGET_LIMITS.historyPairs);
   const messages: { role: "user" | "assistant"; content: string }[] = [];
@@ -113,10 +117,10 @@ export const beginTurn = internalMutation({ args: { ...turnArgs, query: v.string
     messages.unshift({ role: "user", content: turn.query }, { role: "assistant", content: turn.result.answer });
   }
   const attemptNonce = crypto.randomUUID();
-  const turnId = await ctx.db.insert("widgetTurns", { sessionId: session._id, organizationId: session.organizationId, requestId: args.requestId, queryDigest, query, contentRevision: authority.contentRevision, attemptNonce, status: "pending", holdsSlot: true, leaseExpiresAt: now + WIDGET_LIMITS.leaseMs, createdAt: now, deleteAfter: session.deleteAfter });
+  const turnId = await ctx.db.insert("widgetTurns", { sessionId: session._id, ...scope, requestId: args.requestId, queryDigest, query, contentRevision: authority.contentRevision, attemptNonce, status: "pending", holdsSlot: true, leaseExpiresAt: now + WIDGET_LIMITS.leaseMs, createdAt: now, deleteAfter: session.deleteAfter });
   for (const [row, bucket] of [[day, dayKey], [month, monthKey]] as const) {
     if (row) await ctx.db.patch(row._id, { count: row.count + 1 });
-    else await ctx.db.insert("widgetUsageBuckets", { organizationId: session.organizationId, bucket, count: 1, expiresAt: now + 90 * 86400000 });
+    else await ctx.db.insert("widgetUsageBuckets", { ...scope, bucket, count: 1, expiresAt: now + 90 * 86400000 });
   }
   await ctx.db.patch(session._id, { lastUsedAt: now, expiresAt: Math.min(now + WIDGET_LIMITS.idleMs, session.deleteAfter) });
   return { kind: "admitted", turnId, attemptNonce, authority: { organizationId: authority.organizationId, jurisdictionId: authority.jurisdictionId, accessVersion: authority.accessVersion, contentRevision: authority.contentRevision, store: authority.store }, messages };
@@ -148,7 +152,7 @@ export const finishTurn = internalMutation({ args: { turnId: v.id("widgetTurns")
         const versionId = ctx.db.normalizeId("documentVersions", args.citations[i].versionId);
         const version = versionId ? await ctx.db.get(versionId) : null;
         if (!resource || !version) throw new ConvexError("INVALID_CHAT_CITATIONS");
-        return { ...citation, jurisdictionKind: "organizational" as const, relation: "selected" as const, issuer: resource.issuer, officialCitation: resource.officialCitation, effectiveDate: version.effectiveDate ?? resource.effectiveDate ?? null, sourceUrl: version.sourceUrl || resource.sourceUrl || null };
+        return { ...citation, jurisdictionKind: authority.store.kind, relation: "selected" as const, issuer: resource.issuer, officialCitation: resource.officialCitation, effectiveDate: version.effectiveDate ?? resource.effectiveDate ?? null, sourceUrl: version.sourceUrl || resource.sourceUrl || null };
       }));
     }
   } catch (caught) { if (!(caught instanceof ConvexError)) throw caught; failure = error(String(caught.data) === "INVALID_CHAT_CITATIONS" ? "ANSWER_UNAVAILABLE" : codeFrom(caught)); }

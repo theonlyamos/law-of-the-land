@@ -20,9 +20,15 @@ Set these secrets through your deployment's secret manager; never put their valu
 
 Production admission currently supports Vercel's trusted `x-vercel-forwarded-for` ingress header and requires `VERCEL=1`. Generic forwarded headers are never accepted. Other hosting environments fail closed until a deployment-owned trusted-IP adapter is implemented and tested. See [Vercel request headers](https://vercel.com/docs/headers/request-headers). Unit tests use a fixed loopback identity; that fallback is unavailable in production builds.
 
-In Admin → Jurisdictions, provision an enabled organizational jurisdiction and its dedicated Gemini store using the existing setup workflow. The organization row's **Manage website chat access** control assigns existing users scoped roles and provisions the platform allowance. Start with 100 accepted questions/day, 1,000/month, and three concurrent generations. Unprovisioned organizations have zero allowance.
+Both typed geographical and organizational jurisdictions support website chat. Each widget uses one enabled, public jurisdiction and its dedicated Gemini store. In Admin → Jurisdictions, the organization row's **Manage website chat access** control assigns existing users scoped roles and provisions the platform allowance. Geographical rows have **Website chat** and **Manage website chat allowance** controls. Start with 100 accepted questions/day, 1,000/month, and three concurrent generations. Unprovisioned widgets have zero allowance.
 
 Members can view the workspace. Managers create/edit records, upload originals, change visibility, and configure the widget. Reviewers approve/reject and publish/unpublish/roll back. All require current organization membership and a two-factor-verified session. A manager cannot approve their own upload by acquiring the reviewer role later. Existing platform admin permissions remain separate. Role assignment does not grant platform roles.
+
+## Geographical jurisdiction journey
+
+Use the existing Admin document upload, independent review, publication, and jurisdiction setup workflows. Once the geographical jurisdiction is enabled and has indexed published documents, open **Admin → Jurisdictions → Website chat**. Configure the same appearance, allowed websites, limits, and installation snippet used for organizational widgets. Jurisdiction-write permission is required for changes and allowance provisioning; jurisdiction-read permission provides a read-only view. Organization membership alone grants no control over geographical jurisdictions. Archiving the jurisdiction or disabling its widget stops guest access.
+
+The widget searches only the selected jurisdiction's documents. It does not automatically include geographical ancestors or linked organizational geographies. This keeps the displayed source and the retrieval boundary aligned for both types.
 
 ## Organization journey
 
@@ -45,7 +51,7 @@ The loader exposes only `window.LotlWidget.open()`, `.close()` and `.destroy()`.
 - Rates: five attempts/session/minute, ten/network identifier/organization/minute, twenty session creations/network identifier/organization/ten minutes, twelve recovery reads/session/minute. One concurrent turn per session; organization ceiling defaults to three.
 - A request ID is admitted once and never grants a second provider execution. Changed input under the same ID is rejected. Recovery reads do not consume another question allowance.
 - Generation has a 90-second deadline; terminal writes have a 110-second bound and the host limit is 120 seconds. Stopped/uncertain provider work retains capacity until its 120-second lease ends or the provider's completion is confirmed.
-- Only one dedicated organizational store is queried. Geographic links do not expand guest scope. History is at most ten completed pairs and 24 KiB UTF-8; output is capped at 4,096 tokens.
+- Only the selected jurisdiction's dedicated store is queried. Ancestors and geographic links do not expand guest scope. History is at most ten completed pairs and 24 KiB UTF-8; output is capped at 4,096 tokens.
 - Answer text is buffered until current access and active-version citations are validated and canonical completion is stored. The client automatically checks an interrupted answer at approximately 2, 5 and 10 seconds, then offers manual **Check answer** and explicit **Ask again**.
 - Publication lifecycle, resource metadata, store/access and visibility changes advance revisions. Old sessions and stale completions fail closed. Legacy lifecycle locks lacking a jurisdiction binding conservatively block guest library access until reconciled.
 
@@ -56,6 +62,8 @@ The visible notice links to `/privacy`. Review that page as part of deployment a
 Session and turn records become deletion-eligible 24 hours after session creation. Four 15-minute cron jobs delete eligible sessions, turns, rate buckets and 90-day usage buckets in bounded batches of 100; full batches reschedule. Access checks enforce expiry even if cleanup is delayed. Aggregate usage contains counts, not prompts. Guest conversations are not exposed in organization dashboards or ordinary account exports. Do not add prompt/transcript logging to the Next routes, bridge, or operational tooling.
 
 Monitor the oldest `widgetSessions.deleteAfter`, `widgetTurns.deleteAfter`, and bucket `expiresAt` values using their indexes. Eligible records persisting beyond the next two scheduled intervals warrant checking cron execution and failed mutations. Monitor outcome counts, latency and provider spending without recording raw network addresses or conversation content.
+
+Existing organizational public IDs, sessions, usage, and allowance keys remain compatible. Geographical quota records use `jurisdictionId`; organizational records retain `organizationId`. The legacy `organizationWidgetAllowances` table name is retained to avoid migrating existing allowance data. Application writes require exactly one quota owner; quotas, network rate limits, and concurrency are isolated by that owner. Deploy the additive schema/index changes with the functions before exposing the new management route.
 
 ## Stop / rollback
 
@@ -82,6 +90,8 @@ Local verification covers origin normalization, ownership, role revocation, sign
 The repository's default ESLint config does not select TypeScript files. The audit uses the already-installed Next TypeScript preset for changed files without changing project-wide lint configuration. Four existing unused-symbol warnings in `convex/admin/jobs.ts` and `convex/admin/e2eFixtures.ts` remain out of scope.
 
 Browser verification uses an authorized local Convex deployment with real authorization, uploads, publication jobs, persistence, quotas, and cleanup. Only the external Gemini transport is stubbed. The suite covers organization settings, an independent reviewer publishing a manager's upload, visibility changes, lazy embedding, persisted citations, blocked storage, and rejected origins in Chromium/Firefox/WebKit. Production activation, a real-provider acceptance query, and a physical mobile-device check remain separate release checks.
+
+The geographical extension passed 146 focused backend/UI regression tests, followed by 11 focused checks after the final compatibility adjustments. The production build, TypeScript, and changed-file lint passed. Coverage includes jurisdiction-admin versus organization-member permissions, geographical allowance isolation, correct citation kinds, rejection of foreign citations and malformed/private/disabled jurisdictions, and content-revision revocation. The earlier browser evidence below covers the organizational journey; the new geographical management route has not yet had a live browser acceptance run.
 
 Latest local evidence (2026-09-11): **eight functional browser checks passed**, covering both management workflows in Chromium and guest embedding in Chromium, Firefox, and WebKit. The production build passed. The earlier combined **242 tests / 23 suites** passed; follow-up regression runs passed **98 tests / 8 suites**, then four focused guest tests after deferring the response parser and Markdown renderer. Convex declarations were regenerated against the local backend. Fixture teardown completed and the original development configuration was restored.
 

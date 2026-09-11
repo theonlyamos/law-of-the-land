@@ -14,24 +14,28 @@ import {
 
 export default defineSchema({
   jurisdictionWidgets: defineTable({
-    jurisdictionId: v.id("jurisdictions"), organizationId: v.id("organizations"), publicId: v.string(), accessVersion: v.number(),
+    jurisdictionId: v.id("jurisdictions"), organizationId: v.optional(v.id("organizations")), publicId: v.string(), accessVersion: v.number(),
     ...widgetSettingsFields, createdAt: v.number(), updatedAt: v.number(), updatedBy: v.string(),
   }).index("by_jurisdictionId", ["jurisdictionId"]).index("by_publicId", ["publicId"]).index("by_organizationId", ["organizationId"]),
+  // Legacy table name retained so existing organization allowances need no migration.
   organizationWidgetAllowances: defineTable({
-    organizationId: v.id("organizations"), dailyLimit: v.number(), monthlyLimit: v.number(), platformDailyLimit: v.number(), platformMonthlyLimit: v.number(), maxConcurrent: v.number(), updatedAt: v.number(), updatedBy: v.string(),
-  }).index("by_organizationId", ["organizationId"]),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    organizationId: v.optional(v.id("organizations")), dailyLimit: v.number(), monthlyLimit: v.number(), platformDailyLimit: v.number(), platformMonthlyLimit: v.number(), maxConcurrent: v.number(), updatedAt: v.number(), updatedBy: v.string(),
+  }).index("by_organizationId", ["organizationId"]).index("by_jurisdictionId", ["jurisdictionId"]),
   widgetSessions: defineTable({
-    widgetId: v.id("jurisdictionWidgets"), organizationId: v.id("organizations"), tokenHash: v.string(), parentOrigin: v.string(),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    widgetId: v.id("jurisdictionWidgets"), organizationId: v.optional(v.id("organizations")), tokenHash: v.string(), parentOrigin: v.string(),
     accessVersion: v.number(), contentRevision: v.number(), createdAt: v.number(), lastUsedAt: v.number(), expiresAt: v.number(), deleteAfter: v.number(), revokedAt: v.optional(v.number()),
   }).index("by_tokenHash", ["tokenHash"]).index("by_expiresAt", ["expiresAt"]).index("by_deleteAfter", ["deleteAfter"]),
   widgetTurns: defineTable({
-    sessionId: v.id("widgetSessions"), organizationId: v.id("organizations"), requestId: v.string(), queryDigest: v.string(), query: v.string(),
+    jurisdictionId: v.optional(v.id("jurisdictions")),
+    sessionId: v.id("widgetSessions"), organizationId: v.optional(v.id("organizations")), requestId: v.string(), queryDigest: v.string(), query: v.string(),
     contentRevision: v.number(), attemptNonce: v.string(), status: widgetTurnStateValidator, holdsSlot: v.boolean(), leaseExpiresAt: v.number(),
     result: v.optional(widgetDoneValidator), citations: v.optional(v.array(widgetCitationIdentityValidator)), error: v.optional(widgetErrorValidator), createdAt: v.number(), completedAt: v.optional(v.number()), deleteAfter: v.number(),
   }).index("by_sessionId_and_requestId", ["sessionId", "requestId"]).index("by_sessionId_and_status_and_createdAt", ["sessionId", "status", "createdAt"])
-    .index("by_organizationId_and_holdsSlot_and_leaseExpiresAt", ["organizationId", "holdsSlot", "leaseExpiresAt"]).index("by_status_and_leaseExpiresAt", ["status", "leaseExpiresAt"]).index("by_deleteAfter", ["deleteAfter"]),
-  widgetUsageBuckets: defineTable({ organizationId: v.id("organizations"), bucket: v.string(), count: v.number(), expiresAt: v.number() })
-    .index("by_organizationId_and_bucket", ["organizationId", "bucket"]).index("by_expiresAt", ["expiresAt"]),
+    .index("by_organizationId_and_holdsSlot_and_leaseExpiresAt", ["organizationId", "holdsSlot", "leaseExpiresAt"]).index("by_jurisdictionId_and_holdsSlot_and_leaseExpiresAt", ["jurisdictionId", "holdsSlot", "leaseExpiresAt"]).index("by_status_and_leaseExpiresAt", ["status", "leaseExpiresAt"]).index("by_deleteAfter", ["deleteAfter"]),
+  widgetUsageBuckets: defineTable({ jurisdictionId: v.optional(v.id("jurisdictions")), organizationId: v.optional(v.id("organizations")), bucket: v.string(), count: v.number(), expiresAt: v.number() })
+    .index("by_jurisdictionId_and_bucket", ["jurisdictionId", "bucket"]).index("by_organizationId_and_bucket", ["organizationId", "bucket"]).index("by_expiresAt", ["expiresAt"]),
   widgetRateBuckets: defineTable({ namespace: v.string(), key: v.string(), window: v.number(), count: v.number(), expiresAt: v.number() })
     .index("by_namespace_and_key_and_window", ["namespace", "key", "window"]).index("by_expiresAt", ["expiresAt"]),
   jurisdictions: defineTable({

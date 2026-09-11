@@ -226,7 +226,7 @@ test.describe("Widget performance", () => {
       const frame = page.frameLocator("iframe");
       await expect(frame.getByRole("textbox")).toBeEnabled();
       const embedded = page.frames().find(frame => frame.url().includes("/embed/"))!;
-      cold.push(await embedded.evaluate(() => (window as Window & { widgetComposerReadyAt: number }).widgetComposerReadyAt) - opened.at);
+      cold.push(await embedded.evaluate(() => (window as Window & { widgetComposerReadyAt?: number }).widgetComposerReadyAt!) - opened.at);
       await embedded.evaluate(() => document.fonts.ready);
       await frame.getByRole("button", { name: "Close chat" }).click();
       const before = requests, warmStart = performance.now();

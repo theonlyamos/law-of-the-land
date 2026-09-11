@@ -25,7 +25,7 @@ export const widgetErrorValidator = v.object({ code: widgetErrorCodeValidator, m
 export type WidgetError = Infer<typeof widgetErrorValidator>;
 export const widgetSourceValidator = v.object({
   label: v.string(), jurisdictionId: v.string(), jurisdictionName: v.string(),
-  jurisdictionKind: v.literal("organizational"), relation: v.literal("selected"),
+  jurisdictionKind: v.union(v.literal("geographic"), v.literal("organizational")), relation: v.literal("selected"),
   issuer: v.string(), officialCitation: v.string(), effectiveDate: v.union(v.string(), v.null()), sourceUrl: v.union(v.string(), v.null()),
 });
 export type WidgetSource = Infer<typeof widgetSourceValidator>;

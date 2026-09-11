@@ -1,7 +1,7 @@
 "use client";
 import { normalizeWidgetSettings } from "@/convex/lib/widgetContracts";
 import { useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery, useConvexAuth } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
 import { organizationApi } from "@/lib/organization-api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -10,11 +10,13 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { GuestChat } from "@/components/embed/guest-chat";
 import { SavedWidgetTest } from "@/components/embed/saved-widget-test";
-export function WebsiteChatSettings({ organizationId }: { organizationId: Id<"organizations"> }) {
-  const data = useQuery(organizationApi.widgets.getSettings, { organizationId });
-  return data ? <SettingsForm organizationId={organizationId} data={data} /> : <p role="status">Loading website chat…</p>;
+type WidgetTarget = { organizationId: Id<"organizations">; jurisdictionId?: never } | { jurisdictionId: Id<"jurisdictions">; organizationId?: never };
+export function WebsiteChatSettings(target: WidgetTarget) {
+  const { isAuthenticated } = useConvexAuth();
+  const data = useQuery(organizationApi.widgets.getSettings, isAuthenticated ? target : "skip");
+  return data ? <SettingsForm key={target.organizationId ?? target.jurisdictionId} target={target} data={data} /> : <p role="status">Loading website chat…</p>;
 }
-function SettingsForm({ organizationId, data }: { organizationId: Id<"organizations">; data: FunctionReturnType<typeof organizationApi.widgets.getSettings> }) {
+function SettingsForm({ target, data }: { target: WidgetTarget; data: FunctionReturnType<typeof organizationApi.widgets.getSettings> }) {
   const save = useMutation(organizationApi.widgets.saveSettings);
   const [draft, setDraft] = useState(data.settings), [origins, setOrigins] = useState(data.settings.allowedOrigins.join("\n"));
   const [daily, setDaily] = useState(data.dailyLimit), [monthly, setMonthly] = useState(data.monthlyLimit), [tab, setTab] = useState("Appearance"), [busy, setBusy] = useState(false), [notice, setNotice] = useState(""), [testing, setTesting] = useState(false);
@@ -22,7 +24,7 @@ function SettingsForm({ organizationId, data }: { organizationId: Id<"organizati
   const snippet = data.publicId ? `<script src="${typeof window === "undefined" ? "" : window.location.origin}/widget.js" data-embed-id="${data.publicId}" async></script>` : "Save your settings to generate the installation code.";
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setNotice("");
-    try { const settings = normalizeWidgetSettings({ ...draft, suggestedQuestions: draft.suggestedQuestions.map(q => q?.trim() ?? "").filter(Boolean), allowedOrigins: origins.split("\n").map(v => v.trim()).filter(Boolean) }); await save({ organizationId, settings, dailyLimit: daily, monthlyLimit: monthly }); setDraft(settings); setOrigins(settings.allowedOrigins.join("\n")); setNotice("Settings saved. Your installed widget will use these settings the next time the page loads."); }
+    try { const settings = normalizeWidgetSettings({ ...draft, suggestedQuestions: draft.suggestedQuestions.map(q => q?.trim() ?? "").filter(Boolean), allowedOrigins: origins.split("\n").map(v => v.trim()).filter(Boolean) }); await save({ ...target, settings, dailyLimit: daily, monthlyLimit: monthly }); setDraft(settings); setOrigins(settings.allowedOrigins.join("\n")); setNotice("Settings saved. Your installed widget will use these settings the next time the page loads."); }
     catch { setNotice("Settings couldn't be saved. Check website addresses, required fields, and allowance limits. Enabling chat requires a public jurisdiction with published documents."); }
     finally { setBusy(false); }
   }
