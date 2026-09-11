@@ -337,9 +337,11 @@ function OwnerInvitations({
             });
             form.reset();
             setMessage("Invitation created. Delivery status appears below.");
-          } catch {
+          } catch (error) {
             setMessage(
-              "Could not invite this member. Check the email and pending invitations, then retry.",
+              error instanceof Error && error.message.includes("ORGANIZATION_INVITATION_ROLE_CONFLICT")
+                ? "This email already has a pending invitation with a different role. Revoke it before inviting them with the new role."
+                : "Could not invite this member. Check the email and pending invitations, then retry.",
             );
           } finally {
             setBusy(false);

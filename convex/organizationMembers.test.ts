@@ -29,6 +29,7 @@ it("binds invitations to verified accounts and never reactivates an accepted inv
   };
   const invitationId = await owner.client.mutation(invite, input);
   expect(await owner.client.mutation(invite, input)).toBe(invitationId);
+  await expect(owner.client.mutation(invite, { ...input, role: "manager" })).rejects.toThrow("ORGANIZATION_INVITATION_ROLE_CONFLICT");
   await expect(wrong.client.mutation(accept, { invitationId })).rejects.toThrow(
     "ORGANIZATION_INVITATION_UNAVAILABLE",
   );

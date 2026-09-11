@@ -490,6 +490,7 @@ export function JurisdictionSettings(target: Target) {
           onConfirmed={async (input) => {
             await setVisibility({
               ...target,
+              reason: input.reason,
               visibility: risk.visibility,
               confirmation: input.confirmation ?? "",
               idempotencyKey: risk.key,

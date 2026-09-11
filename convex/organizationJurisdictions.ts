@@ -272,6 +272,7 @@ export const update = mutation({
 export const setVisibility = mutation({
   args: {
     ...targetArgs,
+    reason: v.string(),
     visibility: v.union(v.literal("public"), v.literal("members")),
     confirmation: v.string(),
     idempotencyKey: v.string(),
@@ -285,6 +286,7 @@ export const setVisibility = mutation({
       "manage",
     );
     const action = "organization.visibility";
+    const reason = validateAuditReason(args.reason);
     const receipt = await organizationOperation(
       ctx,
       actor.userId,
@@ -293,6 +295,7 @@ export const setVisibility = mutation({
       {
         jurisdictionId: args.jurisdictionId,
         visibility: args.visibility,
+        reason,
         confirmation: args.confirmation,
       },
     );
@@ -331,6 +334,7 @@ export const setVisibility = mutation({
       organizationId: args.organizationId,
       organizationRole: actor.organizationRole,
       action: "organization.visibility_set",
+      reason,
       targetType: "jurisdiction",
       targetId: jurisdiction._id,
       afterSummary: args.visibility,

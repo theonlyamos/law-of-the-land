@@ -268,7 +268,10 @@ export const invite = mutation({
             .gt("expiresAt", now),
       )
       .first();
-    if (old) return old._id;
+    if (old) {
+      if (old.role !== args.role) throw new ConvexError("ORGANIZATION_INVITATION_ROLE_CONFLICT");
+      return old._id;
+    }
     const pending = await ctx.db
       .query("organizationInvitations")
       .withIndex("by_organizationId_and_state_and_expiresAt", (q) =>

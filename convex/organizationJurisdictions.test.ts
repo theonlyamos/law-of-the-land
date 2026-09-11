@@ -8,6 +8,17 @@ import {
 } from "./widgetTestHelpers.fixture";
 
 afterEach(() => vi.unstubAllEnvs());
+it("validates and records a jurisdiction visibility change reason", async () => {
+  const t = createWidgetBackend(), f = await seedPublicWidget(t);
+  const manager = await addOrganizationMember(t, f.organizationId, "manager");
+  const input = { organizationId: f.organizationId, jurisdictionId: f.jurisdictionId, visibility: "members", confirmation: `PRIVATE ${f.jurisdictionId}`, idempotencyKey: "visibility_reason_test", reason: "Restrict research audience" };
+  const change = makeFunctionReference<"mutation">("organizationJurisdictions:setVisibility");
+  await t.mutation(makeFunctionReference<"mutation">("admin/users:recordAdminStepUpProof"), { actorId: manager.userId, sessionId: manager.sessionId, action: "organization_visibility", targetId: f.jurisdictionId, idempotencyKey: input.idempotencyKey });
+  await expect(manager.client.mutation(change, { ...input, reason: "" })).rejects.toThrow();
+  await manager.client.mutation(change, input);
+  const events = await t.run(ctx => ctx.db.query("auditEvents").collect());
+  expect(events.find(event => event.action === "organization.visibility_set")?.reason).toBe(input.reason);
+});
 it("reads and reduces an eight-geography scope while rejecting a ninth link", async () => {
   const t = createWidgetBackend(), f = await seedPublicWidget(t);
   const owner = await addOrganizationMember(t, f.organizationId, "manager");
