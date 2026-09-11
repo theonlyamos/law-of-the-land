@@ -504,6 +504,9 @@ describe("typed jurisdiction administration", () => {
       id: jurisdictionId,
       reason: "Retire linked organization rules",
     })).rejects.toThrow("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
+    const savedLinks = await t.run(async ctx => (await ctx.db.query("organizationGeographicScopes").collect()).map(link => link.geographicJurisdictionId));
+    await admin.client.mutation(updateOrganizationalJurisdiction, { id: jurisdictionId, name: "Renamed linked library", visibility: "members", scopeMode: "linked_geographies", reason: "Rename without replacing scope" });
+    expect(await t.run(async ctx => (await ctx.db.query("organizationGeographicScopes").collect()).map(link => link.geographicJurisdictionId))).toEqual(savedLinks);
     const updated = await admin.client.mutation(updateOrganizationalJurisdiction, {
       id: jurisdictionId,
       name: "Global policy library",

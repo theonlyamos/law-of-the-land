@@ -1264,7 +1264,7 @@ export const createOrganizationalJurisdiction = mutation({
 });
 
 export const updateOrganizationalJurisdiction = mutation({
-  args: { id: v.id("jurisdictions"), name: v.optional(v.string()), ...organizationalMutationArgs },
+  args: { id: v.id("jurisdictions"), name: v.optional(v.string()), ...organizationalMutationArgs, geographicJurisdictionIds: v.optional(v.array(v.id("jurisdictions"))) },
   returns: jurisdictionDocumentValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
@@ -1282,13 +1282,13 @@ export const updateOrganizationalJurisdiction = mutation({
     if (!organization || organization.status !== "active") {
       throw new ConvexError("ORGANIZATION_NOT_AVAILABLE");
     }
+    const links = await scopeLinks(ctx, profile._id);
+    const previousProfiles = await linkedProfilesForAudit(ctx, links);
     const profiles = await resolveScopeProfiles(
       ctx,
       args.scopeMode,
-      args.geographicJurisdictionIds,
+      args.geographicJurisdictionIds ?? (args.scopeMode === profile.scopeMode ? previousProfiles.map(link => link.jurisdictionId) : []),
     );
-    const links = await scopeLinks(ctx, profile._id);
-    const previousProfiles = await linkedProfilesForAudit(ctx, links);
     const beforeSnapshot = organizationalJurisdictionSnapshot(
       row,
       profile,

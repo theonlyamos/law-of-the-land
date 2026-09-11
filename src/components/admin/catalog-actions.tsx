@@ -353,8 +353,8 @@ export function JurisdictionLifecycleActions({
         await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), reason: auditReason });
       } else {
         const geographicJurisdictionIds = [...new Set(linkedIds)];
-        if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
-        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, name: jurisdictionName.trim(), visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], reason: auditReason });
+        if (scopeMode === "linked_geographies" && ((geographicJurisdictionIds.length < 1 && jurisdiction.scopeMode !== "linked_geographies") || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, name: jurisdictionName.trim(), visibility, scopeMode, ...(scopeMode === "global" || geographicJurisdictionIds.length > 0 ? { geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[] } : {}), reason: auditReason });
       }
       router.refresh();
     } catch {
@@ -424,7 +424,7 @@ export function JurisdictionLifecycleActions({
       <Link href="/admin/operations?status=manual_review" className="font-semibold underline underline-offset-4">View provider job</Link>
     </div> : null}
     {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
-      <p className="text-sm">Stored Gemini identifiers are never displayed. Changing a linked organizational scope replaces its current links.</p>
+      <p className="text-sm">Stored Gemini identifiers are never displayed. Selecting geographies replaces current links; leave the selection empty to keep saved links.</p>
       {jurisdiction.kind === "geographic" ? <>
         <Suspense fallback={<p role="status">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={(next) => { setSelection(next); setParentId(""); }} disabled={pending} /></Suspense>
         <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>

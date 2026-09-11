@@ -54,7 +54,7 @@ async function audit(
     actorRoles: [],
     organizationId: actor.organizationId,
     action,
-    targetType: "organizationMembership",
+    targetType: action.startsWith("organization.invitation_") ? "organizationInvitation" : "organizationMembership",
     targetId,
     reason,
     outcome: "success",

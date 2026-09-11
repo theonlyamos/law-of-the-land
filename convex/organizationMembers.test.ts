@@ -36,6 +36,8 @@ it("binds invitations to verified accounts and never reactivates an accepted inv
   expect(await recipient.client.mutation(accept, { invitationId })).toBe(
     f.organizationId,
   );
+  const invitationEvents = await t.run(ctx => ctx.db.query("auditEvents").withIndex("by_targetType_and_targetId", q => q.eq("targetType", "organizationInvitation").eq("targetId", invitationId)).collect());
+  expect(invitationEvents.map(event => event.action)).toEqual(["organization.invitation_created", "organization.invitation_accepted"]);
   await t.run(async (ctx) => {
     const member = await ctx.db
       .query("organizationMemberships")
