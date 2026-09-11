@@ -118,7 +118,7 @@ test("manager uploads, independent reviewer publishes, manager changes visibilit
   await context.clearCookies();
   await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie, true);
   await page.goto(`${base}/settings`);
-  for (const [button, confirmation, expectedStatus] of [["Make private", "PRIVATE", 404], ["Make public", "PUBLIC", 200]] as const) {
+  for (const [button, confirmation, expectedStatus] of [["Make private", "PRIVATE", 200], ["Make public", "PUBLIC", 200]] as const) {
     await page.getByRole("button", { name: button, exact: true }).click();
     await dialog.getByLabel("Reason for this action").fill("Verify jurisdiction visibility controls.");
     await dialog.getByLabel("Exact confirmation").fill(`${confirmation} ${fixture.records.publicOrganizationJurisdictionId}`);

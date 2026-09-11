@@ -50,3 +50,17 @@ it("uses jurisdiction admin permissions for geographical settings and preserves 
   expect(updated.dailyLimit).toBe(2);
   expect((await manager.client.query(get, { organizationId: org.organizationId })).dailyLimit).toBe(100);
 });
+
+it("lets a manager enable a private jurisdiction without changing browsing visibility", async () => {
+  const t = createWidgetBackend(), f = await seedPublicWidget(t);
+  const manager = await addOrganizationMember(t, f.organizationId, "manager"), reviewer = await addOrganizationMember(t, f.organizationId, "reviewer");
+  await t.run(ctx => ctx.db.patch(f.jurisdictionId, { visibility: "members" }));
+  const data = await manager.client.query(get, { organizationId: f.organizationId });
+  expect(data.ready).toBe(true);
+  const input = { organizationId: f.organizationId, settings: data.settings, dailyLimit: 100, monthlyLimit: 1000 };
+  await expect(reviewer.client.mutation(save, input)).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
+  await manager.client.mutation(save, input);
+  expect((await t.run(ctx => ctx.db.get(f.jurisdictionId)))?.visibility).toBe("members");
+  await manager.client.mutation(save, { ...input, settings: { ...input.settings, enabled: false } });
+  expect((await t.run(ctx => ctx.db.get(f.widgetId)))?.accessVersion).toBe(1);
+});

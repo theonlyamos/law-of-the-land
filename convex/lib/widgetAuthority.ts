@@ -25,7 +25,7 @@ export function widgetParentAllowed(origins: readonly string[], parentOrigin: st
 }
 export async function resolveWidgetLibrary(ctx: QueryCtx, jurisdictionId: Id<"jurisdictions">) {
   const jurisdiction = await ctx.db.get(jurisdictionId);
-  if (!jurisdiction || (jurisdiction.kind !== "geographic" && jurisdiction.kind !== "organizational") || jurisdiction.status !== "enabled" || jurisdiction.visibility !== "public") throw new ConvexError("WIDGET_UNAVAILABLE");
+  if (!jurisdiction || (jurisdiction.kind !== "geographic" && jurisdiction.kind !== "organizational") || jurisdiction.status !== "enabled" || (jurisdiction.visibility !== "public" && jurisdiction.visibility !== "members")) throw new ConvexError("WIDGET_UNAVAILABLE");
   const [organization, profile, geographic, storeName] = await Promise.all([
     jurisdiction.organizationId ? ctx.db.get(jurisdiction.organizationId) : null,
     ctx.db.query("organizationalJurisdictions").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", jurisdictionId)).unique(),

@@ -35,8 +35,8 @@ export const getSettings = query({ args: targetArgs, handler: async (ctx, args) 
   const now = Date.now(), iso = new Date(now).toISOString();
   const [day, month] = await Promise.all([iso.slice(0, 10), iso.slice(0, 7)].map(bucket => widgetUsage(ctx, scope, bucket)));
   const settings: WidgetSettings = widget ? settingsProjection(widget) : { enabled: false, allowedOrigins: [], title: `Ask ${jurisdiction?.name ?? "our organization"}`.slice(0, 80), welcomeMessage: "Ask a question about our published documents.", suggestedQuestions: [], accent: "#8d6a35", side: "right" };
-  return { publicId: widget?.publicId ?? null, jurisdictionName: jurisdiction?.name ?? "Organization", settings, canManage,
-    readiness: ready ? "Published documents available" : !jurisdiction ? "Create an organization jurisdiction first." : jurisdiction.visibility !== "public" ? "Make your jurisdiction public before enabling website chat." : "Publish a document and wait for indexing to finish.", ready,
+  return { publicId: widget?.publicId ?? null, jurisdictionName: jurisdiction?.name ?? "Organization", jurisdictionVisibility: jurisdiction?.visibility ?? null, settings, canManage,
+    readiness: ready ? "Published documents available" : !jurisdiction ? "Create an organization jurisdiction first." : "Publish a document and wait for indexing to finish.", ready,
     dailyLimit: allowance?.dailyLimit ?? 0, monthlyLimit: allowance?.monthlyLimit ?? 0, platformDailyLimit: allowance?.platformDailyLimit ?? 0, platformMonthlyLimit: allowance?.platformMonthlyLimit ?? 0,
     usage: { day: day?.count ?? 0, month: month?.count ?? 0, dayReset: Date.parse(`${iso.slice(0, 10)}T00:00:00Z`) + 86400000, monthReset: Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth() + 1, 1) } };
 } });

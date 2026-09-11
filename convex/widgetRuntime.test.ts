@@ -79,3 +79,34 @@ it("isolates geographical quotas, persists geographic citations, and revokes cha
   await t.run(ctx => bumpContentRevision(ctx, geo.jurisdictionId));
   expect((await t.mutation(readRef, input)).error.code).toBe("LIBRARY_CHANGED");
 });
+
+for (const [kind, seed] of [["organizational", seedPublicWidget], ["geographic", seedGeographicWidget]] as const) {
+  it(`serves enabled private ${kind} documents only through the widget and revokes ongoing answers`, async () => {
+    const t = createWidgetBackend(), f = await seed(t);
+    await t.run(ctx => ctx.db.patch(f.jurisdictionId, { visibility: "members" }));
+    const config = makeFunctionReference<"query">("widgets:getPublicConfig");
+    const publicRead = makeFunctionReference<"query">("jurisdictions:getAccessibleById");
+    const input = { publicId: f.publicId, tokenHash: await hashOpaqueTelemetryValue(createOpaqueTelemetryToken()), ipKey: "private-test", requestId: crypto.randomUUID() };
+    const session = { publicId: input.publicId, tokenHash: input.tokenHash, ipKey: input.ipKey, parentOrigin: "https://greenfield.example" };
+    await t.run(ctx => ctx.db.patch(f.widgetId, { enabled: false }));
+    expect(await t.query(config, { publicId: f.publicId, parentOrigin: session.parentOrigin })).toBeNull();
+    expect((await t.mutation(sessionRef, session)).error.code).toBe("WIDGET_UNAVAILABLE");
+    await t.run(ctx => ctx.db.patch(f.widgetId, { enabled: true }));
+    expect(await t.query(publicRead, { id: f.jurisdictionId })).toBeNull();
+    expect(await t.query(config, { publicId: f.publicId, parentOrigin: "https://attacker.example" })).toBeNull();
+    expect(await t.query(config, { publicId: f.publicId, parentOrigin: session.parentOrigin })).not.toBeNull();
+    await t.mutation(sessionRef, session);
+    const turn: Admission = await t.mutation(beginRef, { ...input, query: "Policy?" });
+    if (turn.kind !== "admitted") throw new Error("Expected private widget admission");
+    const citation = { jurisdictionId: f.jurisdictionId, resourceId: f.resourceId, versionId: f.versionId, providerStoreName: f.storeName };
+    const done = await t.mutation(finishRef, { turnId: turn.turnId, attemptNonce: turn.attemptNonce, outcome: "completed", answer: "Published policy applies.", citations: [citation], providerFinished: true });
+    expect(done.result.citations[0].jurisdictionKind).toBe(kind);
+    const pending: Admission = await t.mutation(beginRef, { ...input, requestId: crypto.randomUUID(), query: "Another question?" });
+    if (pending.kind !== "admitted") throw new Error("Expected second admission");
+    await t.run(ctx => ctx.db.patch(f.widgetId, { enabled: false, accessVersion: 1 }));
+    expect((await t.mutation(readRef, input)).error.code).toBe("WIDGET_UNAVAILABLE");
+    const rejected = await t.mutation(finishRef, { turnId: pending.turnId, attemptNonce: pending.attemptNonce, outcome: "completed", answer: "Must not be released", citations: [citation], providerFinished: true });
+    expect(rejected.status).toBe("failed");
+    expect(rejected.result).toBeUndefined();
+  });
+}
