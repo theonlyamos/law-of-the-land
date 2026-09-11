@@ -39,6 +39,7 @@ export default defineSchema({
   widgetRateBuckets: defineTable({ namespace: v.string(), key: v.string(), window: v.number(), count: v.number(), expiresAt: v.number() })
     .index("by_namespace_and_key_and_window", ["namespace", "key", "window"]).index("by_expiresAt", ["expiresAt"]),
   jurisdictions: defineTable({
+    discoveryText: v.optional(v.string()),
     contentRevision: v.optional(v.number()),
     code: v.optional(v.string()),
     name: v.string(),
@@ -93,6 +94,8 @@ export default defineSchema({
     .index("by_isDefault", ["isDefault"])
     .index("by_isDefault_and_status", ["isDefault", "status"])
     .index("by_organizationId", ["organizationId"])
+    .index("by_organizationId_and_status_and_name", ["organizationId", "status", "name"])
+    .searchIndex("search_discoveryText", { searchField: "discoveryText", filterFields: ["organizationId", "kind", "status", "visibility"] })
     .index("by_gemini_store_name", ["geminiFileSearchStoreName"])
     .searchIndex("search_name", {
       searchField: "name",
@@ -125,6 +128,7 @@ export default defineSchema({
       "normalizedAlias",
     ]),
   organizations: defineTable({
+    ownerUserId: v.optional(v.string()),
     name: v.string(),
     slug: v.string(),
     class: organizationClassValidator,
@@ -135,12 +139,22 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    .index("by_slug", ["slug"])
+    .index("by_slug", ["slug"]).index("by_ownerUserId_and_status", ["ownerUserId", "status"])
     .index("by_status_and_name", ["status", "name"])
     .searchIndex("search_name", {
       searchField: "name",
       filterFields: ["status"],
     }),
+  organizationInvitations: defineTable({
+    organizationId: v.id("organizations"), normalizedEmail: v.string(), role: organizationRoleValidator,
+    inviterUserId: v.string(), expiresAt: v.number(),
+    state: v.union(v.literal("pending"), v.literal("accepted"), v.literal("declined"), v.literal("revoked")),
+    acceptedByUserId: v.optional(v.string()),
+    deliveryState: v.union(v.literal("queued"), v.literal("sent"), v.literal("failed")),
+    deliveryAttempt: v.number(), lastDeliveryRequestedAt: v.number(), createdAt: v.number(), updatedAt: v.number(),
+  }).index("by_organizationId_and_state_and_expiresAt", ["organizationId", "state", "expiresAt"])
+    .index("by_organizationId_and_normalizedEmail_and_state_and_expiresAt", ["organizationId", "normalizedEmail", "state", "expiresAt"])
+    .index("by_normalizedEmail_and_state_and_expiresAt", ["normalizedEmail", "state", "expiresAt"]),
   organizationMemberships: defineTable({
     role: v.optional(organizationRoleValidator),
     organizationId: v.id("organizations"),

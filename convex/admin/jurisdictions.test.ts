@@ -491,7 +491,7 @@ describe("typed jurisdiction administration", () => {
       scopeMode: "linked_geographies",
       geographicJurisdictionIds: [countryId],
       reason: "Duplicate organization rules",
-    })).rejects.toThrow("ORGANIZATION_JURISDICTION_EXISTS");
+    })).rejects.toThrow("ORGANIZATION_JURISDICTION_NAME_EXISTS");
     await expect(admin.client.mutation(archiveJurisdiction, {
       id: countryId,
       reason: "Retire scoped geography",
@@ -504,14 +504,19 @@ describe("typed jurisdiction administration", () => {
       id: jurisdictionId,
       reason: "Retire linked organization rules",
     })).rejects.toThrow("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
+    const savedLinks = await t.run(async ctx => (await ctx.db.query("organizationGeographicScopes").collect()).map(link => link.geographicJurisdictionId));
+    await admin.client.mutation(updateOrganizationalJurisdiction, { id: jurisdictionId, name: "Renamed linked library", visibility: "members", scopeMode: "linked_geographies", reason: "Rename without replacing scope" });
+    expect(await t.run(async ctx => (await ctx.db.query("organizationGeographicScopes").collect()).map(link => link.geographicJurisdictionId))).toEqual(savedLinks);
     const updated = await admin.client.mutation(updateOrganizationalJurisdiction, {
       id: jurisdictionId,
+      name: "Global policy library",
       visibility: "public",
       scopeMode: "global",
       geographicJurisdictionIds: [],
       reason: "Make organization scope global",
     });
-    expect(updated).toMatchObject({ visibility: "public" });
+    expect(updated).toMatchObject({ visibility: "public", name: "Global policy library" });
+    expect((await t.run(ctx => ctx.db.get("jurisdictions", jurisdictionId)))?.discoveryText).toBe("Example University Global policy library");
     expect(updated).not.toHaveProperty("geminiFileSearchStoreName");
     await expect(admin.client.mutation(archiveJurisdiction, {
       id: jurisdictionId,

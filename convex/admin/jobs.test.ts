@@ -151,6 +151,32 @@ async function asAdmin(t: Backend, role: string) {
 }
 
 const previousAdminPanelEnabled = process.env.ADMIN_PANEL_ENABLED;
+
+it("withdraws an organization owner's queued publication authority after transfer", async () => {
+  const t = createBackend();
+  await enablePanel(t);
+  const fixture = await seedBoundGeminiIndexJob(t, { suffix: "owner-transfer-publication", status: "queued", providerSyncState: "synced" });
+  const owner = await asAdmin(t, "user");
+  const organizationId = await t.run(async ctx => {
+    const now = Date.now();
+    const id = await ctx.db.insert("organizations", { name: "University", slug: "owner-transfer", class: "university", status: "active", ownerUserId: owner.userId, createdBy: owner.userId, updatedBy: owner.userId, createdAt: now, updatedAt: now });
+    await ctx.db.insert("organizationMemberships", { organizationId: id, userId: owner.userId, role: "manager", status: "active", createdAt: now, updatedAt: now });
+    await ctx.db.patch(fixture.jurisdictionId, { kind: "organizational", organizationId: id, visibility: "members" });
+    await ctx.db.patch(fixture.jobId, { organizationId: id, organizationRole: "manager", actorId: owner.userId, actorRoles: [] });
+    const version = (await ctx.db.get("documentVersions", fixture.versionId))!;
+    const metadata = (await ctx.db.system.get("_storage", version.originalStorageId))!;
+    const sha256 = /^[a-f0-9]{64}$/i.test(metadata.sha256) ? metadata.sha256.toLowerCase() : Array.from(Uint8Array.from(atob(metadata.sha256), c => c.charCodeAt(0)), b => b.toString(16).padStart(2, "0")).join("");
+    await ctx.db.patch(version._id, { sha256 });
+    await ctx.db.patch(fixture.jobId, { payload: JSON.stringify({ operation: "publish", storeName: fixture.storeName, sha256 }) });
+    return id;
+  });
+  const claim = await t.mutation(claimJob, { jobId: fixture.jobId });
+  expect(claim).not.toBeNull();
+  await expect(t.query(getGeminiJobTarget, { jobId: fixture.jobId, leaseToken: claim!.leaseToken })).resolves.toBeTruthy();
+  await t.run(ctx => ctx.db.patch(organizationId, { ownerUserId: "new-owner" }));
+  await expect(t.query(getGeminiJobTarget, { jobId: fixture.jobId, leaseToken: claim!.leaseToken })).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
+  expect((await t.run(ctx => ctx.db.get("legalResources", fixture.resourceId)))?.activeVersionId).toBeUndefined();
+});
 const previousAdminEnvironment = process.env.ADMIN_ENVIRONMENT;
 const previousGoogleAiApiKey = process.env.GOOGLE_AI_API_KEY;
 

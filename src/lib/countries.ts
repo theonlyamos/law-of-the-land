@@ -7,6 +7,8 @@ export interface ResearchJurisdiction {
   slug: string;
   kind: ResearchJurisdictionKind;
   isDefault: boolean;
+  organization?: { id: string; name: string };
+  visibility?: "public" | "members";
 }
 
 export interface ChatCitation {

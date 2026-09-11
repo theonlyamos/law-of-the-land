@@ -52,6 +52,10 @@ export async function assertJurisdictionAccess(
   jurisdiction: Doc<"jurisdictions">,
 ): Promise<void> {
   if (jurisdiction.status !== "enabled") denied();
+  if (jurisdiction.kind === "organizational") {
+    const organization = jurisdiction.organizationId ? await ctx.db.get(jurisdiction.organizationId) : null;
+    if (organization?.status !== "active") denied();
+  }
   if ((jurisdiction.visibility ?? "public") === "public") return;
 
   const organizationId = jurisdiction.organizationId;

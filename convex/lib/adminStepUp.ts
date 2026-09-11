@@ -12,6 +12,11 @@ export const ADMIN_STEP_UP_ACTIONS = new Set([
   "admin_panel_set",
   "unified_jurisdictions_set",
   "organization_visibility",
+  "organization_member_role",
+  "organization_member_remove",
+  "organization_owner_transfer",
+  "organization_archive",
+  "organization_restore",
 ] as const);
 
 export const ADMIN_STEP_UP_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;

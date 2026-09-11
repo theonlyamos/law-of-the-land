@@ -26,6 +26,7 @@ export type GeographicLevel =
   | "other_locality";
 
 export const MAX_GEOGRAPHIC_DEPTH = 8;
+export const MAX_SCOPE_LINKS = 8;
 export const MAX_SELECTOR_PAGE_SIZE = 20;
 export const MAX_RETRIEVAL_LIBRARIES = 4;
 export const MAX_ACTIVE_ORGANIZATION_MEMBERSHIPS = 100;
@@ -99,6 +100,7 @@ export const jurisdictionDocumentValidator = v.object({
   visibility: v.optional(jurisdictionVisibilityValidator),
   organizationId: v.optional(v.id("organizations")),
   legacyCountryCode: v.optional(v.string()),
+  discoveryText: v.optional(v.string()),
   createdBy: v.string(),
   updatedBy: v.string(),
   createdAt: v.number(),
@@ -113,6 +115,8 @@ export const jurisdictionSearchPageValidator = v.object({
       slug: v.string(),
       kind: jurisdictionKindValidator,
       isDefault: v.boolean(),
+      organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
+      visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
     }),
   ),
   group: v.union(

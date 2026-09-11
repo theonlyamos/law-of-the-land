@@ -2,7 +2,7 @@ import { createTelemetryServiceProofForSecret, hashOpaqueTelemetryValue } from "
 
 export async function createWidgetServiceProof(operation: string, issuedAt: number, bodyBytes: Uint8Array): Promise<string> {
   const secret = process.env.EMBED_SERVICE_SECRET;
-  if (!secret || secret.length < 32) throw new Error("Website chat is not configured");
+  if (!secret || secret.length < 32) throw new Error("Chat widget is not configured");
   return createTelemetryServiceProofForSecret(secret, ["widget-v1", operation, issuedAt, await hashOpaqueTelemetryValue(new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes))]);
 }
 export async function verifyWidgetServiceProof(operation: string, issuedAt: number, bodyBytes: Uint8Array, signature: string): Promise<boolean> {

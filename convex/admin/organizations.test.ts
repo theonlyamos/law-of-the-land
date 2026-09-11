@@ -301,7 +301,7 @@ describe("organization administration", () => {
     })).rejects.toThrow("ORGANIZATION_MEMBERSHIP_LIMIT");
   });
 
-  it("synchronizes draft linked jurisdiction labels and blocks enabled or archived jurisdiction changes", async () => {
+  it("preserves jurisdiction identities on rename and archives an organization with active members", async () => {
     const t = createBackend();
     await enablePanel(t);
     const admin = await asUser(t, "content_manager");
@@ -337,60 +337,21 @@ describe("organization administration", () => {
       class: "university",
       reason: "Correct organization name",
     })).resolves.toMatchObject({ name: "Renamed University", slug: "renamed-university" });
-    await expect(t.run((ctx) => ctx.db.get("jurisdictions", jurisdictionId)))
-      .resolves.toMatchObject({ name: "Renamed University", slug: "renamed-university" });
-
-    await admin.client.mutation(setOrganizationMemberStatus, {
-      organizationId,
-      userId: member.userId,
-      status: "active",
-      reason: "Add organization member",
+    await expect(t.run(ctx=>ctx.db.get(jurisdictionId))).resolves.toMatchObject({name:"Example University Rules",slug:"example-university-rules",discoveryText:"Renamed University Example University Rules"});
+    await admin.client.mutation(setOrganizationMemberStatus,{organizationId,userId:member.userId,status:"active",reason:"Add organization member"});
+    await t.run(ctx=>ctx.db.patch(jurisdictionId,{status:"enabled"}));
+    await expect(admin.client.mutation(updateOrganization,{id:organizationId,name:"Updated University",slug:"updated-university",class:"university",reason:"Rename active organization"})).resolves.toMatchObject({name:"Updated University"});
+    await expect(admin.client.mutation(archiveOrganization,{id:organizationId,reason:"Suspend organization"})).rejects.toThrow("ORGANIZATION_OWNER_REQUIRED");
+    await t.run(async ctx => {
+      const membership = await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", organizationId).eq("userId", member.userId)).unique();
+      await ctx.db.patch(membership!._id, { role: "manager" });
+      await ctx.db.patch(organizationId, { ownerUserId: member.userId });
     });
-    await expect(admin.client.mutation(archiveOrganization, {
-      id: organizationId,
-      reason: "Retire organization",
-    })).rejects.toThrow("ORGANIZATION_HAS_ACTIVE_MEMBERSHIPS");
-
-    await admin.client.mutation(setOrganizationMemberStatus, {
-      organizationId,
-      userId: member.userId,
-      status: "inactive",
-      reason: "Offboarding",
-    });
-    await t.run((ctx) => ctx.db.patch(jurisdictionId, { status: "enabled" }));
-    await expect(admin.client.mutation(archiveOrganization, {
-      id: organizationId,
-      reason: "Retire organization",
-    })).rejects.toThrow("ORGANIZATION_HAS_ENABLED_JURISDICTION");
-    await expect(admin.client.mutation(updateOrganization, {
-      id: organizationId,
-      name: "Blocked rename",
-      slug: "blocked-rename",
-      class: "university",
-      reason: "Attempt enabled rename",
-    })).rejects.toThrow("ORGANIZATION_JURISDICTION_ENABLED");
-
-    await t.run((ctx) => ctx.db.patch(jurisdictionId, { status: "archived" }));
-    await expect(admin.client.mutation(updateOrganization, {
-      id: organizationId,
-      name: "Archived rename",
-      slug: "archived-rename",
-      class: "university",
-      reason: "Attempt archived rename",
-    })).rejects.toThrow("ORGANIZATION_JURISDICTION_ARCHIVED");
-    await expect(t.run((ctx) => ctx.db.get("jurisdictions", jurisdictionId)))
-      .resolves.toMatchObject({
-        name: "Renamed University",
-        slug: "renamed-university",
-        status: "archived",
-      });
-    await expect(admin.client.mutation(archiveOrganization, {
-      id: organizationId,
-      reason: "Retire organization",
-    })).resolves.toMatchObject({ status: "archived" });
+    await expect(admin.client.mutation(archiveOrganization,{id:organizationId,reason:"Suspend organization"})).resolves.toMatchObject({status:"archived"});
+    await expect(t.run(ctx=>ctx.db.get(jurisdictionId))).resolves.toMatchObject({status:"enabled",name:"Example University Rules"});
+    expect(await t.run(ctx=>ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_status",q=>q.eq("organizationId",organizationId).eq("status","active")).collect())).toHaveLength(1);
   });
-
-  it("rejects a draft linked-jurisdiction slug collision without writes", async () => {
+  it("keeps organization and jurisdiction slug namespaces independent", async () => {
     const t = createBackend();
     await enablePanel(t);
     const admin = await asUser(t, "content_manager");
@@ -438,14 +399,14 @@ describe("organization administration", () => {
       slug: "renamed-university",
       class: "university",
       reason: "Reject linked jurisdiction slug collision",
-    })).rejects.toThrow("JURISDICTION_SLUG_EXISTS");
+    })).resolves.toMatchObject({ name: "Renamed University", slug: "renamed-university" });
 
     await expect(t.run((ctx) => Promise.all([
       ctx.db.get("organizations", organizationId),
       ctx.db.get("jurisdictions", jurisdictionId),
       ctx.db.get("jurisdictions", conflictingJurisdictionId),
     ]))).resolves.toEqual([
-      expect.objectContaining({ name: "Example University", slug: "example-university" }),
+      expect.objectContaining({ name: "Renamed University", slug: "renamed-university" }),
       expect.objectContaining({ name: "Example University Rules", slug: "example-university-rules" }),
       expect.objectContaining({ name: "Existing Jurisdiction", slug: "renamed-university" }),
     ]);

@@ -344,7 +344,7 @@ describe("deterministic authorized research scope", () => {
 
       await expect(t.query(resolveResearchScope, {
         jurisdictionId: organization.jurisdictionId,
-      })).rejects.toThrow("JURISDICTION_SCOPE_STATE_INVALID");
+      })).rejects.toThrow(corruption === "inactive" ? "JURISDICTION_ACCESS_DENIED" : "JURISDICTION_SCOPE_STATE_INVALID");
     },
   );
 });

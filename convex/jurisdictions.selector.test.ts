@@ -182,6 +182,7 @@ async function insertOrganizationJurisdiction(
       isDefault: false,
       providerSyncState: "synced",
       kind: "organizational",
+      discoveryText: `${input.name} ${input.name}`,
       visibility: input.visibility,
       organizationId,
       geminiFileSearchStoreName: `fileSearchStores/org-${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
@@ -475,4 +476,20 @@ describe("bounded accessible jurisdiction search", () => {
       }),
     ).rejects.toThrow("JURISDICTION_SELECTOR_STATE_INVALID");
   });
+});
+
+it("finds sibling jurisdictions by organization name and keeps private siblings out of public search",async()=>{
+  const t=createBackend(),member=await asUser(t,"sibling-member");
+  const a=await insertOrganizationJurisdiction(t,{name:"Northbridge",visibility:"members"}),b=await insertOrganizationJurisdiction(t,{name:"Other",visibility:"public"});
+  await t.run(async ctx=>{
+    await ctx.db.patch(a.jurisdictionId,{name:"Student rules",discoveryText:"Northbridge Student rules"});
+    await ctx.db.patch(b.jurisdictionId,{organizationId:a.organizationId,name:"Employment rules",discoveryText:"Northbridge Employment rules"});
+    await ctx.db.insert("organizationMemberships",{organizationId:a.organizationId,userId:member.userId,status:"active",createdAt:Date.now(),updatedAt:Date.now()});
+  });
+  const result=await member.client.query(searchAccessible,{kind:"organizational",query:"Northbridge",cursor:null});
+  expect(new Set(result.page.map((row:{id:string})=>row.id))).toEqual(new Set([a.jurisdictionId,b.jurisdictionId]));
+  expect(result.page[0].organization).toEqual({id:a.organizationId,name:"Northbridge"});
+  const publicResult=await t.query(searchAccessible,{kind:"organizational",query:"Northbridge",cursor:null});
+  expect(publicResult.page.map((row:{id:string})=>row.id)).toEqual([b.jurisdictionId]);
+  await expect(t.query(searchAccessible,{kind:"organizational",query:"Northbridge",cursor:result.continueCursor})).rejects.toThrow("INVALID_JURISDICTION_SEARCH_CURSOR");
 });

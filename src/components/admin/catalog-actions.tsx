@@ -1,4 +1,5 @@
 "use client";
+import { fieldClass, labelClass, buttonClass, secondaryButtonClass } from "./form-styles";
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -9,10 +10,6 @@ import { lazy, Suspense, type FormEvent, useEffect, useState } from "react";
 import type { GeographicPlaceSelection } from "./geographic-place-picker";
 import { StepUpDialog } from "./step-up-dialog";
 
-const fieldClass = "min-h-11 w-full border border-[oklch(61%_0.035_252)] bg-[oklch(98%_0.01_82)] px-3 text-base text-[oklch(23%_0.045_252)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700";
-const labelClass = "grid gap-2 text-xs font-semibold uppercase tracking-[0.11em] text-[oklch(39%_0.045_252)]";
-const buttonClass = "inline-flex min-h-11 items-center justify-center bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
-const secondaryButtonClass = "inline-flex min-h-11 items-center justify-center border border-[oklch(48%_0.045_252)] px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 disabled:opacity-50";
 const SETUP_REFRESH_MS = 2_000;
 
 const GeographicPlacePicker = lazy(() => import("./geographic-place-picker").then((module) => ({ default: module.GeographicPlacePicker })));
@@ -218,6 +215,7 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
         if (scopeMode === "linked_geographies" && (distinctIds.length < 1 || distinctIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
         await createOrganizational({
           organizationId: organizationId as Id<"organizations">,
+          ...(text(data, "jurisdictionName").trim() ? { name: text(data, "jurisdictionName").trim() } : {}),
           visibility: text(data, "visibility") as "public" | "members",
           scopeMode,
           geographicJurisdictionIds: (scopeMode === "global" ? [] : distinctIds) as Id<"jurisdictions">[],
@@ -255,6 +253,7 @@ export function JurisdictionEditor({ organizations = [], organizationPage, geogr
           <label className={labelClass}>Organization class<select name="organizationClass" className={fieldClass}>{ORGANIZATION_CLASSES.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
           <label className={labelClass}>Organization HTTPS website<input aria-label="Organization HTTPS website" name="organizationWebsite" type="url" maxLength={500} className={fieldClass} /></label>
         </>}
+        <label className={labelClass}>Jurisdiction name<input name="jurisdictionName" aria-label="Jurisdiction name" maxLength={300} placeholder="Defaults to organization name" className={fieldClass} /></label>
         <label className={labelClass}>Visibility<select aria-label="Visibility" name="visibility" className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
         <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
         {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}
@@ -311,6 +310,7 @@ export function JurisdictionLifecycleActions({
   const [level, setLevel] = useState<GeographicLevel>(jurisdiction.geographic?.level ?? "country");
   const [parentId, setParentId] = useState(jurisdiction.geographic?.parent?.id ?? "");
   const [visibility, setVisibility] = useState(jurisdiction.visibility);
+  const [jurisdictionName, setJurisdictionName] = useState(jurisdiction.name);
   const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">(jurisdiction.scopeMode ?? "global");
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [deletingStore, setDeletingStore] = useState(false);
@@ -353,8 +353,8 @@ export function JurisdictionLifecycleActions({
         await updateGeographic({ id: jurisdiction.id as Id<"jurisdictions">, verifiedPlaceClaim: selection.verifiedPlaceClaim, level, ...(parentId ? { parentJurisdictionId: parentId as Id<"jurisdictions"> } : {}), reason: auditReason });
       } else {
         const geographicJurisdictionIds = [...new Set(linkedIds)];
-        if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
-        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], reason: auditReason });
+        if (scopeMode === "linked_geographies" && ((geographicJurisdictionIds.length < 1 && jurisdiction.scopeMode !== "linked_geographies") || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, name: jurisdictionName.trim(), visibility, scopeMode, ...(scopeMode === "global" || geographicJurisdictionIds.length > 0 ? { geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[] } : {}), reason: auditReason });
       }
       router.refresh();
     } catch {
@@ -424,12 +424,13 @@ export function JurisdictionLifecycleActions({
       <Link href="/admin/operations?status=manual_review" className="font-semibold underline underline-offset-4">View provider job</Link>
     </div> : null}
     {editable && editing ? <div className="grid gap-3 border-t border-[oklch(73%_0.03_77)] pt-3">
-      <p className="text-sm">Stored Gemini identifiers are never displayed. Changing a linked organizational scope replaces its current links.</p>
+      <p className="text-sm">Stored Gemini identifiers are never displayed. Selecting geographies replaces current links; leave the selection empty to keep saved links.</p>
       {jurisdiction.kind === "geographic" ? <>
         <Suspense fallback={<p role="status">Loading secure place search…</p>}><GeographicPlacePicker value={selection} onChange={(next) => { setSelection(next); setParentId(""); }} disabled={pending} /></Suspense>
         <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
         {level !== "country" ? <GeographicParentField key={level} level={level} selection={selection} value={parentId} onChange={setParentId} initial={geographicOptions} /> : null}
       </> : <>
+        <label className={labelClass}>Jurisdiction name<input name="jurisdictionName" aria-label="Jurisdiction name" value={jurisdictionName} onChange={(event) => setJurisdictionName(event.target.value)} maxLength={300} required className={fieldClass} /></label>
         <label className={labelClass}>Visibility<select aria-label="Visibility" value={visibility} onChange={(event) => setVisibility(event.target.value as typeof visibility)} className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
         <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
         {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}

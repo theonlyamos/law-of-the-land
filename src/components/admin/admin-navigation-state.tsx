@@ -43,7 +43,7 @@ export function useAdminNavigation() {
   return state;
 }
 
-export function AdminNavigationToggle() {
+export function AdminNavigationToggle({ label = "administration" }: { label?: string } = {}) {
   const { isCollapsed, setIsCollapsed } = useAdminNavigation();
 
   return (
@@ -53,8 +53,8 @@ export function AdminNavigationToggle() {
       aria-expanded={!isCollapsed}
       aria-label={
         isCollapsed
-          ? "Expand administration navigation"
-          : "Collapse administration navigation"
+          ? `Expand ${label} navigation`
+          : `Collapse ${label} navigation`
       }
       onClick={() => setIsCollapsed((value) => !value)}
       className="admin-nav-link hidden min-h-11 w-full items-center justify-start gap-3 whitespace-nowrap border-b-2 border-transparent px-3 text-sm font-medium text-slate-700 transition-colors duration-150 hover:bg-slate-200/60 hover:text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 md:flex md:rounded-md md:border-b-0 md:border-l-2"
@@ -75,7 +75,7 @@ export function AdminNavigationToggle() {
   );
 }
 
-export function MobileAdminNavigationToggle() {
+export function MobileAdminNavigationToggle({ label = "administration" }: { label?: string } = {}) {
   const { isMobileMenuOpen, setIsMobileMenuOpen } = useAdminNavigation();
 
   return (
@@ -84,7 +84,7 @@ export function MobileAdminNavigationToggle() {
       aria-controls="admin-sidebar"
       aria-expanded={isMobileMenuOpen}
       aria-label={
-        isMobileMenuOpen ? "Close administration menu" : "Open administration menu"
+        isMobileMenuOpen ? `Close ${label} menu` : `Open ${label} menu`
       }
       onClick={() => setIsMobileMenuOpen((value) => !value)}
       className="fixed right-4 top-0 z-50 inline-flex min-h-12 min-w-12 items-center justify-center rounded-b-lg border border-t-0 border-[oklch(61%_0.035_252)] bg-[oklch(97%_0.012_82)] text-[oklch(31%_0.055_252)] shadow-md transition-colors hover:bg-[oklch(89%_0.025_79)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700 md:hidden"

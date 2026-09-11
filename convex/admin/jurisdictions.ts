@@ -1,3 +1,4 @@
+import { currentOrganizationJurisdictions, discoveryText, MAX_ORGANIZATION_JURISDICTIONS, organizationName, uniqueOrganizationSlug } from "../lib/organizationManagement";
 import { bumpContentRevision, bumpWidgetAccessVersion } from "../lib/widgetAuthority";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
@@ -12,6 +13,7 @@ import type { AdminRole } from "../lib/adminPermissions";
 import { isGeminiFileSearchStoreName } from "../lib/geminiFileSearchNames";
 import {
   MAX_GEOGRAPHIC_DEPTH,
+  MAX_SCOPE_LINKS,
   allowedParentLevelsByLevel,
   geographicLevelValidator,
   jurisdictionDocumentValidator,
@@ -36,7 +38,6 @@ import {
 import { queueGeminiStoreProvision } from "./jobs";
 
 const MAX_TEXT_LENGTH = 300;
-const MAX_SCOPE_LINKS = 8;
 const MAX_PROFILE_ROWS = 2;
 const MAX_ARCHIVAL_CHILD_SCAN = 100;
 const MAX_GEOGRAPHIC_ALIASES = 20;
@@ -101,7 +102,7 @@ const adminJurisdictionValidator = v.object({
   scopeMode: v.union(v.null(), organizationScopeModeValidator),
 });
 
-type Actor = { userId: string; roles: AdminRole[] };
+type Actor = { userId: string; roles: AdminRole[]; organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer" };
 
 export const assertCanManageJurisdictions = query({
   args: {},
@@ -159,7 +160,7 @@ async function assertUniquePlace(
 }
 
 async function geographicProfile(
-  ctx: MutationCtx,
+  ctx: QueryCtx | MutationCtx,
   jurisdictionId: Id<"jurisdictions">,
 ): Promise<Doc<"geographicJurisdictions"> | null> {
   const rows = await ctx.db
@@ -329,8 +330,8 @@ export async function assertOrganizationalScope(
   }));
 }
 
-async function resolveScopeProfiles(
-  ctx: MutationCtx,
+export async function resolveScopeProfiles(
+  ctx: QueryCtx | MutationCtx,
   scopeMode: "global" | "linked_geographies",
   jurisdictionIds: Id<"jurisdictions">[],
 ): Promise<Doc<"geographicJurisdictions">[]> {
@@ -373,6 +374,7 @@ async function auditJurisdiction(
   await writeAudit(ctx, {
     actorId: actor.userId,
     actorRoles: actor.roles,
+    organizationId: actor.organizationId, organizationRole: actor.organizationRole,
     action: input.action,
     targetType: "jurisdiction",
     targetId: input.targetId,
@@ -1183,29 +1185,24 @@ export const updateGeographicJurisdiction = mutation({
   },
 });
 
-const organizationalMutationArgs = {
+export const organizationalMutationArgs = {
   visibility: jurisdictionVisibilityValidator,
   scopeMode: organizationScopeModeValidator,
   geographicJurisdictionIds: v.array(v.id("jurisdictions")),
   reason: v.string(),
 } as const;
 
-export const createOrganizationalJurisdiction = mutation({
-  args: { organizationId: v.id("organizations"), ...organizationalMutationArgs },
-  returns: v.id("jurisdictions"),
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
+export async function createOrganizationalJurisdictionForActor(ctx: MutationCtx, actor: Actor, args: { organizationId: Id<"organizations">; name?: string; visibility: "public" | "members"; scopeMode: "global" | "linked_geographies"; geographicJurisdictionIds: Id<"jurisdictions">[]; reason: string }) {
     const reason = validateAuditReason(args.reason);
     const organization = await ctx.db.get("organizations", args.organizationId);
     if (!organization || organization.status !== "active") {
       throw new ConvexError("ORGANIZATION_NOT_AVAILABLE");
     }
-    const existing = await ctx.db
-      .query("jurisdictions")
-      .withIndex("by_organizationId", (q) => q.eq("organizationId", organization._id))
-      .take(2);
-    if (existing.length > 0) throw new ConvexError("ORGANIZATION_JURISDICTION_EXISTS");
-    await assertUniqueSlug(ctx, organization.slug);
+    const existing = await currentOrganizationJurisdictions(ctx, organization._id);
+    if (existing.length >= MAX_ORGANIZATION_JURISDICTIONS) throw new ConvexError("ORGANIZATION_JURISDICTION_LIMIT");
+    const name = organizationName(args.name ?? organization.name);
+    if (existing.some(row => row.name.normalize("NFKC").toLowerCase() === name.toLowerCase())) throw new ConvexError("ORGANIZATION_JURISDICTION_NAME_EXISTS");
+    const slug = await uniqueOrganizationSlug(ctx, "jurisdictions", args.name ? `${organization.slug}-${name}` : organization.slug);
     const profiles = await resolveScopeProfiles(
       ctx,
       args.scopeMode,
@@ -1213,8 +1210,9 @@ export const createOrganizationalJurisdiction = mutation({
     );
     const now = Date.now();
     const id = await ctx.db.insert("jurisdictions", {
-      name: organization.name,
-      slug: organization.slug,
+      name,
+      slug,
+      discoveryText: discoveryText(organization.name, name),
       status: "draft",
       isDefault: false,
       providerSyncState: "pending",
@@ -1254,15 +1252,19 @@ export const createOrganizationalJurisdiction = mutation({
     await queueGeminiStoreProvision(
       ctx,
       created,
-      { id: actor.userId, roles: actor.roles },
+      { id: actor.userId, roles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole },
       `provision-gemini-${id}`,
     );
     return id;
-  },
+}
+export const createOrganizationalJurisdiction = mutation({
+  args: { organizationId: v.id("organizations"), name: v.optional(v.string()), ...organizationalMutationArgs },
+  returns: v.id("jurisdictions"),
+  handler: async (ctx, args) => createOrganizationalJurisdictionForActor(ctx, await requireEnabledAdminPermission(ctx, "jurisdiction", "write"), args),
 });
 
 export const updateOrganizationalJurisdiction = mutation({
-  args: { id: v.id("jurisdictions"), ...organizationalMutationArgs },
+  args: { id: v.id("jurisdictions"), name: v.optional(v.string()), ...organizationalMutationArgs, geographicJurisdictionIds: v.optional(v.array(v.id("jurisdictions"))) },
   returns: jurisdictionDocumentValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
@@ -1280,20 +1282,27 @@ export const updateOrganizationalJurisdiction = mutation({
     if (!organization || organization.status !== "active") {
       throw new ConvexError("ORGANIZATION_NOT_AVAILABLE");
     }
+    const links = await scopeLinks(ctx, profile._id);
+    const previousProfiles = await linkedProfilesForAudit(ctx, links);
     const profiles = await resolveScopeProfiles(
       ctx,
       args.scopeMode,
-      args.geographicJurisdictionIds,
+      args.geographicJurisdictionIds ?? (args.scopeMode === profile.scopeMode ? previousProfiles.map(link => link.jurisdictionId) : []),
     );
-    const links = await scopeLinks(ctx, profile._id);
-    const previousProfiles = await linkedProfilesForAudit(ctx, links);
     const beforeSnapshot = organizationalJurisdictionSnapshot(
       row,
       profile,
       previousProfiles,
     );
+    const name = args.name === undefined ? row.name : organizationName(args.name);
+    if (name !== row.name) {
+      const siblings = await currentOrganizationJurisdictions(ctx, organization._id);
+      if (siblings.some(sibling => sibling._id !== row._id && sibling.name.normalize("NFKC").toLowerCase() === name.toLowerCase())) throw new ConvexError("ORGANIZATION_JURISDICTION_NAME_EXISTS");
+    }
     const now = Date.now();
     const patch = {
+      name,
+      discoveryText: discoveryText(organization.name, name),
       visibility: args.visibility,
       updatedBy: actor.userId,
       updatedAt: now,

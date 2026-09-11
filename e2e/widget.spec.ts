@@ -70,7 +70,7 @@ async function host(page: Page, origin = "https://allowed.widget.test", directFr
 test("manager saves settings, independent reviewer cannot edit appearance", async ({ page, context }, testInfo) => {
   await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie, true);
   await page.goto(`/organizations/${fixture.records.widget!.organizationId}/website-chat`);
-  await expect(page.getByRole("heading", { name: "Website chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Chat widget", exact: true })).toBeVisible();
   await expect(page.getByText("Design preview only. No questions are sent.")).toBeVisible();
   await page.getByLabel("Welcome message").fill("Ask about our published policies.");
   await page.getByRole("button", { name: "Save changes" }).click();
@@ -117,7 +117,7 @@ test("manager uploads, independent reviewer publishes, manager changes visibilit
   await expect(page.getByRole("button", { name: "Unpublish version", exact: true })).toBeVisible({ timeout: 30000 });
   await context.clearCookies();
   await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie, true);
-  await page.goto(`${base}/settings`);
+  await page.goto(`${base}/jurisdictions/${fixture.records.publicOrganizationJurisdictionId}/settings`);
   for (const [button, confirmation, expectedStatus] of [["Make private", "PRIVATE", 200], ["Make public", "PUBLIC", 200]] as const) {
     await page.getByRole("button", { name: button, exact: true }).click();
     await dialog.getByLabel("Reason for this action").fill("Verify jurisdiction visibility controls.");

@@ -5,6 +5,7 @@ import { mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { writeAudit, validateAuditReason } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
+import { organizationAccessForUser } from "../lib/organizationAccess";
 
 const MIN_KEY = 8;
 const MAX_KEY = 128;
@@ -119,7 +120,7 @@ async function finishReviewOperation(
   ctx: MutationCtx,
   actor: Actor,
   operation: { operationId: Id<"adminOperations">; correlationId: string },
-  input: { action: string; versionId: Id<"documentVersions">; reason: string; status: ReviewResult["status"] },
+  input: { action: string; versionId: Id<"documentVersions">; reason: string; status: ReviewResult["status"]; ownerSelfReview?: boolean },
 ): Promise<ReviewResult> {
   const result = { status: input.status, correlationId: operation.correlationId, versionId: input.versionId };
   await ctx.db.patch(operation.operationId, {
@@ -134,7 +135,7 @@ async function finishReviewOperation(
     targetType: "documentVersion",
     targetId: input.versionId,
     reason: input.reason,
-    afterSummary: JSON.stringify({ status: input.status }),
+    afterSummary: JSON.stringify({ status: input.status, ...(input.ownerSelfReview ? { ownerSelfReview: true } : {}) }),
     correlationId: operation.correlationId,
     outcome: "success",
   });
@@ -187,7 +188,12 @@ export async function decideForActor(
   const version = await ctx.db.get(args.versionId);
   if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
   if (version.status !== "ready_for_review") throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
-  if (version.submittedBy === actor.userId && !actor.roles.includes("super_admin")) {
+  const resource = await ctx.db.get(version.resourceId);
+  const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
+  const organizationAccess = jurisdiction?.kind === "organizational" && jurisdiction.organizationId ? await organizationAccessForUser(ctx, jurisdiction.organizationId, actor.userId) : null;
+  if (actor.organizationId && (jurisdiction?.organizationId !== actor.organizationId || !organizationAccess?.canReview)) throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
+  const ownerSelfReview = version.submittedBy === actor.userId && organizationAccess?.isOwner === true;
+  if (version.submittedBy === actor.userId && !actor.roles.includes("super_admin") && !ownerSelfReview) {
     throw new ConvexError("Document must be approved by a different reviewer");
   }
   if (decision === "approve" && Object.values(args.checklistAnswers).some((answer) => !answer)) {
@@ -207,7 +213,7 @@ export async function decideForActor(
   });
   const status = decision === "approve" ? "approved" as const : "rejected" as const;
   await ctx.db.patch(version._id, { status, reviewedBy: actor.userId, reviewedAt: now, updatedAt: now });
-  return await finishReviewOperation(ctx, actor, operation, { action, versionId: version._id, reason: args.reason, status });
+  return await finishReviewOperation(ctx, actor, operation, { action, versionId: version._id, reason: args.reason, status, ownerSelfReview });
 }
 
 export const decisionArgs = {

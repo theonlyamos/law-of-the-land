@@ -1,3 +1,4 @@
+import { organizationAccessForUser } from "../lib/organizationAccess";
 import { bumpContentRevision } from "../lib/widgetAuthority";
 import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -101,6 +102,10 @@ export async function resolveGeminiPublicationWorkflow(
   const storeName = jurisdiction?.geminiFileSearchStoreName;
   if (!resource || !jurisdiction || resource.status !== "active" || jurisdiction.status !== "enabled" || !storeName || !isGeminiFileSearchStoreName(storeName) || payload.storeName !== storeName) {
     throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
+  }
+  if (job.organizationId && (job.type === "gemini_index_document" || payload.operation === "replace_delete")) {
+    const access = await organizationAccessForUser(ctx, job.organizationId, job.actorId);
+    if (jurisdiction.organizationId !== job.organizationId || !access.canReview) throw new ConvexError("ORGANIZATION_ACCESS_DENIED");
   }
   await assertNoStoreTeardown(ctx, jurisdiction._id);
   const owners = await ctx.db.query("jurisdictions").withIndex("by_gemini_store_name", (q) => q.eq("geminiFileSearchStoreName", storeName)).take(2);

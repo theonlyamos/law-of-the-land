@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import { CreditCard, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
+import { Building2, CreditCard, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "@/components/providers/theme-provider";
 import { Button } from "./button";
@@ -57,6 +57,7 @@ export function ProfileMenu({ name, image, collapsed = false, onNavigate, onSign
           <Button asChild variant="ghost" className="h-10 w-full justify-start gap-3 px-3">
             <Link href="/settings/security" onClick={navigate}><Settings className="size-4 text-muted-foreground" />Settings</Link>
           </Button>
+          <Button asChild variant="ghost" className="h-10 w-full justify-start gap-3 px-3"><Link href="/organizations" onClick={navigate}><Building2 className="size-4 text-muted-foreground" />Organizations</Link></Button>
           <div className="mx-1 my-1.5 border-t" />
           <div className="px-3 py-2">
             <p className="mb-2 text-xs text-muted-foreground" id={`${panelId}-theme`}>Appearance</p>

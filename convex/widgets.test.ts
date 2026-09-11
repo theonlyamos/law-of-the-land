@@ -40,7 +40,7 @@ it("uses jurisdiction admin permissions for geographical settings and preserves 
   const input = { ...target, settings: { ...data.settings, title: "Ask the city" }, dailyLimit: 100, monthlyLimit: 1000 };
   await expect(auditor.client.mutation(save, input)).rejects.toThrow();
   expect(await admin.client.mutation(save, input)).toBe(geo.publicId);
-  await expect(admin.client.mutation(save, { ...input, jurisdictionId: org.jurisdictionId })).rejects.toThrow("GEOGRAPHIC_JURISDICTION_REQUIRED");
+  await expect(admin.client.mutation(save, { ...input, jurisdictionId: org.jurisdictionId })).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
   await expect(manager.client.mutation(save, { ...input, organizationId: org.organizationId })).rejects.toThrow("WIDGET_UNAVAILABLE");
   const setAllowance = makeFunctionReference<"mutation">("widgets:setWidgetAllowance");
   const limits = { ...target, platformDailyLimit: 2, platformMonthlyLimit: 10, maxConcurrent: 1, reason: "Set city pilot allowance" };
@@ -63,4 +63,18 @@ it("lets a manager enable a private jurisdiction without changing browsing visib
   expect((await t.run(ctx => ctx.db.get(f.jurisdictionId)))?.visibility).toBe("members");
   await manager.client.mutation(save, { ...input, settings: { ...input.settings, enabled: false } });
   expect((await t.run(ctx => ctx.db.get(f.widgetId)))?.accessVersion).toBe(1);
+});
+
+it("targets sibling widgets explicitly without overwriting their shared allowance",async()=>{
+  const t=createWidgetBackend(),a=await seedPublicWidget(t),b=await seedPublicWidget(t),manager=await addOrganizationMember(t,a.organizationId,"manager");
+  await t.run(async ctx=>{await ctx.db.patch(b.jurisdictionId,{organizationId:a.organizationId});await ctx.db.patch(b.widgetId,{organizationId:a.organizationId});});
+  await expect(manager.client.query(get,{organizationId:a.organizationId})).rejects.toThrow("ORGANIZATION_JURISDICTION_SELECTION_REQUIRED");
+  const target={organizationId:a.organizationId,jurisdictionId:b.jurisdictionId};
+  const data=await manager.client.query(get,target);
+  await manager.client.mutation(makeFunctionReference<"mutation">("widgets:saveUsageLimits"),{...target,dailyLimit:7,monthlyLimit:50});
+  await manager.client.mutation(save,{...target,settings:{...data.settings,title:"Sibling library"}});
+  expect(await manager.client.query(get,{organizationId:a.organizationId,jurisdictionId:a.jurisdictionId})).toMatchObject({dailyLimit:7,monthlyLimit:50,settings:{title:"Ask Greenfield"}});
+  expect(await manager.client.query(get,target)).toMatchObject({publicId:b.publicId,settings:{title:"Sibling library"}});
+  await expect(manager.client.mutation(save,{...target,settings:data.settings,dailyLimit:100,monthlyLimit:1000})).rejects.toThrow("WIDGET_ALLOWANCE_INVALID");
+  await expect(manager.client.query(get,{organizationId:b.organizationId,jurisdictionId:a.jurisdictionId})).rejects.toThrow();
 });
