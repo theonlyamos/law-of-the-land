@@ -95,6 +95,7 @@ it("transfers ownership with step-up and immediately changes review authority", 
     membershipId: next.membershipId,
     confirmation: `TRANSFER ${next.membershipId}`,
     idempotencyKey: "transfer_owner_test",
+    reason: "Transfer responsibility to successor",
   };
   await expect(owner.client.mutation(transfer, input)).rejects.toThrow();
   await t.mutation(proof, {
@@ -106,6 +107,8 @@ it("transfers ownership with step-up and immediately changes review authority", 
   });
   await owner.client.mutation(transfer, input);
   await owner.client.mutation(transfer, input);
+  const events = await t.run(ctx => ctx.db.query("auditEvents").collect());
+  expect(events.find(event => event.action === "organization.member_transfer")?.reason).toBe(input.reason);
   expect(
     await next.client.query(workspace, { organizationId: f.organizationId }),
   ).toMatchObject({

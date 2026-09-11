@@ -506,12 +506,14 @@ describe("typed jurisdiction administration", () => {
     })).rejects.toThrow("JURISDICTION_HAS_ACTIVE_SCOPE_LINKS");
     const updated = await admin.client.mutation(updateOrganizationalJurisdiction, {
       id: jurisdictionId,
+      name: "Global policy library",
       visibility: "public",
       scopeMode: "global",
       geographicJurisdictionIds: [],
       reason: "Make organization scope global",
     });
-    expect(updated).toMatchObject({ visibility: "public" });
+    expect(updated).toMatchObject({ visibility: "public", name: "Global policy library" });
+    expect((await t.run(ctx => ctx.db.get("jurisdictions", jurisdictionId)))?.discoveryText).toBe("Example University Global policy library");
     expect(updated).not.toHaveProperty("geminiFileSearchStoreName");
     await expect(admin.client.mutation(archiveJurisdiction, {
       id: jurisdictionId,

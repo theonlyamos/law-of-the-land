@@ -29,7 +29,7 @@ import {
   verifiedOrganizationUser,
 } from "./lib/organizationManagement";
 import { consumeStepUp } from "./admin/publication";
-import { writeAudit } from "./admin/audit";
+import { validateAuditReason, writeAudit } from "./admin/audit";
 import { sendEmail } from "./lib/email";
 
 const sendRef = makeFunctionReference<"action">(
@@ -47,6 +47,7 @@ async function audit(
   actor: { userId: string; organizationId: Id<"organizations"> },
   action: string,
   targetId: string,
+  reason?: string,
 ) {
   await writeAudit(ctx, {
     actorId: actor.userId,
@@ -55,6 +56,7 @@ async function audit(
     action,
     targetType: "organizationMembership",
     targetId,
+    reason,
     outcome: "success",
   });
 }
@@ -89,6 +91,7 @@ export const listMembers = query({
   },
 });
 const memberArgs = {
+  reason: v.string(),
   organizationId: v.id("organizations"),
   membershipId: v.id("organizationMemberships"),
   confirmation: v.string(),
@@ -97,6 +100,7 @@ const memberArgs = {
 async function memberChange(
   ctx: MutationCtx,
   args: {
+    reason: string;
     organizationId: Id<"organizations">;
     membershipId: Id<"organizationMemberships">;
     confirmation: string;
@@ -106,6 +110,7 @@ async function memberChange(
   operation: "role" | "remove" | "transfer",
 ) {
   const session = await verifiedOrganizationUser(ctx);
+  const reason = validateAuditReason(args.reason);
   const action =
     operation === "role"
       ? "organization_member_role"
@@ -121,6 +126,7 @@ async function memberChange(
       organizationId: args.organizationId,
       membershipId: args.membershipId,
       role: args.role ?? null,
+      reason,
       confirmation: args.confirmation,
     },
   );
@@ -174,7 +180,7 @@ async function memberChange(
     receipt.fingerprint,
     member._id,
   );
-  await audit(ctx, owner, `organization.member_${operation}`, member._id);
+  await audit(ctx, owner, `organization.member_${operation}`, member._id, reason);
   return null;
 }
 export const changeRole = mutation({

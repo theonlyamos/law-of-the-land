@@ -449,12 +449,14 @@ describe("jurisdiction lifecycle actions", () => {
     }} geographicOptions={geographies} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Edit organizational settings" }));
+    expect(screen.getByLabelText("Jurisdiction name")).toHaveValue("World Health Organization");
+    fireEvent.change(screen.getByLabelText("Jurisdiction name"), { target: { value: "Ghana policies" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Ghana" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Audit reason for World Health Organization" }), { target: { value: "Replace governed scope" } });
     fireEvent.click(screen.getByRole("button", { name: "Save organizational changes" }));
 
     await waitFor(() => expect(mocks.updateOrganizational).toHaveBeenCalledWith({
-      id: "org_1", visibility: "members", scopeMode: "linked_geographies", geographicJurisdictionIds: ["geo_1"], reason: "Replace governed scope",
+      id: "org_1", name: "Ghana policies", visibility: "members", scopeMode: "linked_geographies", geographicJurisdictionIds: ["geo_1"], reason: "Replace governed scope",
     }));
   });
 

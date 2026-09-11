@@ -310,6 +310,7 @@ export function JurisdictionLifecycleActions({
   const [level, setLevel] = useState<GeographicLevel>(jurisdiction.geographic?.level ?? "country");
   const [parentId, setParentId] = useState(jurisdiction.geographic?.parent?.id ?? "");
   const [visibility, setVisibility] = useState(jurisdiction.visibility);
+  const [jurisdictionName, setJurisdictionName] = useState(jurisdiction.name);
   const [scopeMode, setScopeMode] = useState<"global" | "linked_geographies">(jurisdiction.scopeMode ?? "global");
   const [linkedIds, setLinkedIds] = useState<string[]>([]);
   const [deletingStore, setDeletingStore] = useState(false);
@@ -353,7 +354,7 @@ export function JurisdictionLifecycleActions({
       } else {
         const geographicJurisdictionIds = [...new Set(linkedIds)];
         if (scopeMode === "linked_geographies" && (geographicJurisdictionIds.length < 1 || geographicJurisdictionIds.length > 8)) throw new Error("LINKED_SCOPE_REQUIRED");
-        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], reason: auditReason });
+        await updateOrganizational({ id: jurisdiction.id as Id<"jurisdictions">, name: jurisdictionName.trim(), visibility, scopeMode, geographicJurisdictionIds: (scopeMode === "global" ? [] : geographicJurisdictionIds) as Id<"jurisdictions">[], reason: auditReason });
       }
       router.refresh();
     } catch {
@@ -429,7 +430,7 @@ export function JurisdictionLifecycleActions({
         <label className={labelClass}>Geographic level<select aria-label="Geographic level" value={level} onChange={(event) => { setLevel(event.target.value as GeographicLevel); setParentId(""); }} className={fieldClass}>{LEVELS.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label>
         {level !== "country" ? <GeographicParentField key={level} level={level} selection={selection} value={parentId} onChange={setParentId} initial={geographicOptions} /> : null}
       </> : <>
-        <label className={labelClass}>Jurisdiction name<input name="jurisdictionName" aria-label="Jurisdiction name" maxLength={300} placeholder="Defaults to organization name" className={fieldClass} /></label>
+        <label className={labelClass}>Jurisdiction name<input name="jurisdictionName" aria-label="Jurisdiction name" value={jurisdictionName} onChange={(event) => setJurisdictionName(event.target.value)} maxLength={300} required className={fieldClass} /></label>
         <label className={labelClass}>Visibility<select aria-label="Visibility" value={visibility} onChange={(event) => setVisibility(event.target.value as typeof visibility)} className={fieldClass}><option value="public">Public</option><option value="members">All active members</option></select></label>
         <label className={labelClass}>Scope mode<select aria-label="Scope mode" value={scopeMode} onChange={(event) => { setScopeMode(event.target.value as typeof scopeMode); setLinkedIds([]); }} className={fieldClass}><option value="global">Global</option><option value="linked_geographies">Linked geographies</option></select></label>
         {scopeMode === "linked_geographies" ? <LinkedGeographyField initial={geographicOptions} page={geographicPage} selected={linkedIds} onChange={setLinkedIds} /> : null}

@@ -62,6 +62,7 @@ it("suspends all jurisdictions and keeps widgets disabled after restore", async 
     organizationId: a.organizationId,
     idempotencyKey: "archive_org_test",
     confirmation: `ARCHIVE ${a.organizationId}`,
+    reason: "Suspend unused organization",
   };
   await expect(owner.client.mutation(archive, input)).rejects.toThrow();
   await t.mutation(proof, {
@@ -85,8 +86,12 @@ it("suspends all jurisdictions and keeps widgets disabled after restore", async 
     organizationId: a.organizationId,
     idempotencyKey: "restore_org_test",
     confirmation: `RESTORE ${a.organizationId}`,
+    reason: "Resume organization operations",
   });
   expect(await t.query(accessible, { id: a.jurisdictionId })).not.toBeNull();
+  const events = await t.run(ctx => ctx.db.query("auditEvents").collect());
+  expect(events.find(event => event.action === "organization.archived")?.reason).toBe(input.reason);
+  expect(events.find(event => event.action === "organization.restored")?.reason).toBe("Resume organization operations");
   expect(
     await t.run((ctx) =>
       Promise.all([ctx.db.get(a.widgetId), ctx.db.get(b.widgetId)]),

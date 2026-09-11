@@ -1264,7 +1264,7 @@ export const createOrganizationalJurisdiction = mutation({
 });
 
 export const updateOrganizationalJurisdiction = mutation({
-  args: { id: v.id("jurisdictions"), ...organizationalMutationArgs },
+  args: { id: v.id("jurisdictions"), name: v.optional(v.string()), ...organizationalMutationArgs },
   returns: jurisdictionDocumentValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "jurisdiction", "write");
@@ -1294,8 +1294,15 @@ export const updateOrganizationalJurisdiction = mutation({
       profile,
       previousProfiles,
     );
+    const name = args.name === undefined ? row.name : organizationName(args.name);
+    if (name !== row.name) {
+      const siblings = await currentOrganizationJurisdictions(ctx, organization._id);
+      if (siblings.some(sibling => sibling._id !== row._id && sibling.name.normalize("NFKC").toLowerCase() === name.toLowerCase())) throw new ConvexError("ORGANIZATION_JURISDICTION_NAME_EXISTS");
+    }
     const now = Date.now();
     const patch = {
+      name,
+      discoveryText: discoveryText(organization.name, name),
       visibility: args.visibility,
       updatedBy: actor.userId,
       updatedAt: now,

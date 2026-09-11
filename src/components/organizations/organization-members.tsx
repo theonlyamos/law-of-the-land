@@ -287,6 +287,7 @@ export function OrganizationMembers({
           onClose={() => setRisk(null)}
           onConfirmed={async (input) => {
             const args = {
+              reason: input.reason,
               organizationId,
               membershipId: risk.id,
               confirmation: input.confirmation ?? "",

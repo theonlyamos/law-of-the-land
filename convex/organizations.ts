@@ -466,6 +466,7 @@ export async function archiveOrganizationForActor(
   });
 }
 const lifecycleArgs = {
+  reason: v.string(),
   organizationId: v.id("organizations"),
   confirmation: v.string(),
   idempotencyKey: v.string(),
@@ -473,6 +474,7 @@ const lifecycleArgs = {
 async function organizationLifecycle(
   ctx: MutationCtx,
   args: {
+    reason: string;
     organizationId: Id<"organizations">;
     confirmation: string;
     idempotencyKey: string;
@@ -481,12 +483,13 @@ async function organizationLifecycle(
 ) {
   const session = await verifiedOrganizationUser(ctx);
   const action = restore ? "organization_restore" : "organization_archive";
+  const reason = validateAuditReason(args.reason);
   const operation = await organizationOperation(
     ctx,
     session.userId,
     action,
     args.idempotencyKey,
-    { organizationId: args.organizationId, confirmation: args.confirmation },
+    { organizationId: args.organizationId, confirmation: args.confirmation, reason },
   );
   if (operation.old) return null;
   const actor = await requireOrganizationOwner(
@@ -532,6 +535,7 @@ async function organizationLifecycle(
     organizationId: args.organizationId,
     organizationRole: "manager",
     action: restore ? "organization.restored" : "organization.archived",
+    reason,
     targetType: "organization",
     targetId: args.organizationId,
     outcome: "success",

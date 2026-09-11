@@ -113,6 +113,7 @@ export function OrganizationSettings({
           onClose={() => setRisk(null)}
           onConfirmed={async (input) => {
             await (archived ? restore : archive)({
+              reason: input.reason,
               organizationId,
               idempotencyKey: risk,
               confirmation: input.confirmation ?? "",
