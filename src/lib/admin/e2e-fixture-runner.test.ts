@@ -451,6 +451,15 @@ describe("admin E2E place-claim control client", () => {
 });
 
 describe("Playwright web server environment", () => {
+  it("keeps widget provider transport local and copies only explicit test secrets", () => {
+    const environment = { ...safeEnvironment, WIDGET_E2E: "true", ADMIN_E2E_EMBED_SERVICE_SECRET: "e".repeat(43), ADMIN_E2E_WIDGET_IP_HASH_SECRET: "i".repeat(43), GOOGLE_AI_API_KEY: "live-key-must-not-pass", GOOGLE_GEMINI_BASE_URL: "https://provider.example" };
+    const child = buildWebServerEnvironment(environment);
+    expect(child.GOOGLE_AI_API_KEY).toBe("isolated-widget-provider-stub");
+    expect(child.GOOGLE_GEMINI_BASE_URL).toBe("http://127.0.0.1:3219");
+    expect(child.EMBED_SERVICE_SECRET).toBe(environment.ADMIN_E2E_EMBED_SERVICE_SECRET);
+    expect(buildBrowserEnvironment(environment)).not.toHaveProperty("EMBED_SERVICE_SECRET");
+    expect(() => buildWebServerEnvironment({ ...environment, ADMIN_E2E_PROVIDER_STUB_MODE: "false" })).toThrow();
+  });
   it("derives local HEAD even when VITEST is inherited", async () => {
     const expectedLocalHead = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const previous = {

@@ -1,9 +1,10 @@
 import { MainChrome } from "@/components/layout/main-chrome";
+import { AccountProviders } from "@/components/providers/account-providers";
 
 export default function MainLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return <MainChrome>{children}</MainChrome>;
+  return <AccountProviders><MainChrome>{children}</MainChrome></AccountProviders>;
 }

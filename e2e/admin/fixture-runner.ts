@@ -42,6 +42,7 @@ type FixtureRecoveryManifest = {
 };
 
 type FixtureRecords = {
+  widget?: { organizationId: string; publicId: string };
   chatId: string;
   resourceId: string;
   publishedVersionId: string;

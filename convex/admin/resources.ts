@@ -1,5 +1,6 @@
+import { bumpContentRevision } from "../lib/widgetAuthority";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import { mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
@@ -85,7 +86,7 @@ const resourceDetailValidator = v.object({
   }),
 });
 
-type Actor = { userId: string; roles: AdminRole[] };
+type Actor = { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: AdminRole[] };
 type ResourceType = Doc<"legalResources">["type"];
 
 function validatePageSize(value: number) {
@@ -342,7 +343,7 @@ async function auditChange(
 ) {
   await writeAudit(ctx, {
     actorId: actor.userId,
-    actorRoles: actor.roles,
+    actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole,
     action: input.action,
     targetType: input.targetType,
     targetId: input.targetId,
@@ -585,11 +586,8 @@ async function resourceInput(
   };
 }
 
-export const createResource = mutation({
-  args: { jurisdictionId: v.id("jurisdictions"), type: v.string(), ...resourceMutationArgs },
-  returns: v.id("legalResources"),
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+export const createResourceArgs = v.object({ jurisdictionId: v.id("jurisdictions"), type: v.string(), ...resourceMutationArgs });
+export async function createResourceForActor(ctx: MutationCtx, actor: Actor, args: Infer<typeof createResourceArgs>) {
     const reason = validateAuditReason(args.reason);
     const type = validateResourceType(args.type);
     const normalized = await resourceInput(ctx, args);
@@ -621,14 +619,19 @@ export const createResource = mutation({
       })),
     });
     return id;
+}
+
+export const createResource = mutation({
+  args: createResourceArgs.fields,
+  returns: v.id("legalResources"),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+    return createResourceForActor(ctx, actor, args);
   },
 });
 
-export const updateResource = mutation({
-  args: { id: v.id("legalResources"), ...resourceMutationArgs },
-  returns: resourceDocValidator,
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+export const updateResourceArgs = v.object({ id: v.id("legalResources"), ...resourceMutationArgs });
+export async function updateResourceForActor(ctx: MutationCtx, actor: Actor, args: Infer<typeof updateResourceArgs>) {
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
@@ -649,6 +652,7 @@ export const updateResource = mutation({
       updatedAt: Date.now(),
     };
     await ctx.db.patch(row._id, patch);
+    if (row.activeVersionId) await bumpContentRevision(ctx, row.jurisdictionId);
     await auditChange(ctx, actor, {
       action: "resource.updated",
       targetType: "legalResource",
@@ -658,6 +662,14 @@ export const updateResource = mutation({
       after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
+}
+
+export const updateResource = mutation({
+  args: updateResourceArgs.fields,
+  returns: resourceDocValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+    return updateResourceForActor(ctx, actor, args);
   },
 });
 
@@ -672,11 +684,8 @@ async function requireResourceLifecycleIdle(
   if (lock) throw new ConvexError("DOCUMENT_LIFECYCLE_BUSY");
 }
 
-export const archiveResource = mutation({
-  args: { id: v.id("legalResources"), reason: v.string() },
-  returns: resourceDocValidator,
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+export const archiveResourceArgs = v.object({ id: v.id("legalResources"), reason: v.string() });
+export async function archiveResourceForActor(ctx: MutationCtx, actor: Actor, args: Infer<typeof archiveResourceArgs>) {
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
@@ -685,6 +694,7 @@ export const archiveResource = mutation({
     await requireResourceLifecycleIdle(ctx, row._id);
     const patch = { status: "archived" as const, updatedBy: actor.userId, updatedAt: Date.now() };
     await ctx.db.patch(row._id, patch);
+    if (row.activeVersionId) await bumpContentRevision(ctx, row.jurisdictionId);
     await auditChange(ctx, actor, {
       action: "resource.archived",
       targetType: "legalResource",
@@ -694,18 +704,23 @@ export const archiveResource = mutation({
       after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
-  },
-});
+}
 
-export const markResourceRepealed = mutation({
-  args: {
-    id: v.id("legalResources"),
-    repealDate: v.string(),
-    reason: v.string(),
-  },
+export const archiveResource = mutation({
+  args: archiveResourceArgs.fields,
   returns: resourceDocValidator,
   handler: async (ctx, args) => {
     const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+    return archiveResourceForActor(ctx, actor, args);
+  },
+});
+
+export const markResourceRepealedArgs = v.object({
+    id: v.id("legalResources"),
+    repealDate: v.string(),
+    reason: v.string(),
+  });
+export async function markResourceRepealedForActor(ctx: MutationCtx, actor: Actor, args: Infer<typeof markResourceRepealedArgs>) {
     const reason = validateAuditReason(args.reason);
     const row = await ctx.db.get("legalResources", args.id);
     if (!row) throw new ConvexError("RESOURCE_NOT_FOUND");
@@ -722,6 +737,7 @@ export const markResourceRepealed = mutation({
       updatedAt: Date.now(),
     };
     await ctx.db.patch(row._id, patch);
+    if (row.activeVersionId) await bumpContentRevision(ctx, row.jurisdictionId);
     await auditChange(ctx, actor, {
       action: "resource.repealed",
       targetType: "legalResource",
@@ -731,6 +747,14 @@ export const markResourceRepealed = mutation({
       after: JSON.stringify(resourceSnapshot({ ...row, ...patch })),
     });
     return { ...row, ...patch };
+}
+
+export const markResourceRepealed = mutation({
+  args: markResourceRepealedArgs.fields,
+  returns: resourceDocValidator,
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "resource", "write");
+    return markResourceRepealedForActor(ctx, actor, args);
   },
 });
 

@@ -617,14 +617,9 @@ type GovernedCompletionAuthority = {
   jurisdictionCoverage: GovernedJurisdictionCoverage[];
 };
 
-async function resolveGovernedCompletionAuthority(
-  ctx: MutationCtx,
-  session: Doc<"chatSessions">,
-  jurisdictionId: Id<"jurisdictions">,
-  citations: readonly GovernedCitationIdentity[],
-): Promise<GovernedCompletionAuthority> {
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
-  const stores = new Map(resolution.stores.map((store) => [store.jurisdictionId, store]));
+export async function validateGovernedCitations(ctx: QueryCtx, storeList: readonly import("./jurisdictions").ChatResearchStore[], citations: readonly GovernedCitationIdentity[]) {
+  if (citations.length > MAX_CITATIONS || citations.some(c => c.pageNumber !== undefined && (!Number.isInteger(c.pageNumber) || c.pageNumber < 1 || c.pageNumber > MAX_PAGE_NUMBER))) throw new ConvexError("INVALID_CHAT_CITATIONS");
+  const stores = new Map(storeList.map((store) => [store.jurisdictionId, store]));
   const seen = new Set<string>();
   const publicCitations: ChatCitation[] = [];
   for (const citation of citations) {
@@ -674,6 +669,17 @@ async function resolveGovernedCompletionAuthority(
       relation: store.relation,
     });
   }
+  return publicCitations;
+}
+
+async function resolveGovernedCompletionAuthority(
+  ctx: MutationCtx,
+  session: Doc<"chatSessions">,
+  jurisdictionId: Id<"jurisdictions">,
+  citations: readonly GovernedCitationIdentity[],
+): Promise<GovernedCompletionAuthority> {
+  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
+  const publicCitations = await validateGovernedCitations(ctx, resolution.stores, citations);
   if (citations.length > 0) {
     if (!publicCitations.some((citation) => citation.jurisdictionId === jurisdictionId)) {
       throw new ConvexError("INVALID_CHAT_CITATIONS");

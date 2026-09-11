@@ -1,3 +1,4 @@
+import { bumpContentRevision, bumpWidgetAccessVersion } from "../lib/widgetAuthority";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -615,6 +616,8 @@ export async function updateLegacyJurisdictionForActor(
     updatedAt: Date.now(),
   };
   await ctx.db.patch(row._id, patch);
+  await bumpWidgetAccessVersion(ctx, row._id);
+  await bumpContentRevision(ctx, row._id);
   await auditJurisdiction(ctx, actor, {
     action: "jurisdiction.updated",
     targetId: row._id,
@@ -1139,6 +1142,8 @@ export const updateGeographicJurisdiction = mutation({
       updatedAt: now,
     };
     await ctx.db.patch(row._id, patch);
+  await bumpWidgetAccessVersion(ctx, row._id);
+  await bumpContentRevision(ctx, row._id);
     await ctx.db.patch(profile._id, {
       googlePlaceId: placeId,
       level: args.level,
@@ -1294,6 +1299,8 @@ export const updateOrganizationalJurisdiction = mutation({
       updatedAt: now,
     };
     await ctx.db.patch(row._id, patch);
+  await bumpWidgetAccessVersion(ctx, row._id);
+  await bumpContentRevision(ctx, row._id);
     await ctx.db.patch(profile._id, { scopeMode: args.scopeMode, updatedAt: now });
     for (const link of links) await ctx.db.delete(link._id);
     for (const geographic of profiles) {
@@ -1348,6 +1355,8 @@ export async function enableJurisdictionForActor(
   const beforeSnapshot = await completeJurisdictionSnapshot(ctx, row);
   const patch = { status: "enabled" as const, updatedBy: actor.userId, updatedAt: Date.now() };
   await ctx.db.patch(row._id, patch);
+  await bumpWidgetAccessVersion(ctx, row._id);
+  await bumpContentRevision(ctx, row._id);
   const updated = { ...row, ...patch };
   await auditJurisdiction(ctx, actor, {
     action: "jurisdiction.enabled",
@@ -1444,6 +1453,8 @@ export async function archiveJurisdictionForActor(
     updatedAt: Date.now(),
   };
   await ctx.db.patch(row._id, patch);
+  await bumpWidgetAccessVersion(ctx, row._id);
+  await bumpContentRevision(ctx, row._id);
   const archived = { ...row, ...patch };
   await auditJurisdiction(ctx, actor, {
     action: "jurisdiction.archived",

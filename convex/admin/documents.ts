@@ -1,6 +1,7 @@
-import { ConvexError, v } from "convex/values";
+import type { Id } from "../_generated/dataModel";
+import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc } from "../_generated/dataModel";
-import { mutation } from "../_generated/server";
+import { mutation, type MutationCtx } from "../_generated/server";
 import {
   GEMINI_DOCUMENT_TYPES,
   GEMINI_MAX_DOCUMENT_BYTES,
@@ -12,7 +13,7 @@ import { requireEnabledAdminPermission } from "./featureFlags";
 const MAX_FILENAME_LENGTH = 180;
 const MAX_SOURCE_URL_LENGTH = 500;
 
-function uploadLimit(): number {
+export function uploadLimit(): number {
   const raw = process.env.ADMIN_MAX_DOCUMENT_BYTES;
   if (!raw || !/^\d+$/.test(raw)) {
     throw new ConvexError("DOCUMENT_UPLOAD_NOT_CONFIGURED");
@@ -154,8 +155,7 @@ export const generateUploadUrl = mutation({
   },
 });
 
-export const createDocumentVersion = mutation({
-  args: {
+export const createDocumentVersionArgs = v.object({
     resourceId: v.id("legalResources"),
     storageId: v.id("_storage"),
     filename: v.string(),
@@ -164,10 +164,8 @@ export const createDocumentVersion = mutation({
     sha256: v.string(),
     sourceUrl: v.string(),
     effectiveAt: v.string(),
-  },
-  returns: v.id("documentVersions"),
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "document", "write");
+  });
+export async function createDocumentVersionForActor(ctx: MutationCtx, actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: string[] }, args: Infer<typeof createDocumentVersionArgs>) {
     const limit = uploadLimit();
     const resource = await ctx.db.get("legalResources", args.resourceId);
     if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
@@ -250,7 +248,7 @@ export const createDocumentVersion = mutation({
     const operationId = correlationId();
     await writeAudit(ctx, {
       actorId: actor.userId,
-      actorRoles: actor.roles,
+      actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole,
       action: "document.version_created",
       targetType: "documentVersion",
       targetId: versionId,
@@ -266,5 +264,13 @@ export const createDocumentVersion = mutation({
       outcome: "success",
     });
     return versionId;
+}
+
+export const createDocumentVersion = mutation({
+  args: createDocumentVersionArgs.fields,
+  returns: v.id("documentVersions"),
+  handler: async (ctx, args) => {
+    const actor = await requireEnabledAdminPermission(ctx, "document", "write");
+    return createDocumentVersionForActor(ctx, actor, args);
   },
 });

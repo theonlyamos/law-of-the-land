@@ -84,6 +84,7 @@ const providerSyncStateValidator = v.union(
 );
 
 export const jurisdictionDocumentValidator = v.object({
+  contentRevision: v.optional(v.number()),
   _id: v.id("jurisdictions"),
   _creationTime: v.number(),
   code: v.optional(v.string()),

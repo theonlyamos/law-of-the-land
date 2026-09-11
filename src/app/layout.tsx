@@ -1,19 +1,18 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
-import { ConvexClientProvider } from "@/components/providers/convex-client-provider";
-import { ImpersonationBanner } from "@/components/admin/impersonation-banner";
-import { ThemeProvider } from "@/components/providers/theme-provider";
 import "./globals.css";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
   variable: "--font-geist-sans",
   weight: "100 900",
+  preload: false,
 });
 const geistMono = localFont({
   src: "./fonts/GeistMonoVF.woff",
   variable: "--font-geist-mono",
   weight: "100 900",
+  preload: false,
 });
 
 export const metadata: Metadata = {
@@ -30,16 +29,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning className={`${geistSans.variable} ${geistMono.variable}`}>
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: `(function(){var t='system';try{t=localStorage.getItem('lotl-theme')||'system'}catch(e){}var d=t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.add(d?'dark':'light')})()` }} />
-      </head>
       <body className="flex min-h-screen flex-col antialiased">
-        <ThemeProvider>
-          <ConvexClientProvider>
-            <ImpersonationBanner />
-            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
-          </ConvexClientProvider>
-        </ThemeProvider>
+        {children}
       </body>
     </html>
   );

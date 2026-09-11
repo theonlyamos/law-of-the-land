@@ -45,15 +45,22 @@ export default defineConfig({
   reporter: process.env.CI ? [["line"], ["html", { open: "never" }]] : "line",
   outputDir: "test-results/playwright",
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: process.env.WIDGET_E2E === "true" ? "https://127.0.0.1:3110" : "http://127.0.0.1:3000",
+    ignoreHTTPSErrors: process.env.WIDGET_E2E === "true",
     launchOptions: { env: buildBrowserEnvironment(process.env) },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    ...(process.env.WIDGET_E2E === "true" ? [
+      { name: "firefox", testMatch: "widget.spec.ts", grep: /@cross-browser/, use: { ...devices["Desktop Firefox"] } },
+      { name: "webkit", testMatch: "widget.spec.ts", grep: /@cross-browser/, use: { ...devices["Desktop Safari"] } },
+    ] : []),
+  ],
   webServer: {
     command: "node ./e2e/admin/start-web-server.mjs",
-    url: "http://127.0.0.1:3000",
+    url: process.env.WIDGET_E2E === "true" ? "http://127.0.0.1:3100" : "http://127.0.0.1:3000",
     reuseExistingServer: false,
     timeout: 120_000,
   },

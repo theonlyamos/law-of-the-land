@@ -27,6 +27,7 @@ const SENSITIVE_TERM_PATTERN =
 export type AuditOutcome = "success" | "failure" | "denied";
 
 export type GovernanceAuditEvent = {
+  organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer";
   actorId: string;
   actorRoles: readonly string[];
   action: string;
@@ -328,7 +329,7 @@ export async function writeAudit(
     actorType: legacy.actorType,
     actorUserId: legacy.actorUserId,
     actorId: event.actorId,
-    actorRoles: [...new Set(event.actorRoles)],
+    actorRoles: [...new Set(event.actorRoles)], organizationId: event.organizationId, organizationRole: event.organizationRole,
     action: event.action,
     targetType: event.targetType,
     targetId: event.targetId,

@@ -1,5 +1,7 @@
 "use client";
 
+import type { FunctionArgs } from "convex/server";
+import type { ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import { useMutation } from "convex/react";
 import { useRouter } from "next/navigation";
@@ -23,7 +25,7 @@ export type ReviewItem = {
   mimeType: string;
   byteSize: number;
   sha256: string;
-  sourceHost: string;
+  sourceHost: string; originalUrl?: string | null;
   effectiveDate?: string;
   status: "ready_for_review" | "approved" | "publishing" | "published" | "superseded";
   failureSummary?: string;
@@ -39,13 +41,24 @@ function actionKey(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-export function DocumentReview({ items, onPublicationQueued }: { items: readonly ReviewItem[]; onPublicationQueued?: () => void }) {
+type ReviewActions = {
+  approve: (args: FunctionArgs<typeof api.admin.reviews.approveVersion>) => Promise<unknown>;
+  reject: (args: FunctionArgs<typeof api.admin.reviews.rejectVersion>) => Promise<unknown>;
+  publish: (args: FunctionArgs<typeof api.admin.publication.publishVersion>) => Promise<unknown>;
+  unpublish: (args: FunctionArgs<typeof api.admin.publication.unpublishVersion>) => Promise<unknown>;
+  rollback: (args: FunctionArgs<typeof api.admin.publication.rollbackVersion>) => Promise<unknown>;
+};
+function ReviewPermission({ scoped, allowed, ...props }: { scoped: boolean; allowed?: boolean; resource: string; action: string; fallback?: ReactNode; children: ReactNode }) {
+  return scoped ? allowed ? props.children : props.fallback : <PermissionBoundary {...props} />;
+}
+export function DocumentReview({ items, onPublicationQueued, actions, canReview, operationsHref = "/admin/operations" }: { items: readonly ReviewItem[]; onPublicationQueued?: () => void; actions?: ReviewActions; canReview?: boolean; operationsHref?: string }) {
   const router = useRouter();
-  const approve = useMutation(api.admin.reviews.approveVersion);
-  const reject = useMutation(api.admin.reviews.rejectVersion);
-  const publish = useMutation(api.admin.publication.publishVersion);
-  const unpublish = useMutation(api.admin.publication.unpublishVersion);
-  const rollback = useMutation(api.admin.publication.rollbackVersion);
+  const adminapprove = useMutation(api.admin.reviews.approveVersion);
+  const adminreject = useMutation(api.admin.reviews.rejectVersion);
+  const adminpublish = useMutation(api.admin.publication.publishVersion);
+  const adminunpublish = useMutation(api.admin.publication.unpublishVersion);
+  const adminrollback = useMutation(api.admin.publication.rollbackVersion);
+  const { approve, reject, publish, unpublish, rollback } = actions ?? { approve: adminapprove, reject: adminreject, publish: adminpublish, unpublish: adminunpublish, rollback: adminrollback };
   const [message, setMessage] = useState("");
   const [risk, setRisk] = useState<{ item: ReviewItem; action: HighRiskAction; key: string } | null>(null);
 
@@ -107,6 +120,7 @@ export function DocumentReview({ items, onPublicationQueued }: { items: readonly
             <div className="space-y-8">
               <section aria-labelledby={`${item.id}-original`}>
                 <h3 id={`${item.id}-original`} className="text-sm font-semibold uppercase tracking-[0.14em]">Authoritative original</h3>
+                {item.originalUrl && <a href={item.originalUrl} target="_blank" rel="noopener noreferrer" className="mt-3 inline-block underline">View original document</a>}
                 <dl className="mt-3 grid gap-x-6 gap-y-4 border-y border-[oklch(75%_0.025_78)] py-5 sm:grid-cols-2">
                   <div><dt className="text-xs font-semibold">File</dt><dd className="mt-1 break-all text-sm">{item.filename} / {item.mimeType} / {item.byteSize.toLocaleString()} bytes</dd></div>
                   <div><dt className="text-xs font-semibold">Official source host</dt><dd className="mt-1 text-sm">{item.sourceHost}</dd></div>
@@ -134,10 +148,10 @@ export function DocumentReview({ items, onPublicationQueued }: { items: readonly
 
             <aside className="border-l border-[oklch(75%_0.025_78)] pl-0 xl:pl-7" aria-label={`Actions for version ${item.versionNumber}`}>
               {item.status === "ready_for_review" ? (
-                <PermissionBoundary resource="document" action="review" fallback={<p className="text-sm">Read-only review evidence. Your role cannot record a decision.</p>}>
+                <ReviewPermission scoped={!!actions} allowed={canReview} resource="document" action="review" fallback={<p className="text-sm">Read-only review evidence. Your role cannot record a decision.</p>}>
                   <form onSubmit={(event) => {
                     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
-                    void decide(event, item, submitter?.value === "reject" ? "reject" : "approve");
+                    void decide(event, item, submitter?.value === "reject" ? "reject" : "approve").catch(() => setMessage("The decision could not be recorded. Check the review fields and your access, then try again."));
                   }} className="grid gap-4">
                     <fieldset className="grid gap-3"><legend className="mb-2 font-semibold">Required review record</legend>
                       {[["sourceAuthentic", "Official source authenticated"], ["metadataAccurate", "Metadata is accurate"], ["extractionReviewed", "Original text reviewed"], ["citationsVerified", "Citations verified"], ["evaluationPassed", "Search evaluation passed"]].map(([name, label]) => <label key={name} className="flex min-h-11 items-center gap-3 text-sm"><input name={name} type="checkbox" className="h-5 w-5 accent-amber-700" />{label}</label>)}
@@ -146,16 +160,16 @@ export function DocumentReview({ items, onPublicationQueued }: { items: readonly
                     <label className="grid gap-2 text-sm font-semibold">Decision reason<textarea name="reason" required minLength={3} maxLength={500} rows={4} className="border border-[oklch(62%_0.035_252)] bg-transparent p-3 font-normal" /></label>
                     <div className="flex flex-wrap gap-3"><button type="submit" name="decision" value="approve" className="min-h-11 bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)]">Approve version</button><button type="submit" name="decision" value="reject" className="min-h-11 px-4 text-sm font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">Reject version</button></div>
                   </form>
-                </PermissionBoundary>
+                </ReviewPermission>
               ) : item.status === "publishing" ? (
                 <div className="space-y-3 text-sm" role="status">
                   <p>{item.failureSummary ?? "Publication is queued or indexing is in progress. The document will be published once Gemini confirms indexing."}</p>
-                  <a href="/admin/operations" className="font-semibold underline underline-offset-4">View publishing jobs</a>
+                  <a href={operationsHref} className="font-semibold underline underline-offset-4">View publishing jobs</a>
                 </div>
               ) : (
-                <PermissionBoundary resource="document" action={item.status === "superseded" ? "rollback" : "publish"} fallback={<p className="text-sm">Read-only review evidence. Your role cannot change publication state.</p>}>
+                <ReviewPermission scoped={!!actions} allowed={canReview} resource="document" action={item.status === "superseded" ? "rollback" : "publish"} fallback={<p className="text-sm">Read-only review evidence. Your role cannot change publication state.</p>}>
                   <button type="button" onClick={() => setRisk({ item, action: item.status === "approved" ? "publish" : item.status === "published" ? "unpublish" : "rollback", key: actionKey(item.status) })} className="min-h-11 bg-[oklch(28%_0.055_252)] px-4 text-sm font-semibold text-[oklch(97%_0.012_82)]">{item.status === "approved" ? "Publish version" : item.status === "published" ? "Unpublish version" : "Roll back to version"}</button>
-                </PermissionBoundary>
+                </ReviewPermission>
               )}
             </aside>
           </div>

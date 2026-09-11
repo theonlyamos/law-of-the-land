@@ -62,6 +62,14 @@ export async function requireCurrentAdmin(
   roles: AdminRole[];
   impersonatedBy?: string;
 }> {
+  const assured = await requireAssuredSession(ctx);
+  const roles = parseAdminRoles(assured.role);
+  if (roles.length === 0) throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
+  return { userId: assured.userId, roles, ...(assured.impersonatedBy ? { impersonatedBy: assured.impersonatedBy } : {}) };
+}
+
+/** Session assurance shared by platform and scoped organization management. */
+export async function requireAssuredSession(ctx: AdminCtx) {
   const identity = await ctx.auth.getUserIdentity();
   const user = await authComponent.safeGetAuthUser(ctx);
 
@@ -89,7 +97,7 @@ export async function requireCurrentAdmin(
     model: "session",
     where: [{ field: "_id", operator: "eq", value: sessionId }],
   });
-  if (!session || session.userId !== user._id) {
+  if (!session || session.userId !== user._id || session.expiresAt <= Date.now()) {
     throw adminAccessError(
       "ADMIN_AUTH_REQUIRED",
       "You must be signed in to perform this action.",
@@ -105,14 +113,10 @@ export async function requireCurrentAdmin(
     );
   }
 
-  const roles = parseAdminRoles(user.role);
-  if (roles.length === 0) {
-    throw adminAccessError("ADMIN_FORBIDDEN", "Admin permission required");
-  }
-
   return {
     userId: user._id,
-    roles,
+    sessionId,
+    role: user.role,
     ...(typeof session.impersonatedBy === "string"
       ? { impersonatedBy: session.impersonatedBy }
       : {}),

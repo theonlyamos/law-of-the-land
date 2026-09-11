@@ -30,13 +30,13 @@ export function DocumentUpload({
   resourceStatus,
   defaultSourceUrl,
   defaultEffectiveAt,
-  maxBytes,
+  maxBytes, onUpload,
 }: {
   resourceId: string;
   resourceStatus: "active" | "repealed" | "archived";
   defaultSourceUrl: string;
   defaultEffectiveAt: string;
-  maxBytes: number;
+  maxBytes: number; onUpload?: (input: { file: File; sourceUrl: string; effectiveAt: string }) => Promise<void>;
 }) {
   const router = useRouter();
   const generateUploadUrl = useMutation(api.admin.documents.generateUploadUrl);
@@ -64,6 +64,11 @@ export function DocumentUpload({
     }
 
     try {
+      if (onUpload) {
+        setState({ kind: "busy", message: "Uploading and verifying original…" });
+        await onUpload({ file, sourceUrl, effectiveAt });
+        setFile(null); setState({ kind: "success", message: "Version recorded and ready for review." }); router.refresh(); return;
+      }
       setState({ kind: "busy", message: "Computing file checksum..." });
       const sha256 = await computeFileSha256(file);
       const uploadUrl = await generateUploadUrl({});
@@ -136,7 +141,7 @@ export function DocumentUpload({
             Add an original
           </h2>
           <p className="mt-3 max-w-[38ch] text-sm leading-6 text-[oklch(40%_0.035_252)]">
-            The browser sends the file directly to protected Convex storage.
+            {onUpload ? "Your original is verified and saved to protected storage." : "The browser sends the file directly to protected Convex storage."}
             A SHA-256 checksum binds the immutable original to its review record.
           </p>
           <p className="mt-4 text-xs font-semibold uppercase tracking-[0.1em] text-[oklch(37%_0.05_252)]">

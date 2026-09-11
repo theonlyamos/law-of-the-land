@@ -179,6 +179,17 @@ export function buildWebServerEnvironment(environment) {
     result.NEXT_PUBLIC_CONVEX_SITE_URL = environment.ADMIN_E2E_CONVEX_SITE_URL;
   }
   result.NODE_ENV = "production";
+  if (environment.WIDGET_E2E === "true") {
+    assertIsolatedWebServerEnvironment(environment);
+    result.WIDGET_CHAT_ENABLED = "true";
+    result.SITE_URL = "https://127.0.0.1:3110";
+    result.EMBED_SERVICE_SECRET = requiredTransportSecret(environment, "ADMIN_E2E_EMBED_SERVICE_SECRET");
+    result.WIDGET_IP_HASH_SECRET = requiredTransportSecret(environment, "ADMIN_E2E_WIDGET_IP_HASH_SECRET");
+    // Simulate Vercel's trusted edge header in the isolated browser harness.
+    result.VERCEL = "1";
+    result.GOOGLE_AI_API_KEY = "isolated-widget-provider-stub";
+    result.GOOGLE_GEMINI_BASE_URL = "http://127.0.0.1:3219";
+  }
   result.NEXT_TELEMETRY_DISABLED = "1";
   return result;
 }

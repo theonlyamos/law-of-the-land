@@ -14,7 +14,7 @@ const build = spawnSync(process.execPath, [next, "build"], {
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);
 
-const server = spawnSync(process.execPath, [next, "start", "--port", "3000"], {
+const server = spawnSync(process.execPath, [next, "start", "--hostname", "127.0.0.1", "--port", process.env.WIDGET_E2E === "true" ? "3100" : "3000"], {
   cwd: process.cwd(),
   env: environment,
   stdio: "inherit",

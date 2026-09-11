@@ -6,6 +6,10 @@ import { Send } from "lucide-react";
 import React from "react";
 
 interface ChatInputProps {
+  disabled?: boolean;
+  id?: string;
+  maxLength?: number;
+  describedBy?: string;
   query: string;
   onQueryChange: (value: string) => void;
   onSearch: () => void; // Simplified: will call with internal query
@@ -17,6 +21,7 @@ interface ChatInputProps {
 }
 
 export function ChatInput({
+  id, maxLength, describedBy, disabled = false,
   query,
   onQueryChange,
   onSearch,
@@ -29,11 +34,12 @@ export function ChatInput({
   return (
     <div className={`relative flex items-center ${className || ''}`}>
       <Textarea
+        id={id} maxLength={maxLength} aria-describedby={describedBy}
         placeholder={placeholder}
         onChange={(e) => onQueryChange(e.target.value)}
         onKeyDown={onKeyDown}
         value={query}
-        disabled={isLoading}
+        disabled={disabled || isLoading}
         className="resize-none pr-14 min-h-[56px] max-h-[200px] scrollbar-hide"
         rows={rows}
         style={{
@@ -42,7 +48,7 @@ export function ChatInput({
       />
 <Button
          onClick={onSearch}
-         disabled={isLoading || !query.trim()}
+         disabled={disabled || isLoading || !query.trim()}
          size="icon"
          className="absolute right-2 top-1/2 -translate-y-1/2 h-11 w-11 disabled:opacity-50 disabled:cursor-not-allowed"
        >

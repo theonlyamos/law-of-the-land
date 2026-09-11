@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
 import {
   chatCitationValidator,
   geographicLevelValidator,
@@ -12,7 +13,29 @@ import {
 } from "./lib/jurisdictionDomain";
 
 export default defineSchema({
+  jurisdictionWidgets: defineTable({
+    jurisdictionId: v.id("jurisdictions"), organizationId: v.id("organizations"), publicId: v.string(), accessVersion: v.number(),
+    ...widgetSettingsFields, createdAt: v.number(), updatedAt: v.number(), updatedBy: v.string(),
+  }).index("by_jurisdictionId", ["jurisdictionId"]).index("by_publicId", ["publicId"]).index("by_organizationId", ["organizationId"]),
+  organizationWidgetAllowances: defineTable({
+    organizationId: v.id("organizations"), dailyLimit: v.number(), monthlyLimit: v.number(), platformDailyLimit: v.number(), platformMonthlyLimit: v.number(), maxConcurrent: v.number(), updatedAt: v.number(), updatedBy: v.string(),
+  }).index("by_organizationId", ["organizationId"]),
+  widgetSessions: defineTable({
+    widgetId: v.id("jurisdictionWidgets"), organizationId: v.id("organizations"), tokenHash: v.string(), parentOrigin: v.string(),
+    accessVersion: v.number(), contentRevision: v.number(), createdAt: v.number(), lastUsedAt: v.number(), expiresAt: v.number(), deleteAfter: v.number(), revokedAt: v.optional(v.number()),
+  }).index("by_tokenHash", ["tokenHash"]).index("by_expiresAt", ["expiresAt"]).index("by_deleteAfter", ["deleteAfter"]),
+  widgetTurns: defineTable({
+    sessionId: v.id("widgetSessions"), organizationId: v.id("organizations"), requestId: v.string(), queryDigest: v.string(), query: v.string(),
+    contentRevision: v.number(), attemptNonce: v.string(), status: widgetTurnStateValidator, holdsSlot: v.boolean(), leaseExpiresAt: v.number(),
+    result: v.optional(widgetDoneValidator), citations: v.optional(v.array(widgetCitationIdentityValidator)), error: v.optional(widgetErrorValidator), createdAt: v.number(), completedAt: v.optional(v.number()), deleteAfter: v.number(),
+  }).index("by_sessionId_and_requestId", ["sessionId", "requestId"]).index("by_sessionId_and_status_and_createdAt", ["sessionId", "status", "createdAt"])
+    .index("by_organizationId_and_holdsSlot_and_leaseExpiresAt", ["organizationId", "holdsSlot", "leaseExpiresAt"]).index("by_status_and_leaseExpiresAt", ["status", "leaseExpiresAt"]).index("by_deleteAfter", ["deleteAfter"]),
+  widgetUsageBuckets: defineTable({ organizationId: v.id("organizations"), bucket: v.string(), count: v.number(), expiresAt: v.number() })
+    .index("by_organizationId_and_bucket", ["organizationId", "bucket"]).index("by_expiresAt", ["expiresAt"]),
+  widgetRateBuckets: defineTable({ namespace: v.string(), key: v.string(), window: v.number(), count: v.number(), expiresAt: v.number() })
+    .index("by_namespace_and_key_and_window", ["namespace", "key", "window"]).index("by_expiresAt", ["expiresAt"]),
   jurisdictions: defineTable({
+    contentRevision: v.optional(v.number()),
     code: v.optional(v.string()),
     name: v.string(),
     slug: v.string(),
@@ -115,6 +138,7 @@ export default defineSchema({
       filterFields: ["status"],
     }),
   organizationMemberships: defineTable({
+    role: v.optional(organizationRoleValidator),
     organizationId: v.id("organizations"),
     userId: v.string(),
     status: organizationMembershipStatusValidator,
@@ -275,6 +299,7 @@ export default defineSchema({
     ])
     .index("by_decision_and_createdAt", ["decision", "createdAt"]),
   documentLifecycleLocks: defineTable({
+    jurisdictionId: v.optional(v.id("jurisdictions")),
     resourceId: v.id("legalResources"),
     versionId: v.id("documentVersions"),
     operation: v.union(
@@ -291,13 +316,15 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_resourceId", ["resourceId"])
-    .index("by_jobId", ["jobId"]),
+    .index("by_jobId", ["jobId"])
+    .index("by_jurisdictionId", ["jurisdictionId"]),
   resourceVersionCounters: defineTable({
     resourceId: v.id("legalResources"),
     nextVersionNumber: v.number(),
     updatedAt: v.number(),
   }).index("by_resourceId", ["resourceId"]),
   auditEvents: defineTable({
+    organizationId: v.optional(v.id("organizations")), organizationRole: v.optional(v.union(v.literal("member"), v.literal("manager"), v.literal("reviewer"))),
     actorType: v.union(v.literal("system"), v.literal("user")),
     actorUserId: v.optional(v.string()),
     // Governance fields are optional while Task 3's bootstrap and role-change
@@ -428,6 +455,7 @@ export default defineSchema({
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_targetUserId_and_createdAt", ["targetUserId", "createdAt"]),
   integrationJobs: defineTable({
+    organizationId: v.optional(v.id("organizations")), organizationRole: v.optional(v.union(v.literal("member"), v.literal("manager"), v.literal("reviewer"))),
     type: v.union(
       v.literal("create_bucket"),
       v.literal("ingest_remote"),

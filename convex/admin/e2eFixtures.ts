@@ -211,6 +211,29 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
   }
   for (const organization of [publicOrganization, memberOrganization]) {
     if (!organization) continue;
+    const sessions = (await ctx.db.query("widgetSessions").take(501)).filter(row => row.organizationId === organization._id);
+    for (const session of sessions) {
+      for (const turn of await ctx.db.query("widgetTurns").withIndex("by_sessionId_and_requestId", q => q.eq("sessionId", session._id)).take(100)) {
+        if (await deleteOwned(turn._id)) return deleted;
+      }
+      for (const namespace of ["chat-session", "recovery"]) {
+        for (const bucket of await ctx.db.query("widgetRateBuckets").withIndex("by_namespace_and_key_and_window", q => q.eq("namespace", namespace).eq("key", session._id)).take(100)) {
+          if (await deleteOwned(bucket._id)) return deleted;
+        }
+      }
+      if (await deleteOwned(session._id)) return deleted;
+    }
+    for (const bucket of await ctx.db.query("widgetRateBuckets").take(500)) {
+      if (bucket.key.startsWith(`${organization._id}:`) && await deleteOwned(bucket._id)) return deleted;
+    }
+    for (const bucket of await ctx.db.query("widgetUsageBuckets").withIndex("by_organizationId_and_bucket", q => q.eq("organizationId", organization._id)).take(100)) {
+      if (await deleteOwned(bucket._id)) return deleted;
+    }
+    const allowance = await ctx.db.query("organizationWidgetAllowances").withIndex("by_organizationId", q => q.eq("organizationId", organization._id)).unique();
+    if (allowance && await deleteOwned(allowance._id)) return deleted;
+    for (const widget of await ctx.db.query("jurisdictionWidgets").withIndex("by_organizationId", q => q.eq("organizationId", organization._id)).take(2)) {
+      if (await deleteOwned(widget._id)) return deleted;
+    }
     for (const status of ["active", "inactive"] as const) {
       const memberships = await ctx.db.query("organizationMemberships")
         .withIndex("by_organizationId_and_status", (q) => q.eq("organizationId", organization._id).eq("status", status))
@@ -221,11 +244,48 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
       }
     }
   }
+  const fixtureJurisdictions = (await ctx.db.query("jurisdictions").take(500)).filter(
+    (row) => row.slug === tag || row.createdBy === `fixture:${tag}` || fixtureUserIds.has(row.createdBy),
+  );
+  for (const jurisdiction of fixtureJurisdictions) {
+    const resources = await ctx.db.query("legalResources")
+      .withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(500);
+    for (const resource of resources) {
+      // The browser matrix invokes the production createResource mutation as
+      // an assured fixture actor, so its createdBy is that actor rather than
+      // the bootstrap sentinel. The tagged jurisdiction is the exact owner.
+      const versions = await ctx.db.query("documentVersions")
+        .withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", resource._id)).take(20);
+      for (const version of versions) {
+        fixtureVersionIds.add(version._id);
+        for (const decision of await ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).take(20)) {
+          if (await deleteOwned(decision._id)) return deleted;
+        }
+        if (operationUnits + 3 > maxOperationUnits) return deleted;
+        const originalStorage = await ctx.db.system.get("_storage", version.originalStorageId);
+        operationUnits += 1;
+        if (originalStorage) { await ctx.storage.delete(version.originalStorageId); operationUnits += 1; }
+        if (await deleteOwned(version._id)) return deleted;
+      }
+      for (const lock of await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).take(20)) {
+        if (await deleteOwned(lock._id)) return deleted;
+      }
+      const counter = await ctx.db.query("resourceVersionCounters").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).unique();
+      if (counter && await deleteOwned(counter._id)) return deleted;
+      if (await deleteOwned(resource._id)) return deleted;
+    }
+    if (!typedJurisdictions.some(row => row._id === jurisdiction._id) && await deleteOwned(jurisdiction._id)) return deleted;
+  }
+
   for (const profile of organizationalProfiles) { if (await deleteOwned(profile._id)) return deleted; }
   for (const profile of geographicProfiles) { if (await deleteOwned(profile._id)) return deleted; }
-  for (const jurisdiction of typedJurisdictions) { if (await deleteOwned(jurisdiction._id)) return deleted; }
-  for (const organization of [publicOrganization, memberOrganization]) {
-    if (organization && await deleteOwned(organization._id)) return deleted;
+  for (const jurisdiction of [country, town]) { if (jurisdiction && await deleteOwned(jurisdiction._id)) return deleted; }
+  for (const [jurisdiction, organization] of [[publicOrganizationJurisdiction, publicOrganization], [memberOrganizationJurisdiction, memberOrganization]]) {
+    if (!jurisdiction || !organization) continue;
+    // Keep each ownership pair together across bounded cleanup passes.
+    if (operationUnits + 2 > maxOperationUnits) return deleted;
+    await deleteOwned(jurisdiction._id);
+    if (await deleteOwned(organization._id)) return deleted;
   }
 
   for (const user of fixtureUsers) {
@@ -271,38 +331,6 @@ async function cleanupFixture(ctx: MutationCtx, tag: string, options: { deleteOw
     if (await deleteOwned(chat._id)) return deleted;
   }
 
-  const fixtureJurisdictions = (await ctx.db.query("jurisdictions").take(500)).filter(
-    (row) => row.slug === tag || row.createdBy === `fixture:${tag}` || fixtureUserIds.has(row.createdBy),
-  );
-  for (const jurisdiction of fixtureJurisdictions) {
-    const resources = await ctx.db.query("legalResources")
-      .withIndex("by_jurisdictionId_and_updatedAt", (q) => q.eq("jurisdictionId", jurisdiction._id)).take(500);
-    for (const resource of resources) {
-      // The browser matrix invokes the production createResource mutation as
-      // an assured fixture actor, so its createdBy is that actor rather than
-      // the bootstrap sentinel. The tagged jurisdiction is the exact owner.
-      const versions = await ctx.db.query("documentVersions")
-        .withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", resource._id)).take(20);
-      for (const version of versions) {
-        fixtureVersionIds.add(version._id);
-        for (const decision of await ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).take(20)) {
-          if (await deleteOwned(decision._id)) return deleted;
-        }
-        if (operationUnits + 3 > maxOperationUnits) return deleted;
-        const originalStorage = await ctx.db.system.get("_storage", version.originalStorageId);
-        operationUnits += 1;
-        if (originalStorage) { await ctx.storage.delete(version.originalStorageId); operationUnits += 1; }
-        if (await deleteOwned(version._id)) return deleted;
-      }
-      for (const lock of await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).take(20)) {
-        if (await deleteOwned(lock._id)) return deleted;
-      }
-      const counter = await ctx.db.query("resourceVersionCounters").withIndex("by_resourceId", (q) => q.eq("resourceId", resource._id)).unique();
-      if (counter && await deleteOwned(counter._id)) return deleted;
-      if (await deleteOwned(resource._id)) return deleted;
-    }
-    if (await deleteOwned(jurisdiction._id)) return deleted;
-  }
 
   const fixtureIncidentIds = new Set(registeredIncidentIds);
   const incidentActions = new Set(["incident_create", "incident_note", "incident_update"]);
@@ -463,6 +491,7 @@ const bootstrapResultValidator = v.object({
     formerMember: sessionManifestValidator,
   }),
   records: v.object({
+    widget: v.optional(v.object({ organizationId: v.id("organizations"), publicId: v.string() })),
     chatId: v.id("chatSessions"), resourceId: v.id("legalResources"), publishedVersionId: v.id("documentVersions"),
     reviewVersionId: v.id("documentVersions"), conversationGrantId: v.id("adminAccessGrants"), jurisdictionId: v.id("jurisdictions"),
     separationVersionId: v.id("documentVersions"),
@@ -557,8 +586,9 @@ export const bootstrapRecords = internalMutation({
     const normal = await createUser("normal", "user", false, false);
     const noTwoFactor = await createUser("no_two_factor", "super_admin", false, false);
     const unassured = await createUser("unassured", "super_admin", true, false);
-    const member = await createUser("member", "user", false, false);
-    const formerMember = await createUser("former_member", "user", false, false);
+    const widgetMode = process.env.WIDGET_CHAT_ENABLED === "true";
+    const member = await createUser("member", "user", widgetMode, widgetMode);
+    const formerMember = await createUser("former_member", "user", widgetMode, widgetMode);
 
     const jurisdictionCountryId = await ctx.db.insert("jurisdictions", {
       code: "GH", name: `${tag} Ghana`, slug: fixtureSlug(tag, "ghana"), status: "enabled", isDefault: true,
@@ -631,7 +661,7 @@ export const bootstrapRecords = internalMutation({
       createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`, createdAt: now, updatedAt: now,
     });
     const resourceId = await ctx.db.insert("legalResources", {
-      jurisdictionId, type: "act", title: `${tag} Legal Resource`, issuer: "E2E fixture",
+      jurisdictionId: widgetMode ? publicOrganizationJurisdictionId : jurisdictionId, type: "act", title: `${tag} Legal Resource`, issuer: "E2E fixture",
       officialCitation: tag, officialCitationKey: tag, sourceUrl: "https://example.invalid/e2e", topics: ["fixture"],
       effectiveDate: "2026-01-01", status: "active", createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`,
       createdAt: now, updatedAt: now,
@@ -639,7 +669,7 @@ export const bootstrapRecords = internalMutation({
     const publishedVersionId = await ctx.db.insert("documentVersions", {
       resourceId, versionNumber: 1, originalStorageId: publishedStorageId, filename: `${tag}-published.pdf`, mimeType: "application/pdf",
       byteSize: publishedMetadata.size, sha256: storageSha256Hex(publishedMetadata.sha256), sourceUrl: "https://example.invalid/e2e-v1", effectiveDate: "2026-01-01",
-      status: "published", geminiDocumentName: FIXTURE_GEMINI_DOCUMENT_NAME,
+      status: "published", geminiDocumentName: widgetMode ? `${FIXTURE_PUBLIC_ORGANIZATION_GEMINI_STORE_NAME}/documents/published` : FIXTURE_GEMINI_DOCUMENT_NAME,
       submittedBy: sessions.content_manager.userId, reviewedBy: sessions.content_reviewer.userId,
       submittedAt: now, reviewedAt: now, publishedAt: now, createdAt: now, updatedAt: now,
     });
@@ -656,6 +686,16 @@ export const bootstrapRecords = internalMutation({
       submittedAt: now, createdAt: now + 2, updatedAt: now + 2,
     });
     await ctx.db.patch(resourceId, { activeVersionId: publishedVersionId });
+    let widget: { organizationId: Id<"organizations">; publicId: string } | undefined;
+    if (widgetMode) {
+      for (const [userId, role] of [[member.userId, "manager"], [formerMember.userId, "reviewer"]] as const) {
+        await ctx.db.insert("organizationMemberships", { organizationId: publicOrganizationId, userId, role, status: "active", createdAt: now, updatedAt: now });
+      }
+      const publicId = crypto.randomUUID();
+      await ctx.db.insert("jurisdictionWidgets", { organizationId: publicOrganizationId, jurisdictionId: publicOrganizationJurisdictionId, publicId, accessVersion: 1, enabled: true, allowedOrigins: ["https://allowed.widget.test"], title: "Ask our organization", welcomeMessage: "How can we help?", suggestedQuestions: [], accent: "#2563eb", side: "right", createdAt: now, updatedAt: now, updatedBy: member.userId });
+      await ctx.db.insert("organizationWidgetAllowances", { organizationId: publicOrganizationId, dailyLimit: 100, monthlyLimit: 1000, platformDailyLimit: 100, platformMonthlyLimit: 1000, maxConcurrent: 3, updatedAt: now, updatedBy: sessions.super_admin.userId });
+      widget = { organizationId: publicOrganizationId, publicId };
+    }
 
     const chatId = await ctx.db.insert("chatSessions", {
       userId: `fixture:${tag}`, externalId: tag, title: `${tag} private conversation`, lastMessage: "fixture preview",
@@ -682,6 +722,7 @@ export const bootstrapRecords = internalMutation({
       variants: { normal, noTwoFactor, unassured },
       jurisdictionUsers: { member, formerMember },
       records: {
+        ...(widget ? { widget } : {}),
         chatId, resourceId, publishedVersionId, reviewVersionId, separationVersionId, conversationGrantId, jurisdictionId, userId: normal.userId,
         geminiStoreName: FIXTURE_GEMINI_STORE_NAME, geminiDocumentName: FIXTURE_GEMINI_DOCUMENT_NAME,
         geminiOperationName: FIXTURE_GEMINI_OPERATION_NAME, providerJobId,
@@ -716,6 +757,7 @@ export const bootstrap = internalAction({
         variants: Record<"normal" | "noTwoFactor" | "unassured", { userId: string; sessionToken: string }>;
         jurisdictionUsers: Record<"member" | "formerMember", { userId: string; sessionToken: string }>;
         records: {
+          widget?: { organizationId: Id<"organizations">; publicId: string };
           chatId: Id<"chatSessions">; resourceId: Id<"legalResources">; publishedVersionId: Id<"documentVersions">;
           reviewVersionId: Id<"documentVersions">; separationVersionId: Id<"documentVersions">; conversationGrantId: Id<"adminAccessGrants">; jurisdictionId: Id<"jurisdictions">;
           userId: string; geminiStoreName: string; geminiDocumentName: string;
@@ -961,11 +1003,12 @@ async function requireTaggedVersion(ctx: MutationCtx, tag: string, versionId: Id
   const version = await ctx.db.get(versionId);
   if (!version) throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   const resource = await ctx.db.get(version.resourceId);
-  if (!resource || resource.createdBy !== `fixture:${tag}`) {
+  const owners = new Set([`fixture:${tag}`, ...(await listFixtureUsers(ctx, tag)).map(user => user.userId)]);
+  if (!resource || !owners.has(resource.createdBy)) {
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   const jurisdiction = await ctx.db.get(resource.jurisdictionId);
-  if (!jurisdiction || jurisdiction.slug !== tag || jurisdiction.createdBy !== `fixture:${tag}`) {
+  if (!jurisdiction || ![tag, fixtureSlug(tag, "public-organization")].includes(jurisdiction.slug) || jurisdiction.createdBy !== `fixture:${tag}`) {
     throw new ConvexError("E2E_FIXTURE_VERSION_MISMATCH");
   }
   return { version, resource };

@@ -1,0 +1,31 @@
+import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
+import { afterEach, expect, it, vi } from "vitest";
+const loader = readFileSync("public/widget.js", "utf8");
+type Instance = { open(): void; close(): void; destroy(): void; embedId: string; instanceId: string };
+const globalWidget = () => (window as Window & { LotlWidget?: Instance }).LotlWidget;
+afterEach(() => { globalWidget()?.destroy(); vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+it("loads no iframe until opened, checks the message source, and installs only once", async () => {
+  const script = document.createElement("script"); script.src = "https://assistant.example/widget.js"; script.dataset.embedId = "widget-12345";
+  Object.defineProperty(document, "currentScript", { configurable: true, get: () => script });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ title: "Ask Greenfield", accent: "#8d6a35", side: "right" })));
+  window.eval(loader); await vi.waitFor(() => expect(document.getElementById("lotl-widget-host")).not.toBeNull());
+  const host = document.getElementById("lotl-widget-host")!, root = host.shadowRoot!;
+  expect(root.querySelector("iframe")).toBeNull();
+  window.eval(loader); expect(document.querySelectorAll("#lotl-widget-host")).toHaveLength(1);
+  const instance = globalWidget()!; instance.open();
+  const frame = root.querySelector("iframe")!;
+  expect(frame.sandbox?.toString() ?? frame.getAttribute("sandbox")).toContain("allow-scripts");
+  expect(new URL(frame.src).searchParams.get("parentOrigin")).toBe(location.origin);
+  const ready = { namespace: "lotl-widget", version: 1, embedId: instance.embedId, instanceId: instance.instanceId, type: "ready", payload: {} };
+  window.dispatchEvent(new MessageEvent("message", { origin: "https://attacker.example", source: frame.contentWindow, data: ready }));
+  expect(frame.hidden).toBe(true);
+  window.dispatchEvent(new MessageEvent("message", { origin: "https://assistant.example", source: frame.contentWindow, data: ready }));
+  expect(frame.hidden).toBe(false);
+  instance.close(); expect(root.querySelector("section")?.hidden).toBe(true);
+  instance.open(); expect(root.querySelectorAll("iframe")).toHaveLength(1);
+  instance.destroy(); expect(document.getElementById("lotl-widget-host")).toBeNull(); expect(globalWidget()).toBeUndefined();
+});
+it("keeps the launcher assets below the 10 KiB compressed budget", () => {
+  expect(gzipSync(loader).length + gzipSync(readFileSync("public/widget.css")).length).toBeLessThan(10 * 1024);
+});

@@ -33,6 +33,7 @@ export function UserNav() {
         <UserRound className="h-4 w-4" />
         <span className="max-w-[160px] truncate">{displayName}</span>
       </div>
+      <Button asChild size="sm" variant="ghost"><Link href="/organizations">Organizations</Link></Button>
       <Button asChild size="sm" variant="ghost">
         <Link href="/settings/security">
           <Settings className="h-4 w-4" />

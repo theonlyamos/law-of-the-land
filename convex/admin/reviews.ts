@@ -30,7 +30,7 @@ type Checklist = {
   citationsVerified: boolean;
   evaluationPassed: boolean;
 };
-type Actor = { userId: string; roles: AdminRole[] };
+type Actor = { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: AdminRole[] };
 type ReviewResult = {
   status: "ready_for_review" | "approved" | "rejected";
   correlationId: string;
@@ -129,7 +129,7 @@ async function finishReviewOperation(
   });
   await writeAudit(ctx, {
     actorId: actor.userId,
-    actorRoles: actor.roles,
+    actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole,
     action: input.action.replace("_", "."),
     targetType: "documentVersion",
     targetId: input.versionId,
@@ -141,11 +141,7 @@ async function finishReviewOperation(
   return result;
 }
 
-export const submitForReview = mutation({
-  args: { versionId: v.id("documentVersions"), reason: v.string(), idempotencyKey: v.string() },
-  returns: operationResultValidator,
-  handler: async (ctx, args) => {
-    const actor = await requireEnabledAdminPermission(ctx, "document", "submit");
+export async function submitForReviewForActor(ctx: MutationCtx, args: { versionId: Id<"documentVersions">; reason: string; idempotencyKey: string }, actor: Actor) {
     const operation = await beginReviewOperation(ctx, actor, {
       action: "document_submit", versionId: args.versionId, reason: args.reason, idempotencyKey: args.idempotencyKey,
       payload: { versionId: args.versionId, reason: args.reason },
@@ -169,15 +165,18 @@ export const submitForReview = mutation({
     return await finishReviewOperation(ctx, actor, operation, {
       action: "document_submit", versionId: version._id, reason: args.reason, status: "ready_for_review",
     });
-  },
+}
+export const submitForReview = mutation({
+  args: { versionId: v.id("documentVersions"), reason: v.string(), idempotencyKey: v.string() },
+  returns: operationResultValidator,
+  handler: async (ctx, args) => submitForReviewForActor(ctx, args, await requireEnabledAdminPermission(ctx, "document", "submit")),
 });
-
-async function decide(
+export async function decideForActor(
   ctx: MutationCtx,
   args: { versionId: Id<"documentVersions">; checklistAnswers: Checklist; evaluationRunId: string; reason: string; idempotencyKey: string },
   decision: "approve" | "reject",
+  actor: Actor,
 ) {
-  const actor = await requireEnabledAdminPermission(ctx, "document", "review");
   const evaluationRunId = validateEvaluation(args.evaluationRunId);
   const action = decision === "approve" ? "document_approve" : "document_reject";
   const operation = await beginReviewOperation(ctx, actor, {
@@ -211,7 +210,7 @@ async function decide(
   return await finishReviewOperation(ctx, actor, operation, { action, versionId: version._id, reason: args.reason, status });
 }
 
-const decisionArgs = {
+export const decisionArgs = {
   versionId: v.id("documentVersions"),
   checklistAnswers: checklistValidator,
   evaluationRunId: v.string(),
@@ -222,13 +221,13 @@ const decisionArgs = {
 export const approveVersion = mutation({
   args: decisionArgs,
   returns: operationResultValidator,
-  handler: async (ctx, args) => await decide(ctx, args, "approve"),
+  handler: async (ctx, args) => await decideForActor(ctx, args, "approve", await requireEnabledAdminPermission(ctx, "document", "review")),
 });
 
 export const rejectVersion = mutation({
   args: decisionArgs,
   returns: operationResultValidator,
-  handler: async (ctx, args) => await decide(ctx, args, "reject"),
+  handler: async (ctx, args) => await decideForActor(ctx, args, "reject", await requireEnabledAdminPermission(ctx, "document", "review")),
 });
 
 const queueRowValidator = v.object({
