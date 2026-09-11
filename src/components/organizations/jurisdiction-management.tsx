@@ -402,6 +402,7 @@ export function JurisdictionSettings(target: Target) {
                 if (action === "retry")
                   await retry({
                     ...target,
+                    reason: String(form.get("reason")),
                     idempotencyKey: `setup_${crypto.randomUUID()}`,
                   });
                 else

@@ -66,4 +66,12 @@ it("creates independent sibling libraries and retries without duplicate provider
   expect(
     await t.run((ctx) => ctx.db.query("integrationJobs").collect()),
   ).toHaveLength(1);
+  await t.run(async ctx => {
+    const job = (await ctx.db.query("integrationJobs").collect())[0];
+    await ctx.db.patch(job._id, { status: "manual_review", recoveryKind: "apply_store_result", knownStoreResult: { kind: "store_created", storeName: "fileSearchStores/retry-reason", embeddingModel: "models/gemini-embedding-2" } });
+  });
+  const reason = "Resume verified setup result";
+  await manager.client.mutation(makeFunctionReference<"mutation">("organizationJurisdictions:retrySetup"), { organizationId: f.organizationId, jurisdictionId: id, idempotencyKey: "setup_reason_test", reason });
+  const events = await t.run(ctx => ctx.db.query("auditEvents").collect());
+  expect(events.find(event => event.action === "integration.job_retry")?.reason).toBe(reason);
 });

@@ -428,6 +428,9 @@ export async function archiveOrganizationForActor(
   organization: Doc<"organizations">,
   userId: string,
 ) {
+  if (!organization.ownerUserId || !(await organizationAccessForUser(ctx, organization._id, organization.ownerUserId)).isOwner) {
+    throw new ConvexError("ORGANIZATION_OWNER_REQUIRED");
+  }
   const rows = await currentOrganizationJurisdictions(ctx, organization._id);
   const invitations = await ctx.db
     .query("organizationInvitations")

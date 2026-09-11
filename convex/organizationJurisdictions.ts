@@ -477,7 +477,7 @@ export const restore = mutation({
   handler: (ctx, args) => lifecycle(ctx, args, "restore"),
 });
 export const retrySetup = mutation({
-  args: { ...targetArgs, idempotencyKey: v.string() },
+  args: { ...targetArgs, reason: v.string(), idempotencyKey: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
     const { actor, jurisdiction } = await requireOrganizationJurisdiction(
@@ -502,7 +502,7 @@ export const retrySetup = mutation({
       ctx,
       {
         jobId: jobs[0]._id,
-        reason: "Resume organization library setup",
+        reason: args.reason,
         idempotencyKey: args.idempotencyKey,
       },
       { ...actor, roles: [] },

@@ -341,6 +341,12 @@ describe("organization administration", () => {
     await admin.client.mutation(setOrganizationMemberStatus,{organizationId,userId:member.userId,status:"active",reason:"Add organization member"});
     await t.run(ctx=>ctx.db.patch(jurisdictionId,{status:"enabled"}));
     await expect(admin.client.mutation(updateOrganization,{id:organizationId,name:"Updated University",slug:"updated-university",class:"university",reason:"Rename active organization"})).resolves.toMatchObject({name:"Updated University"});
+    await expect(admin.client.mutation(archiveOrganization,{id:organizationId,reason:"Suspend organization"})).rejects.toThrow("ORGANIZATION_OWNER_REQUIRED");
+    await t.run(async ctx => {
+      const membership = await ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_userId", q => q.eq("organizationId", organizationId).eq("userId", member.userId)).unique();
+      await ctx.db.patch(membership!._id, { role: "manager" });
+      await ctx.db.patch(organizationId, { ownerUserId: member.userId });
+    });
     await expect(admin.client.mutation(archiveOrganization,{id:organizationId,reason:"Suspend organization"})).resolves.toMatchObject({status:"archived"});
     await expect(t.run(ctx=>ctx.db.get(jurisdictionId))).resolves.toMatchObject({status:"enabled",name:"Example University Rules"});
     expect(await t.run(ctx=>ctx.db.query("organizationMemberships").withIndex("by_organizationId_and_status",q=>q.eq("organizationId",organizationId).eq("status","active")).collect())).toHaveLength(1);
