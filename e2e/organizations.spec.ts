@@ -12,7 +12,13 @@ test("owner creates sibling libraries, reviews their uploads, and manages scoped
     test.setTimeout(180_000);
     page.setDefaultTimeout(15_000);
   const fixture = await loadBrowserFixtureManifest();
+  const scriptWarnings: string[] = [];
+  page.on("console", message => { if (message.text().includes("Encountered a script tag")) scriptWarnings.push(message.text()); });
   await installSessionCookie(context, fixture.jurisdictionUsers.member.cookie);
+  await page.goto("/organizations");
+  await page.getByRole("link", { name: "Back to chat" }).click();
+  await expect(page.getByRole("heading", { name: "What do you want to know?" })).toBeVisible();
+  expect(scriptWarnings).toEqual([]);
   await page.goto("/organizations");
   await page
     .getByRole("button", { name: "Create organization", exact: true })
