@@ -33,6 +33,7 @@ const listMessages = makeFunctionReference<"query">(
 const listConversations = makeFunctionReference<"query">(
   "admin/conversations:list",
 );
+const conversationPreviews = makeFunctionReference<"query">("admin/conversations:previews");
 const queueConversationExport = makeFunctionReference<"mutation">(
   "admin/exports:queueConversationExport",
 );
@@ -197,18 +198,34 @@ describe("audited conversation access grants", () => {
         content: `  What are my rights?\npassword: do-not-leak\n${"😀".repeat(130)}`,
       });
     });
-    const result = await admin.client.query(listConversations, firstPage);
-    const preview = result.page[0].firstUserMessagePreview;
+    const result = await admin.client.query(conversationPreviews, { chatIds: [chatId] });
+    const preview = result[0].firstUserMessagePreview;
     expect(preview).toMatch(/^What are my rights\? password: \[REDACTED\] /);
     expect(Array.from(preview)).toHaveLength(120);
     expect(preview.endsWith("…")).toBe(true);
     expect(preview).not.toMatch(/do-not-leak|Later|Earlier|\ufffd/);
-    expect(result.page[0]).not.toHaveProperty("content");
+    expect(result[0]).not.toHaveProperty("content");
+    await expect(admin.client.query(conversationPreviews, { chatIds: Array(9).fill(chatId) }))
+      .rejects.toThrow("TOO_MANY_CONVERSATION_PREVIEWS");
 
     await t.run((ctx) => ctx.runMutation(components.betterAuth.adapter.updateOne, {
       input: { model: "session", where: [{ field: "_id", value: admin.sessionId }], update: { impersonatedBy: "another-admin" } },
     }));
     await expect(admin.client.query(listConversations, firstPage)).rejects.toThrow("Impersonated sessions");
+    await expect(admin.client.query(conversationPreviews, { chatIds: [chatId] })).rejects.toThrow("Impersonated sessions");
+  });
+
+  it.each(["api\nkey", "access\ntoken", "refresh\t  token"])("masks split sensitive labels: %s", async (label) => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const chatId = await seedConversation(t, 0);
+    const secret = crypto.randomUUID();
+    await t.run((ctx) => ctx.db.insert("messages", {
+      sessionId: chatId, role: "user", content: `${label}: ${secret}`, createdAt: 1,
+    }));
+    const [preview] = await admin.client.query(conversationPreviews, { chatIds: [chatId] });
+    expect(preview.firstUserMessagePreview).toBe(`${label.replace(/\s+/g, " ")}: [REDACTED]`);
   });
 
   it("projects stable unified jurisdiction metadata without using country", async () => {
@@ -259,7 +276,10 @@ describe("audited conversation access grants", () => {
       },
     })]);
     expect(result.page[0]).not.toHaveProperty("country");
-    expect(result.page[0]).toMatchObject({ userName: null, userEmail: null, firstUserMessagePreview: null });
+    expect(result.page[0]).toMatchObject({ userName: null, userEmail: null });
+    expect(result.page[0]).not.toHaveProperty("firstUserMessagePreview");
+    const previews = await admin.client.query(conversationPreviews, { chatIds: [seeded.chatId] });
+    expect(previews[0].firstUserMessagePreview).toBeNull();
   });
 
   it("issues one 15-minute audit grant and reads masked messages without refresh writes", async () => {

@@ -5,7 +5,7 @@ import {
   readAdminTableNavigation,
   type AdminTableSearchParams,
 } from "@/components/admin/data-table";
-import { authorizeAdminPage } from "@/lib/admin/server";
+import { authorizeAdminPage, isAdminAccessDenial } from "@/lib/admin/server";
 import { fetchAuthQuery } from "@/lib/auth-server";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -51,14 +51,26 @@ export default async function ConversationsPage({
   }
 
   let result: Awaited<ReturnType<typeof fetchAuthQuery>> | null = null;
+  const previewsById = new Map<string, string | null>();
   let failed = !navigation.isValid || Array.isArray(parameters.userId);
   if (!failed) {
     try {
-      result = await fetchAuthQuery(api.admin.conversations.list, {
+      const listing = await fetchAuthQuery(api.admin.conversations.list, {
         paginationOpts: { numItems: 30, cursor: navigation.cursor },
         ...(userId ? { userId } : {}),
       });
-    } catch {
+      result = listing;
+      const rows = listing.page;
+      for (let start = 0; start < rows.length; start += 8) {
+        const previews = await fetchAuthQuery(api.admin.conversations.previews, {
+          chatIds: rows.slice(start, start + 8).map((row) => row.id),
+        });
+        for (const preview of previews) {
+          previewsById.set(preview.id, preview.firstUserMessagePreview);
+        }
+      }
+    } catch (error) {
+      if (isAdminAccessDenial(error)) redirect("/admin/forbidden");
       failed = true;
     }
   }
@@ -73,7 +85,6 @@ export default async function ConversationsPage({
           userEmail: string | null;
           createdAt: number;
           messageCount: number;
-          firstUserMessagePreview?: string | null;
           updatedAt: number;
           jurisdiction: {
             id: string;
@@ -116,9 +127,9 @@ export default async function ConversationsPage({
                     className="inline-flex min-h-11 max-w-[32ch] items-center font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
                   >
                     <span className="line-clamp-2 [overflow-wrap:anywhere]">
-                      {conversation.firstUserMessagePreview === undefined
+                      {previewsById.get(conversation.id) === undefined
                         ? "Conversation"
-                        : conversation.firstUserMessagePreview || "No user message"}
+                        : previewsById.get(conversation.id) || "No user message"}
                     </span>
                   </Link>
                   <span className="break-all text-xs text-[oklch(45%_0.035_252)]">

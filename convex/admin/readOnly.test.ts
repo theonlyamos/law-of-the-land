@@ -400,7 +400,6 @@ describe("read-only admin query behavior", () => {
     expect(Object.keys(first.page[0]).sort()).toEqual([
       "createdAt",
       "externalId",
-      "firstUserMessagePreview",
       "id",
       "jurisdiction",
       "messageCount",

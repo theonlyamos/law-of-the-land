@@ -49,7 +49,6 @@ const conversationRowValidator = v.object({
   userEmail: v.union(v.string(), v.null()),
   createdAt: v.number(),
   messageCount: v.number(),
-  firstUserMessagePreview: v.union(v.string(), v.null()),
   updatedAt: v.number(),
   jurisdiction: v.union(
     v.object({
@@ -113,19 +112,7 @@ export const list = query({
     const usersById = new Map(users.map((user) => [user.userId, user]));
 
     return {
-      page: await Promise.all(result.page.map(async (session) => {
-        const firstMessage = await ctx.db.query("messages")
-          .withIndex("by_sessionId_and_role_and_createdAt", (q) =>
-            q.eq("sessionId", session._id).eq("role", "user"),
-          )
-          .order("asc")
-          .first();
-        const text = maskSensitiveFields(firstMessage?.content ?? "").replace(/\s+/g, " ").trim();
-        const characters = Array.from(text);
-        const preview = characters.length > 120
-          ? `${characters.slice(0, 119).join("").trimEnd()}…`
-          : text;
-        return {
+      page: result.page.map((session) => ({
         id: session._id,
         userId: session.userId,
         externalId: session.externalId,
@@ -133,7 +120,6 @@ export const list = query({
         userEmail: usersById.get(session.userId)?.email ?? null,
         createdAt: session._creationTime,
         messageCount: session.messageCount,
-        firstUserMessagePreview: preview || null,
         updatedAt: session.updatedAt,
         jurisdiction:
           session.jurisdictionContract === "unified"
@@ -146,11 +132,39 @@ export const list = query({
                 kind: session.jurisdictionKind,
               }
             : null,
-        };
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };
+  },
+});
+
+export const previews = query({
+  args: { chatIds: v.array(v.id("chatSessions")) },
+  returns: v.array(v.object({
+    id: v.id("chatSessions"),
+    firstUserMessagePreview: v.union(v.string(), v.null()),
+  })),
+  handler: async (ctx, { chatIds }) => {
+    await requireDirectConversationContentAdmin(ctx);
+    // At most 8 one-MiB message documents, leaving room for authorization reads.
+    if (chatIds.length > 8) throw new Error("TOO_MANY_CONVERSATION_PREVIEWS");
+    return await Promise.all([...new Set(chatIds)].map(async (id) => {
+      const firstMessage = await ctx.db.query("messages")
+        .withIndex("by_sessionId_and_role_and_createdAt", (q) =>
+          q.eq("sessionId", id).eq("role", "user"),
+        )
+        .order("asc")
+        .first();
+      const text = maskSensitiveFields(firstMessage?.content ?? "").replace(/\s+/g, " ").trim();
+      const characters = Array.from(text);
+      return {
+        id,
+        firstUserMessagePreview: (characters.length > 120
+          ? `${characters.slice(0, 119).join("").trimEnd()}…`
+          : text) || null,
+      };
+    }));
   },
 });
 
@@ -162,11 +176,11 @@ export const list = query({
 export function maskSensitiveFields(content: string): string {
   return content
     .replace(
-      /(["']?(?:password|passwd|authorization|cookie|secret|access[_ -]?token|refresh[_ -]?token|api[_ -]?key)["']?\s*:\s*)(["'])([^"'\r\n]*)(\2)/gi,
+      /(["']?(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)["']?\s*:\s*)(["'])([^"'\r\n]*)(\2)/gi,
       "$1$2[REDACTED]$4",
     )
     .replace(
-      /(\b(?:password|passwd|authorization|cookie|secret|access[_ -]?token|refresh[_ -]?token|api[_ -]?key)\b\s*[=:]\s*)([^\r\n]+)/gi,
+      /(\b(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)\b\s*[=:]\s*)([^\r\n]+)/gi,
       "$1[REDACTED]",
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
