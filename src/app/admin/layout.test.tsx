@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("convex/react", () => ({
   useConvexAuth: () => mocks.auth,
   usePaginatedQuery: mocks.query,
+  useQuery: mocks.query,
 }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers({ "x-admin-pathname": mocks.pathname }) }));
 vi.mock("next/navigation", () => ({ usePathname: () => mocks.pathname, useSearchParams: () => new URLSearchParams(mocks.search), redirect: mocks.redirect }));

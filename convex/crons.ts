@@ -1,6 +1,7 @@
 import { cronJobs, makeFunctionReference } from "convex/server";
 
 const crons = cronJobs();
+crons.interval("initialize review stage counts", { minutes: 1 }, makeFunctionReference<"mutation">("admin/reviewCounts:backfill"), {});
 for (const table of ["sessions", "turns", "rates", "usage"] as const) {
   crons.interval(`expire widget ${table}`, { minutes: 15 }, makeFunctionReference<"mutation">("widgetRuntime:cleanup"), { table });
 }

@@ -1,3 +1,4 @@
+import { patchDocumentVersion } from "./reviewCounts";
 import { organizationAccessForUser } from "../lib/organizationAccess";
 import { bumpContentRevision } from "../lib/widgetAuthority";
 import { ConvexError } from "convex/values";
@@ -251,7 +252,7 @@ export async function applyPublicationJobFailure(ctx: MutationCtx, job: Doc<"int
     await releaseLifecycleLock(ctx, workflow.lock);
     return;
   }
-  await ctx.db.patch(workflow.version._id, { status: workflow.publicationOperation === "rollback" ? "superseded" : "approved", failureSummary: workflow.previous ? "Publishing failed. The previous published version is still active." : "Publishing failed. No version was published.", updatedAt: now });
+  await patchDocumentVersion(ctx, workflow.version._id, { status: workflow.publicationOperation === "rollback" ? "superseded" : "approved", failureSummary: workflow.previous ? "Publishing failed. The previous published version is still active." : "Publishing failed. No version was published.", updatedAt: now });
   await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, workflow.version._id, "failure");
   await releaseLifecycleLock(ctx, workflow.lock);
@@ -267,7 +268,7 @@ export async function applyGeminiIndexCompletion(ctx: MutationCtx, job: Doc<"int
   if (workflow.previous) {
     return { previousVersionId: workflow.previous._id, payload: { operation: "replace_delete", publicationOperation: workflow.publicationOperation, candidateVersionId: workflow.version._id, candidateDocumentName: documentName, previousVersionId: workflow.previous._id, storeName: workflow.storeName, documentName: workflow.previous.geminiDocumentName! } };
   }
-  await ctx.db.patch(workflow.version._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
+  await patchDocumentVersion(ctx, workflow.version._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
   await ctx.db.patch(workflow.resource._id, { activeVersionId: workflow.version._id, updatedBy: job.actorId, updatedAt: now });
   await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, workflow.version._id, "success");
@@ -286,7 +287,7 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
   await bumpContentRevision(ctx, workflow.jurisdiction._id);
   if (workflow.kind !== "delete") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
   if (workflow.payload.operation === "unpublish") {
-    await ctx.db.patch(workflow.target._id, { status: "unpublished", geminiDocumentName: undefined, geminiIndexedAt: undefined, unpublishedAt: now, failureSummary: undefined, updatedAt: now });
+    await patchDocumentVersion(ctx, workflow.target._id, { status: "unpublished", geminiDocumentName: undefined, geminiIndexedAt: undefined, unpublishedAt: now, failureSummary: undefined, updatedAt: now });
     await ctx.db.patch(workflow.resource._id, { activeVersionId: undefined, updatedBy: job.actorId, updatedAt: now });
     await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
     await auditOutcome(ctx, job, "unpublish", workflow.target._id, "success");
@@ -294,8 +295,8 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
     return;
   }
   const candidate = workflow.candidate!;
-  await ctx.db.patch(workflow.target._id, { status: "superseded", geminiDocumentName: undefined, geminiIndexedAt: undefined, updatedAt: now });
-  await ctx.db.patch(candidate._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
+  await patchDocumentVersion(ctx, workflow.target._id, { status: "superseded", geminiDocumentName: undefined, geminiIndexedAt: undefined, updatedAt: now });
+  await patchDocumentVersion(ctx, candidate._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
   await ctx.db.patch(workflow.resource._id, { activeVersionId: candidate._id, updatedBy: job.actorId, updatedAt: now });
   await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, candidate._id, "success");

@@ -1,3 +1,4 @@
+import { insertDocumentVersion } from "./reviewCounts";
 import type { Id } from "../_generated/dataModel";
 import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc } from "../_generated/dataModel";
@@ -240,7 +241,7 @@ export async function createDocumentVersionForActor(ctx: MutationCtx, actor: { o
       createdAt: now,
       updatedAt: now,
     };
-    const versionId = await ctx.db.insert("documentVersions", version);
+    const versionId = await insertDocumentVersion(ctx, version);
     await ctx.db.patch(counter._id, {
       nextVersionNumber: counter.nextVersionNumber + 1,
       updatedAt: now,

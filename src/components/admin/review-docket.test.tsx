@@ -2,28 +2,28 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ReviewDocket } from "./review-docket";
 
-const mocks = vi.hoisted(() => ({ query: vi.fn(), counts: vi.fn(), loadMore: vi.fn(), loadCounts: vi.fn() }));
-vi.mock("convex/react", () => ({ usePaginatedQuery: (...args: unknown[]) => args[0] === "statuses" ? mocks.counts(...args) : mocks.query(...args) }));
-vi.mock("../../../convex/_generated/api", () => ({ api: { admin: { reviews: { listReviewQueue: "reviews", listReviewStatuses: "statuses" } } } }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), counts: vi.fn(), loadMore: vi.fn() }));
+vi.mock("convex/react", () => ({ usePaginatedQuery: mocks.query, useQuery: mocks.counts }));
+vi.mock("../../../convex/_generated/api", () => ({ api: { admin: { reviews: { listReviewQueue: "reviews", getReviewCounts: "counts" } } } }));
 vi.mock("./document-review", () => ({ DocumentReview: ({ onPublicationQueued }: { onPublicationQueued: () => void }) => <button onClick={onPublicationQueued}>Simulate queued publication</button> }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
-beforeEach(() => { mocks.counts.mockReturnValue({ results: [], status: "LoadingFirstPage", loadMore: mocks.loadCounts }); });
+beforeEach(() => { mocks.counts.mockReturnValue(undefined); });
 
-it("counts every loaded status, waits for all pages, and updates totals when a version moves", () => {
+it("shows stored totals, waits for initialization, and updates when a version moves", () => {
   mocks.query.mockReturnValue({ results: [], status: "Exhausted", loadMore: mocks.loadMore });
-  mocks.counts.mockReturnValue({ results: ["approved"], status: "CanLoadMore", loadMore: mocks.loadCounts });
+  mocks.counts.mockReturnValue(null);
   const { rerender } = render(<ReviewDocket />);
-  expect(mocks.loadCounts).toHaveBeenCalledWith(200);
+  expect(mocks.counts).toHaveBeenCalledWith("counts", {});
   expect(screen.getByRole("button", { name: "Approved" })).toHaveTextContent("…");
 
-  mocks.counts.mockReturnValue({ results: ["approved", "approved", "published", "draft", "rejected"], status: "Exhausted", loadMore: mocks.loadCounts });
+  mocks.counts.mockReturnValue({ approved: 2, published: 1, draft: 1, rejected: 1 });
   rerender(<ReviewDocket />);
   expect(screen.getByRole("button", { name: "Approved (2)" })).toHaveTextContent("2");
   expect(screen.getByRole("button", { name: "Published (1)" })).toHaveTextContent("1");
   for (const label of ["Unapproved", "Queued for publishing", "Superseded"]) {
     expect(screen.getByRole("button", { name: `${label} (0)` })).toHaveTextContent("0");
   }
-  mocks.counts.mockReturnValue({ results: ["approved", "publishing", "published"], status: "Exhausted", loadMore: mocks.loadCounts });
+  mocks.counts.mockReturnValue({ approved: 1, publishing: 1, published: 1 });
   rerender(<ReviewDocket />);
   expect(screen.getByRole("button", { name: "Approved (1)" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Queued for publishing (1)" })).toBeInTheDocument();

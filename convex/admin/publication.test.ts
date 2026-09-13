@@ -1,12 +1,13 @@
 /// <reference types="vite/client" />
 
 import { convexTest, type TestConvex } from "convex-test";
-import { makeFunctionReference, type PaginationResult } from "convex/server";
+import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
+import { insertDocumentVersion, patchDocumentVersion, deleteDocumentVersion } from "./reviewCounts";
 
 const modules = Object.fromEntries(Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [path.startsWith("../") ? `./${path.slice(3)}` : `./admin/${path.slice(2)}`, load]));
 const authModules = Object.fromEntries(Object.entries(import.meta.glob("../betterAuth/**/*.ts")).map(([path, load]) => [`./${path.slice("../betterAuth/".length)}`, load]));
@@ -28,7 +29,8 @@ const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGem
 const recordAdminStepUpProof = makeFunctionReference<"mutation">("admin/users:recordAdminStepUpProof");
 const expireLifecycleLock = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
 const listReviewQueue = makeFunctionReference<"query">("admin/reviews:listReviewQueue");
-const listReviewStatuses = makeFunctionReference<"query">("admin/reviews:listReviewStatuses");
+const getReviewCounts = makeFunctionReference<"query">("admin/reviews:getReviewCounts");
+const backfillReviewCounts = makeFunctionReference<"mutation">("admin/reviewCounts:backfill");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -147,27 +149,32 @@ afterEach(() => {
 });
 
 describe("governed document publication", () => {
-  it("paginates status-only count inputs behind document read authorization", async () => {
+  it("maintains authorized totals during bounded backfill and interleaved version writes", async () => {
     const t = createBackend();
     await enablePanel(t);
     const reviewer = await asAdmin(t, "content_reviewer");
-    const args = { paginationOpts: { numItems: 2, cursor: null } };
-    await expect(t.query(listReviewStatuses, args)).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+    await expect(t.query(getReviewCounts, {})).rejects.toThrow("ADMIN_AUTH_REQUIRED");
     const billing = await asAdmin(t, "billing_admin");
-    await expect(billing.client.query(listReviewStatuses, args)).rejects.toThrow("ADMIN_FORBIDDEN");
-    expect((await reviewer.client.query(listReviewStatuses, args)).page).toEqual([]);
-    const statuses = ["draft", "approved", "approved", "published", "superseded"] as const;
-    await seedCatalog(t, "manager", [...statuses]);
-    const collected: string[] = [];
-    let cursor: string | null = null;
-    for (let pageNumber = 0; pageNumber < 4; pageNumber++) {
-      const result: PaginationResult<string> = await reviewer.client.query(listReviewStatuses, { paginationOpts: { numItems: 2, cursor } });
-      expect(result.page.length).toBeLessThanOrEqual(2);
-      collected.push(...result.page);
-      if (result.isDone) break;
-      cursor = result.continueCursor;
-    }
-    expect(collected).toEqual(statuses);
+    await expect(billing.client.query(getReviewCounts, {})).rejects.toThrow("ADMIN_FORBIDDEN");
+    expect(await reviewer.client.query(getReviewCounts, {})).toBeNull();
+    const { ids } = await seedCatalog(t, "manager", Array.from({ length: 205 }, () => "approved"));
+    await t.mutation(backfillReviewCounts, {});
+    expect(await reviewer.client.query(getReviewCounts, {})).toBeNull();
+    await t.run(async ctx => {
+      await patchDocumentVersion(ctx, ids[201], { status: "published" });
+      await deleteDocumentVersion(ctx, ids[0]);
+      await deleteDocumentVersion(ctx, ids[202]);
+      const { _id, _creationTime, reviewCounted, ...version } = (await ctx.db.get(ids[1]))!;
+      await insertDocumentVersion(ctx, { ...version, versionNumber: 206, status: "ready_for_review" });
+    });
+    await t.mutation(backfillReviewCounts, {});
+    expect(await reviewer.client.query(getReviewCounts, {})).toEqual({ approved: 202, published: 1, ready_for_review: 1 });
+    await t.mutation(backfillReviewCounts, {});
+    await t.run(async ctx => {
+      await patchDocumentVersion(ctx, ids[201], { status: "approved" });
+      await patchDocumentVersion(ctx, ids[201], { status: "approved" });
+    });
+    expect(await reviewer.client.query(getReviewCounts, {})).toEqual({ approved: 203, published: 0, ready_for_review: 1 });
   });
 
   it("includes queued publications and their failure details only in the publishing docket", async () => {
@@ -336,6 +343,7 @@ describe("governed document publication", () => {
     await enablePanel(t);
     const publisher = await asAdmin(t, "content_reviewer");
     const { resourceId, ids } = await seedCatalog(t, "manager", ["published", "approved"]);
+    await t.mutation(backfillReviewCounts, {});
     await addStepUp(t, publisher, "document_publish", ids[1], "replacement-publish-1");
     const queued = await publisher.client.mutation(publishVersion, { versionId: ids[1], confirmation: `PUBLISH ${ids[1]}`, reason: "Publish replacement", idempotencyKey: "replacement-publish-1" });
     await completeIndex(t, queued.jobId, "replacement-v2");
@@ -343,6 +351,7 @@ describe("governed document publication", () => {
     expect(indexed.resource?.activeVersionId).toBe(ids[0]);
     expect(indexed.previous?.status).toBe("published");
     expect(indexed.candidate?.status).toBe("publishing");
+    expect(await publisher.client.query(getReviewCounts, {})).toEqual({ published: 1, approved: 0, publishing: 1 });
     const deletion = indexed.jobs.find((job) => job.type === "gemini_delete_document");
     if (!deletion) throw new Error("expected replacement deletion");
     await expect(completeDelete(t, deletion._id)).resolves.toMatchObject({ kind: "delete_document", documentName: "fileSearchStores/ghana-test/documents/version-1" });
@@ -351,6 +360,7 @@ describe("governed document publication", () => {
     expect(final.previous).toMatchObject({ status: "superseded" });
     expect(final.previous?.geminiDocumentName).toBeUndefined();
     expect(final.candidate).toMatchObject({ status: "published", geminiDocumentName: "fileSearchStores/ghana-test/documents/replacement-v2" });
+    expect(await publisher.client.query(getReviewCounts, {})).toEqual({ published: 1, approved: 0, publishing: 0, superseded: 1 });
     expect(final.locks).toHaveLength(0);
   });
 
