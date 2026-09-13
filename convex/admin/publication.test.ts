@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest, type TestConvex } from "convex-test";
-import { makeFunctionReference } from "convex/server";
+import { makeFunctionReference, type PaginationResult } from "convex/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -28,6 +28,7 @@ const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGem
 const recordAdminStepUpProof = makeFunctionReference<"mutation">("admin/users:recordAdminStepUpProof");
 const expireLifecycleLock = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
 const listReviewQueue = makeFunctionReference<"query">("admin/reviews:listReviewQueue");
+const listReviewStatuses = makeFunctionReference<"query">("admin/reviews:listReviewStatuses");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -146,6 +147,29 @@ afterEach(() => {
 });
 
 describe("governed document publication", () => {
+  it("paginates status-only count inputs behind document read authorization", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const args = { paginationOpts: { numItems: 2, cursor: null } };
+    await expect(t.query(listReviewStatuses, args)).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+    const billing = await asAdmin(t, "billing_admin");
+    await expect(billing.client.query(listReviewStatuses, args)).rejects.toThrow("ADMIN_FORBIDDEN");
+    expect((await reviewer.client.query(listReviewStatuses, args)).page).toEqual([]);
+    const statuses = ["draft", "approved", "approved", "published", "superseded"] as const;
+    await seedCatalog(t, "manager", [...statuses]);
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    for (let pageNumber = 0; pageNumber < 4; pageNumber++) {
+      const result: PaginationResult<string> = await reviewer.client.query(listReviewStatuses, { paginationOpts: { numItems: 2, cursor } });
+      expect(result.page.length).toBeLessThanOrEqual(2);
+      collected.push(...result.page);
+      if (result.isDone) break;
+      cursor = result.continueCursor;
+    }
+    expect(collected).toEqual(statuses);
+  });
+
   it("includes queued publications and their failure details only in the publishing docket", async () => {
     const t = createBackend();
     await enablePanel(t);

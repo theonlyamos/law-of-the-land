@@ -262,6 +262,22 @@ const queueRowValidator = v.object({
   })),
 });
 
+export const listReviewStatuses = query({
+  args: { paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(v.string()),
+  handler: async (ctx, args) => {
+    await requireEnabledAdminPermission(ctx, "document", "read");
+    // ponytail: totals scan all versions in bounded pages; use maintained counters if the catalog outgrows this.
+    const result = await ctx.db.query("documentVersions").order("asc").paginate({
+      ...args.paginationOpts,
+      numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 200),
+      maximumRowsRead: 200,
+      maximumBytesRead: 1024 * 1024,
+    });
+    return { ...result, page: result.page.map((version) => version.status) };
+  },
+});
+
 export const listReviewQueue = query({
   args: {
     status: v.optional(v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded"))),
