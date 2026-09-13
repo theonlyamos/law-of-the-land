@@ -4,6 +4,7 @@ import { memoryAdapter } from "@better-auth/memory-adapter";
 import { base32 } from "@better-auth/utils/base32";
 import { createOTP } from "@better-auth/utils/otp";
 import { betterAuth } from "better-auth/minimal";
+import { symmetricEncrypt } from "better-auth/crypto";
 import { convexTest, type TestConvex } from "convex-test";
 import { afterEach, describe, expect, it } from "vitest";
 import { components } from "./_generated/api";
@@ -237,6 +238,69 @@ async function postAuth(
 }
 
 describe("Better Auth administrative Two Factor policy", () => {
+  it("signs in an existing enrolled admin through the Convex adapter", async () => {
+    const t = createBackend();
+    const encryptionKey = "existing-admin-regression-secret-123456789";
+    const totpSecret = "existing-admin-totp-secret";
+    const auth: AuthHandler = {
+      handler: async (request) => {
+        let response!: Response;
+        await t.run(async (ctx) => {
+          const { emailVerification: _emailVerification, ...options } = createAuthOptions(ctx);
+          response = await betterAuth({
+            ...options,
+            baseURL: "http://localhost:3000",
+            secret: encryptionKey,
+            emailAndPassword: { enabled: true },
+            socialProviders: {},
+            plugins: options.plugins.filter((plugin) => plugin.id !== "convex"),
+          }).handler(request);
+        });
+        return response;
+      },
+    };
+    const credentials = await signUp(auth);
+    const user = await t.query(components.betterAuth.adapter.findOne, {
+      model: "user",
+      where: [],
+    });
+    if (!user || !("email" in user)) throw new Error("Expected test user");
+    await t.mutation(components.betterAuth.adapter.updateOne, {
+      input: {
+        model: "user",
+        where: [{ field: "_id", value: user._id }],
+        update: { role: "super_admin", twoFactorEnabled: true },
+      },
+    });
+    // Existing enrollments predate the optional account-lockout fields.
+    await t.mutation(components.betterAuth.adapter.create, {
+      input: {
+        model: "twoFactor",
+        data: {
+          userId: user._id,
+          secret: await symmetricEncrypt({ key: encryptionKey, data: totpSecret }),
+          backupCodes: await symmetricEncrypt({ key: encryptionKey, data: "[]" }),
+        },
+      },
+    });
+    await postAuth(auth, "/sign-out", credentials.cookie, {});
+    const signIn = await postAuth(auth, "/sign-in/email", "", {
+      email: user.email,
+      password: credentials.password,
+    });
+    expect(await signIn.json()).toMatchObject({ twoFactorRedirect: true });
+    const challenge = signIn.headers.getSetCookie()
+      .map((cookie) => cookie.split(";")[0]).join("; ");
+    const code = await createOTP(totpSecret).totp();
+    const response = await postAuth(auth, "/two-factor/verify-totp", challenge, { code });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const session = await t.query(components.betterAuth.adapter.findOne, {
+      model: "session",
+      where: [{ field: "userId", value: user._id }],
+    });
+    expect(session).toMatchObject({ adminTwoFactorVerifiedAt: expect.any(Number) });
+  });
+
   it("persists assurance only after a successful real TOTP verification", async () => {
     const { auth, db } = createServerAuthTest();
     const credentials = await signUp(auth);

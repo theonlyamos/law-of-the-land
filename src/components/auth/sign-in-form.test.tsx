@@ -90,7 +90,7 @@ describe("SignInForm Two-Factor challenge", () => {
   it("keeps the challenge open after an invalid authenticator code", async () => {
     mocks.verifyTotp.mockResolvedValue({
       data: null,
-      error: { message: "Invalid code" },
+      error: { code: "INVALID_CODE", message: "Invalid code", status: 401 },
     });
     render(<SignInForm />);
     submitPasswordSignIn();
@@ -104,6 +104,24 @@ describe("SignInForm Two-Factor challenge", () => {
       "code was not accepted",
     );
     expect(screen.getByLabelText("Authenticator code")).toBeInTheDocument();
+    expect(mocks.replace).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ status: 500 }, /service is unavailable/i],
+    [{ status: 401, code: "INVALID_TWO_FACTOR_COOKIE" }, /sign in again/i],
+    [{ status: 429, code: "ACCOUNT_TEMPORARILY_LOCKED" }, /too many attempts/i],
+  ])("explains verification failures without blaming the code: %j", async (error, expectedMessage) => {
+    mocks.verifyTotp.mockResolvedValue({ data: null, error });
+    render(<SignInForm />);
+    submitPasswordSignIn();
+    fireEvent.change(await screen.findByLabelText("Authenticator code"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and sign in" }));
+    const message = await screen.findByRole("alert");
+    expect(message).toHaveTextContent(expectedMessage);
+    expect(message).not.toHaveTextContent("code was not accepted");
     expect(mocks.replace).not.toHaveBeenCalled();
   });
 });
