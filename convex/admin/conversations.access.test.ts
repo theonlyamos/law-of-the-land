@@ -195,7 +195,7 @@ describe("audited conversation access grants", () => {
       await ctx.db.insert("messages", { sessionId: chatId, role: "assistant", content: "Earlier assistant message", createdAt: 10 });
       await ctx.db.insert("messages", {
         sessionId: chatId, role: "user", createdAt: 20,
-        content: `  What are my rights?\npassword: do-not-leak\n${"😀".repeat(130)}${"a".repeat(900_000)}`,
+        content: `  What are my rights?\npassword: do-not-leak\n${"😀".repeat(130)}${"key-".repeat(225_000)}`,
       });
     });
     const result = await admin.client.query(conversationPreviews, { chatIds: [chatId] });
@@ -219,6 +219,8 @@ describe("audited conversation access grants", () => {
     ["api\nkey", ":"], ["access\ntoken", "="], ["refresh\t  token", ":"],
     ["GOOGLE_AI_API_KEY", "="], ["RESEND_API_KEY", "="], ["APP_ACCESS_TOKEN", "="],
     ["BETTER_AUTH_SECRET", "="], ['"SERVICE_API_KEY"', ":"],
+    ["clientSecret", ":"], ["privateKey", ":"], ['"sessionToken"', ":"],
+    ["passwordHash", ":"], ["signingKey", ":"], ["credentials", ":"],
   ])("masks sensitive field %s", async (label, separator) => {
     const t = createBackend();
     await enablePanel(t);
@@ -226,11 +228,12 @@ describe("audited conversation access grants", () => {
     const chatId = await seedConversation(t, 0);
     const secret = crypto.randomUUID();
     await t.run((ctx) => ctx.db.insert("messages", {
-      sessionId: chatId, role: "user", content: `${label}${separator} "${secret}"`, createdAt: 1,
+      sessionId: chatId, role: "user", content: `${label}${separator} "${secret}"\nquestion: tenant rights`, createdAt: 1,
     }));
     const [preview] = await admin.client.query(conversationPreviews, { chatIds: [chatId] });
     expect(preview.firstUserMessagePreview).not.toContain(secret);
     expect(preview.firstUserMessagePreview).toContain("[REDACTED]");
+    expect(preview.firstUserMessagePreview).toContain("question: tenant rights");
   });
 
   it("projects stable unified jurisdiction metadata without using country", async () => {
