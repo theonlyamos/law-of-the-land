@@ -236,6 +236,20 @@ describe("audited conversation access grants", () => {
     expect(preview.firstUserMessagePreview).toContain("question: tenant rights");
   });
 
+  it.each(["'", '"', "\\", "\n"])("masks quoted credential values containing %j", async (character) => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const chatId = await seedConversation(t, 0);
+    const secret = `${crypto.randomUUID()}${character}suffix`;
+    await t.run((ctx) => ctx.db.insert("messages", {
+      sessionId: chatId, role: "user", createdAt: 1,
+      content: JSON.stringify({ password: secret, question: "tenant rights" }),
+    }));
+    const [preview] = await admin.client.query(conversationPreviews, { chatIds: [chatId] });
+    expect(preview.firstUserMessagePreview).toBe('{"password":"[REDACTED]","question":"tenant rights"}');
+  });
+
   it("projects stable unified jurisdiction metadata without using country", async () => {
     const t = createBackend();
     await enablePanel(t);
