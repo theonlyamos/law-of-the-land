@@ -1,4 +1,5 @@
 import { AdminShell } from "@/components/admin/admin-shell";
+import { AdminAuthBoundary } from "@/components/admin/admin-auth-boundary";
 import { AccountProviders } from "@/components/providers/account-providers";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { headers } from "next/headers";
@@ -22,7 +23,7 @@ export default async function AdminLayout({
 
   return (
     <AccountProviders><AdminShell currentAdmin={access.currentAdmin} currentPath={pathname ?? undefined}>
-      {children}
+      <AdminAuthBoundary>{children}</AdminAuthBoundary>
     </AdminShell></AccountProviders>
   );
 }
