@@ -184,6 +184,33 @@ async function issueExportStepUp(
 const firstPage = { paginationOpts: { numItems: 50, cursor: null } };
 
 describe("audited conversation access grants", () => {
+  it("previews only the earliest user message, masked and bounded", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const admin = await asAdmin(t, "support_agent");
+    const chatId = await seedConversation(t, 0);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("messages", { sessionId: chatId, role: "user", content: "Later user message", createdAt: 30 });
+      await ctx.db.insert("messages", { sessionId: chatId, role: "assistant", content: "Earlier assistant message", createdAt: 10 });
+      await ctx.db.insert("messages", {
+        sessionId: chatId, role: "user", createdAt: 20,
+        content: `  What are my rights?\npassword: do-not-leak\n${"😀".repeat(130)}`,
+      });
+    });
+    const result = await admin.client.query(listConversations, firstPage);
+    const preview = result.page[0].firstUserMessagePreview;
+    expect(preview).toMatch(/^What are my rights\? password: \[REDACTED\] /);
+    expect(Array.from(preview)).toHaveLength(120);
+    expect(preview.endsWith("…")).toBe(true);
+    expect(preview).not.toMatch(/do-not-leak|Later|Earlier|\ufffd/);
+    expect(result.page[0]).not.toHaveProperty("content");
+
+    await t.run((ctx) => ctx.runMutation(components.betterAuth.adapter.updateOne, {
+      input: { model: "session", where: [{ field: "_id", value: admin.sessionId }], update: { impersonatedBy: "another-admin" } },
+    }));
+    await expect(admin.client.query(listConversations, firstPage)).rejects.toThrow("Impersonated sessions");
+  });
+
   it("projects stable unified jurisdiction metadata without using country", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -232,6 +259,7 @@ describe("audited conversation access grants", () => {
       },
     })]);
     expect(result.page[0]).not.toHaveProperty("country");
+    expect(result.page[0]).toMatchObject({ userName: null, userEmail: null, firstUserMessagePreview: null });
   });
 
   it("issues one 15-minute audit grant and reads masked messages without refresh writes", async () => {

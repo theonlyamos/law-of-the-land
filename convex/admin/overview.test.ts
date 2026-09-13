@@ -123,7 +123,12 @@ describe("admin overview", () => {
       t
         .withIdentity({ subject: admin.userId, sessionId: admin.sessionId })
         .query(api.admin.overview.currentAdmin, {}),
-    ).resolves.toEqual({ userId: admin.userId, roles: ["support_agent"] });
+    ).resolves.toEqual({
+      userId: admin.userId,
+      roles: ["support_agent"],
+      name: "Overview Admin",
+      email: expect.stringMatching(/^overview-.*@example\.com$/),
+    });
   });
 
   it("fails closed when the site-wide admin feature flag is disabled", async () => {

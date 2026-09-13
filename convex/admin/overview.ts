@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { components } from "../_generated/api";
 import type { Doc } from "../_generated/dataModel";
 import { query, type QueryCtx } from "../_generated/server";
 import {
@@ -23,6 +24,8 @@ const adminRoleValidator = v.union(
 
 const currentAdminValidator = v.object({
   userId: v.string(),
+  name: v.string(),
+  email: v.string(),
   roles: v.array(adminRoleValidator),
 });
 
@@ -170,7 +173,10 @@ export const currentAdmin = query({
   returns: currentAdminValidator,
   handler: async (ctx) => {
     const admin = await requireEnabledAdmin(ctx);
-    return { userId: admin.userId, roles: admin.roles };
+    const [user] = await ctx.runQuery(components.betterAuth.adminUsers.getDisplayProfiles, {
+      userIds: [admin.userId],
+    });
+    return { userId: admin.userId, roles: admin.roles, name: user?.name ?? "", email: user?.email ?? "" };
   },
 });
 

@@ -69,7 +69,11 @@ export default async function ConversationsPage({
           id: string;
           userId: string;
           externalId: string;
+          userName: string | null;
+          userEmail: string | null;
+          createdAt: number;
           messageCount: number;
+          firstUserMessagePreview?: string | null;
           updatedAt: number;
           jurisdiction: {
             id: string;
@@ -84,15 +88,15 @@ export default async function ConversationsPage({
       <header className="grid gap-5 border-b-2 border-[oklch(35%_0.055_252)] pb-7 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.42fr)] lg:items-end">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[oklch(43%_0.065_67)]">
-            Support · metadata register
+            Support · conversation register
           </p>
           <h1 className="mt-3 text-[clamp(2.25rem,6vw,4.75rem)] font-semibold leading-[0.96] tracking-[-0.05em] text-[oklch(23%_0.05_252)]">
             Conversations
           </h1>
         </div>
         <p className="max-w-[48ch] text-sm leading-6 text-[oklch(41%_0.035_252)]">
-          This register contains identifiers, jurisdiction, counts, and timing
-          only. Prompts, answers, attachments, and exports are excluded.
+          Identify conversations by their opening message, owner, jurisdiction,
+          and date. Full transcripts require a recorded access reason.
         </p>
       </header>
 
@@ -108,22 +112,37 @@ export default async function ConversationsPage({
                 <span className="grid gap-1">
                   <Link
                     href={`/admin/conversations/${encodeURIComponent(conversation.id)}`}
-                    className="inline-flex min-h-11 items-center font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
+                    title={conversation.id}
+                    className="inline-flex min-h-11 max-w-[32ch] items-center font-semibold text-[oklch(27%_0.06_252)] underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
                   >
-                    {conversation.id}
+                    <span className="line-clamp-2 [overflow-wrap:anywhere]">
+                      {conversation.firstUserMessagePreview === undefined
+                        ? "Conversation"
+                        : conversation.firstUserMessagePreview || "No user message"}
+                    </span>
                   </Link>
                   <span className="break-all text-xs text-[oklch(45%_0.035_252)]">
-                    {conversation.externalId}
+                    {conversation.createdAt
+                      ? `Started ${formatDateTime(conversation.createdAt)}`
+                      : `Updated ${formatDateTime(conversation.updatedAt)}`}
                   </span>
                 </span>
               ),
               owner: (
+                <span className="grid gap-1">
                 <Link
                   href={`/admin/users/${encodeURIComponent(conversation.userId)}`}
+                  title={conversation.userId}
                   className="inline-flex min-h-11 items-center break-all font-semibold underline decoration-[oklch(56%_0.11_68)] decoration-2 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"
                 >
-                  {conversation.userId}
+                  {conversation.userName?.trim() || conversation.userEmail?.trim() || "Unknown user"}
                 </Link>
+                {conversation.userName?.trim() && conversation.userEmail?.trim() ? (
+                  <span className="break-all text-xs text-[oklch(45%_0.035_252)]">
+                    {conversation.userEmail}
+                  </span>
+                ) : null}
+                </span>
               ),
               jurisdiction: conversation.jurisdiction ? (
                 <span className="grid gap-1">

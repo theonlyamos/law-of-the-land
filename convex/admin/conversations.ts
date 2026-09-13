@@ -1,5 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import { components } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
   mutation,
@@ -44,7 +45,11 @@ const conversationRowValidator = v.object({
   id: v.id("chatSessions"),
   userId: v.string(),
   externalId: v.string(),
+  userName: v.union(v.string(), v.null()),
+  userEmail: v.union(v.string(), v.null()),
+  createdAt: v.number(),
   messageCount: v.number(),
+  firstUserMessagePreview: v.union(v.string(), v.null()),
   updatedAt: v.number(),
   jurisdiction: v.union(
     v.object({
@@ -67,7 +72,7 @@ export const list = query({
     continueCursor: v.string(),
   }),
   handler: async (ctx, args) => {
-    await requireEnabledAdminPermission(ctx, "conversation", "read_content");
+    await requireDirectConversationContentAdmin(ctx);
     if (
       args.userId !== undefined &&
       (!args.userId || args.userId.trim() !== args.userId)
@@ -100,12 +105,35 @@ export const list = query({
           .order("desc")
           .paginate(paginationOpts);
 
+    const userIds = [...new Set(result.page.map((session) => session.userId))];
+    const users = userIds.length === 0 ? [] : (await ctx.runQuery(
+      components.betterAuth.adminUsers.getDisplayProfiles,
+      { userIds },
+    ));
+    const usersById = new Map(users.map((user) => [user.userId, user]));
+
     return {
-      page: result.page.map((session) => ({
+      page: await Promise.all(result.page.map(async (session) => {
+        const firstMessage = await ctx.db.query("messages")
+          .withIndex("by_sessionId_and_role_and_createdAt", (q) =>
+            q.eq("sessionId", session._id).eq("role", "user"),
+          )
+          .order("asc")
+          .first();
+        const text = maskSensitiveFields(firstMessage?.content ?? "").replace(/\s+/g, " ").trim();
+        const characters = Array.from(text);
+        const preview = characters.length > 120
+          ? `${characters.slice(0, 119).join("").trimEnd()}…`
+          : text;
+        return {
         id: session._id,
         userId: session.userId,
         externalId: session.externalId,
+        userName: usersById.get(session.userId)?.name ?? null,
+        userEmail: usersById.get(session.userId)?.email ?? null,
+        createdAt: session._creationTime,
         messageCount: session.messageCount,
+        firstUserMessagePreview: preview || null,
         updatedAt: session.updatedAt,
         jurisdiction:
           session.jurisdictionContract === "unified"
@@ -118,6 +146,7 @@ export const list = query({
                 kind: session.jurisdictionKind,
               }
             : null,
+        };
       })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,

@@ -41,11 +41,12 @@ export function AdminShell({
   currentPath,
   children,
 }: {
-  currentAdmin: { userId: string; roles: readonly AdminRole[] };
+  currentAdmin: { userId: string; roles: readonly AdminRole[]; name?: string; email?: string };
   currentPath?: string;
   children: ReactNode;
 }) {
   const roleSummary = currentAdmin.roles.map((role) => ROLE_LABELS[role]).join(" · ");
+  const adminLabel = currentAdmin.name?.trim() || currentAdmin.email?.trim() || "Signed-in administrator";
 
   return (
     <AdminPermissionProvider permissions={grantedPermissions(currentAdmin.roles)}>
@@ -91,8 +92,8 @@ export function AdminShell({
                 Signed-in authority
               </p>
               <p className="mt-2 text-sm font-semibold text-[oklch(26%_0.04_252)]">{roleSummary}</p>
-              <p className="mt-1 truncate text-xs text-[oklch(47%_0.035_252)]" title={currentAdmin.userId}>
-                {currentAdmin.userId}
+              <p className="mt-1 truncate text-xs text-[oklch(47%_0.035_252)]" title={currentAdmin.email || adminLabel}>
+                {adminLabel}
               </p>
             </div>
             <AdminNav roles={currentAdmin.roles} currentPath={currentPath} />

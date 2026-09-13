@@ -361,15 +361,16 @@ describe("read-only admin query behavior", () => {
     expect(JSON.stringify(result)).not.toContain("fingerprint");
   });
 
-  it("returns cursor-paginated conversation metadata without content-derived fields", async () => {
+  it("paginates conversation summaries without exposing titles or answers", async () => {
     const t = createBackend();
     await enablePanel(t);
     const asSupport = await createAdmin(t, "support_agent");
+    const owner = await createUser(t, { name: "Case Reader", email: "reader@example.com" });
 
     await t.run(async (ctx) => {
       for (let index = 0; index < 3; index += 1) {
         await ctx.db.insert("chatSessions", {
-          userId: "target-user",
+          userId: owner._id,
           externalId: `external-${index}`,
           title: `Sensitive prompt title ${index}`,
           lastMessage: `Sensitive answer ${index}`,
@@ -382,11 +383,11 @@ describe("read-only admin query behavior", () => {
 
     const first = await asSupport.query(api.admin.conversations.list, {
       paginationOpts: { numItems: 2, cursor: null },
-      userId: "target-user",
+      userId: owner._id,
     });
     const second = await asSupport.query(api.admin.conversations.list, {
       paginationOpts: { numItems: 2, cursor: first.continueCursor },
-      userId: "target-user",
+      userId: owner._id,
     });
 
     expect(first.page).toHaveLength(2);
@@ -397,13 +398,22 @@ describe("read-only admin query behavior", () => {
       1_900_000_000_001,
     ]);
     expect(Object.keys(first.page[0]).sort()).toEqual([
+      "createdAt",
       "externalId",
+      "firstUserMessagePreview",
       "id",
       "jurisdiction",
       "messageCount",
       "updatedAt",
+      "userEmail",
       "userId",
+      "userName",
     ]);
+    expect(first.page[0]).toMatchObject({
+      userName: "Case Reader",
+      userEmail: "reader@example.com",
+      createdAt: expect.any(Number),
+    });
     expect(first.page.every((row) => row.jurisdiction === null)).toBe(true);
     expect(JSON.stringify(first)).not.toContain("Sensitive prompt");
     expect(JSON.stringify(first)).not.toContain("Sensitive answer");

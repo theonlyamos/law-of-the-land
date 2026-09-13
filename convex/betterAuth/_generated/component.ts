@@ -1238,6 +1238,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     adminUsers: {
+      getDisplayProfiles: FunctionReference<
+        "query",
+        "internal",
+        { userIds: Array<string> },
+        Array<{ email: string; name: string; userId: string }>,
+        Name
+      >;
       listPage: FunctionReference<
         "query",
         "internal",
