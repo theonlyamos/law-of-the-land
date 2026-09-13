@@ -127,11 +127,18 @@ function SignInFormInner() {
             });
 
       if (result.error || !result.data) {
-        setError(
-          challengeMode === "totp"
+        const code = result.error?.code;
+        if (code === "INVALID_TWO_FACTOR_COOKIE" || code === "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE") {
+          setError("This verification attempt has expired. Go back and sign in again.");
+        } else if (result.error?.status === 429 || code === "ACCOUNT_TEMPORARILY_LOCKED") {
+          setError("Too many attempts. Wait a few minutes, then sign in again.");
+        } else if (code === "INVALID_CODE" || code === "INVALID_BACKUP_CODE") {
+          setError(challengeMode === "totp"
             ? "That authenticator code was not accepted. Check the time on your device and try again."
-            : "That backup code was not accepted. Check the code and try another unused code.",
-        );
+            : "That backup code was not accepted. Check the code and try another unused code.");
+        } else {
+          setError("The verification service is unavailable. Please try signing in again shortly.");
+        }
         return;
       }
 
