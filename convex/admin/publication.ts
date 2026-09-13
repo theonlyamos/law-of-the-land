@@ -1,3 +1,4 @@
+import { patchDocumentVersion } from "./reviewCounts";
 import { makeFunctionReference } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -95,7 +96,7 @@ async function restoreExpiredUnstartedIndex(ctx: MutationCtx, lock: Doc<"documen
     !operationValid || resource.activeVersionId !== previousVersionId ||
     jurisdiction.geminiFileSearchStoreName !== payload.storeName
   ) throw new ConvexError("DOCUMENT_LIFECYCLE_LOCK_STATE_INVALID");
-  await ctx.db.patch(version._id, {
+  await patchDocumentVersion(ctx, version._id, {
     status: lock.operation === "rollback" ? "superseded" : "approved",
     failureSummary: previousVersionId ? "Publishing failed. The previous published version is still active." : "Publishing failed. No version was published.",
     updatedAt: Date.now(),
@@ -179,7 +180,7 @@ export async function queuePublication(ctx: MutationCtx, actor: Actor, args: { v
     if (!job) throw new ConvexError("INTEGRATION_JOB_NOT_FOUND");
     await ctx.db.patch(lockId, { jobId: job._id, updatedAt: Date.now() });
     await ctx.scheduler.runAfter(LIFECYCLE_LOCK_MS, expireLifecycleLockRef, { lockId });
-    if (operation !== "unpublish") await ctx.db.patch(version._id, { status: "publishing", failureSummary: undefined, updatedAt: Date.now() });
+    if (operation !== "unpublish") await patchDocumentVersion(ctx, version._id, { status: "publishing", failureSummary: undefined, updatedAt: Date.now() });
     await writeAudit(ctx, { actorId: actor.userId, actorRoles: actor.roles, organizationId: actor.organizationId, organizationRole: actor.organizationRole, action: `document.${operation}.queued`, targetType: "documentVersion", targetId: version._id, reason: args.reason, correlationId: job.correlationId, outcome: "success" });
     return { jobId: job._id, type: operation === "unpublish" ? "gemini_delete" as const : "gemini_index" as const, duplicate: false, correlationId: job.correlationId };
   } catch (error) {

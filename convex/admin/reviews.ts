@@ -1,3 +1,4 @@
+import { patchDocumentVersion, getReviewCountState } from "./reviewCounts";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
@@ -162,7 +163,7 @@ export async function submitForReviewForActor(ctx: MutationCtx, args: { versionI
       throw new ConvexError("DOCUMENT_CHECKSUM_MISMATCH");
     }
     const now = Date.now();
-    await ctx.db.patch(version._id, { status: "ready_for_review", submittedBy: actor.userId, submittedAt: now, updatedAt: now });
+    await patchDocumentVersion(ctx, version._id, { status: "ready_for_review", submittedBy: actor.userId, submittedAt: now, updatedAt: now });
     return await finishReviewOperation(ctx, actor, operation, {
       action: "document_submit", versionId: version._id, reason: args.reason, status: "ready_for_review",
     });
@@ -212,7 +213,7 @@ export async function decideForActor(
     createdAt: now,
   });
   const status = decision === "approve" ? "approved" as const : "rejected" as const;
-  await ctx.db.patch(version._id, { status, reviewedBy: actor.userId, reviewedAt: now, updatedAt: now });
+  await patchDocumentVersion(ctx, version._id, { status, reviewedBy: actor.userId, reviewedAt: now, updatedAt: now });
   return await finishReviewOperation(ctx, actor, operation, { action, versionId: version._id, reason: args.reason, status, ownerSelfReview });
 }
 
@@ -260,6 +261,16 @@ const queueRowValidator = v.object({
     decision: v.union(v.literal("approve"), v.literal("reject")),
     reviewerId: v.string(), reason: v.string(), evaluationRunId: v.optional(v.string()), createdAt: v.number(),
   })),
+});
+
+export const getReviewCounts = query({
+  args: {},
+  returns: v.union(v.record(v.string(), v.number()), v.null()),
+  handler: async ctx => {
+    await requireEnabledAdminPermission(ctx, "document", "read");
+    const state = await getReviewCountState(ctx);
+    return state?.ready ? state.counts : null;
+  },
 });
 
 export const listReviewQueue = query({

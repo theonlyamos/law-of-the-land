@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { usePaginatedQuery } from "convex/react";
+import { usePaginatedQuery, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { DocumentReview, type ReviewItem } from "./document-review";
 
@@ -15,6 +15,7 @@ const stages = [
 
 export function ReviewDocket() {
   const [stage, setStage] = useState<ReviewItem["status"]>("ready_for_review");
+  const counts = useQuery(api.admin.reviews.getReviewCounts, {});
   const { results, status, loadMore } = usePaginatedQuery(
     api.admin.reviews.listReviewQueue,
     { status: stage },
@@ -26,8 +27,12 @@ export function ReviewDocket() {
       <div role="group" aria-label="Filter by document status" className="flex flex-wrap gap-2">
         {stages.map(([value, label]) => (
           <button key={value} type="button" aria-pressed={stage === value} onClick={() => setStage(value)}
+            aria-label={counts != null ? `${label} (${counts[value] ?? 0})` : label}
             className={`min-h-11 border px-4 py-2 text-sm font-semibold ${stage === value ? "border-[oklch(28%_0.055_252)] bg-[oklch(28%_0.055_252)] text-[oklch(97%_0.012_82)]" : "border-[oklch(62%_0.035_252)] bg-transparent"}`}>
             {label}
+            <span aria-hidden="true" className="ml-2 inline-block min-w-5 rounded-sm bg-current/10 px-1.5 text-xs tabular-nums">
+              {counts != null ? counts[value] ?? 0 : "…"}
+            </span>
           </button>
         ))}
       </div>

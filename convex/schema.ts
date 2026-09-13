@@ -232,7 +232,12 @@ export default defineSchema({
       "jurisdictionId",
       "activeVersionId",
     ]),
+  reviewStageCounts: defineTable({
+    key: v.literal("all"), counts: v.record(v.string(), v.number()),
+    cursor: v.union(v.string(), v.null()), ready: v.boolean(),
+  }).index("by_key", ["key"]),
   documentVersions: defineTable({
+    reviewCounted: v.optional(v.boolean()),
     resourceId: v.id("legalResources"),
     versionNumber: v.number(),
     originalStorageId: v.id("_storage"),

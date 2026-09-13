@@ -266,6 +266,7 @@ describe("governed original-file uploads", () => {
       locks: await ctx.db.query("documentLifecycleLocks").take(1),
     }));
     expect(state.version).toMatchObject({ status: "ready_for_review", originalStorageId: storageId, submittedAt: expect.any(Number) });
+    expect(await t.run(ctx => ctx.db.query("reviewStageCounts").unique())).toMatchObject({ counts: { ready_for_review: 1 } });
     expect(state.jobs).toHaveLength(0);
     expect(state.locks).toHaveLength(0);
   });
