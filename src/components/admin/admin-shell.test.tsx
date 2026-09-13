@@ -16,6 +16,17 @@ vi.mock("next/navigation", () => ({
 afterEach(cleanup);
 
 describe("administration shell permissions", () => {
+  it.each([
+    ["Alex Admin", "alex@example.com", "Alex Admin"],
+    [" ", "alex@example.com", "alex@example.com"],
+  ])("identifies the administrator by name or email", (name, email, label) => {
+    render(<AdminShell currentAdmin={{ userId: "admin_1", roles: ["auditor"], name, email }}>
+      <h1>Overview</h1>
+    </AdminShell>);
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByText("admin_1")).toBeNull();
+  });
+
   it("shows support tools without exposing document administration", () => {
     render(<AdminNav roles={["support_agent"]} />);
 

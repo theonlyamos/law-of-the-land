@@ -925,5 +925,6 @@ export default defineSchema({
   })
     .index("by_session", ["sessionId"])
     .index("by_session_and_createdAt", ["sessionId", "createdAt"])
+    .index("by_sessionId_and_role_and_createdAt", ["sessionId", "role", "createdAt"])
     .index("by_session_clientId", ["sessionId", "clientId"]),
 });

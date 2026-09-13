@@ -1,5 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import { components } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
   mutation,
@@ -44,6 +45,9 @@ const conversationRowValidator = v.object({
   id: v.id("chatSessions"),
   userId: v.string(),
   externalId: v.string(),
+  userName: v.union(v.string(), v.null()),
+  userEmail: v.union(v.string(), v.null()),
+  createdAt: v.number(),
   messageCount: v.number(),
   updatedAt: v.number(),
   jurisdiction: v.union(
@@ -67,7 +71,7 @@ export const list = query({
     continueCursor: v.string(),
   }),
   handler: async (ctx, args) => {
-    await requireEnabledAdminPermission(ctx, "conversation", "read_content");
+    await requireDirectConversationContentAdmin(ctx);
     if (
       args.userId !== undefined &&
       (!args.userId || args.userId.trim() !== args.userId)
@@ -100,11 +104,21 @@ export const list = query({
           .order("desc")
           .paginate(paginationOpts);
 
+    const userIds = [...new Set(result.page.map((session) => session.userId))];
+    const users = userIds.length === 0 ? [] : (await ctx.runQuery(
+      components.betterAuth.adminUsers.getDisplayProfiles,
+      { userIds },
+    ));
+    const usersById = new Map(users.map((user) => [user.userId, user]));
+
     return {
       page: result.page.map((session) => ({
         id: session._id,
         userId: session.userId,
         externalId: session.externalId,
+        userName: usersById.get(session.userId)?.name ?? null,
+        userEmail: usersById.get(session.userId)?.email ?? null,
+        createdAt: session._creationTime,
         messageCount: session.messageCount,
         updatedAt: session.updatedAt,
         jurisdiction:
@@ -125,6 +139,36 @@ export const list = query({
   },
 });
 
+export const previews = query({
+  args: { chatIds: v.array(v.id("chatSessions")) },
+  returns: v.array(v.object({
+    id: v.id("chatSessions"),
+    firstUserMessagePreview: v.union(v.string(), v.null()),
+  })),
+  handler: async (ctx, { chatIds }) => {
+    await requireDirectConversationContentAdmin(ctx);
+    // At most 8 one-MiB message documents, leaving room for authorization reads.
+    if (chatIds.length > 8) throw new Error("TOO_MANY_CONVERSATION_PREVIEWS");
+    return await Promise.all([...new Set(chatIds)].map(async (id) => {
+      const firstMessage = await ctx.db.query("messages")
+        .withIndex("by_sessionId_and_role_and_createdAt", (q) =>
+          q.eq("sessionId", id).eq("role", "user"),
+        )
+        .order("asc")
+        .first();
+      const text = maskSensitiveFields(firstMessage?.content ?? "").replace(/\s+/g, " ").trim();
+      // 242 UTF-16 units retain at least 121 code points without a body-sized array.
+      const characters = Array.from(text.slice(0, 242));
+      return {
+        id,
+        firstUserMessagePreview: (characters.length > 120
+          ? `${characters.slice(0, 119).join("").trimEnd()}…`
+          : text) || null,
+      };
+    }));
+  },
+});
+
 /**
  * Removes secret-bearing field values before conversation content crosses the
  * administrative read boundary. Markdown rendering applies a second,
@@ -133,12 +177,11 @@ export const list = query({
 export function maskSensitiveFields(content: string): string {
   return content
     .replace(
-      /(["']?(?:password|passwd|authorization|cookie|secret|access[_ -]?token|refresh[_ -]?token|api[_ -]?key)["']?\s*:\s*)(["'])([^"'\r\n]*)(\2)/gi,
-      "$1$2[REDACTED]$4",
-    )
-    .replace(
-      /(\b(?:password|passwd|authorization|cookie|secret|access[_ -]?token|refresh[_ -]?token|api[_ -]?key)\b\s*[=:]\s*)([^\r\n]+)/gi,
-      "$1[REDACTED]",
+      /(?<![a-z0-9_-])(["']?(?=[a-z0-9_-]*(?:password|passwd|authorization|cookie|secret|token|key|credential))[a-z0-9_-]+["']?\s*[=:]\s*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\r\n]+)/gi,
+      (_match, field: string, value: string) => {
+        const quote = value[0] === '"' || value[0] === "'" ? value[0] : "";
+        return `${field}${quote}[REDACTED]${quote}`;
+      },
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
 }

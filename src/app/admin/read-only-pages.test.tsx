@@ -145,13 +145,16 @@ describe("read-only admin pages", () => {
     );
   });
 
-  it("renders conversation metadata without content columns", async () => {
-    mocks.fetchAuthQuery.mockResolvedValue({
+  it("renders conversation previews and owner names without transcript columns", async () => {
+    mocks.fetchAuthQuery.mockResolvedValueOnce({
       page: [
         {
           id: "conversation-1",
           userId: "user-1",
           externalId: "browser-session-1",
+          userName: "Ama Mensah",
+          userEmail: "ama@example.com",
+          createdAt: 1_899_999_000_000,
           messageCount: 4,
           updatedAt: 1_900_000_000_000,
           jurisdiction: {
@@ -163,7 +166,7 @@ describe("read-only admin pages", () => {
       ],
       isDone: true,
       continueCursor: "",
-    });
+    }).mockResolvedValueOnce([{ id: "conversation-1", firstUserMessagePreview: "What are my rights as a tenant?" }]);
 
     render(
       await ConversationsPage({
@@ -180,9 +183,14 @@ describe("read-only admin pages", () => {
     );
     expect(screen.getByRole("columnheader", { name: "Messages" })).toBeVisible();
     expect(
-      screen.getByRole("link", { name: "conversation-1" }),
+      screen.getByRole("link", { name: "What are my rights as a tenant?" }),
     ).toHaveAttribute("href", "/admin/conversations/conversation-1");
-    expect(screen.getByRole("link", { name: "user-1" })).toHaveClass(
+    expect(screen.getByRole("link", { name: "Ama Mensah" })).toHaveAttribute(
+      "href",
+      "/admin/users/user-1",
+    );
+    expect(screen.getByText("ama@example.com")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Ama Mensah" })).toHaveClass(
       "inline-flex",
       "min-h-11",
       "items-center",
@@ -191,6 +199,23 @@ describe("read-only admin pages", () => {
     expect(screen.queryByRole("columnheader", { name: "Answer" })).toBeNull();
     expect(screen.getByText("Ghana")).toBeVisible();
     expect(screen.getByText("Geographic")).toBeVisible();
+  });
+
+  it.each(["list", "previews"])("redirects structured conversation %s denials", async (stage) => {
+    const denial = Object.assign(new Error("Forbidden"), { data: { code: "ADMIN_FORBIDDEN" } });
+    if (stage === "previews") {
+      mocks.fetchAuthQuery.mockResolvedValueOnce({ page: [{ id: "conversation-1" }], isDone: true, continueCursor: "" });
+    }
+    mocks.fetchAuthQuery.mockRejectedValueOnce(denial);
+    await expect(ConversationsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow("NEXT_REDIRECT");
+    expect(mocks.redirect).toHaveBeenCalledWith("/admin/forbidden");
+  });
+
+  it("keeps conversation outages recoverable", async () => {
+    mocks.fetchAuthQuery.mockRejectedValueOnce(new Error("connection reset"));
+    render(await ConversationsPage({ searchParams: Promise.resolve({}) }));
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toBeVisible();
   });
 
   it("adapts user detail session visibility to the current role", async () => {
