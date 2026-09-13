@@ -157,7 +157,8 @@ export const previews = query({
         .order("asc")
         .first();
       const text = maskSensitiveFields(firstMessage?.content ?? "").replace(/\s+/g, " ").trim();
-      const characters = Array.from(text);
+      // 242 UTF-16 units retain at least 121 code points without a body-sized array.
+      const characters = Array.from(text.slice(0, 242));
       return {
         id,
         firstUserMessagePreview: (characters.length > 120
