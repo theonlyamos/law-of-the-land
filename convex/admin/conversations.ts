@@ -177,11 +177,11 @@ export const previews = query({
 export function maskSensitiveFields(content: string): string {
   return content
     .replace(
-      /(["']?(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)["']?\s*:\s*)(["'])([^"'\r\n]*)(\2)/gi,
+      /(["']?\b(?:[a-z0-9_-]+[_-])?(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)["']?\s*:\s*)(["'])([^"'\r\n]*)(\2)/gi,
       "$1$2[REDACTED]$4",
     )
     .replace(
-      /(\b(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)\b\s*[=:]\s*)([^\r\n]+)/gi,
+      /(\b(?:[a-z0-9_-]+[_-])?(?:password|passwd|authorization|cookie|secret|access[_\s-]*token|refresh[_\s-]*token|api[_\s-]*key)\b\s*[=:]\s*)([^\r\n]+)/gi,
       "$1[REDACTED]",
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
