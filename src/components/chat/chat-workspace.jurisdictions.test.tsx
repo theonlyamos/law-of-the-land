@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor, within } from "@testing-library/react";
 import { getFunctionName } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   useMutation: vi.fn(),
   ensureSession: vi.fn(),
   appendMessages: vi.fn(),
+  removeSession: vi.fn(),
+  identityId: "user-1" as string | null,
   resolvedSelection: null as null | {
     id: string;
     name: string;
@@ -48,6 +50,16 @@ vi.mock("next/image", () => ({
   default: ({ alt }: { alt: string }) => <span aria-label={alt} />,
 }));
 
+vi.mock("@/lib/auth-client", () => ({
+  authClient: {
+    useSession: () => ({
+      data: mocks.identityId ? { user: { id: mocks.identityId } } : null,
+      isPending: false,
+      error: null,
+    }),
+  },
+}));
+
 vi.mock("convex/react", () => ({
   useConvexAuth: () => ({ isAuthenticated: true, isLoading: false }),
   useMutation: (reference: unknown) => mocks.useMutation(reference),
@@ -56,6 +68,11 @@ vi.mock("convex/react", () => ({
 }));
 
 import { ChatWorkspace } from "./chat-workspace";
+import { ChatRequestIdentity, ChatRequestsProvider } from "./chat-requests";
+
+const render = (ui: React.ReactNode) => renderComponent(ui, {
+  wrapper: ({ children }) => <ChatRequestsProvider><ChatRequestIdentity />{children}</ChatRequestsProvider>,
+});
 
 const chatId = "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c";
 const jurisdiction = {
@@ -92,6 +109,9 @@ beforeEach(() => {
   mocks.useMutation.mockReset();
   mocks.ensureSession.mockReset();
   mocks.appendMessages.mockReset();
+  mocks.removeSession.mockReset();
+  mocks.removeSession.mockResolvedValue(undefined);
+  mocks.identityId = "user-1";
   mocks.ensureSession.mockResolvedValue(undefined);
   mocks.appendMessages.mockResolvedValue(undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -116,6 +136,7 @@ beforeEach(() => {
     const name = getFunctionName(reference);
     if (name === "chats:ensure") return mocks.ensureSession;
     if (name === "chats:appendMessages") return mocks.appendMessages;
+    if (name === "chats:remove") return mocks.removeSession;
     return vi.fn();
   });
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
@@ -130,6 +151,161 @@ afterEach(() => {
 });
 
 describe("unified chat client", () => {
+  it("keeps both conversations streaming across switches and remounts, saving each to its own chat", async () => {
+    const streams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
+    const signals = new Map<string, AbortSignal>();
+    const encoder = new TextEncoder();
+    vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => {
+      const { externalId } = JSON.parse(init.body as string);
+      signals.set(externalId, init.signal!);
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streams.set(externalId, controller); },
+      }), { headers: { "content-type": "application/x-ndjson" } }));
+    }));
+    const send = (id: string, event: unknown) => streams.get(id)!.enqueue(
+      encoder.encode(`${JSON.stringify(event)}\n`),
+    );
+    const page = (id: string, question: string | null, key = "page") => (
+      <ChatWorkspace key={key} chatId={id} initialQuery={question} initialJurisdiction={jurisdiction.id} />
+    );
+    const view = render(page("chat-a", "Question A"));
+    await waitFor(() => expect(streams.has("chat-a")).toBe(true));
+    view.rerender(page("chat-b", "Question B"));
+    expect(signals.get("chat-a")!.aborted).toBe(false);
+    await waitFor(() => expect(streams.has("chat-b")).toBe(true));
+
+    await act(async () => {
+      send("chat-a", { type: "delta", text: "Answer A so far" });
+      send("chat-b", { type: "delta", text: "Answer B so far" });
+    });
+    expect(await screen.findByText("Answer B so far")).toBeVisible();
+    expect(screen.queryByText("Answer A so far")).not.toBeInTheDocument();
+    view.rerender(page("chat-a", null, "remounted-page"));
+    expect(await screen.findByText("Answer A so far")).toBeVisible();
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(signals.get("chat-b")!.aborted).toBe(false);
+
+    await act(async () => {
+      for (const id of ["chat-b", "chat-a"]) {
+        send(id, { type: "done", result: `Finished ${id}`, citations: [citation], citationClaim, partialCoverage: false });
+        streams.get(id)!.close();
+      }
+    });
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(2));
+    for (const id of ["chat-a", "chat-b"]) {
+      expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({
+        externalId: id,
+        lastMessage: `Finished ${id}`,
+      }));
+    }
+    expect(await screen.findByText("Finished chat-a")).toBeVisible();
+    expect(screen.queryByText("Finished chat-b")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("finishes creating and saving a background chat without clearing the visible draft", async () => {
+    let finishEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));
+    const view = render(<ChatWorkspace chatId="creating-chat" initialQuery="Question A" initialJurisdiction={jurisdiction.id} />);
+    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledTimes(1));
+    view.rerender(<ChatWorkspace key="new-page" chatId="another-chat" initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Unsent draft" } });
+    await act(async () => finishEnsure());
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({
+      externalId: "creating-chat", lastMessage: "Answer",
+    })));
+    expect(screen.getByRole("textbox")).toHaveValue("Unsent draft");
+    expect(screen.queryByText("Answer")).not.toBeInTheDocument();
+  });
+
+  it.each(["stream", "save"])("keeps a background %s failure with its conversation", async (failure) => {
+    let finish!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise<Response>((resolve) => { finish = resolve; })));
+    if (failure === "save") mocks.appendMessages.mockRejectedValue(new Error("save failed"));
+    const page = (id: string, question: string | null) => <ChatWorkspace key={id} chatId={id} initialQuery={question} initialJurisdiction={jurisdiction.id} />;
+    const view = render(page("failed-background", "Question"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    view.rerender(page("visible-chat", null));
+    await act(async () => finish(ndjsonResponse([
+      failure === "stream"
+        ? { type: "error", error: "Background answer failed" }
+        : { type: "done", result: "Unsaved answer", citations: [citation], citationClaim, partialCoverage: false },
+    ])));
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    view.rerender(page("failed-background", null));
+    expect(await screen.findByText(failure === "stream" ? "Background answer failed" : "Unsaved answer")).toBeVisible();
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    if (failure === "save") expect(screen.getByRole("alert")).toHaveTextContent("could not be saved");
+  });
+
+  it("cancels only the deleted background conversation and rejects its late result", async () => {
+    const pending = new Map<string, { signal: AbortSignal; finish: (response: Response) => void }>();
+    vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => new Promise<Response>((finish) => {
+      pending.set(JSON.parse(init.body as string).externalId, { signal: init.signal!, finish });
+    })));
+    mocks.sessions = ["delete-me", "keep-me"].map((id) => ({ id, title: id, lastMessage: "", timestamp: 1, messageCount: 0 }));
+    const page = (id: string) => <ChatWorkspace key={id} chatId={id} initialQuery={`Question ${id}`} initialJurisdiction={jurisdiction.id} />;
+    const view = render(page("delete-me"));
+    await waitFor(() => expect(pending.has("delete-me")).toBe(true));
+    view.rerender(page("keep-me"));
+    await waitFor(() => expect(pending.has("keep-me")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat: delete-me" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    await waitFor(() => expect(mocks.removeSession).toHaveBeenCalledWith({ externalId: "delete-me" }));
+    expect(pending.get("delete-me")!.signal.aborted).toBe(true);
+    expect(pending.get("keep-me")!.signal.aborted).toBe(false);
+    await act(async () => {
+      for (const [id, request] of pending) request.finish(ndjsonResponse([
+        { type: "done", result: `Finished ${id}`, citations: [citation], citationClaim, partialCoverage: false },
+      ]));
+    });
+    expect(await screen.findByText("Finished keep-me")).toBeVisible();
+    expect(mocks.appendMessages).toHaveBeenCalledTimes(1);
+    expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({ externalId: "keep-me" }));
+  });
+
+  it.each([null, "user-2"])("clears pending answers when the signed-in identity changes to %s", async (nextIdentity) => {
+    let finish!: (response: Response) => void;
+    let signal!: AbortSignal;
+    vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => {
+      signal = init.signal!;
+      return new Promise<Response>((resolve) => { finish = resolve; });
+    }));
+    const page = <ChatWorkspace chatId="private-chat" initialQuery="Private question" initialJurisdiction={jurisdiction.id} />;
+    const view = render(page);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    mocks.identityId = nextIdentity;
+    view.rerender(<ChatWorkspace chatId="private-chat" initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    expect(signal.aborted).toBe(true);
+    await act(async () => finish(ndjsonResponse([
+      { type: "done", result: "Private answer", citations: [citation], citationClaim, partialCoverage: false },
+    ])));
+    expect(screen.queryByText("Private answer")).not.toBeInTheDocument();
+    expect(screen.queryByText("Private question")).not.toBeInTheDocument();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps deletion pending across navigation until session creation settles", async () => {
+    let finishEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));
+    mocks.sessions = [{ id: "creating-chat", title: "Creating chat", lastMessage: "", timestamp: 1, messageCount: 0 }];
+    const page = (id: string, question: string | null) => <ChatWorkspace key={id} chatId={id} initialQuery={question} initialJurisdiction={jurisdiction.id} />;
+    const view = render(page("creating-chat", "Question"));
+    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledTimes(1));
+    view.rerender(page("another-chat", null));
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat: Creating chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    expect(mocks.removeSession).not.toHaveBeenCalled();
+    view.rerender(page("creating-chat", null));
+    expect(screen.getByText("Deleting chat…")).toBeVisible();
+    await act(async () => finishEnsure());
+    await waitFor(() => expect(mocks.removeSession).toHaveBeenCalledTimes(1));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.getByText("Chat deleted…")).toBeVisible();
+  });
+
   it("normalizes escaped paragraph breaks before rendering persisted assistant Markdown", async () => {
     mocks.session = {
       title: "Formatted answer",

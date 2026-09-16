@@ -2,6 +2,7 @@
 
 import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
 import { AssistantMessageFooter } from "./assistant-message-footer";
+import { useChatRequests } from "./chat-requests";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Menu } from "lucide-react";
@@ -192,13 +193,13 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const [query, setQuery] = useState("");
   const [selectedResearchJurisdiction, setSelectedResearchJurisdiction] = useState<ResearchJurisdiction | null>(null);
-  const [localMessages, setLocalMessages] = useState<LocalChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [saveFailed, setSaveFailed] = useState(false);
-  const [ensureError, setEnsureError] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [isDeletingCurrentChat, setIsDeletingCurrentChat] = useState(false);
-  const [isCurrentChatDeleted, setIsCurrentChatDeleted] = useState(false);
+  const {
+    store: requests, messages: localMessages, isLoading: requestLoading,
+    saveFailed, ensureError, deleteError,
+    isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted,
+  } = useChatRequests(chatId);
+  const [isStartingNewChat, setIsStartingNewChat] = useState(false);
+  const isLoading = requestLoading || isStartingNewChat;
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
@@ -208,7 +209,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
-  const activeRequestRef = useRef<AbortController | null>(null);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
   const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
@@ -291,28 +291,29 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     Boolean(initialJurisdiction) &&
     resolvedInitialSelection === null;
 
-  const invalidateChatRequests = useCallback(() => {
+  const resetChatView = useCallback(() => {
     requestGenerationRef.current += 1;
-    activeRequestRef.current?.abort();
-    activeRequestRef.current = null;
-    setIsLoading(false);
-    setLocalMessages([]);
-    setSaveFailed(false);
+    setIsStartingNewChat(false);
     prependScrollIntentRef.current = null;
     composerScrollIntentRef.current = null;
   }, []);
 
-  // A route change invalidates every pending response before state for the
-  // next chat is visible, so late fetches cannot bleed into it.
+  // Navigation resets the view; requests and provisional messages stay with their chat.
   useEffect(() => {
-    invalidateChatRequests();
+    resetChatView();
     routeEnsureRef.current = null;
     setQuery("");
-    setDeleteError(null);
-    setEnsureError(null);
-    setIsDeletingCurrentChat(false);
-    setIsCurrentChatDeleted(false);
-  }, [chatId, invalidateChatRequests]);
+  }, [chatId, resetChatView]);
+
+  useEffect(() => {
+    const request = requests.get(chatId);
+    if (!chatId || !request || request.state.isLoading) return;
+    const savedIds = new Set(persistedMessages.map((message) => message.clientId));
+    const remaining = request.state.messages.filter((message) => !savedIds.has(message.clientId));
+    if (remaining.length === request.state.messages.length) return;
+    if (remaining.length === 0) requests.cancel(chatId);
+    else requests.update(chatId, request, { messages: remaining });
+  }, [chatId, localMessages, persistedMessages, requestLoading, requests]);
 
   useEffect(() => {
     if (!isMobileSidebarOpen) return;
@@ -326,17 +327,22 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   }, [isMobileSidebarOpen]);
 
   useEffect(() => {
-    if (!chatId || sessionData === undefined || isCurrentChatDeleted || isDeletingCurrentChat) return;
+    if (!chatId || isDeletingCurrentChat) return;
+    if (isCurrentChatDeleted) {
+      router.replace(routeAfterDeletingCurrentSession(chatId, sessions.map((session) => session.id)));
+      return;
+    }
+    if (sessionData === undefined) return;
     if (sessionData) {
       observedSessionIdsRef.current.add(chatId);
       return;
     }
     if (!observedSessionIdsRef.current.has(chatId)) return;
 
-    setIsCurrentChatDeleted(true);
-    invalidateChatRequests();
-    router.replace(routeAfterDeletingCurrentSession(chatId, sessions.map((session) => session.id)));
-  }, [chatId, invalidateChatRequests, isCurrentChatDeleted, isDeletingCurrentChat, router, sessionData, sessions]);
+    const deleted = requests.beginDelete(chatId);
+    requests.update(chatId, deleted, { isDeleting: false, isDeleted: true });
+    resetChatView();
+  }, [chatId, requests, resetChatView, isCurrentChatDeleted, isDeletingCurrentChat, router, sessionData, sessions]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -440,15 +446,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
       // New-chat mode: the chat page picks the question up from ?q= and runs it.
       if (!chatId) {
-        setIsLoading(true);
+        setIsStartingNewChat(true);
         router.push(`/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&jurisdiction=${encodeURIComponent(chatResearchJurisdiction!.id)}`);
         return;
       }
 
       const requestGeneration = requestGenerationRef.current;
-      const controller = new AbortController();
-      activeRequestRef.current?.abort();
-      activeRequestRef.current = controller;
+      const request = requests.start(chatId);
+      if (!request) return;
+      const controller = request.controller;
+      const setLocalMessages = (update: (previous: LocalChatMessage[]) => LocalChatMessage[]) =>
+        requests.update(chatId, request, { messages: update(request.state.messages) });
       const nextSequence = () => {
         localSequenceRef.current += 1;
         return localSequenceRef.current;
@@ -475,7 +483,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         sequence: nextSequence(),
         state: "pending",
       };
-      const isCurrentRequest = () =>
+      const isCurrentRequest = () => !controller.signal.aborted && requests.get(chatId) === request;
+      const isVisibleRoute = () =>
         canCommitRequestGeneration(
           requestGenerationRef.current,
           requestGeneration,
@@ -483,10 +492,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           chatId
         );
 
-      setIsLoading(true);
-      setEnsureError(null);
       const routeEnsureEntry = ensureSessionForNewSubmission();
       const persistenceEnsure = routeEnsureEntry?.promise ?? Promise.resolve();
+      request.ensurePromise = persistenceEnsure;
       if (routeEnsureEntry) {
         try {
           await persistenceEnsure;
@@ -497,19 +505,22 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           );
           if (!isCurrentRequest()) return;
           console.error("Failed to create chat:", error);
-          setEnsureError("We could not start this chat. Please try again.");
-          setIsLoading(false);
-          if (activeRequestRef.current === controller) activeRequestRef.current = null;
+          requests.update(chatId, request, {
+            ensureError: "We could not start this chat. Please try again.",
+            isLoading: false,
+          });
           return;
         }
         if (!isCurrentRequest()) return;
       }
 
-      setQuery("");
-      prependScrollIntentRef.current = null;
-      composerScrollIntentRef.current = beginComposerBottomScroll({
-        routeGeneration: requestGeneration,
-      });
+      if (isVisibleRoute()) {
+        setQuery("");
+        prependScrollIntentRef.current = null;
+        composerScrollIntentRef.current = beginComposerBottomScroll({
+          routeGeneration: requestGeneration,
+        });
+      }
       setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
 
       let streamedAnswer = "";
@@ -603,7 +614,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         } catch (error) {
           if (!isCurrentRequest()) return;
           console.error("Failed to save chat:", error);
-          setSaveFailed(true);
+          requests.update(chatId, request, { saveFailed: true });
           setLocalMessages((previous) =>
             previous.map((message) =>
               message.localId === userMessage.localId || message.localId === assistantMessage.localId
@@ -629,8 +640,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       } finally {
         cancelPendingStreamRender();
         if (isCurrentRequest()) {
-          setIsLoading(false);
-          if (activeRequestRef.current === controller) activeRequestRef.current = null;
+          requests.update(chatId, request, { isLoading: false });
         }
       }
     },
@@ -643,6 +653,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       isLoading,
       router,
       selectionReady,
+      requests,
     ]
   );
 
@@ -680,41 +691,33 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
       const isCurrentChat = sessionId === chatId;
-      const inFlightEnsure =
-        isCurrentChat &&
-        routeEnsureRef.current?.routeGeneration === requestGenerationRef.current &&
-        routeEnsureRef.current.externalId === chatId
-          ? routeEnsureRef.current.promise
-          : null;
+      if (requests.get(sessionId)?.state.isDeleting) return;
+      const deletion = requests.beginDelete(sessionId);
       if (isCurrentChat) {
         // Invalidate before awaiting the mutation so stale send callbacks and
         // finally blocks cannot update the chat while deletion is pending.
-        invalidateChatRequests();
+        resetChatView();
         routeEnsureRef.current = null;
-        setDeleteError(null);
-        setEnsureError(null);
-        setIsDeletingCurrentChat(true);
       }
 
       try {
         await runRemovalAfterRouteEnsure({
-          ensurePromise: inFlightEnsure,
+          ensurePromise: deletion.ensurePromise,
           remove: () => removeSession({ externalId: sessionId }),
         });
+        requests.update(sessionId, deletion, { isDeleting: false, isDeleted: true });
         if (!isCurrentChat || activeChatIdRef.current !== chatId) return;
 
-        setIsDeletingCurrentChat(false);
-        setIsCurrentChatDeleted(true);
-        router.replace(routeAfterDeletingCurrentSession(sessionId, sessions.map((session) => session.id)));
         setIsMobileSidebarOpen(false);
       } catch (error) {
-        if (!isCurrentChat || activeChatIdRef.current !== chatId) return;
         console.error("Failed to delete chat:", error);
-        setIsDeletingCurrentChat(false);
-        setDeleteError("We could not delete this chat. Please try again.");
+        requests.update(sessionId, deletion, {
+          isDeleting: false,
+          deleteError: "We could not delete this chat. Please try again.",
+        });
       }
     },
-    [chatId, invalidateChatRequests, removeSession, router, sessions]
+    [chatId, requests, resetChatView, removeSession]
   );
 
 
