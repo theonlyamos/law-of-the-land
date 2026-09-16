@@ -4,6 +4,7 @@ import { authClient } from "@/lib/auth-client";
 import { ConvexBetterAuthProvider } from "@convex-dev/better-auth/react";
 import { ConvexReactClient } from "convex/react";
 import type { ReactNode } from "react";
+import { ChatRequestIdentity } from "@/components/chat/chat-requests";
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 
@@ -32,6 +33,7 @@ export function ConvexClientProvider({
 
   return (
     <ConvexBetterAuthProvider client={convex} authClient={authClient} initialToken={initialToken}>
+      <ChatRequestIdentity />
       {children}
     </ConvexBetterAuthProvider>
   );

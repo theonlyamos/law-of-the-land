@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
+import { ChatRequestsProvider } from "@/components/chat/chat-requests";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -33,7 +34,7 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: `(function(){if(location.pathname.startsWith('/embed/'))return;var t='system';try{t=localStorage.getItem('lotl-theme')||'system'}catch(e){}var d=t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.add(d?'dark':'light')})()` }} />
       </head>
       <body className="flex min-h-screen flex-col antialiased">
-        {children}
+        <ChatRequestsProvider>{children}</ChatRequestsProvider>
       </body>
     </html>
   );
