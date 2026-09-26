@@ -47,4 +47,15 @@ describe("chat route jurisdiction selection", () => {
 
     await waitFor(() => expect(mocks.notFound).toHaveBeenCalled());
   });
+
+  it("allows a new chat while its session is being created", () => {
+    mocks.search = new URLSearchParams("jurisdiction=jurisdiction-ghana");
+
+    render(<ChatPage />);
+
+    expect(screen.getByRole("status", { name: "workspace-props" })).toHaveTextContent(
+      '"initialQuery":null',
+    );
+    expect(mocks.notFound).not.toHaveBeenCalled();
+  });
 });

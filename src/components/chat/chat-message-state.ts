@@ -1,4 +1,5 @@
 import type { ChatCitation } from "@/lib/countries";
+import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 
 export type MessageRole = "user" | "assistant";
 
@@ -12,6 +13,7 @@ export interface PersistedChatMessage {
   completedAt?: number;
   durationMs?: number;
   citations?: ChatCitation[];
+  answerKind?: ChatAnswerKind;
 }
 
 export interface LocalChatMessage {
@@ -23,6 +25,7 @@ export interface LocalChatMessage {
   sequence: number;
   state: "pending" | "error";
   citations?: ChatCitation[];
+  answerKind?: ChatAnswerKind;
   partialCoverage?: boolean;
 }
 

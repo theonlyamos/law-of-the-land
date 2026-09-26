@@ -10,7 +10,6 @@ import {
 } from "../../../../convex/lib/telemetryProof";
 import {
   fetchAuthMutation,
-  fetchAuthQuery,
   getToken,
   isAuthenticated,
 } from "@/lib/auth-server";
@@ -22,6 +21,8 @@ import {
 } from "@/lib/gemini-file-search-chat";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
+import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
+import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -50,14 +51,16 @@ type FailureCategory =
 type Coverage = {
   ordinal: number;
   relation: ChatStore["relation"];
-  coverage: "evidence" | "no_evidence";
+  coverage: "evidence" | "no_evidence" | "not_searched";
 };
+const POLICY_MANIFEST: ResearchManifest = { authorizedScopeSize: 0, stores: [], partialCoverage: false };
 type CompletionInput = {
   routeNonce: string;
   externalId: string;
   jurisdictionId: string;
   assistantClientId: string;
   finalAnswer?: string;
+  answerKind?: ChatAnswerKind;
   citations: GovernedChatResult["citations"];
   model: string;
   elapsedMs: number;
@@ -78,6 +81,7 @@ type PublicCitation = {
 type CompletionResult = {
   status: "completed";
   outcome: "success";
+  answerKind: ChatAnswerKind;
   citations: PublicCitation[];
   partialCoverage: boolean;
   citationClaim: string;
@@ -88,6 +92,7 @@ type StreamEvent =
   | {
     type: "done";
     result: string;
+    answerKind: ChatAnswerKind;
     citations: PublicCitation[];
     citationClaim: string;
     partialCoverage: boolean;
@@ -350,12 +355,12 @@ function classifyFailure(error: unknown): FailureCategory {
   return "internal";
 }
 
-function coverageFor(manifest: ResearchManifest, citations: GovernedChatResult["citations"]): Coverage[] {
+function coverageFor(manifest: ResearchManifest, citations: GovernedChatResult["citations"], notSearched = false): Coverage[] {
   const citedJurisdictions = new Set(citations.map((citation) => citation.jurisdictionId));
   return manifest.stores.map((store, ordinal) => ({
     ordinal,
     relation: store.relation,
-    coverage: citedJurisdictions.has(store.jurisdictionId) ? "evidence" : "no_evidence",
+    coverage: notSearched ? "not_searched" : citedJurisdictions.has(store.jurisdictionId) ? "evidence" : "no_evidence",
   }));
 }
 
@@ -384,7 +389,7 @@ function failureInput(
     jurisdictionCoverage: manifest.stores.map((store, ordinal) => ({
       ordinal,
       relation: store.relation,
-      coverage: "no_evidence" as const,
+      coverage: model === "app-policy-v1" ? "not_searched" as const : "no_evidence" as const,
     })),
   };
 }
@@ -430,13 +435,14 @@ function parsePublicCitation(value: unknown): PublicCitation | null {
   return citation as PublicCitation;
 }
 
-function parseCompletionResult(value: unknown, selectedJurisdictionId: string, answer: string): CompletionResult | null {
+function parseCompletionResult(value: unknown, selectedJurisdictionId: string, answer: string, answerKind: ChatAnswerKind): CompletionResult | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = value as Record<string, unknown>;
   if (
     !exactKeys(result, [
       "status",
       "outcome",
+      "answerKind",
       "citations",
       "partialCoverage",
       "citationClaim",
@@ -444,8 +450,10 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
     ])
     || result.status !== "completed"
     || result.outcome !== "success"
+    || result.answerKind !== answerKind
     || !Array.isArray(result.citations)
-    || (result.citations.length === 0 && answer !== CHAT_NO_EVIDENCE)
+    || (result.citations.length === 0 && !(answerKind === "policy" ? isChatPolicyResponse(answer) : answer === CHAT_NO_EVIDENCE))
+    || (answerKind === "policy" && result.citations.length !== 0)
     || result.citations.length > MAX_PUBLIC_CITATIONS
     || typeof result.partialCoverage !== "boolean"
     || typeof result.citationClaim !== "string"
@@ -463,6 +471,7 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
 function streamResponse(input: {
   body: ChatBody;
   manifest: ResearchManifest;
+  reply: string | null;
   model: string;
   routeNonce: string;
   requestStartedAt: number;
@@ -500,43 +509,58 @@ function streamResponse(input: {
       };
       void (async () => {
         let phase = "generation";
+        let completionModel = input.model;
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
-          const apiKey = process.env.GOOGLE_AI_API_KEY;
-          if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
-          const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
-          const result = await raceWithAbort(chat.run({
-            query: input.body.query,
-            stores: input.manifest.stores,
-            history: input.body.messages,
-          }, {
-            signal: input.providerSignal,
-            deadlineAt: input.terminalDeadlineAt,
-            streamSignal: input.streamSignal,
-            streamDeadlineAt: input.modelDeadlineAt,
-            onDelta: (text) => send({ type: "delta", text }),
-            onStreamComplete: () => {
-              phase = "canonical_read";
-              clearTimeout(input.modelTimer);
-            },
-          }), input.providerSignal);
+          if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          let result: Pick<GovernedChatResult, "answer" | "citations">;
+          if (input.reply !== null) {
+            completionModel = "app-policy-v1";
+            result = { answer: input.reply, citations: [] };
+            send({ type: "delta", text: input.reply });
+          } else {
+            phase = "generation";
+            if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
+            const apiKey = process.env.GOOGLE_AI_API_KEY;
+            if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
+            result = await raceWithAbort(chat.run({
+              query: input.body.query,
+              stores: input.manifest.stores,
+              history: input.body.messages,
+            }, {
+              signal: input.providerSignal,
+              deadlineAt: input.terminalDeadlineAt,
+              streamSignal: input.streamSignal,
+              streamDeadlineAt: input.modelDeadlineAt,
+              // Gemini text is provisional until the canonical answer and citations are checked.
+              onDelta: () => undefined,
+              onStreamComplete: () => {
+                phase = "canonical_read";
+                clearTimeout(input.modelTimer);
+              },
+            }), input.providerSignal);
+            send({ type: "delta", text: result.answer });
+          }
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
           phase = "completion";
+          const answerKind: ChatAnswerKind = isChatPolicyResponse(result.answer) ? "policy" : "legal";
           const terminalInput: CompletionInput = {
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
             jurisdictionId: input.body.jurisdictionId,
             assistantClientId: input.body.assistantClientId,
             finalAnswer: result.answer,
+            answerKind,
             citations: result.citations,
-            model: input.model,
+            model: completionModel,
             elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)),
             outcome: "success",
             authorizedScopeSize: input.manifest.authorizedScopeSize,
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
-            jurisdictionCoverage: coverageFor(input.manifest, result.citations),
+            jurisdictionCoverage: coverageFor(input.manifest, result.citations, completionModel === "app-policy-v1"),
           };
           const completed = parseCompletionResult(
             await completeWithinDeadline(
@@ -546,14 +570,16 @@ function streamResponse(input: {
             ),
             input.body.jurisdictionId,
             result.answer,
+            answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
           send({
             type: "done",
             result: result.answer,
+            answerKind,
             citations: completed.citations,
             citationClaim: completed.citationClaim,
-            partialCoverage: completed.partialCoverage,
+            partialCoverage: answerKind === "legal" && completed.partialCoverage,
           });
           return;
         } catch (error) {
@@ -574,7 +600,7 @@ function streamResponse(input: {
                 input.body,
                 input.manifest,
                 input.routeNonce,
-                input.model,
+                completionModel,
                 input.requestStartedAt,
                 aborted ? "aborted" : "failure",
                 aborted ? undefined : category,
@@ -673,28 +699,30 @@ export async function POST(request: Request): Promise<Response> {
         400,
       ));
     }
-    const allowance = await raceWithAbort(
-      fetchAuthQuery(api.usage.checkAllowance, {}),
-      streamSignal,
-    );
-    if (!allowance.allowed || !allowance.canRecord) {
-      return stopEarly(jsonError(
-        "You have reached your question limit for today. It resets tomorrow.",
-        402,
-      ));
+    const mode = chatRoutingMode();
+    let reply: string | null = mode === "on" && exactFormality(body.query)
+      ? policyReply("courtesy") : null;
+    if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
+    if (mode === "shadow" || (mode === "on" && reply === null)) {
+      const choice = await classifyChatIntent(body.query, body.messages, providerSignal, mode);
+      if (mode === "on") reply = policyReply(choice);
     }
-    const token = await raceWithAbort(getToken(), streamSignal);
-    if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
-    let manifest: ResearchManifest | null = null;
-    try {
-      manifest = await raceWithAbort(
-        loadManifest(body.jurisdictionId, token, streamSignal),
-        streamSignal,
-      );
-    } catch {
-      manifest = null;
+    let manifest: ResearchManifest = POLICY_MANIFEST;
+    if (reply === null) {
+      const token = await raceWithAbort(getToken(), streamSignal);
+      if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
+      let loaded: ResearchManifest | null = null;
+      try {
+        loaded = await raceWithAbort(
+          loadManifest(body.jurisdictionId, token, streamSignal),
+          streamSignal,
+        );
+      } catch {
+        loaded = null;
+      }
+      if (!loaded) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
+      manifest = loaded;
     }
-    if (!manifest) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
 
     const routeNonce = createOpaqueTelemetryToken();
     try {
@@ -715,6 +743,7 @@ export async function POST(request: Request): Promise<Response> {
     return streamResponse({
       body,
       manifest,
+      reply,
       model: safeModelName(),
       routeNonce,
       requestStartedAt,

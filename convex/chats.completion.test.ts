@@ -12,6 +12,7 @@ import {
   createTelemetryServiceProof,
 } from "./lib/telemetryProof";
 import schema from "./schema";
+import { CHAT_POLICY_RESPONSES } from "./lib/chatPolicy";
 
 const modules = import.meta.glob("./**/*.ts");
 const authModules = Object.fromEntries(
@@ -41,7 +42,7 @@ type CitationIdentity = {
 type Coverage = {
   ordinal: number;
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
-  coverage: "evidence" | "no_evidence" | "unavailable";
+  coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
 type CompletionInput = {
   routeNonce: string;
@@ -49,6 +50,7 @@ type CompletionInput = {
   jurisdictionId: string;
   assistantClientId: string;
   finalAnswer?: string;
+  answerKind?: "legal" | "policy";
   citations: CitationIdentity[];
   model: string;
   elapsedMs: number;
@@ -246,6 +248,7 @@ async function fixture() {
     jurisdictionId: selection.jurisdictionId,
     assistantClientId: "assistant-turn-1",
     finalAnswer: "The Constitution supplies the governing rule.",
+    answerKind: "legal",
     citations: [{
       jurisdictionId: selection.jurisdictionId,
       resourceId: document.resourceId,
@@ -275,6 +278,7 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
     input.routeNonce,
     input.externalId,
     input.jurisdictionId,
+    input.answerKind ?? "",
     bindings.assistantClientIdBinding,
     bindings.assistantContentBinding,
     input.model,
@@ -302,12 +306,14 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
 }
 
 async function complete(client: Client, input: CompletionInput) {
-  const { finalAnswer, failureCategory, ...required } = input;
+  const normalized = input.outcome === "success" ? input : { ...input, answerKind: undefined };
+  const { finalAnswer, failureCategory, answerKind, ...required } = normalized;
   return await client.mutation(completeGovernedInteraction, {
     ...required,
     ...(finalAnswer === undefined ? {} : { finalAnswer }),
+    ...(answerKind === undefined ? {} : { answerKind }),
     ...(failureCategory === undefined ? {} : { failureCategory }),
-    serviceProof: await createTelemetryServiceProof(await proofParts(input)),
+    serviceProof: await createTelemetryServiceProof(await proofParts(normalized)),
   });
 }
 
@@ -331,6 +337,47 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("persists a fixed policy reply only with its bound kind and claim", async () => {
+    const { t, owner, base } = await fixture();
+    const finalAnswer = CHAT_POLICY_RESPONSES.out_of_scope;
+    const input: CompletionInput = {
+      ...base, finalAnswer, answerKind: "policy", citations: [], model: "app-policy-v1",
+      authorizedScopeSize: 0, readyStoreCount: 0, partialCoverage: false,
+      jurisdictionCoverage: [],
+    };
+    const result = await complete(owner.client, input);
+    expect(result).toMatchObject({ outcome: "success", answerKind: "policy", citations: [] });
+    const claim = (result as { citationClaim: string }).citationClaim;
+    await expect(owner.client.mutation(api.chats.appendMessages, {
+      externalId: base.externalId, lastMessage: finalAnswer,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: finalAnswer,
+        answerKind: "legal", citations: [], citationClaim: claim }],
+    })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+    await owner.client.mutation(api.chats.appendMessages, {
+      externalId: base.externalId, lastMessage: finalAnswer,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: finalAnswer,
+        answerKind: "policy", citations: [], citationClaim: claim }],
+    });
+    const page = await owner.client.query(api.chats.listMessages, {
+      externalId: base.externalId, paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page[0]).toMatchObject({ answerKind: "policy", citations: [] });
+    expect((await terminalState(t)).runs[0]).toMatchObject({
+      answerKind: "policy", model: "app-policy-v1", citationCount: 0,
+      authorizedScopeSize: 1, readyStoreCount: 1,
+      jurisdictionCoverage: [{ coverage: "not_searched" }],
+    });
+  });
+
+  it("rejects a new assistant message without a completion claim", async () => {
+    const { owner, base } = await fixture();
+    await expect(owner.client.mutation(api.chats.appendMessages, {
+      externalId: base.externalId, lastMessage: "unverified",
+      messages: [{ role: "assistant", clientId: base.assistantClientId,
+        content: "unverified", answerKind: "policy", citations: [] }],
+    })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
+  });
+
   it("issues a bound claim for the fixed no-evidence answer and persists it", async () => {
     const { owner, base } = await fixture();
     const finalAnswer = "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.";
@@ -342,7 +389,7 @@ describe("completeGovernedInteraction", () => {
     await owner.client.mutation(api.chats.appendMessages, {
       externalId: base.externalId, lastMessage: finalAnswer,
       messages: [{ role: "assistant", clientId: base.assistantClientId, content: finalAnswer,
-        citations: [], citationClaim: (result as { citationClaim: string }).citationClaim }],
+        answerKind: "legal", citations: [], citationClaim: (result as { citationClaim: string }).citationClaim }],
     });
     const page = await owner.client.query(api.chats.listMessages, {
       externalId: base.externalId, paginationOpts: { numItems: 10, cursor: null },

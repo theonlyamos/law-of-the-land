@@ -29,9 +29,8 @@ function ChatPageInner() {
   }, [chatId]);
 
   useEffect(() => {
-    // Decide once per chat on entry. The workspace strips ?q= and creates the
-    // session asynchronously, so re-evaluating here would reject the chat
-    // mid-creation.
+    // A jurisdiction identifies a chat being created by the workspace.
+    // It may arrive before the session mutation completes.
     if (access !== "pending") return;
 
     if (!isValidChatId(chatId)) {
@@ -48,7 +47,7 @@ function ChatPageInner() {
 
     if (sessionData === undefined) return;
 
-    if (!sessionData && (!q?.trim() || !jurisdiction?.trim())) {
+    if (!sessionData && !jurisdiction?.trim()) {
       setAccess("bad");
       return;
     }
@@ -60,10 +59,6 @@ function ChatPageInner() {
     notFound();
   }
 
-  if (authLoading) {
-    return <PageLoader label="Loading chat…" />;
-  }
-
   // While the chat's content loads, the workspace stays mounted and shows the
   // loading state in the chat panel only.
   return <ChatWorkspace chatId={chatId} initialQuery={q} initialJurisdiction={jurisdiction} />;
@@ -72,7 +67,12 @@ function ChatPageInner() {
 export default function ChatPage() {
   return (
     <div className="flex h-dvh flex-col">
-      <Suspense fallback={<PageLoader label="Loading chat…" />}>
+      <Suspense fallback={
+        <div className="flex min-h-0 flex-1">
+          <aside aria-hidden className="hidden w-64 shrink-0 border-r bg-background md:block" />
+          <PageLoader label="Loading chat…" />
+        </div>
+      }>
         <ChatPageInner />
       </Suspense>
     </div>
