@@ -813,6 +813,7 @@ export default defineSchema({
     sessionBinding: v.string(),
     chatSessionId: v.id("chatSessions"),
     jurisdictionId: v.id("jurisdictions"),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
     assistantClientIdBinding: v.string(),
     assistantContentBinding: v.string(),
     orderedCitationBinding: v.string(),
@@ -865,6 +866,7 @@ export default defineSchema({
       v.literal("failure"),
       v.literal("aborted"),
     ),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
     failureCategory: v.optional(v.union(
       v.literal("authentication"),
       v.literal("configuration"),
@@ -882,7 +884,7 @@ export default defineSchema({
     jurisdictionCoverage: v.array(v.object({
       ordinal: v.number(),
       relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
-      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable")),
+      coverage: v.union(v.literal("evidence"), v.literal("no_evidence"), v.literal("unavailable"), v.literal("not_searched")),
     })),
     completedAt: v.number(),
     rollupStatus: v.union(v.literal("pending"), v.literal("processed")),
@@ -926,6 +928,7 @@ export default defineSchema({
     content: v.string(),
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])

@@ -23,7 +23,7 @@ import logo from "@/app/logo-transparent.png";
 
 interface SidebarProps {
   sessions: ChatSession[];
-  sessionPaginationStatus: "CanLoadMore" | "LoadingMore" | "Exhausted";
+  sessionPaginationStatus: "LoadingFirstPage" | "CanLoadMore" | "LoadingMore" | "Exhausted";
   activeSession?: string;
   /** Mobile drawer state (< md). */
   isOpen: boolean;
@@ -144,7 +144,9 @@ export function Sidebar({
 
       <ScrollArea className={`min-h-0 flex-1 ${collapsed ? "md:invisible" : ""}`}>
         <div className="space-y-1 p-3 pt-1">
-          {sessions.length === 0 ? (
+          {sessionPaginationStatus === "LoadingFirstPage" ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">Loading chats…</p>
+          ) : sessions.length === 0 ? (
             <div className="py-4 text-center text-sm text-muted-foreground">
               No saved chats yet. Ask a question and it will be saved here.
             </div>

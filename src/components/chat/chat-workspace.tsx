@@ -1,6 +1,7 @@
 "use client";
 
 import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
+import { isChatPolicyResponse, type ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ import { useRouter } from "next/navigation";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
-import { PageLoader, Spinner } from "@/components/ui/spinner";
+import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import {
@@ -45,6 +46,7 @@ const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
 
 type ChatResponse = {
   result: string;
+  answerKind: ChatAnswerKind;
   citations: ChatCitation[];
   citationClaim?: string;
   partialCoverage: boolean;
@@ -106,12 +108,14 @@ async function postChat(
       } else if (
         event.type === "done"
         && typeof event.result === "string"
+        && (event.answerKind === "legal" || event.answerKind === "policy")
         && Array.isArray(event.citations)
         && event.citations.every(isChatCitation)
         && typeof event.partialCoverage === "boolean"
       ) {
         completed = {
           result: event.result,
+          answerKind: event.answerKind,
           citations: event.citations,
           ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
           partialCoverage: event.partialCoverage,
@@ -258,6 +262,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         completedAt: message.completedAt,
         durationMs: message.durationMs,
         citations: message.citations,
+        answerKind: message.answerKind,
       });
     }
     return [...byStorageId.values()].sort(
@@ -272,8 +277,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     [localMessages, persistedMessages]
   );
   const isChatLoading =
-    chatId !== null &&
-    (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage");
+    authLoading ||
+    (chatId !== null &&
+      (sessionData === undefined || messagesPaginationStatus === "LoadingFirstPage"));
   // Existing chats answer from the jurisdiction they were started in.
   const chatResearchJurisdiction: ResearchJurisdiction | null = sessionData?.jurisdictionId
     ? {
@@ -444,19 +450,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       const trimmed = searchQuery.trim();
       if (!trimmed || isLoading || !selectionReady) return;
 
-      // New-chat mode: the chat page picks the question up from ?q= and runs it.
+      const submissionChatId = chatId ?? crypto.randomUUID();
       if (!chatId) {
         setIsStartingNewChat(true);
-        router.push(`/${crypto.randomUUID()}?q=${encodeURIComponent(trimmed)}&jurisdiction=${encodeURIComponent(chatResearchJurisdiction!.id)}`);
-        return;
       }
 
       const requestGeneration = requestGenerationRef.current;
-      const request = requests.start(chatId);
+      const request = requests.start(submissionChatId);
       if (!request) return;
       const controller = request.controller;
       const setLocalMessages = (update: (previous: LocalChatMessage[]) => LocalChatMessage[]) =>
-        requests.update(chatId, request, { messages: update(request.state.messages) });
+        requests.update(submissionChatId, request, { messages: update(request.state.messages) });
       const nextSequence = () => {
         localSequenceRef.current += 1;
         return localSequenceRef.current;
@@ -483,29 +487,39 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         sequence: nextSequence(),
         state: "pending",
       };
-      const isCurrentRequest = () => !controller.signal.aborted && requests.get(chatId) === request;
+      const isCurrentRequest = () => !controller.signal.aborted && requests.get(submissionChatId) === request;
       const isVisibleRoute = () =>
         canCommitRequestGeneration(
           requestGenerationRef.current,
           requestGeneration,
           activeChatIdRef.current,
-          chatId
+          submissionChatId
         );
 
       const routeEnsureEntry = ensureSessionForNewSubmission();
-      const persistenceEnsure = routeEnsureEntry?.promise ?? Promise.resolve();
+      const persistenceEnsure = routeEnsureEntry?.promise ?? (!chatId
+        ? ensureSession({
+            externalId: submissionChatId,
+            jurisdictionId: chatResearchJurisdiction!.id as Id<"jurisdictions">,
+            jurisdictionName: chatResearchJurisdiction!.name,
+            jurisdictionKind: chatResearchJurisdiction!.kind,
+          })
+        : Promise.resolve());
       request.ensurePromise = persistenceEnsure;
-      if (routeEnsureEntry) {
+      if (!chatId) router.push(`/${submissionChatId}?jurisdiction=${encodeURIComponent(chatResearchJurisdiction!.id)}`);
+      if (routeEnsureEntry || !chatId) {
         try {
           await persistenceEnsure;
         } catch (error) {
-          routeEnsureRef.current = clearRejectedRouteEnsure(
-            routeEnsureRef.current,
-            routeEnsureEntry,
-          );
+          if (routeEnsureEntry) {
+            routeEnsureRef.current = clearRejectedRouteEnsure(
+              routeEnsureRef.current,
+              routeEnsureEntry,
+            );
+          }
           if (!isCurrentRequest()) return;
           console.error("Failed to create chat:", error);
-          requests.update(chatId, request, {
+          requests.update(submissionChatId, request, {
             ensureError: "We could not start this chat. Please try again.",
             isLoading: false,
           });
@@ -545,7 +559,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           query: trimmed,
           jurisdictionId: chatResearchJurisdiction!.id,
           messages: priorForApi,
-          externalId: chatId,
+          externalId: submissionChatId,
           assistantClientId: assistantMessage.clientId,
         }, (text) => {
           streamedAnswer += text;
@@ -555,7 +569,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
         if (
-          (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE)
+          (chatData.answerKind === "policy"
+            ? (chatData.citations.length !== 0 || !isChatPolicyResponse(chatData.result))
+            : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
           || !chatData.citationClaim
           || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
         ) {
@@ -566,6 +582,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           ...assistantMessage,
           content: chatData.result,
           citations: chatData.citations,
+          answerKind: chatData.answerKind,
           ...(chatData.partialCoverage ? { partialCoverage: true } : {}),
         };
         setLocalMessages((previous) =>
@@ -580,7 +597,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             ensurePromise: persistenceEnsure,
             isCurrentRoute: isCurrentRequest,
             run: () => appendMessages({
-              externalId: chatId,
+              externalId: submissionChatId,
               title: isFirstUserTurn
                 ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "")
                 : undefined,
@@ -600,13 +617,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   content: completedAssistant.content,
                   clientId: completedAssistant.clientId,
                   createdAt: completedAssistant.createdAt,
-                  ...(completedAssistant.citations ? {
-                    citationClaim: chatData.citationClaim,
-                    citations: completedAssistant.citations.map((citation) => ({
+                  answerKind: chatData.answerKind,
+                  citationClaim: chatData.citationClaim,
+                  citations: chatData.citations.map((citation) => ({
                       ...citation,
                       jurisdictionId: citation.jurisdictionId as Id<"jurisdictions">,
-                    })),
-                  } : {}),
+                  })),
                 },
               ],
             }),
@@ -614,7 +630,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         } catch (error) {
           if (!isCurrentRequest()) return;
           console.error("Failed to save chat:", error);
-          requests.update(chatId, request, { saveFailed: true });
+          requests.update(submissionChatId, request, { saveFailed: true });
           setLocalMessages((previous) =>
             previous.map((message) =>
               message.localId === userMessage.localId || message.localId === assistantMessage.localId
@@ -640,7 +656,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       } finally {
         cancelPendingStreamRender();
         if (isCurrentRequest()) {
-          requests.update(chatId, request, { isLoading: false });
+          requests.update(submissionChatId, request, { isLoading: false });
         }
       }
     },
@@ -650,6 +666,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       chatId,
       displayMessages,
       ensureSessionForNewSubmission,
+      ensureSession,
       isLoading,
       router,
       selectionReady,
@@ -721,18 +738,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   );
 
 
-  if (authLoading || (isAuthenticated && sessionsPaginationStatus === "LoadingFirstPage")) {
-    return <PageLoader label="Loading chat…" />;
-  }
-
-  if (isCurrentChatDeleted) {
-    return <PageLoader label="Chat deleted…" />;
-  }
-
-  if (isDeletingCurrentChat) {
-    return <PageLoader label="Deleting chat…" />;
-  }
-
+  const chatStatusLabel = isCurrentChatDeleted
+    ? "Chat deleted…"
+    : isDeletingCurrentChat ? "Deleting chat…" : "Loading chat…";
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -745,7 +753,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
       <Sidebar
         sessions={sessions}
-        sessionPaginationStatus={sessionsPaginationStatus === "LoadingFirstPage" ? "Exhausted" : sessionsPaginationStatus}
+        sessionPaginationStatus={sessionsPaginationStatus}
         activeSession={chatId ?? undefined}
         isOpen={isMobileSidebarOpen}
         collapsed={isSidebarCollapsed}
@@ -779,9 +787,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           </div>
         </div>
 
-        {isChatLoading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center">
+        {isChatLoading || isCurrentChatDeleted || isDeletingCurrentChat ? (
+          <div role="status" aria-label={chatStatusLabel} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4">
             <Spinner />
+            <p className="text-sm text-muted-foreground">{chatStatusLabel}</p>
           </div>
         ) : chatId === null ? (
           <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-4">

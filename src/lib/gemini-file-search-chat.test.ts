@@ -5,10 +5,12 @@ import type { Interactions } from "@google/genai";
 vi.mock("server-only", () => ({}));
 
 import {
+  DEFAULT_FILE_SEARCH_CHAT_MODEL,
   GeminiFileSearchChat,
   type GeminiInteractionsClient,
   type GovernedChatInput,
 } from "./gemini-file-search-chat";
+import { CHAT_POLICY_RESPONSES } from "../../convex/lib/chatPolicy";
 
 const stores = [
   {
@@ -143,6 +145,18 @@ async function run(
 }
 
 describe("GeminiFileSearchChat", () => {
+  it("uses Gemini 3.8 Flash by default", () => {
+    expect(DEFAULT_FILE_SEARCH_CHAT_MODEL).toBe("gemini-3.8-flash");
+  });
+
+  it("preserves only an exact uncited legal-only refusal", async () => {
+    const answer = CHAT_POLICY_RESPONSES.out_of_scope;
+    const { result, client } = await run(eventStream(answer), canonical(answer));
+    expect(result).toMatchObject({ answer, citations: [] });
+    expect(client.requests[0].system_instruction).toContain(answer);
+    await expect(run(eventStream(answer), canonical(answer, [citation()]))).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
   it("replaces an uncited reply with a safe no-evidence answer", async () => {
     const { result } = await run(eventStream("Hello!"), canonical("Hello!"));
     expect(result).toMatchObject({

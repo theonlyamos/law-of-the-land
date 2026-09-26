@@ -23,6 +23,7 @@ vi.mock("@google/genai", () => ({
 }));
 
 import { POST, maxDuration } from "./route";
+import { CHAT_POLICY_RESPONSES } from "../../../../convex/lib/chatPolicy";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -173,6 +174,7 @@ beforeEach(() => {
   process.env.GEMINI_AI_MODEL = "gemini-test-model";
   process.env.NEXT_PUBLIC_CONVEX_SITE_URL = "https://convex.example.test";
   process.env.TELEMETRY_INGEST_SECRET = "route-test-secret-with-at-least-32-characters";
+  process.env.CHAT_INTENT_ROUTING_MODE = "off";
   authMocks.isAuthenticated.mockResolvedValue(true);
   authMocks.getToken.mockResolvedValue("user-session-token");
   authMocks.fetchAuthQuery.mockResolvedValue({
@@ -182,14 +184,15 @@ beforeEach(() => {
     limit: 10,
     isPro: false,
   });
-  authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+  authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
     const name = getFunctionName(reference);
     if (name === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
     if (name === "chats:completeGovernedInteraction") {
       return {
         status: "completed",
         outcome: "success",
-        citations: [publicCitation],
+        answerKind: args.answerKind,
+        citations: args.answerKind === "policy" || args.citations.length === 0 ? [] : [publicCitation],
         partialCoverage: false,
         citationClaim,
         expiresAt: Date.now() + 60_000,
@@ -211,6 +214,8 @@ afterEach(() => {
   delete process.env.GEMINI_AI_MODEL;
   delete process.env.NEXT_PUBLIC_CONVEX_SITE_URL;
   delete process.env.TELEMETRY_INGEST_SECRET;
+  delete process.env.CHAT_INTENT_ROUTING_MODE;
+  delete process.env.TYPESAFE_API_KEY;
 });
 
 describe("POST /api/chat request boundary", () => {
@@ -350,19 +355,16 @@ describe("POST /api/chat request boundary", () => {
     expect(interactionMocks.create).not.toHaveBeenCalled();
   });
 
-  it("rejects quota exhaustion before resolving provider stores", async () => {
-    authMocks.fetchAuthQuery.mockResolvedValue({
-      allowed: false,
-      canRecord: false,
-      used: 10,
-      limit: 10,
-      isPro: false,
+  it("rejects quota exhaustion atomically before calling Gemini", async () => {
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") throw new Error("QUOTA_EXCEEDED");
+      throw new Error("Unexpected mutation after quota exhaustion");
     });
 
     const response = await POST(request());
 
     expect(response.status).toBe(402);
-    expect(authMocks.getToken).not.toHaveBeenCalled();
+    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
     expect(interactionMocks.create).not.toHaveBeenCalled();
   });
 
@@ -402,6 +404,84 @@ describe("POST /api/chat request boundary", () => {
 });
 
 describe("POST /api/chat streamed governed interaction", () => {
+  it("answers an exact greeting in on mode without Jev or Gemini", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    const result = await events(await POST(request({ query: "Hello!!" })));
+    expect(result.at(-1)).toMatchObject({
+      type: "done", result: CHAT_POLICY_RESPONSES.courtesy, answerKind: "policy", citations: [],
+    });
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(authMocks.getToken).not.toHaveBeenCalled();
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+    expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
+    expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
+      model: "app-policy-v1", answerKind: "policy", finalAnswer: CHAT_POLICY_RESPONSES.courtesy,
+      authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [],
+    });
+  });
+
+  it("uses a high-probability Jev refusal without Gemini", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("typesafe.ai")
+      ? Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "out_of_scope", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.997 },
+      } } })
+      : Response.json(manifest));
+    const result = await events(await POST(request({ query: "Tell me a joke" })));
+    expect(result.at(-1)).toMatchObject({
+      type: "done", result: CHAT_POLICY_RESPONSES.out_of_scope, answerKind: "policy", citations: [],
+    });
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+    expect(authMocks.getToken).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
+  });
+
+  it("uses a high-probability Jev clarification without Gemini", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("typesafe.ai")
+      ? Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "unclear", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.997, out_of_scope: 0.001 },
+      } } })
+      : Response.json(manifest));
+    const result = await events(await POST(request({ query: "What should I do about that?" })));
+    expect(result.at(-1)).toMatchObject({
+      type: "done", result: CHAT_POLICY_RESPONSES.unclear, answerKind: "policy", citations: [],
+    });
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+    expect(authMocks.getToken).not.toHaveBeenCalled();
+  });
+
+  it("falls back to legal File Search for a malformed Jev response", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("typesafe.ai")
+      ? Response.json({ answers: { route: { type: "choice", choice: "out_of_scope", probabilities: {} } } })
+      : Response.json(manifest));
+    const result = await events(await POST(request({ query: "Can my landlord evict me?" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("observes Jev in shadow mode while keeping legal File Search", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "shadow";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("typesafe.ai")
+      ? Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "out_of_scope", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.997 },
+      } } })
+      : Response.json(manifest));
+    const result = await events(await POST(request({ query: "Tell me a joke" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
   it("reserves hosting time beyond the application deadline", () => {
     expect(maxDuration).toBeGreaterThan(110);
   });
@@ -413,10 +493,12 @@ describe("POST /api/chat streamed governed interaction", () => {
     interactionMocks.get.mockResolvedValue(final);
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
       if (getFunctionName(reference) === "usage:recordQuestion") return {};
-      return { status: "completed", outcome: "success", citations: [], partialCoverage: false,
+      return { status: "completed", outcome: "success", answerKind: "legal", citations: [], partialCoverage: false,
         citationClaim, expiresAt: Date.now() + 60_000 };
     });
     const result = await events(await POST(request({ query: "hello" })));
+    expect(result[0]).toEqual({ type: "delta", text: "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question." });
+    expect(JSON.stringify(result)).not.toContain("Hello!");
     expect(result.at(-1)).toMatchObject({ type: "done", citations: [], citationClaim,
       result: "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question." });
   });
@@ -443,10 +525,8 @@ describe("POST /api/chat streamed governed interaction", () => {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     const first = JSON.parse(decoder.decode((await reader.read()).value).trim());
-    const second = JSON.parse(decoder.decode((await reader.read()).value).trim());
 
-    expect(first).toEqual({ type: "delta", text: "Employees " });
-    expect(second).toEqual({ type: "delta", text: "are protected." });
+    expect(first).toEqual({ type: "delta", text: "Employees are protected." });
     expect(interactionMocks.create).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => {
       expect(interactionMocks.get).toHaveBeenCalledTimes(1);
@@ -461,6 +541,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     finishTerminal({
       status: "completed",
       outcome: "success",
+      answerKind: "legal",
       citations: [publicCitation],
       partialCoverage: false,
       citationClaim,
@@ -470,6 +551,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalEvent).toEqual({
       type: "done",
       result: "Employees are protected.",
+      answerKind: "legal",
       citations: [publicCitation],
       citationClaim,
       partialCoverage: false,
@@ -700,7 +782,6 @@ describe("POST /api/chat streamed governed interaction", () => {
     const response = await POST(request());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    expect(JSON.parse(decoder.decode((await reader.read()).value).trim()).type).toBe("delta");
     expect(JSON.parse(decoder.decode((await reader.read()).value).trim()).type).toBe("delta");
     await vi.waitFor(() => {
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);

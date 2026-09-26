@@ -33,6 +33,9 @@ import {
 } from "./lib/geminiFileSearchNames";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
+import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
+
+const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"));
 
 const messageValidator = v.union(
   v.object({
@@ -48,6 +51,7 @@ const messageValidator = v.union(
     createdAt: v.optional(v.number()),
     citations: v.optional(v.array(chatCitationValidator)),
     citationClaim: v.optional(v.string()),
+    answerKind: v.optional(answerKindValidator),
   }),
 );
 
@@ -87,7 +91,7 @@ type GovernedCitationIdentity = {
 type GovernedJurisdictionCoverage = {
   ordinal: number;
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
-  coverage: "evidence" | "no_evidence" | "unavailable";
+  coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
 type GovernedCompletionProofInput = {
   routeNonce: string;
@@ -95,6 +99,7 @@ type GovernedCompletionProofInput = {
   jurisdictionId: string;
   assistantClientId: string;
   finalAnswer?: string;
+  answerKind?: ChatAnswerKind;
   citations: readonly GovernedCitationIdentity[];
   model: string;
   elapsedMs: number;
@@ -154,6 +159,7 @@ const governedJurisdictionCoverageValidator = v.object({
     v.literal("evidence"),
     v.literal("no_evidence"),
     v.literal("unavailable"),
+    v.literal("not_searched"),
   ),
 });
 function boundedIdentifier(value: string, maximum: number): boolean {
@@ -177,6 +183,7 @@ export async function completeGovernedInteractionProofParts(
     input.routeNonce,
     input.externalId,
     input.jurisdictionId,
+    input.answerKind ?? "",
     bindings.assistantClientIdBinding,
     bindings.assistantContentBinding,
     input.model,
@@ -213,6 +220,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
     "governed-completion-idempotency-v2",
     input.externalId,
     input.jurisdictionId,
+    input.answerKind ?? "",
     claimBindings.assistantContentBinding,
     input.outcome,
     input.failureCategory ?? "",
@@ -243,9 +251,9 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
     || input.elapsedMs < 0
     || input.elapsedMs > MAX_PROVIDER_LATENCY_MS
     || !validCount(input.authorizedScopeSize, MAX_ROUTE_SCOPE_SIZE)
-    || input.authorizedScopeSize === 0
+    || (input.authorizedScopeSize === 0 && input.model !== "app-policy-v1")
     || !validCount(input.readyStoreCount, input.authorizedScopeSize)
-    || input.readyStoreCount === 0
+    || (input.readyStoreCount === 0 && input.model !== "app-policy-v1")
     || input.jurisdictionCoverage.length !== input.readyStoreCount
     || input.jurisdictionCoverage.some((item, index) =>
       item.ordinal !== index
@@ -265,20 +273,27 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
     throw new ConvexError("INVALID_GOVERNED_INTERACTION");
   }
   if (input.outcome === "success") {
-    const noEvidence = input.citations.length === 0 && answer === CHAT_NO_EVIDENCE;
+    const policy = input.answerKind === "policy" && answer !== undefined && isChatPolicyResponse(answer);
+    const noEvidence = input.answerKind === "legal" && input.citations.length === 0 && answer === CHAT_NO_EVIDENCE;
+    const notSearched = input.model === "app-policy-v1";
     if (
-      answer === undefined
+      (input.answerKind !== "legal" && input.answerKind !== "policy")
+      || answer === undefined
       || !answer.trim()
       || new TextEncoder().encode(answer).byteLength > MAX_ASSISTANT_CONTENT_BYTES
-      || (input.citations.length === 0 && !noEvidence)
+      || (input.citations.length === 0 && !noEvidence && !policy)
+      || (policy && input.citations.length !== 0)
+      || (notSearched && !policy)
       || input.failureCategory !== undefined
-      || (noEvidence
-        ? input.jurisdictionCoverage.some((item) => item.coverage !== "no_evidence")
-        : input.jurisdictionCoverage[0]?.coverage !== "evidence")
+      || (policy
+        ? input.jurisdictionCoverage.some((item) => item.coverage !== (notSearched ? "not_searched" : "no_evidence"))
+        : noEvidence
+          ? input.jurisdictionCoverage.some((item) => item.coverage !== "no_evidence")
+          : input.jurisdictionCoverage[0]?.coverage !== "evidence")
     ) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     return;
   }
-  if (answer !== undefined || input.citations.length !== 0) {
+  if (answer !== undefined || input.answerKind !== undefined || input.citations.length !== 0) {
     throw new ConvexError("INVALID_GOVERNED_INTERACTION");
   }
 }
@@ -554,16 +569,19 @@ function samePendingMessage(
     content: string;
     createdAt?: number;
     citations?: Doc<"messages">["citations"];
+    answerKind?: ChatAnswerKind;
   },
   right: {
     role: "user" | "assistant";
     content: string;
     createdAt?: number;
     citations?: Doc<"messages">["citations"];
+    answerKind?: ChatAnswerKind;
   },
 ): boolean {
   return left.role === right.role &&
     left.content === right.content &&
+    (left.role !== "assistant" || left.answerKind === right.answerKind) &&
     (left.createdAt === undefined
       ? right.createdAt === undefined
       : right.createdAt !== undefined && Object.is(left.createdAt, right.createdAt)) &&
@@ -605,6 +623,7 @@ const chatMessageValidator = v.object({
   createdAt: v.number(),
   creationTime: v.number(),
   citations: v.optional(v.array(chatCitationValidator)),
+  answerKind: v.optional(answerKindValidator),
   completedAt: v.optional(v.number()),
   durationMs: v.optional(v.number()),
 });
@@ -677,6 +696,7 @@ async function resolveGovernedCompletionAuthority(
   session: Doc<"chatSessions">,
   jurisdictionId: Id<"jurisdictions">,
   citations: readonly GovernedCitationIdentity[],
+  notSearched = false,
 ): Promise<GovernedCompletionAuthority> {
   const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
   const publicCitations = await validateGovernedCitations(ctx, resolution.stores, citations);
@@ -697,7 +717,7 @@ async function resolveGovernedCompletionAuthority(
     jurisdictionCoverage: resolution.stores.map((store, ordinal) => ({
       ordinal,
       relation: store.relation,
-      coverage: citedJurisdictionIds.has(store.jurisdictionId)
+      coverage: notSearched ? "not_searched" as const : citedJurisdictionIds.has(store.jurisdictionId)
         ? "evidence" as const
         : "no_evidence" as const,
     })),
@@ -725,6 +745,7 @@ const completionResultValidator = v.union(
   v.object({
     status: v.literal("completed"),
     outcome: v.literal("success"),
+    answerKind: answerKindValidator,
     citations: v.array(chatCitationValidator),
     partialCoverage: v.boolean(),
     citationClaim: v.string(),
@@ -747,6 +768,7 @@ export const completeGovernedInteraction = mutation({
     jurisdictionId: v.string(),
     assistantClientId: v.string(),
     finalAnswer: v.optional(v.string()),
+    answerKind: v.optional(answerKindValidator),
     citations: v.array(governedCitationIdentityValidator),
     model: v.string(),
     elapsedMs: v.number(),
@@ -825,8 +847,10 @@ export const completeGovernedInteraction = mutation({
         session,
         jurisdictionId,
         args.citations,
+        args.answerKind === "policy" && args.model === "app-policy-v1",
       );
-      if (!matchesCurrentScope(input, authority)) {
+      if (!(args.answerKind === "policy" && args.model === "app-policy-v1")
+        && !matchesCurrentScope(input, authority)) {
         throw new ConvexError("INVALID_GOVERNED_INTERACTION");
       }
     }
@@ -859,6 +883,7 @@ export const completeGovernedInteraction = mutation({
         ...principal,
         chatSessionId: session._id,
         jurisdictionId,
+        answerKind: args.answerKind!,
         ...claimBindings,
         expiresAt,
       });
@@ -874,6 +899,7 @@ export const completeGovernedInteraction = mutation({
       jurisdictionName: selected.name,
       jurisdictionKind: kind,
       outcome: args.outcome,
+      ...(args.answerKind ? { answerKind: args.answerKind } : {}),
       ...(args.failureCategory ? { failureCategory: args.failureCategory } : {}),
       model: args.model,
       totalLatencyMs: args.elapsedMs,
@@ -892,6 +918,7 @@ export const completeGovernedInteraction = mutation({
     return {
       status: "completed" as const,
       outcome: "success" as const,
+      answerKind: args.answerKind!,
       citations: publicCitations,
       partialCoverage: terminalScope.partialCoverage,
       ...claim,
@@ -906,6 +933,7 @@ async function consumeCitationClaim(
     clientId?: string;
     content: string;
     citations: ClaimCitation[];
+    answerKind?: ChatAnswerKind;
     citationClaim?: string;
   },
 ) {
@@ -919,6 +947,7 @@ async function consumeCitationClaim(
   const bindings = await createCitationClaimBindings(message.clientId, message.content, message.citations);
   const row = rows[0];
   if (row.chatSessionId !== session._id || row.jurisdictionId !== session.jurisdictionId ||
+    (row.answerKind ?? "legal") !== message.answerKind ||
     !opaqueEqual(row.ownerBinding, principal.ownerBinding) ||
     !opaqueEqual(row.sessionBinding, principal.sessionBinding) ||
     !opaqueEqual(row.assistantClientIdBinding, bindings.assistantClientIdBinding) ||
@@ -1070,6 +1099,7 @@ export const listMessages = query({
           createdAt: message.createdAt,
           creationTime: message._creationTime,
           citations: message.citations,
+          answerKind: message.answerKind,
           ...timing,
         };
       })),
@@ -1182,6 +1212,7 @@ export const appendMessages = mutation({
         if (existing) {
           if (existing.role !== message.role || existing.content !== message.content ||
             (message.createdAt !== undefined && !Object.is(existing.createdAt, message.createdAt)) ||
+            (message.role === "assistant" && existing.answerKind !== message.answerKind) ||
             !sameCitationSnapshots(existing.citations, message.role === "assistant" ? message.citations : undefined)) {
             throw new ConvexError("CHAT_CLIENT_ID_CONFLICT");
           }
@@ -1195,15 +1226,15 @@ export const appendMessages = mutation({
     if (unsavedMessages.length === 0) return { id: session.externalId };
     for (const message of unsavedMessages) {
       await validateCitations(ctx, session, [message]);
-      if (message.role === "assistant" && message.citations !== undefined) {
+      if (message.role === "assistant") {
+        if (!message.answerKind || message.citations === undefined) invalidCitationClaim();
         await consumeCitationClaim(ctx, session, {
           clientId: message.clientId,
           content: message.content,
           citations: message.citations,
+          answerKind: message.answerKind,
           citationClaim: message.citationClaim,
         });
-      } else if (message.role === "assistant" && message.citationClaim !== undefined) {
-        invalidCitationClaim();
       }
 
       await ctx.db.insert("messages", {
@@ -1212,6 +1243,7 @@ export const appendMessages = mutation({
         content: message.content,
         clientId: message.clientId,
         citations: message.role === "assistant" ? message.citations : undefined,
+        answerKind: message.role === "assistant" ? message.answerKind : undefined,
         createdAt: message.createdAt ?? Date.now(),
       });
     }

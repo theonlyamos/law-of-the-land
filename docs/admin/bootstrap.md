@@ -9,7 +9,7 @@
 | Variable | Owner | Local | Preview | Production |
 | --- | --- | --- | --- | --- |
 | `GOOGLE_AI_API_KEY` | Vercel and Convex | Required for legal search, indexing, and generated answers | Required | Required |
-| `GEMINI_AI_MODEL` | Vercel | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` | Optional; defaults to `gemini-3.5-flash-lite` |
+| `GEMINI_AI_MODEL` | Vercel | Optional; defaults to `gemini-3.8-flash` | Optional; defaults to `gemini-3.8-flash` | Optional; defaults to `gemini-3.8-flash` |
 | `PLACES_API_KEY` | Vercel | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
 | `PLACE_CLAIM_SECRET` | Vercel and Convex | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used | Required when geographic jurisdiction verification is used |
 | `CONVEX_DEPLOYMENT` | local shell / Vercel build | Required | Required | Required |

@@ -67,8 +67,15 @@ vi.mock("convex/react", () => ({
   useQuery: mocks.useQuery,
 }));
 
+vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
+  ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: typeof mocks.resolvedSelection) => void }) => (
+    <button onClick={() => onChange(mocks.resolvedSelection)}>Select test jurisdiction</button>
+  ),
+}));
+
 import { ChatWorkspace } from "./chat-workspace";
 import { ChatRequestIdentity, ChatRequestsProvider } from "./chat-requests";
+import { CHAT_POLICY_RESPONSES } from "../../../convex/lib/chatPolicy";
 
 const render = (ui: React.ReactNode) => renderComponent(ui, {
   wrapper: ({ children }) => <ChatRequestsProvider><ChatRequestIdentity />{children}</ChatRequestsProvider>,
@@ -92,7 +99,9 @@ const citation = {
 const citationClaim = "c".repeat(43);
 
 function ndjsonResponse(events: unknown[]): Response {
-  return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
+  return new Response(`${events.map((event) => JSON.stringify(
+    (event as { type?: string }).type === "done" ? { answerKind: "legal", ...(event as object) } : event,
+  )).join("\n")}\n`, {
     headers: { "content-type": "application/x-ndjson" },
   });
 }
@@ -151,6 +160,61 @@ afterEach(() => {
 });
 
 describe("unified chat client", () => {
+  it("starts a new chat before navigation finishes and waits only for session creation", async () => {
+    let finishEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));
+    render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+
+    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledTimes(1));
+    expect(mocks.push).toHaveBeenCalledWith(expect.stringMatching(/^\/[a-f0-9-]{36}\?jurisdiction=/u));
+    expect(fetch).not.toHaveBeenCalled();
+    const externalId = mocks.ensureSession.mock.calls[0][0].externalId;
+    expect(mocks.push).toHaveBeenCalledWith(`/${externalId}?jurisdiction=${jurisdiction.id}`);
+
+    await act(async () => finishEnsure());
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({ externalId })));
+    expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string)).toMatchObject({
+      query: "Hello", jurisdictionId: jurisdiction.id, externalId,
+    });
+  });
+
+  it("shows a recoverable error when creating a new chat fails", async () => {
+    mocks.ensureSession.mockRejectedValue(new Error("create failed"));
+    const view = render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+
+    await waitFor(() => expect(mocks.push).toHaveBeenCalledTimes(1));
+    const externalId = mocks.ensureSession.mock.calls[0][0].externalId;
+    view.rerender(<ChatWorkspace key={externalId} chatId={externalId} initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("We could not start this chat");
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the chat list visible while a newly created chat loads", () => {
+    mocks.usePaginatedQuery.mockImplementation((reference) => ({
+      results: [],
+      status: getFunctionName(reference) === "chats:list" ? "LoadingFirstPage" : "Exhausted",
+      loadMore: vi.fn(),
+    }));
+    mocks.useQuery.mockImplementation((reference) =>
+      getFunctionName(reference) === "chats:getByExternalId" ? undefined : null,
+    );
+    const { container } = render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    expect(screen.getByLabelText("Chat history")).toBeInTheDocument();
+    expect(screen.getByText("Loading chats…")).toBeInTheDocument();
+    const loading = screen.getByRole("status", { name: "Loading chat…" });
+    expect(loading).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat history")).not.toContainElement(loading);
+    expect(container.firstElementChild).toContainElement(loading);
+  });
+
   it("keeps both conversations streaming across switches and remounts, saving each to its own chat", async () => {
     const streams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
     const signals = new Map<string, AbortSignal>();
@@ -163,7 +227,8 @@ describe("unified chat client", () => {
       }), { headers: { "content-type": "application/x-ndjson" } }));
     }));
     const send = (id: string, event: unknown) => streams.get(id)!.enqueue(
-      encoder.encode(`${JSON.stringify(event)}\n`),
+      encoder.encode(`${JSON.stringify((event as { type?: string }).type === "done"
+        ? { answerKind: "legal", ...(event as object) } : event)}\n`),
     );
     const page = (id: string, question: string | null, key = "page") => (
       <ChatWorkspace key={key} chatId={id} initialQuery={question} initialJurisdiction={jurisdiction.id} />
@@ -396,7 +461,7 @@ describe("unified chat client", () => {
         controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
         controller.enqueue(encoder.encode('{"type":"delta","text":"answer."}\n'));
         finishStream = () => {
-          controller.enqueue(encoder.encode(`{"type":"done","result":"The streamed answer.","citations":[${JSON.stringify(citation)}],"citationClaim":"${citationClaim}","partialCoverage":false}\n`));
+          controller.enqueue(encoder.encode(`{"type":"done","result":"The streamed answer.","answerKind":"legal","citations":[${JSON.stringify(citation)}],"citationClaim":"${citationClaim}","partialCoverage":false}\n`));
           controller.close();
         };
       },
@@ -449,6 +514,21 @@ describe("unified chat client", () => {
       messages: expect.arrayContaining([expect.objectContaining({ content: answer, citations: [], citationClaim })]),
     })));
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+  });
+
+  it("persists a policy refusal without showing Sources", async () => {
+    const answer = CHAT_POLICY_RESPONSES.out_of_scope;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "done", result: answer, answerKind: "policy", citations: [], citationClaim, partialCoverage: false },
+    ])));
+    render(<ChatWorkspace chatId="policy-chat" initialQuery="Tell me a joke" initialJurisdiction={jurisdiction.id} />);
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([expect.objectContaining({
+        content: answer, answerKind: "policy", citations: [], citationClaim,
+      })]),
+    })));
+    expect(await screen.findByText(answer)).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Sources" })).not.toBeInTheDocument();
   });
 
   it("handles the deployment's nested 504 error without rendering an object", async () => {
