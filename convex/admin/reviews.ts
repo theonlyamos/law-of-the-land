@@ -2,7 +2,7 @@ import { patchDocumentVersion, getReviewCountState } from "./reviewCounts";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
-import { mutation, query, type MutationCtx } from "../_generated/server";
+import { internalQuery, mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { writeAudit, validateAuditReason } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
@@ -322,5 +322,16 @@ export const listReviewQueue = query({
       };
     }));
     return { ...result, page };
+  },
+});
+
+export const getReviewFile = internalQuery({
+  args: { versionId: v.id("documentVersions") },
+  returns: v.union(v.object({ storageId: v.id("_storage"), filename: v.string(), mimeType: v.string() }), v.null()),
+  handler: async (ctx, { versionId }) => {
+    await requireEnabledAdminPermission(ctx, "document", "read");
+    const version = await ctx.db.get(versionId);
+    if (!version || !["ready_for_review", "approved", "publishing", "published", "superseded"].includes(version.status)) return null;
+    return { storageId: version.originalStorageId, filename: version.filename, mimeType: version.mimeType };
   },
 });

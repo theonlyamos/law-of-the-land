@@ -1,11 +1,13 @@
 import { httpRouter, makeFunctionReference } from "convex/server";
 import { ConvexError } from "convex/values";
 import { httpAction } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { authComponent, createAuth } from "./auth";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
 import type { ChatResearchStores } from "./jurisdictions";
 import { verifyWidgetServiceProof } from "./lib/widgetProof";
+import { verifyAdminFileProof } from "./lib/adminFileProof";
 
 const http = httpRouter();
 
@@ -29,6 +31,7 @@ authComponent.registerRoutes(http, createAuth);
 polar.registerRoutes(http);
 
 const MAX_EXPORT_REFERENCE_BYTES = 256;
+const MAX_REVIEW_FILE_REQUEST_BYTES = 256;
 const MAX_CHAT_RESEARCH_MANIFEST_BYTES = 256;
 const MAX_JURISDICTION_ID_LENGTH = 128;
 const claimConversationExportReference = makeFunctionReference<"mutation">(
@@ -44,6 +47,30 @@ const resolveChatResearchStores = makeFunctionReference<"query">(
 function noStore(status: number): Response {
   return new Response(null, { status, headers: { "cache-control": "no-store" } });
 }
+
+http.route({
+  path: "/private/admin-review-file",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    if (!(await ctx.auth.getUserIdentity())) return noStore(401);
+    const bytes = await readBoundedBody(request, MAX_REVIEW_FILE_REQUEST_BYTES);
+    if (!bytes) return noStore(400);
+    let versionId: unknown;
+    try {
+      const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1) return noStore(400);
+      versionId = (body as { versionId?: unknown }).versionId;
+    } catch { return noStore(400); }
+    if (typeof versionId !== "string" || versionId.length === 0 || versionId.length > 128) return noStore(400);
+    try {
+      if (!await verifyAdminFileProof(versionId, Number(request.headers.get("x-file-issued-at")), request.headers.get("x-file-proof") ?? "")) return noStore(401);
+      const file = await ctx.runQuery(internal.admin.reviews.getReviewFile, { versionId: versionId as import("./_generated/dataModel").Id<"documentVersions"> });
+      if (!file) return noStore(404);
+      const url = await ctx.storage.getUrl(file.storageId);
+      return url ? Response.json({ url, filename: file.filename, mimeType: file.mimeType }, { headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } }) : noStore(404);
+    } catch { return noStore(404); }
+  }),
+});
 
 function readChatResearchManifestRequest(bytes: Uint8Array): { jurisdictionId: string } | null {
   if (bytes.byteLength === 0) return null;

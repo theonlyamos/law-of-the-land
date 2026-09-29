@@ -25,7 +25,7 @@ export type ReviewItem = {
   mimeType: string;
   byteSize: number;
   sha256: string;
-  sourceHost: string; originalUrl?: string | null;
+  sourceHost: string;
   effectiveDate?: string;
   status: "ready_for_review" | "approved" | "publishing" | "published" | "superseded";
   failureSummary?: string;
@@ -120,7 +120,7 @@ export function DocumentReview({ items, onPublicationQueued, actions, canReview,
             <div className="space-y-8">
               <section aria-labelledby={`${item.id}-original`}>
                 <h3 id={`${item.id}-original`} className="text-sm font-semibold uppercase tracking-[0.14em]">Authoritative original</h3>
-                {item.originalUrl && <a href={item.originalUrl} target="_blank" rel="noopener noreferrer" className="mt-3 inline-block underline">View original document</a>}
+                <a href={`/api/admin/review-files/${encodeURIComponent(item.id)}`} target="_blank" rel="noopener noreferrer" aria-label={`View uploaded file for ${item.resourceTitle}, version ${item.versionNumber}`} className="mt-3 inline-block underline">View uploaded file</a>
                 <dl className="mt-3 grid gap-x-6 gap-y-4 border-y border-[oklch(75%_0.025_78)] py-5 sm:grid-cols-2">
                   <div><dt className="text-xs font-semibold">File</dt><dd className="mt-1 break-all text-sm">{item.filename} / {item.mimeType} / {item.byteSize.toLocaleString()} bytes</dd></div>
                   <div><dt className="text-xs font-semibold">Official source host</dt><dd className="mt-1 text-sm">{item.sourceHost}</dd></div>
