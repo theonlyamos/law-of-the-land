@@ -227,7 +227,7 @@ export const listVersions = query({
       ...result,
       page: await Promise.all(
         result.page.map(async (row) => {
-          const [previous, decisions, originalUrl] = await Promise.all([
+          const [previous, decisions] = await Promise.all([
             row.versionNumber > 1
               ? ctx.db
                   .query("documentVersions")
@@ -245,7 +245,6 @@ export const listVersions = query({
               )
               .order("desc")
               .take(20),
-            ctx.storage.getUrl(row.originalStorageId),
           ]);
           return {
             id: row._id,
@@ -257,7 +256,6 @@ export const listVersions = query({
             byteSize: row.byteSize,
             sha256: row.sha256,
             sourceHost: new URL(row.sourceUrl).host,
-            originalUrl,
             status: row.status,
             submittedBy: row.submittedBy,
             effectiveDate: row.effectiveDate,
