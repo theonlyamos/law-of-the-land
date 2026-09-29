@@ -1,6 +1,28 @@
 import { makeFunctionReference } from "convex/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createWidgetBackend, seedPublicWidget, addOrganizationMember } from "./widgetTestHelpers.fixture";
+import { createAdminFileProof } from "./lib/adminFileProof";
+
+it("lets organization members view reviewed files without exposing storage URLs", async () => {
+  vi.stubEnv("TELEMETRY_INGEST_SECRET", "review-file-test-secret-".repeat(2));
+  try {
+    const t = createWidgetBackend(), own = await seedPublicWidget(t), other = await seedPublicWidget(t);
+    const member = await addOrganizationMember(t, own.organizationId, "reviewer");
+    const list = makeFunctionReference<"query">("organizationContent:listVersions");
+    const versions = await member.client.query(list, { organizationId: own.organizationId, jurisdictionId: own.jurisdictionId, resourceId: own.resourceId, paginationOpts: { numItems: 10, cursor: null } });
+    expect(versions.page[0]).not.toHaveProperty("originalUrl");
+    const issuedAt = Date.now();
+    const fetchFile = async (versionId: string) => member.client.fetch("/private/admin-review-file", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-file-issued-at": String(issuedAt), "x-file-proof": await createAdminFileProof(versionId, issuedAt) },
+      body: JSON.stringify({ versionId }),
+    });
+    expect((await fetchFile(own.versionId)).status).toBe(200);
+    expect((await fetchFile(other.versionId)).status).toBe(404);
+    await t.run(ctx => ctx.db.patch(member.membershipId, { status: "inactive" }));
+    expect((await fetchFile(own.versionId)).status).toBe(404);
+  } finally { vi.unstubAllEnvs(); }
+});
 
 it("allows only the current owner to review their own submission", async () => {
   const t = createWidgetBackend(), f = await seedPublicWidget(t);
@@ -43,7 +65,6 @@ it("scopes password verification to the current organization role and target", a
   await expect(manager.client.mutation(makeFunctionReference<"mutation">("organizations:setVisibility"), { organizationId: own.organizationId, visibility: "members", confirmation: `PRIVATE ${own.jurisdictionId}`, idempotencyKey: input.idempotencyKey })).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
 });
 import { createWidgetServiceProof, uploadProofBytes } from "./lib/widgetProof";
-import { vi } from "vitest";
 it("finalizes only the verified original and permits an exact retry", async () => {
   vi.stubEnv("EMBED_SERVICE_SECRET", "fixture-upload-secret-".repeat(3));
   vi.stubEnv("ADMIN_MAX_DOCUMENT_BYTES", "4194304");

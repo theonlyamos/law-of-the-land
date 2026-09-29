@@ -58,6 +58,7 @@ describe("document review workbench", () => {
     render(<AdminPermissionProvider permissions={["document:review", "document:publish", "document:rollback"]}><DocumentReview items={[item]} /></AdminPermissionProvider>);
     expect(screen.getByRole("heading", { name: "Data Protection Act" })).toBeVisible();
     expect(screen.getByText("Act 843")).toBeVisible();
+    expect(screen.getByRole("link", { name: "View uploaded file for Data Protection Act, version 2" })).toHaveAttribute("href", "/api/admin/review-files/version_2");
     expect(screen.getByText(`SHA-256 ${"a".repeat(64)}`)).toBeVisible();
     expect(screen.queryByRole("heading", { name: "X-Ray evidence" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Metadata-only version diff" })).toBeVisible();

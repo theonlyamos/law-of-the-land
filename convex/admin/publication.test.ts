@@ -8,6 +8,7 @@ import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
 import { insertDocumentVersion, patchDocumentVersion, deleteDocumentVersion } from "./reviewCounts";
+import { createAdminFileProof } from "../lib/adminFileProof";
 
 const modules = Object.fromEntries(Object.entries(import.meta.glob("../**/*.ts")).map(([path, load]) => [path.startsWith("../") ? `./${path.slice(3)}` : `./admin/${path.slice(2)}`, load]));
 const authModules = Object.fromEntries(Object.entries(import.meta.glob("../betterAuth/**/*.ts")).map(([path, load]) => [`./${path.slice("../betterAuth/".length)}`, load]));
@@ -142,10 +143,12 @@ const checklist = { sourceAuthentic: true, metadataAccurate: true, extractionRev
 const originalEnabled = process.env.ADMIN_PANEL_ENABLED;
 const originalEnvironment = process.env.ADMIN_ENVIRONMENT;
 const originalGoogleApiKey = process.env.GOOGLE_AI_API_KEY;
+const originalTelemetrySecret = process.env.TELEMETRY_INGEST_SECRET;
 afterEach(() => {
   if (originalEnabled === undefined) delete process.env.ADMIN_PANEL_ENABLED; else process.env.ADMIN_PANEL_ENABLED = originalEnabled;
   if (originalEnvironment === undefined) delete process.env.ADMIN_ENVIRONMENT; else process.env.ADMIN_ENVIRONMENT = originalEnvironment;
   if (originalGoogleApiKey === undefined) delete process.env.GOOGLE_AI_API_KEY; else process.env.GOOGLE_AI_API_KEY = originalGoogleApiKey;
+  if (originalTelemetrySecret === undefined) delete process.env.TELEMETRY_INGEST_SECRET; else process.env.TELEMETRY_INGEST_SECRET = originalTelemetrySecret;
 });
 
 describe("governed document publication", () => {
@@ -199,11 +202,41 @@ describe("governed document publication", () => {
     await manager.client.mutation(submitForReview, { versionId: ids[0], reason: "Ready for independent legal review", idempotencyKey: "submit-version-1" });
     await expect(manager.client.mutation(approveVersion, { versionId: ids[0], checklistAnswers: checklist, evaluationRunId: "evaluation-2026-01", reason: "Independent review complete", idempotencyKey: "approve-version-1" })).rejects.toThrow("different reviewer");
     await reviewer.client.mutation(approveVersion, { versionId: ids[0], checklistAnswers: checklist, evaluationRunId: "evaluation-2026-01", reason: "Independent review complete", idempotencyKey: "approve-version-1" });
+    await expect(t.query(listReviewQueue, { status: "approved", paginationOpts: { numItems: 10, cursor: null } })).rejects.toThrow("ADMIN_AUTH_REQUIRED");
     const docket = await reviewer.client.query(listReviewQueue, { status: "approved", paginationOpts: { numItems: 10, cursor: null } });
     expect(docket.page[0]).toMatchObject({ id: ids[0], status: "approved", sourceHost: "laws.example.gov" });
+    expect(docket.page[0]).not.toHaveProperty("originalUrl");
     expect(docket.page[0]).not.toHaveProperty("stagingDocumentId");
     expect(docket.page[0]).not.toHaveProperty("xrayEvidence");
     expect(await t.run(async (ctx) => ctx.db.query("integrationJobs").take(1))).toHaveLength(0);
+  });
+
+  it("keeps original file URLs behind a server proof and current document permission", async () => {
+    process.env.TELEMETRY_INGEST_SECRET = "review-file-test-secret-".repeat(2);
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const billing = await asAdmin(t, "billing_manager");
+    const { ids } = await seedCatalog(t, "manager", ["draft", "ready_for_review"]);
+    const body = JSON.stringify({ versionId: ids[1] });
+    const issuedAt = Date.now();
+    const headers = { "content-type": "application/json", "x-file-issued-at": String(issuedAt), "x-file-proof": await createAdminFileProof(ids[1], issuedAt) };
+    const path = "/private/admin-review-file";
+
+    expect((await t.fetch(path, { method: "POST", headers, body })).status).toBe(401);
+    expect((await reviewer.client.fetch(path, { method: "POST", body })).status).toBe(401);
+    const staleAt = issuedAt - 61_000;
+    expect((await reviewer.client.fetch(path, { method: "POST", headers: { ...headers, "x-file-issued-at": String(staleAt), "x-file-proof": await createAdminFileProof(ids[1], staleAt) }, body })).status).toBe(401);
+    expect((await billing.client.fetch(path, { method: "POST", headers, body })).status).toBe(404);
+    const allowed = await reviewer.client.fetch(path, { method: "POST", headers, body });
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({ url: expect.any(String), filename: "act-843-v2.pdf", mimeType: "application/pdf" });
+    const draftBody = JSON.stringify({ versionId: ids[0] });
+    const draftHeaders = { ...headers, "x-file-proof": await createAdminFileProof(ids[0], issuedAt) };
+    expect((await reviewer.client.fetch(path, { method: "POST", headers: draftHeaders, body: draftBody })).status).toBe(404);
+
+    process.env.ADMIN_PANEL_ENABLED = "false";
+    expect((await reviewer.client.fetch(path, { method: "POST", headers, body })).status).toBe(404);
   });
 
   it("allows a super administrator to approve and publish their own submission", async () => {
