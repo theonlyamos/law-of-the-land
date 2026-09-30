@@ -166,17 +166,17 @@ function SignInFormInner() {
     }
   };
 
-  const handleOAuth = async (provider: "github" | "google") => {
+  const handleOAuth = async () => {
     setSubmitting(true);
     setError(null);
     try {
       await authClient.signIn.social({
-        provider,
+        provider: "google",
         callbackURL: redirectTo,
       });
     } catch {
       setError(
-        `We could not start ${provider === "github" ? "GitHub" : "Google"} sign-in. Try again, or use email and password.`
+        "We could not start Google sign-in. Try again, or use email and password."
       );
       setSubmitting(false);
     }
@@ -379,24 +379,15 @@ function SignInFormInner() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={submitting}
-                onClick={() => void handleOAuth("github")}
-              >
-                GitHub
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={submitting}
-                onClick={() => void handleOAuth("google")}
-              >
-                Google
-              </Button>
-            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              disabled={submitting}
+              onClick={() => void handleOAuth()}
+            >
+              Google
+            </Button>
           </div>}
 
           {step !== "twoFactor" && <div className="text-center text-sm text-muted-foreground">
