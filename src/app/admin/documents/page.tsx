@@ -1,4 +1,3 @@
-import type { FunctionReturnType } from "convex/server";
 import { api } from "../../../../convex/_generated/api";
 import type { Doc, Id } from "../../../../convex/_generated/dataModel";
 import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
@@ -29,6 +28,8 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const jurisdictionId = single(parameters.jurisdictionId);
   const jurisdictionCode = single(parameters.jurisdictionCode);
   const jurisdictionCursor = single(parameters.jurisdictionCursor) || null;
+  const filterJurisdictionName = single(parameters.filterJurisdictionName).trim();
+  const filterJurisdictionCursor = single(parameters.filterJurisdictionCursor) || null;
   const validStatus = status === "" || STATUSES.includes(status as (typeof STATUSES)[number]);
   const access = await authorizeAdminPage();
   if (
@@ -68,19 +69,24 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
     } catch { failed = true; }
   }
 
-  // ponytail: load options for a native select; use a paginated picker if this catalog grows large.
   const filterJurisdictions: Array<{ id: string; name: string }> = [];
+  let filterJurisdictionNextCursor = "";
+  let filterJurisdictionIsDone = true;
   if (!failed) {
     try {
-      let cursor: string | null = null;
-      do {
-        const jurisdictions: FunctionReturnType<typeof api.admin.resources.listJurisdictions> = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
-          paginationOpts: { numItems: 100, cursor },
+      const jurisdictions = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
+        paginationOpts: { numItems: 25, cursor: filterJurisdictionCursor },
+        ...(filterJurisdictionName ? { name: filterJurisdictionName } : {}),
+      });
+      filterJurisdictions.push(...jurisdictions.page.map((row) => ({ id: row._id, name: row.name })));
+      filterJurisdictionNextCursor = jurisdictions.continueCursor;
+      filterJurisdictionIsDone = jurisdictions.isDone;
+      if (jurisdictionId && !filterJurisdictions.some((row) => row.id === jurisdictionId)) {
+        const selected = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
+          id: jurisdictionId as Id<"jurisdictions">, paginationOpts: { numItems: 1, cursor: null },
         });
-        filterJurisdictions.push(...jurisdictions.page.map((row) => ({ id: row._id, name: row.name })));
-        cursor = jurisdictions.isDone ? null : jurisdictions.continueCursor;
-      } while (cursor);
-      filterJurisdictions.sort((a, b) => a.name.localeCompare(b.name));
+        filterJurisdictions.push(...selected.page.map((row) => ({ id: row._id, name: row.name })));
+      }
     } catch { failed = true; }
   }
 
@@ -107,7 +113,9 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         <DataTable
           ariaLabel="Legal resources"
           basePath="/admin/documents"
-          filterHeader={<DocumentFilters name={name} status={status} jurisdictionId={jurisdictionId} jurisdictions={filterJurisdictions} />}
+          filterHeader={<DocumentFilters name={name} status={status} jurisdictionId={jurisdictionId} jurisdictions={filterJurisdictions}
+            jurisdictionSearch={filterJurisdictionName} jurisdictionCursor={filterJurisdictionCursor}
+            jurisdictionNextCursor={filterJurisdictionIsDone ? "" : filterJurisdictionNextCursor} />}
           columns={COLUMNS}
           rows={rows.map((row) => ({ id: row._id, cells: {
             instrument: <span className="grid gap-1"><Link href={`/admin/documents/${row._id}`} className="inline-flex min-h-11 items-center font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">{row.title}</Link><span className="text-xs">{row.type} / {row.officialCitation}</span></span>,
@@ -116,7 +124,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
             state: <CatalogStatus status={row.status === "active" && !row.hasPublishedVersion ? "unpublished" : row.status} />,
             effective: <span>{row.effectiveDate ?? "Not set"}{row.repealDate ? ` - ${row.repealDate}` : ""}</span>,
           }}))}
-          filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }, { name: "jurisdictionId", label: "Jurisdiction", value: jurisdictionId }]}
+          filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }, { name: "jurisdictionId", label: "Jurisdiction", value: jurisdictionId }, { name: "filterJurisdictionName", label: "Jurisdiction search", value: filterJurisdictionName }, { name: "filterJurisdictionCursor", label: "Jurisdiction page", value: filterJurisdictionCursor ?? "" }]}
           currentCursor={navigation.cursor}
           previousCursors={navigation.previousCursors}
           nextCursor={result && "continueCursor" in result ? result.continueCursor : ""}

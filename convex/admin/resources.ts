@@ -365,6 +365,8 @@ async function auditChange(
 
 export const listJurisdictions = query({
   args: {
+    id: v.optional(v.id("jurisdictions")),
+    name: v.optional(v.string()),
     status: v.optional(jurisdictionStatusValidator),
     code: v.optional(v.string()),
     paginationOpts: paginationOptsValidator,
@@ -373,6 +375,19 @@ export const listJurisdictions = query({
   handler: async (ctx, args) => {
     await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
+    if (args.id) {
+      const row = await ctx.db.get(args.id);
+      return { page: row ? [projectPickerJurisdiction(row)] : [], isDone: true, continueCursor: "" };
+    }
+    const name = args.name?.trim();
+    if (name) {
+      if (name.length > 200 || name.split(/\s+/u).length > 16) throw new ConvexError("INVALID_JURISDICTION_SEARCH");
+      const result = await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) => {
+        const search = q.search("name", name);
+        return args.status ? search.eq("status", args.status) : search;
+      }).paginate(args.paginationOpts);
+      return { ...result, page: result.page.map(projectPickerJurisdiction) };
+    }
     const code = args.code === undefined ? undefined : normalizeCode(args.code);
     if (code) {
       const [codeRows, legacyCodeRows] = await Promise.all([
@@ -519,7 +534,12 @@ export const listResources = query({
               q.eq("jurisdictionId", args.jurisdictionId!),
             )
           : ctx.db.query("legalResources");
-    const result = await (searchSource ?? source.order("desc")).paginate(args.paginationOpts);
+    const orderedSource = searchSource ?? source.order("desc");
+    // ponytail: existence filtering scans indexed candidates; index a published flag if this exceeds the read cap.
+    const catalogSource = args.status === "active"
+      ? orderedSource.filter((q) => q.neq(q.field("activeVersionId"), undefined))
+      : orderedSource;
+    const result = await catalogSource.paginate({ ...args.paginationOpts, maximumRowsRead: 1000 });
     const jurisdictions = new Map(await Promise.all(
       [...new Set(result.page.map((row) => row.jurisdictionId))].map(async (id) => [id, await ctx.db.get(id)] as const),
     ));

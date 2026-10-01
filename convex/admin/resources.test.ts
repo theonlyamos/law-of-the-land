@@ -868,13 +868,13 @@ describe("legal resource governance", () => {
     }
     const first = await auditor.client.query(listResources, {
       jurisdictionId,
-      status: "active",
+      status: "unpublished",
       paginationOpts: { numItems: 2, cursor: null },
     });
     expect(first.page).toHaveLength(2);
     expect(first.isDone).toBe(false);
     const named = await auditor.client.query(listResources, {
-      name: "  lABOUR  ", jurisdictionId, status: "active",
+      name: "  lABOUR  ", jurisdictionId, status: "unpublished",
       paginationOpts: { numItems: 2, cursor: null },
     });
     expect(named.page.map((row: { title: string }) => row.title)).toEqual(["Labour Act"]);
@@ -1038,8 +1038,17 @@ it("filters unpublished resources before pagination, including name and jurisdic
   });
   for (const filters of [{}, { jurisdictionId }, { status: "active" }, { jurisdictionId, status: "active" }]) {
     const latest = await auditor.client.query(listResources, { ...filters, paginationOpts: { numItems: 10, cursor: null } });
-    const orderedIds = ids.filter((id, i) => (!filters.jurisdictionId || i !== 5) && (!filters.status || (i !== 4 && i !== 6))).reverse();
+    const orderedIds = ids.filter((id, i) => (!filters.jurisdictionId || i !== 5) && (!filters.status || i === 0 || i === 2)).reverse();
     expect(latest.page.map((row: { _id: string }) => row._id)).toEqual(orderedIds);
+  }
+  for (const selectedJurisdiction of [undefined, jurisdictionId]) {
+    const active = await auditor.client.query(listResources, { status: "active", name: "Act", ...(selectedJurisdiction ? { jurisdictionId: selectedJurisdiction } : {}), paginationOpts: { numItems: 1, cursor: null } });
+    expect(active.page).toHaveLength(1);
+    expect(active.page[0].hasPublishedVersion).toBe(true);
+    const next = await auditor.client.query(listResources, { status: "active", name: "Act", ...(selectedJurisdiction ? { jurisdictionId: selectedJurisdiction } : {}), paginationOpts: { numItems: 1, cursor: active.continueCursor } });
+    expect(next.page).toHaveLength(1);
+    expect(next.page[0].hasPublishedVersion).toBe(true);
+    expect(new Set([active.page[0]._id, next.page[0]._id])).toEqual(new Set([ids[0], ids[2]]));
   }
   const args = { status: "unpublished", paginationOpts: { numItems: 1, cursor: null } };
   const first = await auditor.client.query(listResources, { ...args, jurisdictionId });
@@ -1057,6 +1066,10 @@ it("filters unpublished resources before pagination, including name and jurisdic
   await t.run((ctx) => ctx.db.patch(ids[0], { activeVersionId: undefined }));
   const unpublished = await auditor.client.query(listResources, { ...args, name: "Act 0" });
   expect(unpublished.page.map((row: { _id: string }) => row._id)).toEqual([ids[0]]);
+  const namedJurisdictions = await auditor.client.query(listJurisdictions, { name: "Ghana", paginationOpts: { numItems: 1, cursor: null } });
+  expect(namedJurisdictions.page.map((row: { _id: string }) => row._id)).toEqual([jurisdictionId]);
+  const selectedJurisdiction = await auditor.client.query(listJurisdictions, { id: otherJurisdictionId, paginationOpts: { numItems: 1, cursor: null } });
+  expect(selectedJurisdiction.page.map((row: { _id: string }) => row._id)).toEqual([otherJurisdictionId]);
 });
 
 it("lets document-reading admins view uploaded originals in every lifecycle state and denies other readers", async () => {

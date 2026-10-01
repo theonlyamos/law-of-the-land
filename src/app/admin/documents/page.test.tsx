@@ -71,18 +71,23 @@ it("filters for auditors and keeps jurisdiction and unpublished state in paginat
   mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor_1", roles: ["auditor"] } });
   mocks.fetchAuthQuery
     .mockResolvedValueOnce({ page: [], isDone: false, continueCursor: "documents-next" })
-    .mockResolvedValueOnce({ page: [{ _id: "ghana", name: "Ghana", status: "enabled" }], isDone: false, continueCursor: "jurisdictions-next" })
-    .mockResolvedValueOnce({ page: [{ _id: "kenya", name: "Kenya", status: "archived" }], isDone: true, continueCursor: "" });
-  render(await DocumentsPage({ searchParams: Promise.resolve({ name: "Act", status: "unpublished", jurisdictionId: "ghana" }) }));
+    .mockResolvedValueOnce({ page: [{ _id: "kenya", name: "Kenya", status: "archived" }], isDone: false, continueCursor: "jurisdictions-next" })
+    .mockResolvedValueOnce({ page: [{ _id: "ghana", name: "Ghana", status: "enabled" }], isDone: true, continueCursor: "" });
+  render(await DocumentsPage({ searchParams: Promise.resolve({ name: "Act", status: "unpublished", jurisdictionId: "ghana", filterJurisdictionName: "Kenya", filterJurisdictionCursor: "jurisdictions-current" }) }));
   expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(1, api.admin.resources.listResources, {
     name: "Act", status: "unpublished", jurisdictionId: "ghana", paginationOpts: { numItems: 30, cursor: null },
   });
-  expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(3, api.admin.resources.listJurisdictions, {
-    paginationOpts: { numItems: 100, cursor: "jurisdictions-next" },
+  expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(2, api.admin.resources.listJurisdictions, {
+    name: "Kenya", paginationOpts: { numItems: 25, cursor: "jurisdictions-current" },
   });
+  expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(3, api.admin.resources.listJurisdictions, {
+    id: "ghana", paginationOpts: { numItems: 1, cursor: null },
+  });
+  expect(mocks.fetchAuthQuery).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("button", { name: "Next jurisdictions" })).toBeVisible();
   expect(screen.getByRole("combobox", { name: "Jurisdiction" })).toHaveValue("ghana");
   expect(screen.getByRole("option", { name: "Kenya" })).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Catalog state" })).toHaveValue("unpublished");
-  expect(screen.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana&history=%7E&cursor=documents-next");
+  expect(screen.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana&filterJurisdictionName=Kenya&filterJurisdictionCursor=jurisdictions-current&history=%7E&cursor=documents-next");
   expect(screen.queryByRole("region", { name: "Resource editor" })).not.toBeInTheDocument();
 });
