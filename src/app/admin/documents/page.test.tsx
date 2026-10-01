@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/admin/server", () => ({ authorizeAdminPage: mocks.authorizeAdminPage }));
 vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
-vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
+vi.mock("next/navigation", () => ({ redirect: mocks.redirect, useRouter: () => ({ replace: vi.fn() }) }));
 vi.mock("@/components/admin/catalog-actions", () => ({
   ResourceEditor: () => <section aria-label="Resource editor" />,
 }));
@@ -20,6 +20,7 @@ import DocumentsPage from "./page";
 beforeEach(() => {
   mocks.authorizeAdminPage.mockReset();
   mocks.fetchAuthQuery.mockReset();
+  mocks.fetchAuthQuery.mockResolvedValue({ page: [], isDone: true, continueCursor: "" });
   mocks.redirect.mockReset();
   mocks.authorizeAdminPage.mockResolvedValue({
     status: "authorized",
@@ -64,4 +65,24 @@ describe("document catalog jurisdiction picker", () => {
       },
     );
   });
+});
+
+it("filters for auditors and keeps jurisdiction and unpublished state in pagination links", async () => {
+  mocks.authorizeAdminPage.mockResolvedValue({ status: "authorized", currentAdmin: { userId: "auditor_1", roles: ["auditor"] } });
+  mocks.fetchAuthQuery
+    .mockResolvedValueOnce({ page: [], isDone: false, continueCursor: "documents-next" })
+    .mockResolvedValueOnce({ page: [{ _id: "ghana", name: "Ghana", status: "enabled" }], isDone: false, continueCursor: "jurisdictions-next" })
+    .mockResolvedValueOnce({ page: [{ _id: "kenya", name: "Kenya", status: "archived" }], isDone: true, continueCursor: "" });
+  render(await DocumentsPage({ searchParams: Promise.resolve({ name: "Act", status: "unpublished", jurisdictionId: "ghana" }) }));
+  expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(1, api.admin.resources.listResources, {
+    name: "Act", status: "unpublished", jurisdictionId: "ghana", paginationOpts: { numItems: 30, cursor: null },
+  });
+  expect(mocks.fetchAuthQuery).toHaveBeenNthCalledWith(3, api.admin.resources.listJurisdictions, {
+    paginationOpts: { numItems: 100, cursor: "jurisdictions-next" },
+  });
+  expect(screen.getByRole("combobox", { name: "Jurisdiction" })).toHaveValue("ghana");
+  expect(screen.getByRole("option", { name: "Kenya" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Catalog state" })).toHaveValue("unpublished");
+  expect(screen.getByRole("link", { name: "Next page" })).toHaveAttribute("href", "/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana&history=%7E&cursor=documents-next");
+  expect(screen.queryByRole("region", { name: "Resource editor" })).not.toBeInTheDocument();
 });

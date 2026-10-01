@@ -330,10 +330,11 @@ export const getReviewFile = internalQuery({
   returns: v.union(v.object({ storageId: v.id("_storage"), filename: v.string(), mimeType: v.string() }), v.null()),
   handler: async (ctx, { versionId }) => {
     const version = await ctx.db.get(versionId);
-    if (!version || !["ready_for_review", "approved", "publishing", "published", "superseded"].includes(version.status)) return null;
+    if (!version) return null;
     try {
       await requireEnabledAdminPermission(ctx, "document", "read");
     } catch {
+      if (!["ready_for_review", "approved", "publishing", "published", "superseded"].includes(version.status)) return null;
       await requireOrganizationResource(ctx, version.resourceId, "read");
     }
     return { storageId: version.originalStorageId, filename: version.filename, mimeType: version.mimeType };

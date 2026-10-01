@@ -34,6 +34,9 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
     ]);
   } catch { notFound(); }
 
+  const versionRows = versions.page as Doc<"documentVersions">[];
+  const latestVersion = versionRows[0];
+
   return (
     <article className="mx-auto max-w-[82rem]">
       <Link href="/admin/documents" className="inline-flex min-h-11 items-center text-sm font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">Back to legal resource register</Link>
@@ -72,8 +75,9 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
         </section>
       ) : null}
       <section className="mt-10" aria-labelledby="version-history-heading">
-        <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.065_67)]">Immutable originals</p><h2 id="version-history-heading" className="mt-2 text-2xl font-semibold tracking-[-0.03em]">Version and review history</h2></div><p className="max-w-[42ch] text-sm text-[oklch(42%_0.035_252)]">Metadata only. Original file bodies are never downloaded by this register.</p></div>
-        <VersionHistory versions={(versions.page as Doc<"documentVersions">[]).map((version) => ({ id: version._id, versionNumber: version.versionNumber, filename: version.filename, mimeType: version.mimeType, byteSize: version.byteSize, sha256: version.sha256, status: version.status, failureSummary: version.failureSummary, createdAt: version.createdAt }))} />
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.065_67)]">Immutable originals</p><h2 id="version-history-heading" className="mt-2 text-2xl font-semibold tracking-[-0.03em]">Version and review history</h2></div><p className="max-w-[42ch] text-sm text-[oklch(42%_0.035_252)]">Open the latest original separately. The history below shows metadata and review state.</p></div>
+        {latestVersion ? <a href={`/api/admin/review-files/${encodeURIComponent(latestVersion._id)}`} target="_blank" rel="noopener noreferrer" aria-label={`View latest uploaded file for ${resource.title}, version ${latestVersion.versionNumber}`} className="mb-5 inline-flex min-h-11 items-center text-sm font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">View latest uploaded file / Version {latestVersion.versionNumber}</a> : null}
+        <VersionHistory versions={versionRows.map((version) => ({ id: version._id, versionNumber: version.versionNumber, filename: version.filename, mimeType: version.mimeType, byteSize: version.byteSize, sha256: version.sha256, status: version.status, failureSummary: version.failureSummary, createdAt: version.createdAt }))} />
       </section>
     </article>
   );
