@@ -15,10 +15,10 @@ export async function POST(request: Request, context: { params: Promise<{ organi
     if (!contentType.startsWith("multipart/form-data;")) return Response.json({ error: "Choose a document to upload." }, { status: 400 });
     const bytes = await readWidgetBody(request, prepared.maximumBytes + 65536);
     const form = await new Response(bytes as Uint8Array<ArrayBuffer>, { headers: { "content-type": contentType } }).formData();
-    if ([...form.keys()].some(key => !["file", "sourceUrl", "effectiveAt"].includes(key)) || [...form.keys()].length !== 3) throw new Error("INVALID_UPLOAD");
+    if ([...form.keys()].some(key => !["file", "sourceUrl", "effectiveAt"].includes(key)) || [...form.keys()].length !== (form.has("effectiveAt") ? 3 : 2)) throw new Error("INVALID_UPLOAD");
     const file = form.get("file");
     if (!(file instanceof File) || file.size < 1 || file.size > prepared.maximumBytes) throw new Error("BODY_TOO_LARGE");
-    const sourceUrl = form.get("sourceUrl"), effectiveAt = form.get("effectiveAt");
+    const sourceUrl = form.get("sourceUrl"), effectiveAt = form.get("effectiveAt") ?? "";
     if (typeof sourceUrl !== "string" || typeof effectiveAt !== "string") throw new Error("INVALID_UPLOAD");
     const fileBytes = await file.arrayBuffer();
     const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", fileBytes))].map(b => b.toString(16).padStart(2, "0")).join("");

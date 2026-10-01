@@ -95,7 +95,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
             jurisdiction: row.jurisdictionName,
             authority: <span className="grid gap-1"><span>{row.issuer}</span><a className="break-all text-xs underline underline-offset-4" href={row.sourceUrl} rel="noreferrer" target="_blank">Official source</a></span>,
             state: <CatalogStatus status={row.status === "active" && !row.hasPublishedVersion ? "unpublished" : row.status} />,
-            effective: <span>{row.effectiveDate}{row.repealDate ? ` - ${row.repealDate}` : ""}</span>,
+            effective: <span>{row.effectiveDate ?? "Not set"}{row.repealDate ? ` - ${row.repealDate}` : ""}</span>,
           }}))}
           filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }]}
           currentCursor={navigation.cursor}

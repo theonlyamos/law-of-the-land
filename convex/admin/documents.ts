@@ -164,7 +164,7 @@ export const createDocumentVersionArgs = v.object({
     byteSize: v.number(),
     sha256: v.string(),
     sourceUrl: v.string(),
-    effectiveAt: v.string(),
+    effectiveAt: v.optional(v.string()),
   });
 export async function createDocumentVersionForActor(ctx: MutationCtx, actor: { organizationId?: Id<"organizations">; organizationRole?: "member" | "manager" | "reviewer"; userId: string; roles: string[] }, args: Infer<typeof createDocumentVersionArgs>) {
     const limit = uploadLimit();
@@ -179,9 +179,10 @@ export async function createDocumentVersionForActor(ctx: MutationCtx, actor: { o
     const byteSize = validatedSize(args.byteSize, limit);
     const sha256 = validatedSha256(args.sha256);
     const sourceUrl = validatedSourceUrl(args.sourceUrl, resource.sourceUrl);
-    const effectiveDate = validatedDate(args.effectiveAt);
-    const resourceEffectiveDate = validatedDate(resource.effectiveDate);
+    const effectiveDate = args.effectiveAt === undefined || args.effectiveAt === "" ? undefined : validatedDate(args.effectiveAt);
+    const resourceEffectiveDate = resource.effectiveDate === undefined ? undefined : validatedDate(resource.effectiveDate);
     if (
+      effectiveDate !== undefined && resourceEffectiveDate !== undefined &&
       Date.parse(`${effectiveDate}T00:00:00.000Z`) <
       Date.parse(`${resourceEffectiveDate}T00:00:00.000Z`)
     ) {

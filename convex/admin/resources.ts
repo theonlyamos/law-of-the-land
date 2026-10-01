@@ -41,6 +41,10 @@ const resourceTypeValidator = v.union(
   v.literal("judgment"),
   v.literal("policy"),
   v.literal("guidance"),
+  v.literal("treaty"),
+  v.literal("convention"),
+  v.literal("protocol"),
+  v.literal("declaration"),
 );
 
 const jurisdictionDocValidator = v.object({
@@ -53,7 +57,7 @@ const resourceDocValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
-  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
 });
@@ -76,7 +80,7 @@ const resourceDetailValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
-  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
   jurisdiction: v.object({
@@ -252,6 +256,10 @@ function validateResourceType(value: string): ResourceType {
     "judgment",
     "policy",
     "guidance",
+    "treaty",
+    "convention",
+    "protocol",
+    "declaration",
   ];
   if (!values.includes(value)) {
     throw new ConvexError("INVALID_RESOURCE_TYPE");
@@ -543,7 +551,7 @@ const resourceMutationArgs = {
   officialCitation: v.string(),
   sourceUrl: v.string(),
   topics: v.array(v.string()),
-  effectiveDate: v.string(),
+  effectiveDate: v.optional(v.string()),
   reason: v.string(),
 } as const;
 
@@ -556,7 +564,7 @@ async function resourceInput(
     officialCitation: string;
     sourceUrl: string;
     topics: string[];
-    effectiveDate: string;
+    effectiveDate?: string;
     exceptId?: Id<"legalResources">;
   },
 ) {
@@ -582,7 +590,7 @@ async function resourceInput(
     officialCitationKey,
     sourceUrl: validateSourceUrl(input.sourceUrl),
     topics: validateTopics(input.topics),
-    effectiveDate: validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
+    effectiveDate: input.effectiveDate === undefined || input.effectiveDate === "" ? undefined : validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
   };
 }
 
@@ -729,7 +737,7 @@ export async function markResourceRepealedForActor(ctx: MutationCtx, actor: Acto
     if (row.activeVersionId !== undefined) throw new ConvexError("RESOURCE_MUST_BE_UNPUBLISHED");
     await requireResourceLifecycleIdle(ctx, row._id);
     const repealDate = validateDate(args.repealDate, "REPEAL_DATE");
-    if (repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
+    if (row.effectiveDate !== undefined && repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
     const patch = {
       status: "repealed" as const,
       repealDate,
