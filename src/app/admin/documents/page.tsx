@@ -1,5 +1,5 @@
 import { api } from "../../../../convex/_generated/api";
-import type { Doc } from "../../../../convex/_generated/dataModel";
+import type { Doc, Id } from "../../../../convex/_generated/dataModel";
 import { hasRolePermission } from "../../../../convex/lib/adminPermissions";
 import { DataTable, readAdminTableNavigation, type AdminTableSearchParams } from "@/components/admin/data-table";
 import { CatalogStatus } from "@/components/admin/resource-register";
@@ -17,7 +17,7 @@ const COLUMNS = [
   { key: "state", label: "Catalog state" },
   { key: "effective", label: "Effective" },
 ] as const;
-const STATUSES = ["active", "repealed", "archived"] as const;
+const STATUSES = ["active", "unpublished", "repealed", "archived"] as const;
 function single(value: string | string[] | undefined) { return typeof value === "string" ? value : ""; }
 
 export default async function DocumentsPage({ searchParams }: { searchParams: Promise<AdminTableSearchParams> }) {
@@ -25,8 +25,11 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
   const navigation = readAdminTableNavigation(parameters);
   const status = single(parameters.status);
   const name = single(parameters.name).trim();
+  const jurisdictionId = single(parameters.jurisdictionId);
   const jurisdictionCode = single(parameters.jurisdictionCode);
   const jurisdictionCursor = single(parameters.jurisdictionCursor) || null;
+  const filterJurisdictionName = single(parameters.filterJurisdictionName).trim();
+  const filterJurisdictionCursor = single(parameters.filterJurisdictionCursor) || null;
   const validStatus = status === "" || STATUSES.includes(status as (typeof STATUSES)[number]);
   const access = await authorizeAdminPage();
   if (
@@ -43,6 +46,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
       result = await fetchAuthQuery(api.admin.resources.listResources, {
         paginationOpts: { numItems: 30, cursor: navigation.cursor },
         ...(name ? { name } : {}),
+        ...(jurisdictionId ? { jurisdictionId: jurisdictionId as Id<"jurisdictions"> } : {}),
         ...(status ? { status: status as (typeof STATUSES)[number] } : {}),
       });
     } catch { failed = true; }
@@ -62,6 +66,27 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         .map((jurisdiction) => ({ id: jurisdiction._id, code: jurisdiction.code, name: jurisdiction.name }));
       jurisdictionNextCursor = jurisdictions.continueCursor;
       jurisdictionIsDone = jurisdictions.isDone;
+    } catch { failed = true; }
+  }
+
+  const filterJurisdictions: Array<{ id: string; name: string }> = [];
+  let filterJurisdictionNextCursor = "";
+  let filterJurisdictionIsDone = true;
+  if (!failed) {
+    try {
+      const jurisdictions = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
+        paginationOpts: { numItems: 25, cursor: filterJurisdictionCursor },
+        ...(filterJurisdictionName ? { name: filterJurisdictionName } : {}),
+      });
+      filterJurisdictions.push(...jurisdictions.page.map((row) => ({ id: row._id, name: row.name })));
+      filterJurisdictionNextCursor = jurisdictions.continueCursor;
+      filterJurisdictionIsDone = jurisdictions.isDone;
+      if (jurisdictionId && !filterJurisdictions.some((row) => row.id === jurisdictionId)) {
+        const selected = await fetchAuthQuery(api.admin.resources.listJurisdictions, {
+          id: jurisdictionId as Id<"jurisdictions">, paginationOpts: { numItems: 1, cursor: null },
+        });
+        filterJurisdictions.push(...selected.page.map((row) => ({ id: row._id, name: row.name })));
+      }
     } catch { failed = true; }
   }
 
@@ -88,7 +113,9 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
         <DataTable
           ariaLabel="Legal resources"
           basePath="/admin/documents"
-          filterHeader={<DocumentFilters name={name} status={status} />}
+          filterHeader={<DocumentFilters name={name} status={status} jurisdictionId={jurisdictionId} jurisdictions={filterJurisdictions}
+            jurisdictionSearch={filterJurisdictionName} jurisdictionCursor={filterJurisdictionCursor}
+            jurisdictionNextCursor={filterJurisdictionIsDone ? "" : filterJurisdictionNextCursor} />}
           columns={COLUMNS}
           rows={rows.map((row) => ({ id: row._id, cells: {
             instrument: <span className="grid gap-1"><Link href={`/admin/documents/${row._id}`} className="inline-flex min-h-11 items-center font-semibold underline decoration-2 decoration-amber-700 underline-offset-4">{row.title}</Link><span className="text-xs">{row.type} / {row.officialCitation}</span></span>,
@@ -97,13 +124,13 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
             state: <CatalogStatus status={row.status === "active" && !row.hasPublishedVersion ? "unpublished" : row.status} />,
             effective: <span>{row.effectiveDate ?? "Not set"}{row.repealDate ? ` - ${row.repealDate}` : ""}</span>,
           }}))}
-          filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }]}
+          filters={[{ name: "name", label: "Document name", value: name }, { name: "status", label: "Catalog state", value: status, options: [{ value: "", label: "All states" }, ...STATUSES.map((value) => ({ value, label: value[0].toUpperCase() + value.slice(1) }))] }, { name: "jurisdictionId", label: "Jurisdiction", value: jurisdictionId }, { name: "filterJurisdictionName", label: "Jurisdiction search", value: filterJurisdictionName }, { name: "filterJurisdictionCursor", label: "Jurisdiction page", value: filterJurisdictionCursor ?? "" }]}
           currentCursor={navigation.cursor}
           previousCursors={navigation.previousCursors}
           nextCursor={result && "continueCursor" in result ? result.continueCursor : ""}
           isDone={result && "isDone" in result ? result.isDone : true}
           state={failed ? "error" : "ready"}
-          emptyMessage="No documents match this name and catalog state."
+          emptyMessage="No documents match these filters."
           errorMessage="Legal resources could not be loaded. Check the filter and pagination link."
         />
       </div>

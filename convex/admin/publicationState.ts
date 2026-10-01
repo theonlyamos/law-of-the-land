@@ -269,7 +269,7 @@ export async function applyGeminiIndexCompletion(ctx: MutationCtx, job: Doc<"int
     return { previousVersionId: workflow.previous._id, payload: { operation: "replace_delete", publicationOperation: workflow.publicationOperation, candidateVersionId: workflow.version._id, candidateDocumentName: documentName, previousVersionId: workflow.previous._id, storeName: workflow.storeName, documentName: workflow.previous.geminiDocumentName! } };
   }
   await patchDocumentVersion(ctx, workflow.version._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
-  await ctx.db.patch(workflow.resource._id, { activeVersionId: workflow.version._id, updatedBy: job.actorId, updatedAt: now });
+  await ctx.db.patch(workflow.resource._id, { activeVersionId: workflow.version._id, catalogPublished: true, updatedBy: job.actorId, updatedAt: now });
   await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, workflow.version._id, "success");
   await releaseLifecycleLock(ctx, workflow.lock);
@@ -288,7 +288,7 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
   if (workflow.kind !== "delete") throw new ConvexError("DOCUMENT_PUBLICATION_STATE_INVALID");
   if (workflow.payload.operation === "unpublish") {
     await patchDocumentVersion(ctx, workflow.target._id, { status: "unpublished", geminiDocumentName: undefined, geminiIndexedAt: undefined, unpublishedAt: now, failureSummary: undefined, updatedAt: now });
-    await ctx.db.patch(workflow.resource._id, { activeVersionId: undefined, updatedBy: job.actorId, updatedAt: now });
+    await ctx.db.patch(workflow.resource._id, { activeVersionId: undefined, catalogPublished: false, updatedBy: job.actorId, updatedAt: now });
     await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
     await auditOutcome(ctx, job, "unpublish", workflow.target._id, "success");
     await releaseLifecycleLock(ctx, workflow.lock);
@@ -297,7 +297,7 @@ export async function applyGeminiDeleteCompletion(ctx: MutationCtx, job: Doc<"in
   const candidate = workflow.candidate!;
   await patchDocumentVersion(ctx, workflow.target._id, { status: "superseded", geminiDocumentName: undefined, geminiIndexedAt: undefined, updatedAt: now });
   await patchDocumentVersion(ctx, candidate._id, { status: "published", publishedAt: now, unpublishedAt: undefined, failureSummary: undefined, updatedAt: now });
-  await ctx.db.patch(workflow.resource._id, { activeVersionId: candidate._id, updatedBy: job.actorId, updatedAt: now });
+  await ctx.db.patch(workflow.resource._id, { activeVersionId: candidate._id, catalogPublished: true, updatedBy: job.actorId, updatedAt: now });
   await clearResolvedJurisdictionDrift(ctx, workflow.jurisdiction, job._id, now);
   await auditOutcome(ctx, job, workflow.publicationOperation, candidate._id, "success");
   await releaseLifecycleLock(ctx, workflow.lock);
