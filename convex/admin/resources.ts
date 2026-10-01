@@ -479,7 +479,7 @@ export const listResources = query({
   args: {
     name: v.optional(v.string()),
     jurisdictionId: v.optional(v.id("jurisdictions")),
-    status: v.optional(resourceStatusValidator),
+    status: v.optional(v.union(resourceStatusValidator, v.literal("unpublished"))),
     paginationOpts: paginationOptsValidator,
   },
   returns: paginationResultValidator(v.object({
@@ -491,25 +491,35 @@ export const listResources = query({
     await requireEnabledAdminCatalogRead(ctx, "resource");
     validatePageSize(args.paginationOpts.numItems);
     const name = args.name?.trim();
+    const status = args.status === "unpublished" ? "active" : args.status;
     if (name && (name.length > 200 || name.split(/\s+/u).length > 16)) throw new ConvexError("RESOURCE_SEARCH_INVALID");
     const searchSource = name ? ctx.db.query("legalResources").withSearchIndex("search_title", (q) => {
         let search = q.search("title", name);
-        if (args.status) search = search.eq("status", args.status);
+        if (status) search = search.eq("status", status);
+        if (args.status === "unpublished") search = search.eq("activeVersionId", undefined);
         if (args.jurisdictionId) search = search.eq("jurisdictionId", args.jurisdictionId);
         return search;
       }) : null;
-    const source = args.jurisdictionId && args.status
+    const source = args.status === "unpublished"
+      ? args.jurisdictionId
+        ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status_and_activeVersionId", (q) =>
+            q.eq("jurisdictionId", args.jurisdictionId!).eq("status", "active").eq("activeVersionId", undefined),
+          )
+        : ctx.db.query("legalResources").withIndex("by_status_and_activeVersionId", (q) =>
+            q.eq("status", "active").eq("activeVersionId", undefined),
+          )
+      : args.jurisdictionId && status
       ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status", (q) =>
-          q.eq("jurisdictionId", args.jurisdictionId!).eq("status", args.status!),
+          q.eq("jurisdictionId", args.jurisdictionId!).eq("status", status!),
         )
-      : args.status
-        ? ctx.db.query("legalResources").withIndex("by_status_and_updatedAt", (q) => q.eq("status", args.status!))
+      : status
+        ? ctx.db.query("legalResources").withIndex("by_status", (q) => q.eq("status", status))
         : args.jurisdictionId
-          ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_updatedAt", (q) =>
+          ? ctx.db.query("legalResources").withIndex("by_jurisdictionId", (q) =>
               q.eq("jurisdictionId", args.jurisdictionId!),
             )
           : ctx.db.query("legalResources");
-    const result = await (searchSource ?? source).paginate(args.paginationOpts);
+    const result = await (searchSource ?? source.order("desc")).paginate(args.paginationOpts);
     const jurisdictions = new Map(await Promise.all(
       [...new Set(result.page.map((row) => row.jurisdictionId))].map(async (id) => [id, await ctx.db.get(id)] as const),
     ));

@@ -219,6 +219,8 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
+    .index("by_jurisdictionId", ["jurisdictionId"])
+    .index("by_status", ["status"])
     .index("by_jurisdictionId_and_status", ["jurisdictionId", "status"])
     .index("by_jurisdictionId_and_updatedAt", ["jurisdictionId", "updatedAt"])
     .index("by_jurisdictionId_and_officialCitation", [
@@ -230,7 +232,9 @@ export default defineSchema({
       "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
-    .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId"] })
+    .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId", "activeVersionId"] })
+    .index("by_status_and_activeVersionId", ["status", "activeVersionId"])
+    .index("by_jurisdictionId_and_status_and_activeVersionId", ["jurisdictionId", "status", "activeVersionId"])
     .index("by_activeVersionId", ["activeVersionId"])
     .index("by_jurisdictionId_and_activeVersionId", [
       "jurisdictionId",

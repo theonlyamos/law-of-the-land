@@ -19,6 +19,9 @@ it("lets organization members view reviewed files without exposing storage URLs"
     });
     expect((await fetchFile(own.versionId)).status).toBe(200);
     expect((await fetchFile(other.versionId)).status).toBe(404);
+    await t.run(ctx => ctx.db.patch(own.versionId, { status: "unpublished" }));
+    expect((await fetchFile(own.versionId)).status).toBe(404);
+    await t.run(ctx => ctx.db.patch(own.versionId, { status: "published" }));
     await t.run(ctx => ctx.db.patch(member.membershipId, { status: "inactive" }));
     expect((await fetchFile(own.versionId)).status).toBe(404);
   } finally { vi.unstubAllEnvs(); }
