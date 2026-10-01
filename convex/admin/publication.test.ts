@@ -233,7 +233,7 @@ describe("governed document publication", () => {
     expect(await allowed.json()).toMatchObject({ url: expect.any(String), filename: "act-843-v2.pdf", mimeType: "application/pdf" });
     const draftBody = JSON.stringify({ versionId: ids[0] });
     const draftHeaders = { ...headers, "x-file-proof": await createAdminFileProof(ids[0], issuedAt) };
-    expect((await reviewer.client.fetch(path, { method: "POST", headers: draftHeaders, body: draftBody })).status).toBe(404);
+    expect((await reviewer.client.fetch(path, { method: "POST", headers: draftHeaders, body: draftBody })).status).toBe(200);
 
     process.env.ADMIN_PANEL_ENABLED = "false";
     expect((await reviewer.client.fetch(path, { method: "POST", headers, body })).status).toBe(404);
@@ -368,7 +368,7 @@ describe("governed document publication", () => {
     ] });
     expect(pollTarget).not.toHaveProperty("signedUrl");
     expect(version).toMatchObject({ status: "published", geminiDocumentName: "fileSearchStores/ghana-test/documents/first-publish" });
-    expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);
+    expect(await t.run(async (ctx) => ctx.db.get(resourceId))).toMatchObject({ activeVersionId: ids[0], catalogPublished: true });
   });
 
   it("replacement keeps the prior active until new indexing and old deletion both succeed", async () => {
@@ -389,7 +389,7 @@ describe("governed document publication", () => {
     if (!deletion) throw new Error("expected replacement deletion");
     await expect(completeDelete(t, deletion._id)).resolves.toMatchObject({ kind: "delete_document", documentName: "fileSearchStores/ghana-test/documents/version-1" });
     const final = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), previous: await ctx.db.get(ids[0]), candidate: await ctx.db.get(ids[1]), locks: await ctx.db.query("documentLifecycleLocks").take(2) }));
-    expect(final.resource?.activeVersionId).toBe(ids[1]);
+    expect(final.resource).toMatchObject({ activeVersionId: ids[1], catalogPublished: true });
     expect(final.previous).toMatchObject({ status: "superseded" });
     expect(final.previous?.geminiDocumentName).toBeUndefined();
     expect(final.candidate).toMatchObject({ status: "published", geminiDocumentName: "fileSearchStores/ghana-test/documents/replacement-v2" });
@@ -441,13 +441,14 @@ describe("governed document publication", () => {
     const deleteCurrent = await t.run(async (ctx) => (await ctx.db.query("integrationJobs").take(3)).find((job) => job.type === "gemini_delete_document"));
     if (!deleteCurrent) throw new Error("expected rollback deletion");
     await completeDelete(t, deleteCurrent._id);
-    expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);
+    expect(await t.run(async (ctx) => ctx.db.get(resourceId))).toMatchObject({ activeVersionId: ids[0], catalogPublished: true });
     await addStepUp(t, publisher, "document_unpublish", ids[0], "unpublish-version-1");
     const unpublish = await publisher.client.mutation(unpublishVersion, { versionId: ids[0], confirmation: `UNPUBLISH ${ids[0]}`, reason: "Withdraw indexed original", idempotencyKey: "unpublish-version-1" });
     expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);
     await completeDelete(t, unpublish.jobId);
     const final = await t.run(async (ctx) => ({ resource: await ctx.db.get(resourceId), version: await ctx.db.get(ids[0]) }));
     expect(final.resource?.activeVersionId).toBeUndefined();
+    expect(final.resource?.catalogPublished).toBe(false);
     expect(final.version?.status).toBe("unpublished");
     expect(final.version?.geminiDocumentName).toBeUndefined();
   });

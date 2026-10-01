@@ -1,8 +1,8 @@
 import { bumpContentRevision } from "../lib/widgetAuthority";
-import { paginationOptsValidator, paginationResultValidator } from "convex/server";
+import { makeFunctionReference, paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
-import { mutation, query, type MutationCtx } from "../_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { isLegacyCountryCode } from "../lib/jurisdictionDomain";
 import { validateAuditReason, writeAudit } from "./audit";
@@ -58,7 +58,7 @@ const resourceDocValidator = v.object({
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
-  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
 });
 const versionStatusValidator = v.union(
@@ -81,7 +81,7 @@ const resourceDetailValidator = v.object({
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
-  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
   jurisdiction: v.object({
     code: v.optional(v.string()),
@@ -490,6 +490,20 @@ export const archiveJurisdiction = mutation({
   },
 });
 
+export const backfillCatalogPublished = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const rows = await ctx.db.query("legalResources").withIndex("by_catalogPublished", (q) => q.eq("catalogPublished", undefined)).take(100);
+    for (const row of rows) {
+      const version = row.activeVersionId ? await ctx.db.get(row.activeVersionId) : null;
+      await ctx.db.patch(row._id, { catalogPublished: version?.resourceId === row._id && version.status === "published" });
+    }
+    if (rows.length === 100) await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("admin/resources:backfillCatalogPublished"), {});
+    return null;
+  },
+});
+
 export const listResources = query({
   args: {
     name: v.optional(v.string()),
@@ -507,21 +521,25 @@ export const listResources = query({
     validatePageSize(args.paginationOpts.numItems);
     const name = args.name?.trim();
     const status = args.status === "unpublished" ? "active" : args.status;
+    const published = args.status === "active" ? true : args.status === "unpublished" ? false : undefined;
+    if (published !== undefined && (await ctx.db.query("legalResources").withIndex("by_catalogPublished", (q) => q.eq("catalogPublished", undefined)).take(1)).length) {
+      throw new ConvexError("RESOURCE_CATALOG_INITIALIZING");
+    }
     if (name && (name.length > 200 || name.split(/\s+/u).length > 16)) throw new ConvexError("RESOURCE_SEARCH_INVALID");
     const searchSource = name ? ctx.db.query("legalResources").withSearchIndex("search_title", (q) => {
         let search = q.search("title", name);
         if (status) search = search.eq("status", status);
-        if (args.status === "unpublished") search = search.eq("activeVersionId", undefined);
+        if (published !== undefined) search = search.eq("catalogPublished", published);
         if (args.jurisdictionId) search = search.eq("jurisdictionId", args.jurisdictionId);
         return search;
       }) : null;
-    const source = args.status === "unpublished"
+    const source = published !== undefined
       ? args.jurisdictionId
-        ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status_and_activeVersionId", (q) =>
-            q.eq("jurisdictionId", args.jurisdictionId!).eq("status", "active").eq("activeVersionId", undefined),
+        ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status_and_catalogPublished", (q) =>
+            q.eq("jurisdictionId", args.jurisdictionId!).eq("status", "active").eq("catalogPublished", published),
           )
-        : ctx.db.query("legalResources").withIndex("by_status_and_activeVersionId", (q) =>
-            q.eq("status", "active").eq("activeVersionId", undefined),
+        : ctx.db.query("legalResources").withIndex("by_status_and_catalogPublished", (q) =>
+            q.eq("status", "active").eq("catalogPublished", published),
           )
       : args.jurisdictionId && status
       ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status", (q) =>
@@ -534,12 +552,7 @@ export const listResources = query({
               q.eq("jurisdictionId", args.jurisdictionId!),
             )
           : ctx.db.query("legalResources");
-    const orderedSource = searchSource ?? source.order("desc");
-    // ponytail: existence filtering scans indexed candidates; index a published flag if this exceeds the read cap.
-    const catalogSource = args.status === "active"
-      ? orderedSource.filter((q) => q.neq(q.field("activeVersionId"), undefined))
-      : orderedSource;
-    const result = await catalogSource.paginate({ ...args.paginationOpts, maximumRowsRead: 1000 });
+    const result = await (searchSource ?? source.order("desc")).paginate(args.paginationOpts);
     const jurisdictions = new Map(await Promise.all(
       [...new Set(result.page.map((row) => row.jurisdictionId))].map(async (id) => [id, await ctx.db.get(id)] as const),
     ));
@@ -636,6 +649,7 @@ export async function createResourceForActor(ctx: MutationCtx, actor: Actor, arg
       type,
       ...normalized,
       status: "active",
+      catalogPublished: false,
       createdBy: actor.userId,
       updatedBy: actor.userId,
       createdAt: now,

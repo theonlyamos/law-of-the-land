@@ -677,7 +677,7 @@ export const bootstrapRecords = internalMutation({
     const resourceId = await ctx.db.insert("legalResources", {
       jurisdictionId: widgetMode ? publicOrganizationJurisdictionId : jurisdictionId, type: "act", title: `${tag} Legal Resource`, issuer: "E2E fixture",
       officialCitation: tag, officialCitationKey: tag, sourceUrl: "https://example.invalid/e2e", topics: ["fixture"],
-      effectiveDate: "2026-01-01", status: "active", createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`,
+      effectiveDate: "2026-01-01", status: "active", catalogPublished: false, createdBy: `fixture:${tag}`, updatedBy: `fixture:${tag}`,
       createdAt: now, updatedAt: now,
     });
     const publishedVersionId = await insertDocumentVersion(ctx, {
@@ -699,7 +699,7 @@ export const bootstrapRecords = internalMutation({
       status: "ready_for_review", submittedBy: sessions.content_reviewer.userId,
       submittedAt: now, createdAt: now + 2, updatedAt: now + 2,
     });
-    await ctx.db.patch(resourceId, { activeVersionId: publishedVersionId });
+    await ctx.db.patch(resourceId, { activeVersionId: publishedVersionId, catalogPublished: true });
     let widget: { organizationId: Id<"organizations">; publicId: string } | undefined;
     if (widgetMode) {
       for (const [userId, role] of [[member.userId, "manager"], [formerMember.userId, "reviewer"]] as const) {
@@ -1086,6 +1086,7 @@ async function createMatrixResource(ctx: MutationCtx, tag: string, key: string, 
     topics: ["fixture"],
     effectiveDate: "2026-01-01",
     status: "active",
+    catalogPublished: false,
     createdBy: `fixture:${tag}`,
     updatedBy: `fixture:${tag}`,
     createdAt: now,
@@ -1125,7 +1126,7 @@ async function createMatrixVersion(
     createdAt: now,
     updatedAt: now,
   });
-  await ctx.db.patch(resourceId, { ...(status === "published" ? { activeVersionId: versionId } : {}), updatedAt: now });
+  await ctx.db.patch(resourceId, { ...(status === "published" ? { activeVersionId: versionId, catalogPublished: true } : {}), updatedAt: now });
   return { resourceId, versionId };
 }
 
@@ -1197,7 +1198,7 @@ async function prepareMatrixOperation(ctx: MutationCtx, input: { tag: string; pa
     case "admin/reviews:rejectVersion": { const submitter = (await fixtureActor(ctx, input.tag, "content_manager")).userId; const item = await createMatrixVersion(ctx, input.tag, input.key, input.path.endsWith("approveVersion") ? "approve" : "reject", "ready_for_review", submitter); Object.assign(args, { versionId: item.versionId, checklistAnswers: { sourceAuthentic: true, metadataAccurate: true, extractionReviewed: true, citationsVerified: true, evaluationPassed: true }, evaluationRunId: `${input.key}.evaluation`, reason, idempotencyKey: input.key }); break; }
     case "admin/publication:publishVersion":
     case "admin/publication:unpublishVersion":
-    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await insertDocumentVersion(ctx, { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", geminiDocumentName: `${FIXTURE_GEMINI_STORE_NAME}/documents/${input.key}-active`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
+    case "admin/publication:rollbackVersion": { const operation = input.path.includes("unpublish") ? "unpublish" : input.path.includes("rollback") ? "rollback" : "publish"; const status = operation === "publish" ? "approved" : operation === "unpublish" ? "published" : "superseded"; const item = await createMatrixVersion(ctx, input.tag, input.key, operation, status, actor.userId); if (operation === "rollback") { const { storageId } = await mainFixtureRecords(ctx, input.tag); const activeId = await insertDocumentVersion(ctx, { resourceId: item.resourceId, versionNumber: 2, originalStorageId: storageId, filename: `${marker}-active.pdf`, mimeType: "application/pdf", byteSize: 18, sha256: "f".repeat(64), sourceUrl: "https://example.invalid/active", effectiveDate: "2026-03-01", status: "published", geminiDocumentName: `${FIXTURE_GEMINI_STORE_NAME}/documents/${input.key}-active`, submittedBy: actor.userId, submittedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }); await ctx.db.patch(item.resourceId, { activeVersionId: activeId, catalogPublished: true }); } await armProviderOutcome(ctx, { tag: input.tag, versionId: item.versionId, operation, outcome: "succeeded" }); await insertStepUp(ctx, actor, `document_${operation}`, item.versionId, input.key); Object.assign(args, { versionId: item.versionId, confirmation: `${operation.toUpperCase()} ${item.versionId}`, reason, idempotencyKey: input.key }); break; }
     case "admin/billing:grantQuotaOverride": {
       const target = await user("quota_grant");
       Object.assign(args, { userId: target.userId, limit: 25, startsAt: Date.now(), expiresAt: Date.now() + 60_000, reason, confirmation: "", idempotencyKey: input.key });

@@ -37,7 +37,7 @@ export async function seedPublicWidget(t: WidgetBackend) {
     const resourceId = await ctx.db.insert("legalResources", { ...stamp, jurisdictionId, type: "policy", title: "Membership policy", issuer: "Greenfield", officialCitation: "Policy 1", officialCitationKey: "policy 1", sourceUrl: "https://greenfield.example/policy", topics: [], effectiveDate: "2026-01-01", status: "active" });
     const originalStorageId = await ctx.storage.store(new Blob(["fixture policy"]));
     const versionId = await ctx.db.insert("documentVersions", { resourceId, versionNumber: 1, originalStorageId, filename: "policy.txt", mimeType: "text/plain", byteSize: 14, sha256: "0".repeat(64), sourceUrl: "https://greenfield.example/policy", effectiveDate: "2026-01-01", status: "published", geminiDocumentName: `${storeName}/documents/policy1`, submittedBy: "fixture", createdAt: now, updatedAt: now });
-    await ctx.db.patch(resourceId, { activeVersionId: versionId });
+    await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
     await ctx.db.insert("resourceVersionCounters", { resourceId, nextVersionNumber: 2, updatedAt: now });
     const publicId = crypto.randomUUID();
     const widgetId = await ctx.db.insert("jurisdictionWidgets", { jurisdictionId, organizationId, publicId, accessVersion: 0, enabled: true, allowedOrigins: ["https://greenfield.example"], title: "Ask Greenfield", welcomeMessage: "Ask about our published documents.", suggestedQuestions: ["How do I join?"], accent: "#123abc", side: "right", createdAt: now, updatedAt: now, updatedBy: "fixture" });
