@@ -44,7 +44,7 @@ export default async function ResourceDetailPage({ params }: { params: Promise<{
       </header>
       <dl className="grid gap-x-8 gap-y-5 border-b border-[oklch(74%_0.028_78)] py-7 sm:grid-cols-2 lg:grid-cols-4">
         <div><dt className="text-xs font-semibold uppercase tracking-[0.12em]">Jurisdiction</dt><dd className="mt-2 text-sm">{resource.jurisdiction.name}</dd></div>
-        <div><dt className="text-xs font-semibold uppercase tracking-[0.12em]">Effective date</dt><dd className="mt-2 text-sm">{resource.effectiveDate}</dd></div>
+        <div><dt className="text-xs font-semibold uppercase tracking-[0.12em]">Effective date</dt><dd className="mt-2 text-sm">{resource.effectiveDate ?? "Not set"}</dd></div>
         <div><dt className="text-xs font-semibold uppercase tracking-[0.12em]">Topics</dt><dd className="mt-2 text-sm">{resource.topics.join(", ") || "None assigned"}</dd></div>
         <div><dt className="text-xs font-semibold uppercase tracking-[0.12em]">Official source</dt><dd className="mt-2 text-sm"><a href={resource.sourceUrl} target="_blank" rel="noreferrer" className="break-all underline decoration-2 decoration-amber-700 underline-offset-4">Open source record</a></dd></div>
       </dl>

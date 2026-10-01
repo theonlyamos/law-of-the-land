@@ -101,14 +101,14 @@ export function OrganizationResources({
             ["issuer", "Issuing organization"],
             ["officialCitation", "Official citation or reference"],
             ["sourceUrl", "Official source URL"],
-            ["effectiveDate", "Effective date"],
+            ["effectiveDate", "Effective date (optional)"],
             ["reason", "Reason for adding"],
           ].map(([name, label]) => (
             <label key={name} className="grid gap-2 text-sm font-medium">
               {label}
               <input
                 name={name}
-                required
+                required={name !== "effectiveDate"}
                 maxLength={name === "sourceUrl" ? 500 : 300}
                 minLength={name === "reason" ? 3 : undefined}
                 type={
@@ -133,6 +133,10 @@ export function OrganizationResources({
                 "judgment",
                 "policy",
                 "guidance",
+                "treaty",
+                "convention",
+                "protocol",
+                "declaration",
               ].map((type) => (
                 <option key={type}>{type}</option>
               ))}
@@ -391,7 +395,7 @@ function ResourceSettings({
             resource.officialCitation,
           ],
           ["sourceUrl", "Official source URL", resource.sourceUrl],
-          ["effectiveDate", "Effective date", resource.effectiveDate],
+          ["effectiveDate", "Effective date (optional)", resource.effectiveDate],
           ["reason", "Reason for change", ""],
         ].map(([name, label, value]) => (
           <label key={name} className="grid gap-2 text-sm font-medium">
@@ -407,7 +411,7 @@ function ResourceSettings({
                     : "text"
               }
               defaultValue={value}
-              required
+              required={name !== "effectiveDate"}
               minLength={name === "reason" ? 3 : undefined}
               maxLength={500}
             />

@@ -2,7 +2,7 @@
 import { fieldClass, labelClass, buttonClass, secondaryButtonClass } from "./form-styles";
 
 import { api } from "../../../convex/_generated/api";
-import type { Id } from "../../../convex/_generated/dataModel";
+import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { useMutation, useQuery_experimental as useQueryState } from "convex/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -460,13 +460,13 @@ function text(data: FormData, key: string) { return String(data.get(key) ?? "");
 type ResourceInput = {
   id: string;
   jurisdictionId: string;
-  type: "constitution" | "act" | "regulation" | "ordinance" | "judgment" | "policy" | "guidance";
+  type: Doc<"legalResources">["type"];
   title: string;
   issuer: string;
   officialCitation: string;
   sourceUrl: string;
   topics: string[];
-  effectiveDate: string;
+  effectiveDate?: string;
   repealDate?: string;
   status: "active" | "repealed" | "archived";
 };
@@ -539,13 +539,13 @@ export function ResourceEditor({
       ) : null}
       <form onSubmit={submit} className="grid gap-4 border-y border-[oklch(73%_0.03_77)] bg-[oklch(94%_0.022_79)] px-4 py-5 sm:grid-cols-2 lg:grid-cols-4">
       {!resource ? <label className={labelClass}>Jurisdiction ID<select name="jurisdictionId" required disabled={options.length === 0} className={fieldClass}>{options.length === 0 ? <option>No jurisdiction on this page</option> : options.map((option) => <option key={option.id} value={option.id}>{option.code} / {option.name}</option>)}</select></label> : null}
-      {!resource ? <label className={labelClass}>Resource type<select name="type" required className={fieldClass}>{["constitution", "act", "regulation", "ordinance", "judgment", "policy", "guidance"].map((type) => <option key={type}>{type}</option>)}</select></label> : null}
+      {!resource ? <label className={labelClass}>Resource type<select name="type" required className={fieldClass}>{["constitution", "act", "regulation", "ordinance", "judgment", "policy", "guidance", "treaty", "convention", "protocol", "declaration"].map((type) => <option key={type}>{type}</option>)}</select></label> : null}
       <label className={labelClass}>Title<input name="title" defaultValue={resource?.title} required className={fieldClass} /></label>
       <label className={labelClass}>Issuer<input name="issuer" defaultValue={resource?.issuer} required className={fieldClass} /></label>
       <label className={labelClass}>Official citation<input aria-label="Official citation" name="officialCitation" defaultValue={resource?.officialCitation} required className={fieldClass} /></label>
       <label className={labelClass}>Official HTTPS source<input type="url" name="sourceUrl" defaultValue={resource?.sourceUrl} required className={fieldClass} /></label>
       <label className={labelClass}>Topics, comma separated<input name="topics" defaultValue={resource?.topics.join(", ")} className={fieldClass} /></label>
-      <label className={labelClass}>Effective date<input type="date" name="effectiveDate" defaultValue={resource?.effectiveDate} required className={fieldClass} /></label>
+      <label className={labelClass}>Effective date (optional)<input type="date" name="effectiveDate" defaultValue={resource?.effectiveDate} className={fieldClass} /></label>
       {resource?.status === "active" ? <label className={labelClass}>Repeal transition date<input type="date" name="repealDate" className={fieldClass} /></label> : null}
       <label className={`${labelClass} sm:col-span-2`}>Audit reason<input name="reason" required minLength={3} maxLength={500} className={fieldClass} /></label>
       <div className="flex flex-wrap gap-3 sm:col-span-2 lg:col-span-4">

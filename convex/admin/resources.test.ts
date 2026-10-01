@@ -492,6 +492,31 @@ describe("legal resource governance", () => {
     });
   });
 
+  it("supports international resource types and optional effective dates", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await manager.client.mutation(createJurisdiction, {
+      code: "GH", name: "Ghana", slug: "ghana", isDefault: false, reason: "Catalog setup",
+    });
+    for (const type of ["treaty", "convention", "protocol", "declaration"]) {
+      const metadata = {
+        title: type, issuer: "United Nations", officialCitation: type,
+        sourceUrl: "https://example.org/instrument", topics: [], reason: "Add international instrument",
+      };
+      const id = await manager.client.mutation(createResource, { jurisdictionId, type, ...metadata });
+      const resource = await manager.client.query(getResource, { id });
+      expect(resource.type).toBe(type);
+      expect(resource.effectiveDate).toBeUndefined();
+      await expect(manager.client.query(listResources, { jurisdictionId, paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: expect.arrayContaining([expect.objectContaining({ _id: id, type })]) });
+      await expect(manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "2026-02-31" })).rejects.toThrow("INVALID_EFFECTIVE_DATE");
+      await manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "2026-01-01" });
+      await manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "" });
+      expect((await manager.client.query(getResource, { id })).effectiveDate).toBeUndefined();
+      await expect(manager.client.mutation(markResourceRepealed, { id, repealDate: "2026-02-01", reason: "Repeal instrument" })).resolves.toMatchObject({ status: "repealed" });
+    }
+  });
+
   it("rejects invalid metadata and duplicate official citations", async () => {
     const t = createBackend();
     await enablePanel(t);

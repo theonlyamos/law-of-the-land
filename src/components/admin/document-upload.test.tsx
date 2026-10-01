@@ -35,13 +35,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderUpload(resourceStatus: "active" | "repealed" | "archived" = "active") {
+function renderUpload(resourceStatus: "active" | "repealed" | "archived" = "active", defaultEffectiveAt = "2012-10-16") {
   render(
     <DocumentUpload
       resourceId="resource_1"
       resourceStatus={resourceStatus}
       defaultSourceUrl="https://laws.example.gov/files/act.pdf"
-      defaultEffectiveAt="2012-10-16"
+      defaultEffectiveAt={defaultEffectiveAt}
       maxBytes={100}
     />,
   );
@@ -58,7 +58,8 @@ describe("document original upload", () => {
     expect(screen.getByLabelText("Official source URL")).toHaveValue(
       "https://laws.example.gov/files/act.pdf",
     );
-    expect(screen.getByLabelText("Effective date")).toHaveValue("2012-10-16");
+    expect(screen.getByLabelText("Effective date (optional)")).toHaveValue("2012-10-16");
+    expect(screen.getByLabelText("Effective date (optional)")).not.toBeRequired();
     expect(screen.getByText(/100 B maximum/i)).toBeVisible();
     expect(screen.getByRole("button", { name: "Upload version" })).toBeVisible();
   });
@@ -89,7 +90,7 @@ describe("document original upload", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("hashes, uploads directly, records metadata, and announces success", async () => {
+  it.each(["2012-10-16", ""])("uploads and records metadata with optional effective date %s", async (defaultEffectiveAt) => {
     generateUploadUrl.mockResolvedValue("https://upload.example/token-secret");
     createDocumentVersion.mockResolvedValue("version_1");
     vi.mocked(fetch).mockResolvedValue(
@@ -98,7 +99,7 @@ describe("document original upload", () => {
         headers: { "content-type": "application/json" },
       }),
     );
-    renderUpload();
+    renderUpload("active", defaultEffectiveAt);
     const file = new File(["abc"], "Act-843.pdf", { type: "application/pdf" });
     Object.defineProperty(file, "arrayBuffer", {
       value: async () => new TextEncoder().encode("abc").buffer,
@@ -126,7 +127,7 @@ describe("document original upload", () => {
       byteSize: 3,
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
       sourceUrl: "https://laws.example.gov/files/act.pdf",
-      effectiveAt: "2012-10-16",
+      effectiveAt: defaultEffectiveAt,
     });
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Version recorded and ready for review.",

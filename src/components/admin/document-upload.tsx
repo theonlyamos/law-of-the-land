@@ -35,7 +35,7 @@ export function DocumentUpload({
   resourceId: string;
   resourceStatus: "active" | "repealed" | "archived";
   defaultSourceUrl: string;
-  defaultEffectiveAt: string;
+  defaultEffectiveAt?: string;
   maxBytes: number; onUpload?: (input: { file: File; sourceUrl: string; effectiveAt: string }) => Promise<void>;
 }) {
   const router = useRouter();
@@ -45,7 +45,7 @@ export function DocumentUpload({
   );
   const [file, setFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState(defaultSourceUrl);
-  const [effectiveAt, setEffectiveAt] = useState(defaultEffectiveAt);
+  const [effectiveAt, setEffectiveAt] = useState(defaultEffectiveAt ?? "");
   const [state, setState] = useState<UploadState>({ kind: "idle" });
   const busy = state.kind === "busy";
 
@@ -184,13 +184,12 @@ export function DocumentUpload({
             </div>
             <div>
               <label htmlFor={`document-effective-${resourceId}`} className="text-sm font-semibold">
-                Effective date
+                Effective date (optional)
               </label>
               <input
                 id={`document-effective-${resourceId}`}
                 type="date"
                 value={effectiveAt}
-                required
                 disabled={busy}
                 onChange={(event) => setEffectiveAt(event.target.value)}
                 className="mt-2 min-h-11 w-full border border-[oklch(62%_0.035_70)] bg-[oklch(99%_0.01_82)] px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700"

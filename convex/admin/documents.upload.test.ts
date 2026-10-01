@@ -193,6 +193,23 @@ describe("governed original-file uploads", () => {
     );
   });
 
+  it.each([[undefined, undefined], [undefined, ""], [undefined, "2026-01-01"], ["2012-10-16", undefined], ["2012-10-16", ""]])("uploads with optional resource date %s and version date %s", async (resourceDate, effectiveAt) => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const resourceId = await seedResource(t);
+    await t.run(ctx => ctx.db.patch(resourceId, { effectiveDate: resourceDate }));
+    const storageId = await storeFile(t);
+    const id = await manager.client.mutation(createDocumentVersion, {
+      resourceId, storageId, filename: "instrument.pdf", mimeType: "application/pdf", byteSize: 3,
+      sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      sourceUrl: "https://laws.example.gov/instrument.pdf",
+      ...(effectiveAt === undefined ? {} : { effectiveAt }),
+    });
+    const version = await t.run(ctx => ctx.db.get(id as Id<"documentVersions">));
+    expect(version?.effectiveDate).toBe(effectiveAt || undefined);
+  });
+
   it("creates the next immutable version ready for review from verified storage metadata", async () => {
     const t = createBackend();
     await enablePanel(t);
