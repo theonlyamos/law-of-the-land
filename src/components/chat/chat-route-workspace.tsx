@@ -12,14 +12,14 @@ type AccessState = "pending" | "ok" | "bad";
 
 function ChatPageInner() {
   const params = useParams();
-  const chatId = params.chatId as string;
+  const chatId = (params.chatId as string | undefined) ?? null;
   const searchParams = useSearchParams();
-  const q = searchParams.get("q");
-  const jurisdiction = searchParams.get("jurisdiction");
+  const q = chatId ? searchParams.get("q") : null;
+  const jurisdiction = chatId ? searchParams.get("jurisdiction") : null;
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const sessionData = useQuery(
     api.chats.getByExternalId,
-    isAuthenticated ? { externalId: chatId } : "skip"
+    isAuthenticated && chatId ? { externalId: chatId } : "skip"
   );
   const [access, setAccess] = useState<AccessState>("pending");
 
@@ -31,7 +31,7 @@ function ChatPageInner() {
   useEffect(() => {
     // A jurisdiction identifies a chat being created by the workspace.
     // It may arrive before the session mutation completes.
-    if (access !== "pending") return;
+    if (chatId === null || access !== "pending") return;
 
     if (!isValidChatId(chatId)) {
       setAccess("bad");
@@ -55,7 +55,7 @@ function ChatPageInner() {
     setAccess("ok");
   }, [access, authLoading, chatId, isAuthenticated, jurisdiction, q, sessionData]);
 
-  if (!isValidChatId(chatId) || access === "bad") {
+  if (chatId !== null && (!isValidChatId(chatId) || access === "bad")) {
     notFound();
   }
 
@@ -64,7 +64,7 @@ function ChatPageInner() {
   return <ChatWorkspace chatId={chatId} initialQuery={q} initialJurisdiction={jurisdiction} />;
 }
 
-export default function ChatPage() {
+export default function ChatRouteWorkspace() {
   return (
     <div className="flex h-dvh flex-col">
       <Suspense fallback={

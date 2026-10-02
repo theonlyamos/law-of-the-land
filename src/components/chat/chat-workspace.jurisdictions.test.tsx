@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
+  chatId: "7bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c" as string | undefined,
+  search: new URLSearchParams(),
   replace: vi.fn(),
   useQuery: vi.fn(),
   usePaginatedQuery: vi.fn(),
@@ -44,6 +46,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push, replace: mocks.replace }),
+  useParams: () => ({ chatId: mocks.chatId }),
+  useSearchParams: () => mocks.search,
+  notFound: () => { throw new Error("Not found"); },
+}));
+
+vi.mock("@/components/providers/account-providers", () => ({
+  AccountProviders: ({ children }: { children: React.ReactNode }) => children,
 }));
 
 vi.mock("next/image", () => ({
@@ -74,6 +83,9 @@ vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
 }));
 
 import { ChatWorkspace } from "./chat-workspace";
+import ChatLayout from "@/app/(chat)/layout";
+import ChatPage from "@/app/(chat)/[chatId]/page";
+import NewChatPage from "@/app/(chat)/new/page";
 import { ChatRequestIdentity, ChatRequestsProvider } from "./chat-requests";
 import { CHAT_POLICY_RESPONSES } from "../../../convex/lib/chatPolicy";
 
@@ -112,6 +124,8 @@ beforeEach(() => {
     value: vi.fn(),
   });
   mocks.push.mockReset();
+  mocks.chatId = chatId;
+  mocks.search = new URLSearchParams();
   mocks.replace.mockReset();
   mocks.useQuery.mockReset();
   mocks.usePaginatedQuery.mockReset();
@@ -160,6 +174,31 @@ afterEach(() => {
 });
 
 describe("unified chat client", () => {
+  it("preserves the sidebar while a different chat route loads", () => {
+    mocks.session = { title: "First chat" };
+    mocks.sessions = [{ id: chatId, title: "Saved chat", lastMessage: "", timestamp: 1, messageCount: 0 }];
+    const route = () => <ChatLayout>{mocks.chatId ? <ChatPage key={mocks.chatId} /> : <NewChatPage />}</ChatLayout>;
+    const view = render(route());
+    const sidebar = screen.getByLabelText("Chat history");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    mocks.chatId = "6bb69b0e-cc01-4b98-ac37-6c8ca7e44c4c";
+    mocks.useQuery.mockReturnValue(undefined);
+    view.rerender(route());
+
+    expect(screen.getByLabelText("Chat history")).toBe(sidebar);
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Saved chat/ })).toBeInTheDocument();
+    expect(screen.queryByText("Loading chats…")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading chat…" })).toBeInTheDocument();
+
+    mocks.chatId = undefined;
+    view.rerender(route());
+    expect(screen.getByLabelText("Chat history")).toBe(sidebar);
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What do you want to know?" })).toBeInTheDocument();
+  });
+
   it("starts a new chat before navigation finishes and waits only for session creation", async () => {
     let finishEnsure!: () => void;
     mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));

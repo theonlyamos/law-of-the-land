@@ -309,6 +309,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     resetChatView();
     routeEnsureRef.current = null;
     setQuery("");
+    setSelectedResearchJurisdiction(null);
   }, [chatId, resetChatView]);
 
   useEffect(() => {
