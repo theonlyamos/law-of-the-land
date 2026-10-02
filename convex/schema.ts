@@ -195,6 +195,10 @@ export default defineSchema({
       v.literal("judgment"),
       v.literal("policy"),
       v.literal("guidance"),
+      v.literal("treaty"),
+      v.literal("convention"),
+      v.literal("protocol"),
+      v.literal("declaration"),
     ),
     title: v.string(),
     issuer: v.string(),
@@ -202,7 +206,7 @@ export default defineSchema({
     officialCitationKey: v.string(),
     sourceUrl: v.string(),
     topics: v.array(v.string()),
-    effectiveDate: v.string(),
+    effectiveDate: v.optional(v.string()),
     repealDate: v.optional(v.string()),
     status: v.union(
       v.literal("active"),
@@ -210,6 +214,7 @@ export default defineSchema({
       v.literal("archived"),
     ),
     activeVersionId: v.optional(v.id("documentVersions")),
+    catalogPublished: v.optional(v.boolean()),
     createdBy: v.string(),
     updatedBy: v.string(),
     createdAt: v.number(),
@@ -228,9 +233,10 @@ export default defineSchema({
       "officialCitationKey",
     ])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
-    .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId", "activeVersionId"] })
-    .index("by_status_and_activeVersionId", ["status", "activeVersionId"])
-    .index("by_jurisdictionId_and_status_and_activeVersionId", ["jurisdictionId", "status", "activeVersionId"])
+    .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId", "catalogPublished"] })
+    .index("by_catalogPublished", ["catalogPublished"])
+    .index("by_status_and_catalogPublished", ["status", "catalogPublished"])
+    .index("by_jurisdictionId_and_status_and_catalogPublished", ["jurisdictionId", "status", "catalogPublished"])
     .index("by_activeVersionId", ["activeVersionId"])
     .index("by_jurisdictionId_and_activeVersionId", [
       "jurisdictionId",

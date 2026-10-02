@@ -53,7 +53,7 @@ it("publishes approved organization content without step-up while retaining orga
   const reviewer = await addOrganizationMember(t, own.organizationId, "reviewer");
   const member = await addOrganizationMember(t, own.organizationId, "member");
   await t.run(async ctx => {
-    await ctx.db.patch(own.resourceId, { activeVersionId: undefined });
+    await ctx.db.patch(own.resourceId, { activeVersionId: undefined, catalogPublished: false });
     await ctx.db.patch(own.versionId, { status: "approved", geminiDocumentName: undefined });
   });
   const publish = makeFunctionReference<"mutation">("organizationContent:publishVersion");

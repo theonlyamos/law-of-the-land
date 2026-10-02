@@ -1,8 +1,8 @@
 import { bumpContentRevision } from "../lib/widgetAuthority";
-import { paginationOptsValidator, paginationResultValidator } from "convex/server";
+import { makeFunctionReference, paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
-import { mutation, query, type MutationCtx } from "../_generated/server";
+import { internalMutation, mutation, query, type MutationCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { isLegacyCountryCode } from "../lib/jurisdictionDomain";
 import { validateAuditReason, writeAudit } from "./audit";
@@ -41,6 +41,10 @@ const resourceTypeValidator = v.union(
   v.literal("judgment"),
   v.literal("policy"),
   v.literal("guidance"),
+  v.literal("treaty"),
+  v.literal("convention"),
+  v.literal("protocol"),
+  v.literal("declaration"),
 );
 
 const jurisdictionDocValidator = v.object({
@@ -53,8 +57,8 @@ const resourceDocValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
-  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
-  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
 });
 const versionStatusValidator = v.union(
@@ -76,8 +80,8 @@ const resourceDetailValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
-  effectiveDate: v.string(), repealDate: v.optional(v.string()), status: resourceStatusValidator,
-  activeVersionId: v.optional(v.id("documentVersions")), createdBy: v.string(), updatedBy: v.string(),
+  effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
+  activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   createdAt: v.number(), updatedAt: v.number(),
   jurisdiction: v.object({
     code: v.optional(v.string()),
@@ -252,6 +256,10 @@ function validateResourceType(value: string): ResourceType {
     "judgment",
     "policy",
     "guidance",
+    "treaty",
+    "convention",
+    "protocol",
+    "declaration",
   ];
   if (!values.includes(value)) {
     throw new ConvexError("INVALID_RESOURCE_TYPE");
@@ -357,6 +365,8 @@ async function auditChange(
 
 export const listJurisdictions = query({
   args: {
+    id: v.optional(v.id("jurisdictions")),
+    name: v.optional(v.string()),
     status: v.optional(jurisdictionStatusValidator),
     code: v.optional(v.string()),
     paginationOpts: paginationOptsValidator,
@@ -365,6 +375,19 @@ export const listJurisdictions = query({
   handler: async (ctx, args) => {
     await requireEnabledAdminCatalogRead(ctx, "jurisdiction");
     validatePageSize(args.paginationOpts.numItems);
+    if (args.id) {
+      const row = await ctx.db.get(args.id);
+      return { page: row ? [projectPickerJurisdiction(row)] : [], isDone: true, continueCursor: "" };
+    }
+    const name = args.name?.trim();
+    if (name) {
+      if (name.length > 200 || name.split(/\s+/u).length > 16) throw new ConvexError("INVALID_JURISDICTION_SEARCH");
+      const result = await ctx.db.query("jurisdictions").withSearchIndex("search_name", (q) => {
+        const search = q.search("name", name);
+        return args.status ? search.eq("status", args.status) : search;
+      }).paginate(args.paginationOpts);
+      return { ...result, page: result.page.map(projectPickerJurisdiction) };
+    }
     const code = args.code === undefined ? undefined : normalizeCode(args.code);
     if (code) {
       const [codeRows, legacyCodeRows] = await Promise.all([
@@ -467,6 +490,20 @@ export const archiveJurisdiction = mutation({
   },
 });
 
+export const backfillCatalogPublished = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const rows = await ctx.db.query("legalResources").withIndex("by_catalogPublished", (q) => q.eq("catalogPublished", undefined)).take(100);
+    for (const row of rows) {
+      const version = row.activeVersionId ? await ctx.db.get(row.activeVersionId) : null;
+      await ctx.db.patch(row._id, { catalogPublished: version?.resourceId === row._id && version.status === "published" });
+    }
+    if (rows.length === 100) await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("admin/resources:backfillCatalogPublished"), {});
+    return null;
+  },
+});
+
 export const listResources = query({
   args: {
     name: v.optional(v.string()),
@@ -484,21 +521,25 @@ export const listResources = query({
     validatePageSize(args.paginationOpts.numItems);
     const name = args.name?.trim();
     const status = args.status === "unpublished" ? "active" : args.status;
+    const published = args.status === "active" ? true : args.status === "unpublished" ? false : undefined;
+    if (published !== undefined && (await ctx.db.query("legalResources").withIndex("by_catalogPublished", (q) => q.eq("catalogPublished", undefined)).take(1)).length) {
+      throw new ConvexError("RESOURCE_CATALOG_INITIALIZING");
+    }
     if (name && (name.length > 200 || name.split(/\s+/u).length > 16)) throw new ConvexError("RESOURCE_SEARCH_INVALID");
     const searchSource = name ? ctx.db.query("legalResources").withSearchIndex("search_title", (q) => {
         let search = q.search("title", name);
         if (status) search = search.eq("status", status);
-        if (args.status === "unpublished") search = search.eq("activeVersionId", undefined);
+        if (published !== undefined) search = search.eq("catalogPublished", published);
         if (args.jurisdictionId) search = search.eq("jurisdictionId", args.jurisdictionId);
         return search;
       }) : null;
-    const source = args.status === "unpublished"
+    const source = published !== undefined
       ? args.jurisdictionId
-        ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status_and_activeVersionId", (q) =>
-            q.eq("jurisdictionId", args.jurisdictionId!).eq("status", "active").eq("activeVersionId", undefined),
+        ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status_and_catalogPublished", (q) =>
+            q.eq("jurisdictionId", args.jurisdictionId!).eq("status", "active").eq("catalogPublished", published),
           )
-        : ctx.db.query("legalResources").withIndex("by_status_and_activeVersionId", (q) =>
-            q.eq("status", "active").eq("activeVersionId", undefined),
+        : ctx.db.query("legalResources").withIndex("by_status_and_catalogPublished", (q) =>
+            q.eq("status", "active").eq("catalogPublished", published),
           )
       : args.jurisdictionId && status
       ? ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_status", (q) =>
@@ -553,7 +594,7 @@ const resourceMutationArgs = {
   officialCitation: v.string(),
   sourceUrl: v.string(),
   topics: v.array(v.string()),
-  effectiveDate: v.string(),
+  effectiveDate: v.optional(v.string()),
   reason: v.string(),
 } as const;
 
@@ -566,7 +607,7 @@ async function resourceInput(
     officialCitation: string;
     sourceUrl: string;
     topics: string[];
-    effectiveDate: string;
+    effectiveDate?: string;
     exceptId?: Id<"legalResources">;
   },
 ) {
@@ -592,7 +633,7 @@ async function resourceInput(
     officialCitationKey,
     sourceUrl: validateSourceUrl(input.sourceUrl),
     topics: validateTopics(input.topics),
-    effectiveDate: validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
+    effectiveDate: input.effectiveDate === undefined || input.effectiveDate === "" ? undefined : validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
   };
 }
 
@@ -608,6 +649,7 @@ export async function createResourceForActor(ctx: MutationCtx, actor: Actor, arg
       type,
       ...normalized,
       status: "active",
+      catalogPublished: false,
       createdBy: actor.userId,
       updatedBy: actor.userId,
       createdAt: now,
@@ -739,7 +781,7 @@ export async function markResourceRepealedForActor(ctx: MutationCtx, actor: Acto
     if (row.activeVersionId !== undefined) throw new ConvexError("RESOURCE_MUST_BE_UNPUBLISHED");
     await requireResourceLifecycleIdle(ctx, row._id);
     const repealDate = validateDate(args.repealDate, "REPEAL_DATE");
-    if (repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
+    if (row.effectiveDate !== undefined && repealDate < row.effectiveDate) throw new ConvexError("INVALID_DATE_RANGE");
     const patch = {
       status: "repealed" as const,
       repealDate,

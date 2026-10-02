@@ -52,6 +52,18 @@ it("syncs URL changes and cancels a stale search when filters are cleared", () =
   expect(replace).toHaveBeenLastCalledWith("/admin/documents?name=Constitution&status=repealed", { scroll: false });
 });
 
+it("searches and pages jurisdiction options while retaining document filters", () => {
+  render(<DocumentFilters {...jurisdictionProps} name="Act" status="unpublished" jurisdictionId="ghana" jurisdictionSearch="Ghana" jurisdictionCursor="current" jurisdictionNextCursor="next" />);
+  fireEvent.click(screen.getByRole("button", { name: "Next jurisdictions" }));
+  expect(replace).toHaveBeenLastCalledWith("/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana&filterJurisdictionName=Ghana&filterJurisdictionCursor=next", { scroll: false });
+  fireEvent.change(screen.getByRole("textbox", { name: "Find jurisdiction by name" }), { target: { value: "Kenya" } });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Find jurisdiction by name" }), { key: "Enter" });
+  expect(replace).toHaveBeenLastCalledWith("/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana&filterJurisdictionName=Kenya", { scroll: false });
+  fireEvent.change(screen.getByRole("textbox", { name: "Find jurisdiction by name" }), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Find jurisdiction" }));
+  expect(replace).toHaveBeenLastCalledWith("/admin/documents?name=Act&status=unpublished&jurisdictionId=ghana", { scroll: false });
+});
+
 it("combines jurisdiction, unpublished state, and search, and syncs cleared URL filters", () => {
   vi.useFakeTimers();
   const { rerender } = render(<DocumentFilters {...jurisdictionProps} name="Act" status="unpublished" jurisdictionId="ghana" />);

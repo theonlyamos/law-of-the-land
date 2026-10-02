@@ -493,6 +493,31 @@ describe("legal resource governance", () => {
     });
   });
 
+  it("supports international resource types and optional effective dates", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const manager = await asAdmin(t, "content_manager");
+    const jurisdictionId = await manager.client.mutation(createJurisdiction, {
+      code: "GH", name: "Ghana", slug: "ghana", isDefault: false, reason: "Catalog setup",
+    });
+    for (const type of ["treaty", "convention", "protocol", "declaration"]) {
+      const metadata = {
+        title: type, issuer: "United Nations", officialCitation: type,
+        sourceUrl: "https://example.org/instrument", topics: [], reason: "Add international instrument",
+      };
+      const id = await manager.client.mutation(createResource, { jurisdictionId, type, ...metadata });
+      const resource = await manager.client.query(getResource, { id });
+      expect(resource.type).toBe(type);
+      expect(resource.effectiveDate).toBeUndefined();
+      await expect(manager.client.query(listResources, { jurisdictionId, paginationOpts: { numItems: 10, cursor: null } })).resolves.toMatchObject({ page: expect.arrayContaining([expect.objectContaining({ _id: id, type })]) });
+      await expect(manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "2026-02-31" })).rejects.toThrow("INVALID_EFFECTIVE_DATE");
+      await manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "2026-01-01" });
+      await manager.client.mutation(updateResource, { id, ...metadata, effectiveDate: "" });
+      expect((await manager.client.query(getResource, { id })).effectiveDate).toBeUndefined();
+      await expect(manager.client.mutation(markResourceRepealed, { id, repealDate: "2026-02-01", reason: "Repeal instrument" })).resolves.toMatchObject({ status: "repealed" });
+    }
+  });
+
   it("rejects invalid metadata and duplicate official citations", async () => {
     const t = createBackend();
     await enablePanel(t);
@@ -766,7 +791,7 @@ describe("legal resource governance", () => {
         createdAt: now,
         updatedAt: now,
       });
-      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
       return versionId;
     });
 
@@ -785,7 +810,7 @@ describe("legal resource governance", () => {
 
     const lockId = await t.run(async (ctx) => {
       const now = Date.now();
-      await ctx.db.patch(resourceId, { activeVersionId: undefined });
+      await ctx.db.patch(resourceId, { activeVersionId: undefined, catalogPublished: false });
       await ctx.db.patch(versionId, { status: "publishing" });
       return await ctx.db.insert("documentLifecycleLocks", {
         resourceId,
@@ -843,13 +868,13 @@ describe("legal resource governance", () => {
     }
     const first = await auditor.client.query(listResources, {
       jurisdictionId,
-      status: "active",
+      status: "unpublished",
       paginationOpts: { numItems: 2, cursor: null },
     });
     expect(first.page).toHaveLength(2);
     expect(first.isDone).toBe(false);
     const named = await auditor.client.query(listResources, {
-      name: "  lABOUR  ", jurisdictionId, status: "active",
+      name: "  lABOUR  ", jurisdictionId, status: "unpublished",
       paginationOpts: { numItems: 2, cursor: null },
     });
     expect(named.page.map((row: { title: string }) => row.title)).toEqual(["Labour Act"]);
@@ -1005,7 +1030,7 @@ it("filters unpublished resources before pagination, including name and jurisdic
         byteSize: 7, sha256: "a".repeat(64), sourceUrl: "https://example.gov/act.pdf", status: "published",
         submittedBy: manager.userId, createdAt: Date.now(), updatedAt: Date.now(),
       });
-      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
     }
     await ctx.db.patch(ids[0], { updatedAt: Date.now() + 60_000 });
     await ctx.db.patch(ids[4], { status: "archived" });
@@ -1013,8 +1038,17 @@ it("filters unpublished resources before pagination, including name and jurisdic
   });
   for (const filters of [{}, { jurisdictionId }, { status: "active" }, { jurisdictionId, status: "active" }]) {
     const latest = await auditor.client.query(listResources, { ...filters, paginationOpts: { numItems: 10, cursor: null } });
-    const orderedIds = ids.filter((id, i) => (!filters.jurisdictionId || i !== 5) && (!filters.status || (i !== 4 && i !== 6))).reverse();
+    const orderedIds = ids.filter((id, i) => (!filters.jurisdictionId || i !== 5) && (!filters.status || i === 0 || i === 2)).reverse();
     expect(latest.page.map((row: { _id: string }) => row._id)).toEqual(orderedIds);
+  }
+  for (const selectedJurisdiction of [undefined, jurisdictionId]) {
+    const active = await auditor.client.query(listResources, { status: "active", name: "Act", ...(selectedJurisdiction ? { jurisdictionId: selectedJurisdiction } : {}), paginationOpts: { numItems: 1, cursor: null } });
+    expect(active.page).toHaveLength(1);
+    expect(active.page[0].hasPublishedVersion).toBe(true);
+    const next = await auditor.client.query(listResources, { status: "active", name: "Act", ...(selectedJurisdiction ? { jurisdictionId: selectedJurisdiction } : {}), paginationOpts: { numItems: 1, cursor: active.continueCursor } });
+    expect(next.page).toHaveLength(1);
+    expect(next.page[0].hasPublishedVersion).toBe(true);
+    expect(new Set([active.page[0]._id, next.page[0]._id])).toEqual(new Set([ids[0], ids[2]]));
   }
   const args = { status: "unpublished", paginationOpts: { numItems: 1, cursor: null } };
   const first = await auditor.client.query(listResources, { ...args, jurisdictionId });
@@ -1029,9 +1063,30 @@ it("filters unpublished resources before pagination, including name and jurisdic
     expect(named.page.map((row: { _id: string }) => row._id).sort()).toEqual((selectedJurisdiction ? [ids[1], ids[3]] : [ids[1], ids[3], ids[5]]).sort());
     expect(named.page.every((row: { hasPublishedVersion: boolean }) => !row.hasPublishedVersion)).toBe(true);
   }
-  await t.run((ctx) => ctx.db.patch(ids[0], { activeVersionId: undefined }));
+  await t.run((ctx) => ctx.db.patch(ids[0], { activeVersionId: undefined, catalogPublished: false }));
   const unpublished = await auditor.client.query(listResources, { ...args, name: "Act 0" });
   expect(unpublished.page.map((row: { _id: string }) => row._id)).toEqual([ids[0]]);
+  const namedJurisdictions = await auditor.client.query(listJurisdictions, { name: "Ghana", paginationOpts: { numItems: 1, cursor: null } });
+  expect(namedJurisdictions.page.map((row: { _id: string }) => row._id)).toEqual([jurisdictionId]);
+  const selectedJurisdiction = await auditor.client.query(listJurisdictions, { id: otherJurisdictionId, paginationOpts: { numItems: 1, cursor: null } });
+  expect(selectedJurisdiction.page.map((row: { _id: string }) => row._id)).toEqual([otherJurisdictionId]);
+  await t.run(async (ctx) => {
+    const { _id, _creationTime, ...row } = (await ctx.db.get(ids[1]))!;
+    for (let i = 0; i < 1001; i++) await ctx.db.insert("legalResources", { ...row, title: `Act recent ${i}` });
+    await ctx.db.patch(ids[1], { catalogPublished: undefined });
+    await ctx.db.patch(ids[2], { catalogPublished: undefined });
+  });
+  await expect(auditor.client.query(listResources, { status: "active", paginationOpts: { numItems: 10, cursor: null } })).rejects.toThrow("RESOURCE_CATALOG_INITIALIZING");
+  const backfill = makeFunctionReference<"mutation">("admin/resources:backfillCatalogPublished");
+  await t.mutation(backfill, {});
+  await t.mutation(backfill, {});
+  expect(await t.run((ctx) => ctx.db.get(ids[1]))).toMatchObject({ catalogPublished: false });
+  expect(await t.run((ctx) => ctx.db.get(ids[2]))).toMatchObject({ catalogPublished: true });
+  for (const filters of [{}, { jurisdictionId }, { name: "Act" }, { jurisdictionId, name: "Act" }]) {
+    const active = await auditor.client.query(listResources, { ...filters, status: "active", paginationOpts: { numItems: 10, cursor: null } });
+    expect(active.page.map((row: { _id: string }) => row._id)).toEqual([ids[2]]);
+    expect(active.isDone).toBe(true);
+  }
 });
 
 it("lets document-reading admins view uploaded originals in every lifecycle state and denies other readers", async () => {

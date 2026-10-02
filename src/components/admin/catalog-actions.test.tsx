@@ -493,6 +493,10 @@ describe("jurisdiction lifecycle actions", () => {
 describe("resource regression", () => {
   it("retains canonical resource creation controls", () => {
     render(<ResourceEditor jurisdictionIds={["jurisdiction_1"]} />);
+    for (const type of ["treaty", "convention", "protocol", "declaration"]) {
+      expect(screen.getByRole("option", { name: type })).toBeVisible();
+    }
+    expect(screen.getByLabelText("Effective date (optional)")).not.toBeRequired();
     expect(screen.getByRole("textbox", { name: "Official citation" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Create legal resource" })).toBeVisible();
   });

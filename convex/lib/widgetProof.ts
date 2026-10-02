@@ -13,7 +13,7 @@ export async function verifyWidgetServiceProof(operation: string, issuedAt: numb
   return difference === 0;
 }
 export function uploadProofBytes(actor: { userId: string; sessionId: string }, file: {
-  resourceId: string; storageId: string; filename: string; mimeType: string; byteSize: number; sha256: string; sourceUrl: string; effectiveAt: string;
+  resourceId: string; storageId: string; filename: string; mimeType: string; byteSize: number; sha256: string; sourceUrl: string; effectiveAt?: string;
 }): Uint8Array {
   return new TextEncoder().encode(JSON.stringify([actor.userId, actor.sessionId, file.resourceId, file.storageId, file.filename, file.mimeType, file.byteSize, file.sha256, file.sourceUrl, file.effectiveAt]));
 }
