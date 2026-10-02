@@ -5,6 +5,7 @@ import { DocumentReview } from "./document-review";
 
 const mocks = vi.hoisted(() => ({
   approve: vi.fn(),
+  publish: vi.fn(),
   refresh: vi.fn(),
 }));
 
@@ -13,12 +14,13 @@ vi.mock("../../../convex/_generated/api", () => ({
     publishVersion: "publish", unpublishVersion: "unpublish", rollbackVersion: "rollback",
   } } },
 }));
-vi.mock("convex/react", () => ({ useMutation: (reference: string) => reference === "approve" ? mocks.approve : vi.fn() }));
+vi.mock("convex/react", () => ({ useMutation: (reference: string) => reference === "approve" ? mocks.approve : reference === "publish" ? mocks.publish : vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 beforeEach(() => {
   mocks.approve.mockReset().mockResolvedValue({});
+  mocks.publish.mockReset().mockResolvedValue({});
   mocks.refresh.mockReset();
 });
 
@@ -41,6 +43,41 @@ const item = {
 };
 
 describe("document review workbench", () => {
+  it("requires publication acknowledgement and keeps the typed phrase without password verification", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    render(<AdminPermissionProvider permissions={["document:publish"]}><DocumentReview items={[{ ...item, status: "approved" }]} /></AdminPermissionProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Publish version" }));
+    expect(screen.queryByLabelText("Confirm your password")).toBeNull();
+    expect(screen.getByText("PUBLISH version_2")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("Reason for this action"), { target: { value: "Publish reviewed version" } });
+    fireEvent.change(screen.getByLabelText("Exact confirmation"), { target: { value: "PUBLISH version_2" } });
+    const acknowledgement = screen.getByRole("checkbox", { name: "I confirm this is the version I intend to publish." });
+    expect(acknowledgement).toBeRequired();
+    expect(acknowledgement).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Queue publish" }));
+    expect(mocks.publish).not.toHaveBeenCalled();
+    fireEvent.click(acknowledgement);
+    fireEvent.click(screen.getByRole("button", { name: "Queue publish" }));
+    await waitFor(() => expect(mocks.publish).toHaveBeenCalledTimes(1));
+    expect(mocks.publish).toHaveBeenCalledWith({
+      versionId: "version_2", confirmation: "PUBLISH version_2", reason: "Publish reviewed version", idempotencyKey: expect.any(String),
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it.each([
+    ["published", "Unpublish version", "UNPUBLISH"],
+    ["superseded", "Roll back to version", "ROLLBACK"],
+  ] as const)("keeps password confirmation for %s versions", (status, button, phrase) => {
+    render(<AdminPermissionProvider permissions={["document:publish", "document:rollback"]}><DocumentReview items={[{ ...item, status }]} /></AdminPermissionProvider>);
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    expect(screen.getByLabelText("Confirm your password")).toBeRequired();
+    expect(screen.getByText(phrase + " version_2")).toBeVisible();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
   it("shows queued publication without offering another publication action", () => {
     render(<AdminPermissionProvider permissions={["document:publish", "document:rollback"]}><DocumentReview items={[{ ...item, status: "publishing" }]} /></AdminPermissionProvider>);
     expect(screen.getByText("Queued for publishing")).toBeVisible();

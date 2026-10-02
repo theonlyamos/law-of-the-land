@@ -48,6 +48,22 @@ it("allows only the current owner to review their own submission", async () => {
   await expect(owner.client.mutation(approve, { ...input, idempotencyKey: "reviewer_self_001" })).rejects.toThrow("different reviewer");
 });
 
+it("publishes approved organization content without step-up while retaining organization access checks", async () => {
+  const t = createWidgetBackend(), own = await seedPublicWidget(t), other = await seedPublicWidget(t);
+  const reviewer = await addOrganizationMember(t, own.organizationId, "reviewer");
+  const member = await addOrganizationMember(t, own.organizationId, "member");
+  await t.run(async ctx => {
+    await ctx.db.patch(own.resourceId, { activeVersionId: undefined });
+    await ctx.db.patch(own.versionId, { status: "approved", geminiDocumentName: undefined });
+  });
+  const publish = makeFunctionReference<"mutation">("organizationContent:publishVersion");
+  const request = { versionId: own.versionId, confirmation: `PUBLISH ${own.versionId}`, reason: "Publish reviewed policy", idempotencyKey: "organization_publish_001" };
+  await expect(member.client.mutation(publish, request)).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
+  await expect(reviewer.client.mutation(publish, { ...request, versionId: other.versionId, confirmation: `PUBLISH ${other.versionId}` })).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
+  await expect(reviewer.client.mutation(publish, request)).resolves.toMatchObject({ type: "gemini_index", duplicate: false });
+  expect(await t.run(ctx => ctx.db.get(own.versionId))).toMatchObject({ status: "publishing" });
+});
+
 it("rejects cross-organization resource writes and forged upload receipts", async () => {
   const t = createWidgetBackend(), a = await seedPublicWidget(t), b = await seedPublicWidget(t);
   const manager = await addOrganizationMember(t, a.organizationId, "manager");

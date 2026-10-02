@@ -347,14 +347,21 @@ describe("governed document publication", () => {
     await expect(publisher.client.mutation(publishVersion, { ...request, idempotencyKey: "stale-publication-2", reason: "Retry safely after expiry" })).resolves.toMatchObject({ type: "gemini_index", duplicate: false });
   });
 
-  it("first publish uploads once with the exact bounded metadata and activates only after completion", async () => {
+  it("first publish needs no step-up, uploads once, and activates only after completion", async () => {
     const t = createBackend();
     await enablePanel(t);
     const publisher = await asAdmin(t, "content_reviewer");
     const { jurisdictionId, resourceId, ids } = await seedCatalog(t, "manager", ["approved"]);
-    await addStepUp(t, publisher, "document_publish", ids[0], "first-publish-1");
-    const queued = await publisher.client.mutation(publishVersion, { versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`, reason: "Publish approved original", idempotencyKey: "first-publish-1" });
+    const request = { versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`, reason: "Publish approved original", idempotencyKey: "first-publish-1" };
+    await expect(t.mutation(publishVersion, request)).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+    await expect(publisher.client.mutation(publishVersion, { ...request, confirmation: "PUBLISH" })).rejects.toThrow("ADMIN_CONFIRMATION_MISMATCH");
+    await expect(publisher.client.mutation(publishVersion, { ...request, reason: "" })).rejects.toThrow("Audit reason must be a trimmed explanation");
+    await t.run(ctx => ctx.db.patch(ids[0], { status: "ready_for_review" }));
+    await expect(publisher.client.mutation(publishVersion, request)).rejects.toThrow("DOCUMENT_TRANSITION_INVALID");
+    await t.run(ctx => ctx.db.patch(ids[0], { status: "approved" }));
+    const queued = await publisher.client.mutation(publishVersion, request);
     expect(queued).toMatchObject({ type: "gemini_index", duplicate: false });
+    await expect(publisher.client.mutation(publishVersion, request)).resolves.toEqual({ ...queued, duplicate: true });
     expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBeUndefined();
     const { executionTarget, pollTarget } = await completeIndex(t, queued.jobId, "first-publish");
     const version = await t.run(async (ctx) => ctx.db.get(ids[0]));
@@ -435,6 +442,7 @@ describe("governed document publication", () => {
     const publisher = await asAdmin(t, "content_reviewer");
     const { resourceId, ids } = await seedCatalog(t, "manager", ["superseded", "published"]);
     await t.run(async (ctx) => ctx.db.patch(ids[0], { geminiDocumentName: undefined, geminiIndexedAt: undefined }));
+    await expect(publisher.client.mutation(rollbackVersion, { versionId: ids[0], confirmation: `ROLLBACK ${ids[0]}`, reason: "Restore verified original", idempotencyKey: "rollback-version-1" })).rejects.toThrow("ADMIN_STEP_UP_REQUIRED");
     await addStepUp(t, publisher, "document_rollback", ids[0], "rollback-version-1");
     const rollback = await publisher.client.mutation(rollbackVersion, { versionId: ids[0], confirmation: `ROLLBACK ${ids[0]}`, reason: "Restore verified original", idempotencyKey: "rollback-version-1" });
     await completeIndex(t, rollback.jobId, "rollback-v1");
@@ -442,6 +450,7 @@ describe("governed document publication", () => {
     if (!deleteCurrent) throw new Error("expected rollback deletion");
     await completeDelete(t, deleteCurrent._id);
     expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);
+    await expect(publisher.client.mutation(unpublishVersion, { versionId: ids[0], confirmation: `UNPUBLISH ${ids[0]}`, reason: "Withdraw indexed original", idempotencyKey: "unpublish-version-1" })).rejects.toThrow("ADMIN_STEP_UP_REQUIRED");
     await addStepUp(t, publisher, "document_unpublish", ids[0], "unpublish-version-1");
     const unpublish = await publisher.client.mutation(unpublishVersion, { versionId: ids[0], confirmation: `UNPUBLISH ${ids[0]}`, reason: "Withdraw indexed original", idempotencyKey: "unpublish-version-1" });
     expect((await t.run(async (ctx) => ctx.db.get(resourceId)))?.activeVersionId).toBe(ids[0]);

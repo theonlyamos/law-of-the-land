@@ -175,7 +175,7 @@ export function DocumentReview({ items, onPublicationQueued, actions, canReview,
           </div>
         </article>
       ))}
-      {risk ? <StepUpDialog open title={`${risk.action[0].toUpperCase()}${risk.action.slice(1)} version ${risk.item.versionNumber}`} description="This changes the production legal-search index. Verify your password and record an operational reason." submitLabel={`Queue ${risk.action}`} targetId={risk.item.id} idempotencyKey={risk.key} stepUpAction={`document_${risk.action}`} confirmationPhrase={`${risk.action.toUpperCase()} ${risk.item.id}`} onClose={() => setRisk(null)} onConfirmed={confirmRisk} /> : null}
+      {risk ? <StepUpDialog open title={`${risk.action[0].toUpperCase()}${risk.action.slice(1)} version ${risk.item.versionNumber}`} description={risk.action === "publish" ? "This makes this version available in legal search. Confirm publication and record an operational reason." : "This changes the production legal-search index. Verify your password and record an operational reason."} submitLabel={`Queue ${risk.action}`} cancelLabel="Cancel" targetId={risk.item.id} idempotencyKey={risk.key} stepUpAction={risk.action === "publish" ? undefined : `document_${risk.action}`} confirmationPhrase={`${risk.action.toUpperCase()} ${risk.item.id}`} acknowledgement={risk.action === "publish" ? "I confirm this is the version I intend to publish." : undefined} onClose={() => setRisk(null)} onConfirmed={confirmRisk} /> : null}
     </div>
   );
 }

@@ -157,7 +157,7 @@ export async function queuePublication(ctx: MutationCtx, actor: Actor, args: { v
   const previousVersionId = resource.activeVersionId;
   if (operation === "unpublish" && (previousVersionId !== version._id || !version.geminiDocumentName || !isGeminiDocumentName(version.geminiDocumentName) || !version.geminiDocumentName.startsWith(`${storeName}/documents/`))) throw new ConvexError("DOCUMENT_ACTIVE_POINTER_INVALID");
   if (operation === "rollback" && (!previousVersionId || previousVersionId === version._id)) throw new ConvexError("DOCUMENT_ROLLBACK_TARGET_INVALID");
-  await consumeStepUp(ctx, actor.userId, identity.sessionId, `document_${operation}`, version._id, args.idempotencyKey);
+  if (operation !== "publish") await consumeStepUp(ctx, actor.userId, identity.sessionId, `document_${operation}`, version._id, args.idempotencyKey);
   const lockId = await claimLifecycleLock(ctx, { resourceId: resource._id, versionId: version._id, operation, actorId: actor.userId, idempotencyKey: args.idempotencyKey });
   await bumpContentRevision(ctx, jurisdiction._id);
   try {
