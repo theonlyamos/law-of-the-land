@@ -1,5 +1,6 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState, type FormEvent } from "react";
 import type { ResearchJurisdiction } from "@/lib/countries";
 import { ResearchJurisdictionPicker } from "./research-jurisdiction-picker";
 
@@ -41,6 +42,11 @@ const ghana: ResearchJurisdiction = {
   isDefault: true,
 };
 
+function ControlledPicker({ initialValue = null }: { initialValue?: ResearchJurisdiction | null }) {
+  const [value, setValue] = useState(initialValue);
+  return <ResearchJurisdictionPicker value={value} onChange={setValue} />;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -51,7 +57,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+
 beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.useFakeTimers();
   mocks.query.mockReset();
   mocks.auth = { isAuthenticated: false, isLoading: false };
@@ -60,6 +69,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
   vi.useRealTimers();
 });
 
@@ -73,7 +83,9 @@ describe("ResearchJurisdictionPicker", () => {
     } satisfies SearchPage);
     render(<ResearchJurisdictionPicker value={null} onChange={vi.fn()} />);
 
-    expect(screen.getByRole("combobox", { name: "Find jurisdiction" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Choose jurisdiction" })).toBeDisabled();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(mocks.query).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Find jurisdiction" }), {
@@ -90,6 +102,80 @@ describe("ResearchJurisdictionPicker", () => {
       query: "Ghana",
       cursor: null,
     });
+  });
+
+  it("collapses a selection, restores focus, and preserves it when changing is cancelled", async () => {
+    mocks.query.mockResolvedValue({
+      page: [ghana],
+      group: "geographic",
+      isDone: true,
+      continueCursor: null,
+    } satisfies SearchPage);
+    render(<ControlledPicker />);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
+    expect(screen.getByRole("dialog", { name: "Choose jurisdiction" })).toBeVisible();
+    const search = screen.getByRole("combobox", { name: "Find jurisdiction" });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: "Ghana" } });
+    await act(async () => vi.advanceTimersByTime(250));
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByRole("option", { name: "Ghana, Geographic" }));
+
+    const change = screen.getByRole("button", { name: "Change jurisdiction" });
+    expect(change).toHaveTextContent("Ghana");
+    expect(change).toHaveFocus();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    fireEvent.click(change);
+    const reopenedSearch = screen.getByRole("combobox", { name: "Find jurisdiction" });
+    expect(reopenedSearch).toHaveValue("");
+    expect(reopenedSearch).toHaveFocus();
+    await act(async () => vi.advanceTimersByTime(250));
+    expect(mocks.query).toHaveBeenLastCalledWith(expect.anything(), {
+      kind: "geographic", query: "", cursor: null,
+    });
+    fireEvent.change(reopenedSearch, { target: { value: "Accra" } });
+    fireEvent.keyDown(reopenedSearch, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(change).toHaveTextContent("Ghana");
+    expect(change).toHaveFocus();
+  });
+
+  it("dismisses on an outside pointer or focus leaving the picker", () => {
+    mocks.query.mockReturnValue(new Promise(() => undefined));
+    render(<><ControlledPicker initialValue={ghana} /><button type="button">Outside action</button></>);
+    const change = screen.getByRole("button", { name: "Change jurisdiction" });
+    const outside = screen.getByRole("button", { name: "Outside action" });
+
+    fireEvent.click(change);
+    fireEvent.pointerDown(outside);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(change).toHaveTextContent("Ghana");
+
+    fireEvent.click(change);
+    fireEvent.blur(screen.getByRole("combobox", { name: "Find jurisdiction" }), { relatedTarget: outside });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(change).toHaveTextContent("Ghana");
+  });
+
+  it("does not submit the research form when Enter has no matching option", async () => {
+    mocks.query.mockResolvedValue({
+      page: [], group: "geographic", isDone: true, continueCursor: null,
+    } satisfies SearchPage);
+    const onSubmit = vi.fn((event: FormEvent) => event.preventDefault());
+    render(<form onSubmit={onSubmit}><ControlledPicker initialValue={ghana} /><button type="submit">Research</button></form>);
+    fireEvent.click(screen.getByRole("button", { name: "Change jurisdiction" }));
+    const search = screen.getByRole("combobox", { name: "Find jurisdiction" });
+    fireEvent.change(search, { target: { value: "missing" } });
+    await act(async () => vi.advanceTimersByTime(250));
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByRole("status")).toHaveTextContent("No matching jurisdictions found.");
+    expect(fireEvent.keyDown(search, { key: "Enter" })).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Ghana");
   });
 
   it("selects with the keyboard and forwards the opaque load-more cursor", async () => {
@@ -116,11 +202,10 @@ describe("ResearchJurisdictionPicker", () => {
     await act(async () => Promise.resolve());
 
     const search = screen.getByRole("combobox", { name: "Find jurisdiction" });
-    fireEvent.keyDown(search, { key: "ArrowDown" });
-    fireEvent.keyDown(search, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith(ghana);
-
-    fireEvent.click(screen.getByRole("button", { name: "Load more jurisdictions" }));
+    const loadMore = screen.getByRole("button", { name: "Load more jurisdictions" });
+    act(() => loadMore.focus());
+    fireEvent.click(loadMore);
+    expect(search).toHaveFocus();
     await act(async () => Promise.resolve());
     expect(mocks.query).toHaveBeenLastCalledWith(expect.anything(), {
       kind: "geographic",
@@ -128,8 +213,12 @@ describe("ResearchJurisdictionPicker", () => {
       cursor: "opaque-next",
     });
     expect(
-      screen.getAllByRole("option", { name: "Ghana, Geographic, ghana" }),
+      screen.getAllByRole("option", { name: "Ghana, Geographic" }),
     ).toHaveLength(1);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith(ghana);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("ignores an older response and preserves the controlled selection", async () => {
@@ -137,7 +226,7 @@ describe("ResearchJurisdictionPicker", () => {
     const newSearch = deferred<SearchPage>();
     mocks.query.mockReturnValueOnce(oldSearch.promise).mockReturnValueOnce(newSearch.promise);
     const { rerender } = render(<ResearchJurisdictionPicker value={ghana} onChange={vi.fn()} />);
-    fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change jurisdiction" }));
     await act(async () => vi.advanceTimersByTime(250));
     fireEvent.change(screen.getByRole("combobox", { name: "Find jurisdiction" }), {
       target: { value: "Accra" },
@@ -160,10 +249,10 @@ describe("ResearchJurisdictionPicker", () => {
     await act(async () => Promise.resolve());
     rerender(<ResearchJurisdictionPicker value={ghana} onChange={vi.fn()} />);
 
-    expect(screen.getByText("Selected: Ghana")).toBeVisible();
-    expect(screen.getByRole("option", { name: "Accra, Geographic, accra" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Ghana");
+    expect(screen.getByRole("option", { name: "Accra, Geographic" })).toBeVisible();
     expect(
-      screen.queryByRole("option", { name: "Old result, Geographic, old" }),
+      screen.queryByRole("option", { name: "Old result, Geographic" }),
     ).not.toBeInTheDocument();
   });
 
@@ -189,6 +278,7 @@ describe("ResearchJurisdictionPicker", () => {
     await act(async () => vi.advanceTimersByTime(250));
     await act(async () => Promise.resolve());
 
+    expect(screen.getByRole("option", { name: "Member Council, Organizational" })).toBeVisible();
     expect(screen.getByRole("group", { name: "Your organizations" })).toBeVisible();
     fireEvent.change(screen.getByRole("combobox", { name: "Find jurisdiction" }), {
       target: { value: "missing" },
@@ -199,9 +289,13 @@ describe("ResearchJurisdictionPicker", () => {
       "Jurisdictions could not be loaded. Try again.",
     );
     expect(screen.queryByText("private backend detail")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry jurisdiction search" }));
+    const retry = screen.getByRole("button", { name: "Retry jurisdiction search" });
+    act(() => retry.focus());
+    fireEvent.click(retry);
+    expect(screen.getByRole("combobox", { name: "Find jurisdiction" })).toHaveFocus();
     await act(async () => Promise.resolve());
     expect(mocks.query).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("status")).toHaveTextContent("No matching jurisdictions found.");
   });
 
   it("clears member-derived options when the authenticated account changes", async () => {
@@ -222,14 +316,51 @@ describe("ResearchJurisdictionPicker", () => {
     await act(async () => vi.advanceTimersByTime(250));
     await act(async () => Promise.resolve());
     expect(
-      screen.getByRole("option", { name: "Member Council, Organizational, ghana" }),
+      screen.getByRole("option", { name: "Member Council, Organizational" }),
     ).toBeVisible();
 
     mocks.sessionUserId = "member-b";
     rerender(<ResearchJurisdictionPicker value={null} onChange={vi.fn()} />);
     expect(
-      screen.queryByRole("option", { name: "Member Council, Organizational, ghana" }),
+      screen.queryByRole("option", { name: "Member Council, Organizational" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps useful organization context without repeating a sole jurisdiction name", async () => {
+    mocks.auth = { isAuthenticated: true, isLoading: false };
+    mocks.sessionUserId = "member-a";
+    const organizational = { ...ghana, kind: "organizational" as const, isDefault: false };
+    const university = { id: "northstar", name: "Northstar University" };
+    mocks.query.mockResolvedValue({
+      page: [
+        { ...organizational, id: "au", name: "African Union (AU)", slug: "au-african-union-au", organization: { id: "au-org", name: "African Union" }, visibility: "public" },
+        { ...organizational, id: "council-employment", name: "Employment", slug: "council-employment", organization: { id: "council", name: "Member Council" }, visibility: "members" },
+        { ...organizational, id: "northstar-employment", name: "Employment", slug: "northstar-employment", organization: university, visibility: "public" },
+        { ...organizational, id: "northstar-campus", name: "Campus", slug: "northstar-campus", organization: university, visibility: "public" },
+      ],
+      group: "your_organizations",
+      isDone: true,
+      continueCursor: null,
+    } satisfies SearchPage);
+    render(<ControlledPicker />);
+    fireEvent.click(screen.getByRole("radio", { name: "Organizational" }));
+    await act(async () => vi.advanceTimersByTime(250));
+    await act(async () => Promise.resolve());
+
+    const africanUnion = screen.getByRole("option", { name: "African Union (AU), Organizational" });
+    expect(within(africanUnion).getByText("African Union (AU)")).toBeVisible();
+    expect(screen.queryByText("African Union", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("au-african-union-au")).not.toBeInTheDocument();
+    expect(screen.queryByText("Public", { exact: true })).not.toBeInTheDocument();
+    const memberEmployment = screen.getByRole("option", { name: "Employment, Organizational, Member Council" });
+    expect(within(memberEmployment).getByText("Member Council")).toBeVisible();
+    expect(within(memberEmployment).getByText("Private · Your organization")).toBeVisible();
+    const universityGroup = screen.getByRole("group", { name: "Northstar University" });
+    expect(within(universityGroup).getAllByText("Northstar University")).toHaveLength(1);
+    expect(within(universityGroup).getAllByRole("option")).toHaveLength(2);
+
+    fireEvent.click(africanUnion);
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Selected: African Union (AU)");
   });
 
   it("clears a controlled member selection on account switch and sign-out but not initially", () => {

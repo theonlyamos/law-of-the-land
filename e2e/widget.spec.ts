@@ -112,7 +112,7 @@ test("manager uploads, independent reviewer publishes, manager changes visibilit
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Reason for this action").fill("Publish reviewed visitor policy.");
   await dialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);
-  await dialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
+  await dialog.getByLabel("I confirm this is the version I intend to publish.").check();
   await dialog.getByRole("button", { name: "Queue publish" }).click();
   await expect(page.getByRole("button", { name: "Unpublish version", exact: true })).toBeVisible({ timeout: 30000 });
   await context.clearCookies();

@@ -209,8 +209,8 @@ async function confirm(page: Page, submit: string) {
     .getByLabel("Exact confirmation")
     .fill((await dialog.locator("strong").textContent())!);
   await dialog
-    .getByLabel("Confirm your password")
-    .fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
+    .getByLabel("I confirm this is the version I intend to publish.")
+    .check();
   await dialog.getByRole("button", { name: submit, exact: true }).click();
   await expect(dialog).not.toBeVisible();
 }

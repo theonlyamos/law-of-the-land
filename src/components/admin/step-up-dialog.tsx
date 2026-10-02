@@ -18,6 +18,7 @@ type StepUpDialogProps = {
   idempotencyKey: string;
   stepUpAction?: string;
   confirmationPhrase?: string;
+  acknowledgement?: string;
   onClose: () => void;
   onConfirmed: (input: {
     reason: string;
@@ -35,6 +36,7 @@ export function StepUpDialog({
   idempotencyKey,
   stepUpAction,
   confirmationPhrase,
+  acknowledgement,
   onClose,
   onConfirmed,
 }: StepUpDialogProps) {
@@ -168,6 +170,13 @@ export function StepUpDialog({
               />
             </label>
           </div>
+        ) : null}
+
+        {acknowledgement ? (
+          <label className="flex min-h-11 items-center gap-3 text-sm font-semibold">
+            <input name="acknowledgement" type="checkbox" required className="h-5 w-5 shrink-0 accent-amber-700" />
+            {acknowledgement}
+          </label>
         ) : null}
 
         {stepUpAction ? (

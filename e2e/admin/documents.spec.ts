@@ -98,7 +98,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   const dialog = page.getByRole("dialog", { name: "Publish version 2" });
   await dialog.getByLabel("Reason for this action").fill("Exercise isolated provider failure boundary");
   await dialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);
-  await dialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
+  await dialog.getByLabel("I confirm this is the version I intend to publish.").check();
   await dialog.getByRole("button", { name: "Queue publish" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Publish queued for version 2" })).toBeVisible();
 
@@ -119,7 +119,7 @@ test("content reviewer drives failure, retry, rollback, and unpublish for exact 
   const retryDialog = page.getByRole("dialog", { name: "Publish version 2" });
   await retryDialog.getByLabel("Reason for this action").fill("Retry fixture publication after the controlled failure");
   await retryDialog.getByLabel("Exact confirmation").fill(`PUBLISH ${versionId}`);
-  await retryDialog.getByLabel("Confirm your password").fill(process.env.ADMIN_E2E_ACCOUNT_PASSWORD!);
+  await retryDialog.getByLabel("I confirm this is the version I intend to publish.").check();
   await retryDialog.getByRole("button", { name: "Queue publish" }).click();
   state = await waitForPublicationState(fixture, versionId, "published", null, versionId);
   expect(state.activeVersionId).toBe(versionId);
