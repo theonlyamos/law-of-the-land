@@ -145,6 +145,26 @@ async function run(
 }
 
 describe("GeminiFileSearchChat", () => {
+  it("accepts a partial creation event but still validates the canonical completion", async () => {
+    const events = eventStream();
+    const created = events[0] as Interactions.InteractionCreatedEvent;
+    Reflect.deleteProperty(created.interaction, "status");
+    const final = canonical(undefined, [citation()]);
+    const { result } = await run(events, final);
+    expect(result.citations).toHaveLength(1);
+    await expect(run(events, { ...final, status: "incomplete" })).rejects.toThrow("canonical_state");
+    await expect(run(events, canonical(undefined, [citation({ document_uri: "fileSearchStores/foreign" })]))).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  });
+
+  it("allows empty intermediate model steps while requiring a valid final answer", async () => {
+    const final = canonical(undefined, [citation()]);
+    final.steps!.unshift({ type: "model_output" });
+    expect((await run(eventStream(), final)).result.citations).toHaveLength(1);
+    await expect(run(eventStream(), { ...final, steps: [{ type: "model_output" }] })).rejects.toThrow("canonical_answer");
+    Object.assign(final.steps![0], { content: {} });
+    await expect(run(eventStream(), final)).rejects.toThrow("canonical_content");
+  });
+
   it("uses Gemini 3.8 Flash by default", () => {
     expect(DEFAULT_FILE_SEARCH_CHAT_MODEL).toBe("gemini-3.8-flash");
   });
