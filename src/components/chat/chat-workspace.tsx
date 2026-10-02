@@ -15,6 +15,7 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
+import { clearGuestResearchDraft, readGuestResearchDraft } from "@/lib/guest-research-draft";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import {
   type ChatCitation,
@@ -213,6 +214,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
+  const queryChatIdRef = useRef(chatId);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
   const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
@@ -262,6 +264,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         completedAt: message.completedAt,
         durationMs: message.durationMs,
         citations: message.citations,
+        guestSources: message.guestSources,
         answerKind: message.answerKind,
       });
     }
@@ -308,9 +311,18 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   useEffect(() => {
     resetChatView();
     routeEnsureRef.current = null;
-    setQuery("");
+    if (queryChatIdRef.current !== chatId) setQuery("");
+    queryChatIdRef.current = chatId;
     setSelectedResearchJurisdiction(null);
   }, [chatId, resetChatView]);
+
+  useEffect(() => {
+    if (!chatId || !isAuthenticated || sessionData === undefined || (!sessionData && !selectionReady)) return;
+    const draft = readGuestResearchDraft(chatId);
+    if (!draft) return;
+    setQuery((current) => current || draft);
+    clearGuestResearchDraft(chatId);
+  }, [chatId, isAuthenticated, selectionReady, sessionData]);
 
   useEffect(() => {
     const request = requests.get(chatId);
@@ -896,12 +908,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                         <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">
                           <h2 className="font-semibold text-foreground">Sources</h2>
                           <ol className="mt-1 list-decimal space-y-1 pl-5">
-                            {message.citations.map((citation, citationIndex) => (
+                            {message.citations.map((citation, citationIndex) => {
+                              const sourceUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl : null;
+                              return (
                               <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`}>
-                                <span className="font-medium text-foreground">{citation.label}</span>{" — "}
+                                {sourceUrl && /^https?:\/\//i.test(sourceUrl)
+                                  ? <a href={sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={`${citation.label} (opens in a new tab)`} className="font-medium text-foreground underline underline-offset-4">{citation.label}</a>
+                                  : <span className="font-medium text-foreground">{citation.label}</span>}{" — "}
                                 {citation.jurisdictionName} ({citation.jurisdictionKind === "organizational" ? "organization" : "geographic jurisdiction"}; {citation.relation === "selected" ? "selected" : citation.relation === "geographic_ancestor" ? "geographic ancestor" : "organization geography"})
                               </li>
-                            ))}
+                              );
+                            })}
                           </ol>
                         </section>
                       ) : null}

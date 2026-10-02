@@ -39,6 +39,7 @@ function landingProps(overrides: Partial<React.ComponentProps<typeof LandingPage
     savedChats: [],
     onResumeChat: vi.fn(),
     isAuthenticated: false,
+    guestResearchEnabled: true,
     researchJurisdiction: {
       id: "ghana-id",
       name: "Ghana",
@@ -85,6 +86,11 @@ describe("professional landing research shell", () => {
   it("requires a stable jurisdiction selection before research", () => {
     render(<LandingPage {...landingProps({ researchJurisdiction: null })} />);
     expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
+  });
+
+  it("explains the guest allowance before submission", () => {
+    render(<LandingPage {...landingProps()} />);
+    expect(screen.getByText(/Try one question and one follow-up free. No account required./)).toBeVisible();
   });
 
   it("shows up to three authenticated recent sessions and resumes the selected session", () => {

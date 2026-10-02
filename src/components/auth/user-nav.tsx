@@ -6,11 +6,12 @@ import { api } from "@/convex/_generated/api";
 import { useConvexAuth, useQuery } from "convex/react";
 import { Loader2, LogOut, Settings, UserRound } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 export function UserNav() {
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
+  const pathname = usePathname();
   const user = useQuery(api.users.current, isAuthenticated ? {} : "skip");
 
   if (isLoading) {
@@ -20,7 +21,7 @@ export function UserNav() {
   if (!isAuthenticated) {
     return (
       <Button asChild size="sm" variant="outline">
-        <Link href="/signin">Sign in</Link>
+        <Link href={pathname === "/research" ? "/signin?redirect=%2Fresearch" : "/signin"}>Sign in</Link>
       </Button>
     );
   }

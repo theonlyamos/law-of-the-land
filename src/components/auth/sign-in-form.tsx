@@ -19,7 +19,9 @@ function SignInFormInner() {
   // mid-action (e.g. asked a question while signed out).
   const redirectTo = safeRedirectPath(searchParams.get("redirect"), "/new");
 
-  const [step, setStep] = useState<"signIn" | "signUp" | "twoFactor">("signIn");
+  const [step, setStep] = useState<"signIn" | "signUp" | "twoFactor">(
+    searchParams.get("mode") === "signup" ? "signUp" : "signIn",
+  );
   const [challengeMode, setChallengeMode] = useState<"totp" | "backup">("totp");
   const [challengeCode, setChallengeCode] = useState("");
   const [name, setName] = useState("");
@@ -62,6 +64,7 @@ function SignInFormInner() {
               email: email.trim(),
               password,
               name: name.trim() || email.trim(),
+              callbackURL: redirectTo,
             });
 
       if (result.error) {
@@ -156,7 +159,7 @@ function SignInFormInner() {
     setSubmitting(true);
     setError(null);
     try {
-      await authClient.sendVerificationEmail({ email: email.trim(), callbackURL: "/" });
+      await authClient.sendVerificationEmail({ email: email.trim(), callbackURL: redirectTo });
       setNotice(`We sent a new verification link to ${email.trim()}. Open it, then sign in here.`);
       setShowResend(false);
     } catch {

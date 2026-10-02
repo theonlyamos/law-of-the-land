@@ -388,7 +388,7 @@ const chatResearchStoreValidator = v.object({
   storeName: v.string(),
 });
 
-const chatResearchStoresValidator = v.object({
+export const chatResearchStoresValidator = v.object({
   authorizedScopeSize: v.number(),
   stores: v.array(chatResearchStoreValidator),
   partialCoverage: v.boolean(),

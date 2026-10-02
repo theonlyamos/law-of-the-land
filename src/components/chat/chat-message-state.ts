@@ -1,5 +1,6 @@
 import type { ChatCitation } from "@/lib/countries";
 import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
+import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
 
 export type MessageRole = "user" | "assistant";
 
@@ -13,6 +14,7 @@ export interface PersistedChatMessage {
   completedAt?: number;
   durationMs?: number;
   citations?: ChatCitation[];
+  guestSources?: NonNullable<GuestTurnView["result"]>["citations"];
   answerKind?: ChatAnswerKind;
 }
 

@@ -23,6 +23,7 @@ interface LandingPageProps {
   savedChats: ChatSession[];
   onResumeChat: (chatId: string) => void;
   isAuthenticated: boolean;
+  guestResearchEnabled: boolean;
   researchJurisdiction: ResearchJurisdiction | null;
   onResearchJurisdictionChange: (selection: ResearchJurisdiction | null) => void;
 }
@@ -43,6 +44,7 @@ export function LandingPage({
   savedChats,
   onResumeChat,
   isAuthenticated,
+  guestResearchEnabled,
   researchJurisdiction,
   onResearchJurisdictionChange,
 }: LandingPageProps) {
@@ -148,8 +150,9 @@ export function LandingPage({
 
             {!isAuthenticated ? (
               <p className={styles.signInNote}>
-                <Link href="/signin">Sign in</Link> to save this research thread and continue on
-                another device.
+                {guestResearchEnabled ? <>Try one question and one follow-up free. No account required.{" "}
+                  <Link href="/signin">Sign in</Link> to save your research.</>
+                  : <><Link href="/signin?mode=signup">Create a free account</Link> to research this question and save your work.</>}
               </p>
             ) : null}
           </form>

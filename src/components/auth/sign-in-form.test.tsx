@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   replace: vi.fn(),
   signInEmail: vi.fn(),
   signUpEmail: vi.fn(),
+  sendVerificationEmail: vi.fn(),
+  search: new URLSearchParams(),
   verifyTotp: vi.fn(),
   verifyBackupCode: vi.fn(),
 }));
@@ -14,13 +16,13 @@ vi.mock("convex/react", () => ({
 }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mocks.replace }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mocks.search,
 }));
 vi.mock("@/lib/auth-client", () => ({
   authClient: {
     signIn: { email: mocks.signInEmail, social: vi.fn() },
     signUp: { email: mocks.signUpEmail },
-    sendVerificationEmail: vi.fn(),
+    sendVerificationEmail: mocks.sendVerificationEmail,
     twoFactor: {
       verifyTotp: mocks.verifyTotp,
       verifyBackupCode: mocks.verifyBackupCode,
@@ -43,6 +45,9 @@ function submitPasswordSignIn() {
 describe("SignInForm Two-Factor challenge", () => {
   beforeEach(() => {
     mocks.replace.mockReset();
+    mocks.search = new URLSearchParams();
+    mocks.signUpEmail.mockReset().mockResolvedValue({ data: {}, error: null });
+    mocks.sendVerificationEmail.mockReset().mockResolvedValue({ data: {}, error: null });
     mocks.signInEmail.mockReset().mockResolvedValue({
       data: { twoFactorRedirect: true, twoFactorMethods: ["totp"] },
       error: null,
@@ -58,6 +63,28 @@ describe("SignInForm Two-Factor challenge", () => {
   });
 
   afterEach(cleanup);
+
+  it.each([
+    ["/research", "/research"],
+    ["//example.com", "/new"],
+  ])("preserves the safe research return path through signup and verification resend: %s", async (redirect, expected) => {
+    mocks.search = new URLSearchParams({ mode: "signup", redirect });
+    mocks.signInEmail.mockResolvedValue({ error: { message: "Email not verified" } });
+    render(<SignInForm />);
+    expect(screen.getByRole("heading", { name: "Create your account" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Visitor" } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "visitor@example.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "correct horse battery staple" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("verification link");
+    expect(mocks.signUpEmail).toHaveBeenCalledWith({
+      name: "Visitor", email: "visitor@example.com", password: "correct horse battery staple", callbackURL: expected,
+    });
+    submitPasswordSignIn();
+    fireEvent.click(await screen.findByRole("button", { name: "Resend verification email" }));
+    expect(mocks.sendVerificationEmail).toHaveBeenCalledWith({ email: "admin@example.com", callbackURL: expected });
+    expect(await screen.findByRole("status")).toHaveTextContent("new verification link");
+  });
 
   it("completes a password sign-in with the authenticator challenge", async () => {
     render(<SignInForm />);
