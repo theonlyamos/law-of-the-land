@@ -1,6 +1,9 @@
 import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor, within } from "@testing-library/react";
 import { getFunctionName } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { saveGuestResearchDraft } from "@/lib/guest-research-draft";
+import type { PersistedChatMessage } from "./chat-message-state";
 
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
@@ -34,14 +37,7 @@ const mocks = vi.hoisted(() => ({
     timestamp: number;
     messageCount: number;
   }>,
-  messages: [] as Array<{
-    storageId: string;
-    clientId: string | null;
-    role: "user" | "assistant";
-    content: string;
-    createdAt: number;
-    creationTime: number;
-  }>,
+  messages: [] as PersistedChatMessage[],
 }));
 
 vi.mock("next/navigation", () => ({
@@ -119,6 +115,7 @@ function ndjsonResponse(events: unknown[]): Response {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
     value: vi.fn(),
@@ -174,6 +171,48 @@ afterEach(() => {
 });
 
 describe("unified chat client", () => {
+  it("keeps verified source links when a guest answer is saved to the account", () => {
+    mocks.session = { title: "Claimed research", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    mocks.messages = [{
+      storageId: "saved-answer", clientId: "guest-answer", role: "assistant", content: "Verified answer", createdAt: 1, creationTime: 1,
+      citations: [citation], guestSources: [{ ...citation, jurisdictionId: citation.jurisdictionId as import("@/convex/_generated/dataModel").Id<"jurisdictions">,
+        issuer: "Authority", officialCitation: "Act 1", effectiveDate: null, sourceUrl: "https://example.org/act.pdf" }],
+    }];
+    render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    expect(screen.getByRole("link", { name: `${citation.label} (opens in a new tab)` })).toHaveAttribute("href", "https://example.org/act.pdf");
+  });
+
+  it("restores a failed guest question into a fresh chat once its jurisdiction is ready, without sending", () => {
+    saveGuestResearchDraft("Retry my guest question", chatId);
+    mocks.resolvedSelection = null;
+    const workspace = <ChatWorkspace chatId={chatId} initialQuery={null} initialJurisdiction={jurisdiction.id} />;
+    const view = render(workspace);
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(localStorage.getItem(`guest-research-draft:${chatId}`)).not.toBeNull();
+
+    mocks.resolvedSelection = jurisdiction;
+    view.rerender(<ChatWorkspace chatId={chatId} initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    expect(screen.getByRole("textbox")).toHaveValue("Retry my guest question");
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(localStorage.getItem(`guest-research-draft:${chatId}`)).toBeNull();
+    expect(mocks.ensureSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("restores the claimed guest question as an editable draft without sending it", async () => {
+    saveGuestResearchDraft("What about my follow-up?", chatId);
+    mocks.session = { title: "Claimed research", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    render(<StrictMode><ChatWorkspace chatId={chatId} initialQuery={null} /></StrictMode>);
+
+    expect(screen.getByRole("textbox")).toHaveValue("What about my follow-up?");
+    expect(localStorage.getItem(`guest-research-draft:${chatId}`)).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Edited follow-up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string).query).toBe("Edited follow-up");
+  });
+
   it("preserves the sidebar while a different chat route loads", () => {
     mocks.session = { title: "First chat" };
     mocks.sessions = [{ id: chatId, title: "Saved chat", lastMessage: "", timestamp: 1, messageCount: 0 }];

@@ -11,6 +11,21 @@ import { verifyAdminFileProof } from "./lib/adminFileProof";
 
 const http = httpRouter();
 
+for (const [operation, functionName] of Object.entries({ session: "createSession", read: "readSession", begin: "beginTurn", finish: "finishTurn", adopt: "adoptSession" })) {
+  http.route({ path: `/private/guest-research/${operation}`, method: "POST", handler: httpAction(async (ctx, request) => {
+    const bytes = await readBoundedBody(request, operation === "finish" ? 131072 : 33792);
+    if (!bytes) return noStore(413);
+    try {
+      if (!await verifyWidgetServiceProof(`guest-${operation}`, Number(request.headers.get("x-widget-issued-at")), bytes, request.headers.get("x-widget-signature") ?? "")) return noStore(401);
+      if (operation === "adopt" && !await ctx.auth.getUserIdentity()) return noStore(401);
+      const body: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      if (!body || typeof body !== "object" || Array.isArray(body)) return noStore(400);
+      const result: unknown = await ctx.runMutation(makeFunctionReference<"mutation">(`guestResearch:${functionName}`), body as Record<string, import("convex/values").Value>);
+      return Response.json(result, { headers: { "cache-control": "no-store" } });
+    } catch { return noStore(400); }
+  }) });
+}
+
 for (const [operation, functionName] of Object.entries({ session: "createSession", begin: "beginTurn", finish: "finishTurn", read: "readTurn", cancel: "cancelTurn", revoke: "revokeSession" })) {
   http.route({ path: `/private/widget/${operation}`, method: "POST", handler: httpAction(async (ctx, request) => {
     const bytes = await readBoundedBody(request, operation === "finish" ? 131072 : 33792);

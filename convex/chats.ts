@@ -33,6 +33,7 @@ import {
 } from "./lib/geminiFileSearchNames";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
+import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
 
 const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"));
@@ -623,6 +624,7 @@ const chatMessageValidator = v.object({
   createdAt: v.number(),
   creationTime: v.number(),
   citations: v.optional(v.array(chatCitationValidator)),
+  guestSources: v.optional(v.array(guestSourceValidator)),
   answerKind: v.optional(answerKindValidator),
   completedAt: v.optional(v.number()),
   durationMs: v.optional(v.number()),
@@ -1099,6 +1101,7 @@ export const listMessages = query({
           createdAt: message.createdAt,
           creationTime: message._creationTime,
           citations: message.citations,
+          guestSources: message.guestSources,
           answerKind: message.answerKind,
           ...timing,
         };

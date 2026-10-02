@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mocks.replace, push: mocks.push }),
+  usePathname: () => "/",
 }));
 
 vi.mock("convex/react", () => ({
@@ -40,6 +41,7 @@ vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
 import Home from "./page";
 
 beforeEach(() => {
+  vi.stubEnv("GUEST_RESEARCH_ENABLED", "true");
   mocks.replace.mockReset();
   mocks.push.mockReset();
   mocks.auth = { isAuthenticated: false, isLoading: false };
@@ -48,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -60,14 +63,14 @@ describe("public home jurisdiction selection", () => {
     expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
   });
 
-  it("preserves a guest question and stable jurisdiction ID through sign-in", () => {
+  it("starts guest research with the question and stable jurisdiction ID without sign-in", () => {
     render(<Home />);
     fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
     fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
-      "/signin?redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26jurisdiction%3Dghana-id",
+      "/research?q=Tenant%20rights%3F&jurisdiction=ghana-id",
     );
   });
 
@@ -81,6 +84,17 @@ describe("public home jurisdiction selection", () => {
     expect(mocks.push).toHaveBeenCalledWith(
       "/new-chat?q=Employment%20policy%3F&jurisdiction=university-id",
     );
+  });
+
+  it("keeps signup and honest account copy when guest research is disabled", () => {
+    vi.stubEnv("GUEST_RESEARCH_ENABLED", "false");
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    expect(mocks.push).toHaveBeenCalledWith("/signin?mode=signup&redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26jurisdiction%3Dghana-id");
+    expect(screen.queryByText(/No account required/)).not.toBeInTheDocument();
+    expect(screen.getByText(/to research this question and save your work/)).toBeVisible();
   });
 
   it("disables research while authentication is loading", () => {

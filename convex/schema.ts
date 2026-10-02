@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
+import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
 import {
   chatCitationValidator,
   geographicLevelValidator,
@@ -13,6 +14,18 @@ import {
 } from "./lib/jurisdictionDomain";
 
 export default defineSchema({
+  guestResearchSessions: defineTable({
+    tokenHash: v.string(), jurisdictionId: v.id("jurisdictions"), scopeBinding: v.string(),
+    createdAt: v.number(), expiresAt: v.number(), attempts: v.number(),
+    adoptedBy: v.optional(v.string()), chatId: v.optional(v.string()),
+  }).index("by_tokenHash", ["tokenHash"]).index("by_expiresAt", ["expiresAt"]),
+  guestResearchTurns: defineTable({
+    sessionId: v.id("guestResearchSessions"), requestId: v.string(), query: v.string(),
+    attemptNonce: v.string(), status: widgetTurnStateValidator, holdsSlot: v.boolean(), leaseExpiresAt: v.number(),
+    result: v.optional(guestResultValidator), citations: v.optional(v.array(widgetCitationIdentityValidator)),
+    error: v.optional(guestErrorValidator), createdAt: v.number(), expiresAt: v.number(),
+  }).index("by_sessionId_and_requestId", ["sessionId", "requestId"])
+    .index("by_sessionId", ["sessionId"]).index("by_expiresAt", ["expiresAt"]),
   jurisdictionWidgets: defineTable({
     jurisdictionId: v.id("jurisdictions"), organizationId: v.optional(v.id("organizations")), publicId: v.string(), accessVersion: v.number(),
     ...widgetSettingsFields, createdAt: v.number(), updatedAt: v.number(), updatedBy: v.string(),
@@ -938,6 +951,7 @@ export default defineSchema({
     content: v.string(),
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
+    guestSources: v.optional(v.array(guestSourceValidator)),
     answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
     createdAt: v.number(),
   })
