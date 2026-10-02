@@ -257,6 +257,7 @@ function canonicalOutput(interaction: Interactions.Interaction): {
   const annotations: Interactions.Annotation[] = [];
   for (const step of interaction.steps) {
     if (step.type !== "model_output") continue;
+    if (step.content === undefined) continue;
     if (!Array.isArray(step.content) || step.content.length > MAX_OUTPUT_BLOCKS) return invalidResponse("canonical_content");
     for (const content of step.content) {
       if (!content || typeof content !== "object" || Array.isArray(content)) return invalidResponse("canonical_block");
@@ -385,7 +386,9 @@ export class GeminiFileSearchChat {
       if (completed) return invalidResponse("event_after_completion");
       if (event.event_type === "error") return invalidResponse("provider_error");
       if (event.event_type === "interaction.created") {
-        if (interactionId || event.interaction.status !== "in_progress") return invalidResponse("creation_state");
+        // Creation payloads may omit status; the fetched canonical response must still be completed.
+        if (interactionId || !isIdentifier(event.interaction.id) ||
+          (event.interaction.status !== undefined && event.interaction.status !== "in_progress")) return invalidResponse("creation_state");
         interactionId = event.interaction.id;
         stepsByInteraction.set(interactionId, new Map());
         fileSearchCallIds.set(interactionId, new Set());
