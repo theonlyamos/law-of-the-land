@@ -10,6 +10,8 @@ async function chooseJurisdiction(
   kind: "Geographic" | "Organizational",
   name: string,
 ) {
+  const change = page.getByRole("button", { name: "Change jurisdiction" });
+  if (await change.isVisible()) await change.click();
   await page.getByRole("radio", { name: kind }).click();
   const search = page.getByRole("combobox", { name: "Find jurisdiction" });
   await search.fill(name);
@@ -22,13 +24,14 @@ async function chooseJurisdiction(
   });
   await expect(exactFixtureOption).toHaveCount(1);
   await expect(exactFixtureOption).toHaveAccessibleName(
-    new RegExp(`^${escapedName}, ${kind}, `),
+    new RegExp(`^${escapedName}, ${kind}(?:,|$)`),
   );
   const optionCount = await options.count();
   expect(optionCount).toBeGreaterThan(0);
   expect(optionCount).toBeLessThanOrEqual(20);
   await exactFixtureOption.click();
-  await expect(exactFixtureOption).toHaveAttribute("aria-selected", "true");
+  await expect(change).toContainText(name);
+  await expect(page.getByRole("dialog", { name: "Choose jurisdiction" })).toHaveCount(0);
 }
 
 test.describe.serial("unified jurisdiction rollout evidence", () => {
