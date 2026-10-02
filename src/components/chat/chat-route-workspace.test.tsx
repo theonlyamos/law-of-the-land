@@ -19,7 +19,7 @@ vi.mock("@/components/chat/chat-workspace", () => ({
   ChatWorkspace: (props: Record<string, unknown>) => <output aria-label="workspace-props">{JSON.stringify(props)}</output>,
 }));
 
-import ChatPage from "./page";
+import ChatPage from "./chat-route-workspace";
 
 beforeEach(() => {
   mocks.search = new URLSearchParams("q=Question&jurisdiction=jurisdiction-ghana");
