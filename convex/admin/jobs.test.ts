@@ -63,7 +63,7 @@ async function enablePanel(t: Backend) {
 
 async function seedBoundGeminiIndexJob(
   t: Backend,
-  input: { suffix: string; status: "queued" | "waiting_provider" | "manual_review"; providerSyncState: "synced" | "drifted"; lastErrorKind?: "provider" },
+  input: { suffix: string; status: "queued" | "waiting_provider" | "manual_review"; providerSyncState: "synced" | "drifted"; lastErrorKind?: "provider"; lockDurationMs?: number },
 ) {
   const fixture = await t.run(async (ctx) => {
     const now = Date.now();
@@ -95,7 +95,7 @@ async function seedBoundGeminiIndexJob(
     const now = Date.now();
     await ctx.db.insert("documentLifecycleLocks", {
       resourceId: fixture.resourceId, versionId: fixture.versionId, operation: "publish", actorId: "gemini_orchestrator",
-      idempotencyKey: `job-${input.suffix}`, jobId: queued.jobId, expiresAt: now + 60_000, createdAt: now, updatedAt: now,
+      idempotencyKey: `job-${input.suffix}`, jobId: queued.jobId, expiresAt: now + (input.lockDurationMs ?? 60_000), createdAt: now, updatedAt: now,
     });
     if (input.status !== "queued") {
       await ctx.db.patch(queued.jobId, {
@@ -599,7 +599,7 @@ describe("durable Gemini jobs", () => {
     })).resolves.toEqual({ status: "manual_review", nextAttemptAt: null });
   });
 
-  it("keeps polling at 60 minutes and requires review after 120 minutes", async () => {
+  it("requires review on exhausted provider errors before the polling window expires", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = Date.UTC(2026, 8, 4, 12);
@@ -622,42 +622,108 @@ describe("durable Gemini jobs", () => {
       await expect(t.run((ctx) => ctx.db.get(earlyTimeout.versionId))).resolves.toMatchObject({
         failureSummary: "Gemini did not confirm the index update. Search is paused until an administrator reviews the job.",
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
+  it("slows pending polls after two hours and requires review after six hours", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.UTC(2026, 8, 4, 12);
+      vi.setSystemTime(startedAt);
+      const t = createBackend();
       const elapsedWindow = await seedBoundGeminiIndexJob(t, {
         suffix: "elapsed-index-window",
         status: "waiting_provider",
         providerSyncState: "synced",
+        lockDurationMs: 24 * 60 * 60_000,
       });
-      await t.run(async (ctx) => {
-        const lock = await ctx.db
-          .query("documentLifecycleLocks")
-          .withIndex("by_resourceId", (q) => q.eq("resourceId", elapsedWindow.resourceId))
-          .unique();
-        if (!lock) throw new Error("expected lifecycle lock");
-        await ctx.db.patch(lock._id, { expiresAt: startedAt + 121 * 60_000 });
-      });
-      vi.setSystemTime(startedAt + 60 * 60_000);
-      let elapsedLease = await claimLease(t, elapsedWindow.jobId);
-      await t.mutation(applyGeminiProviderResult, {
-        jobId: elapsedWindow.jobId,
-        leaseToken: elapsedLease,
-        result: { kind: "index_pending" },
-      });
-      await expect(t.run((ctx) => ctx.db.get("integrationJobs", elapsedWindow.jobId))).resolves.toMatchObject({
-        status: "waiting_provider",
-      });
-      await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.not.toHaveProperty("failureSummary");
+      const operationName = `${elapsedWindow.storeName}/upload/operations/elapsed-index-window`;
+      await t.run((ctx) => ctx.db.patch(elapsedWindow.jobId, { providerPollCount: 359 }));
+      for (const [elapsedMinutes, delayMs] of [[119, 60_000], [120, 300_000], [355, 300_000]]) {
+        vi.setSystemTime(startedAt + elapsedMinutes * 60_000);
+        const leaseToken = await claimLease(t, elapsedWindow.jobId);
+        await t.mutation(applyGeminiProviderResult, {
+          jobId: elapsedWindow.jobId,
+          leaseToken,
+          result: { kind: "index_pending" },
+        });
+        await expect(t.run((ctx) => ctx.db.get("integrationJobs", elapsedWindow.jobId))).resolves.toMatchObject({
+          status: "waiting_provider",
+          providerOperationName: operationName,
+          nextAttemptAt: Date.now() + delayMs,
+        });
+        await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.not.toHaveProperty("failureSummary");
+        await expect(t.mutation(claimJob, { jobId: elapsedWindow.jobId })).resolves.toBeNull();
+        await expect(t.mutation(reconcileStaleJobs, {})).resolves.toEqual({ scheduled: 0, hasMore: false });
+      }
 
-      vi.setSystemTime(startedAt + 120 * 60_000);
-      elapsedLease = await claimLease(t, elapsedWindow.jobId);
+      vi.setSystemTime(startedAt + 360 * 60_000);
+      const elapsedLease = await claimLease(t, elapsedWindow.jobId);
       await t.mutation(applyGeminiProviderResult, {
         jobId: elapsedWindow.jobId,
         leaseToken: elapsedLease,
         result: { kind: "index_pending" },
       });
+      const reviewedJob = await t.run((ctx) => ctx.db.get("integrationJobs", elapsedWindow.jobId));
+      expect(reviewedJob).toMatchObject({ status: "manual_review", lastErrorKind: "timeout", providerOperationName: operationName });
+      expect(reviewedJob).not.toHaveProperty("nextAttemptAt");
       await expect(t.run((ctx) => ctx.db.get(elapsedWindow.versionId))).resolves.toMatchObject({
-        failureSummary: "Gemini did not confirm the index update within 120 minutes. Search is paused until an administrator reviews the job.",
+        status: "publishing",
+        failureSummary: "Gemini did not confirm the index update within 6 hours. Search is paused until an administrator reviews the job.",
       });
+      await expect(t.run((ctx) => ctx.db.get(elapsedWindow.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
+      await expect(t.run((ctx) => ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", elapsedWindow.resourceId)).unique())).resolves.toMatchObject({ jobId: elapsedWindow.jobId });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["index_completed", "index_failed"] as const)("reconciles %s after the old two-hour window", async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.UTC(2026, 8, 4, 12);
+      vi.setSystemTime(startedAt);
+      const t = createBackend();
+      const suffix = outcome === "index_completed" ? "late-completed" : "late-failed";
+      const fixture = await seedBoundGeminiIndexJob(t, {
+        suffix,
+        status: "waiting_provider",
+        providerSyncState: "drifted",
+        lockDurationMs: 24 * 60 * 60_000,
+      });
+      vi.setSystemTime(startedAt + 180 * 60_000);
+      const leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending" } });
+      await expect(t.run((ctx) => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "waiting_provider", nextAttemptAt: startedAt + 185 * 60_000 });
+      await expect(t.run((ctx) => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
+      await expect(t.run((ctx) => ctx.db.get(fixture.resourceId))).resolves.not.toHaveProperty("activeVersionId");
+
+      vi.setSystemTime(startedAt + 185 * 60_000);
+      const claim = await t.mutation(claimJob, { jobId: fixture.jobId });
+      expect(claim).toMatchObject({ workKind: "poll", job: { providerOperationName: `${fixture.storeName}/upload/operations/${suffix}` } });
+      const documentName = `${fixture.storeName}/documents/late-result`;
+      await t.mutation(applyGeminiProviderResult, {
+        jobId: fixture.jobId,
+        leaseToken: claim!.leaseToken,
+        result: outcome === "index_completed" ? { kind: "index_completed", documentName } : { kind: "index_failed", errorKind: "validation" },
+      });
+      const version = await t.run((ctx) => ctx.db.get(fixture.versionId));
+      const resource = await t.run((ctx) => ctx.db.get(fixture.resourceId));
+      if (outcome === "index_completed") {
+        await expect(t.run((ctx) => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "succeeded" });
+        expect(version).toMatchObject({ status: "published", geminiDocumentName: documentName });
+        expect(resource).toMatchObject({ activeVersionId: fixture.versionId });
+      } else {
+        await expect(t.run((ctx) => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "failed", lastErrorKind: "validation" });
+        expect(version).toMatchObject({ status: "approved", failureSummary: "Publishing failed. No version was published." });
+        expect(version).not.toHaveProperty("geminiDocumentName");
+        expect(resource).not.toHaveProperty("activeVersionId");
+      }
+      await expect(t.run((ctx) => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "synced" });
+      await expect(t.run((ctx) => ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", (q) => q.eq("resourceId", fixture.resourceId)).unique())).resolves.toBeNull();
+      await expect(t.run((ctx) => ctx.db.query("integrationJobs").take(2))).resolves.toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -778,7 +844,7 @@ describe("durable Gemini jobs", () => {
     })).rejects.toThrow("Integration job is not retryable");
   });
 
-  it("starts a fresh provider polling window when an indexing job is retried", async () => {
+  it("starts a fresh six-hour polling window on retry despite an old cumulative poll count", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = new Date("2026-09-04T10:00:00.000Z");
@@ -790,18 +856,13 @@ describe("durable Gemini jobs", () => {
         status: "manual_review",
         providerSyncState: "drifted",
         lastErrorKind: "provider",
+        lockDurationMs: 24 * 60 * 60_000,
       });
 
-      vi.setSystemTime(startedAt.getTime() + 61 * 60_000);
+      await t.run((ctx) => ctx.db.patch(safePoll.jobId, { providerPollingStartedAt: startedAt.getTime(), providerPollCount: 359 }));
+      const retriedAt = startedAt.getTime() + 7 * 60 * 60_000;
+      vi.setSystemTime(retriedAt);
       const admin = await asAdmin(t, "super_admin");
-      await t.run(async (ctx) => {
-        const lock = await ctx.db
-          .query("documentLifecycleLocks")
-          .withIndex("by_resourceId", (q) => q.eq("resourceId", safePoll.resourceId))
-          .unique();
-        if (!lock) throw new Error("expected lifecycle lock");
-        await ctx.db.patch(lock._id, { expiresAt: Date.now() + 61 * 60_000 });
-      });
 
       await admin.client.mutation(retryJob, {
         jobId: safePoll.jobId,
@@ -819,8 +880,20 @@ describe("durable Gemini jobs", () => {
 
       await expect(t.run((ctx) => ctx.db.get("integrationJobs", safePoll.jobId))).resolves.toMatchObject({
         status: "waiting_provider",
-        providerPollingStartedAt: Date.now(),
+        providerPollingStartedAt: retriedAt,
+        providerOperationName: `${safePoll.storeName}/upload/operations/retry-poll-window`,
+        providerPollCount: 360,
+        nextAttemptAt: retriedAt + 60_000,
       });
+      await expect(t.run((ctx) => ctx.db.get(safePoll.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
+      vi.setSystemTime(retriedAt + 355 * 60_000);
+      const leaseToken = await claimLease(t, safePoll.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: safePoll.jobId, leaseToken, result: { kind: "index_pending" } });
+      await expect(t.run((ctx) => ctx.db.get(safePoll.jobId))).resolves.toMatchObject({ status: "waiting_provider", providerPollingStartedAt: retriedAt, nextAttemptAt: retriedAt + 360 * 60_000 });
+      vi.setSystemTime(retriedAt + 360 * 60_000);
+      const finalLease = await claimLease(t, safePoll.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: safePoll.jobId, leaseToken: finalLease, result: { kind: "index_pending" } });
+      await expect(t.run((ctx) => ctx.db.get(safePoll.jobId))).resolves.toMatchObject({ status: "manual_review", lastErrorKind: "timeout" });
     } finally {
       vi.useRealTimers();
     }
