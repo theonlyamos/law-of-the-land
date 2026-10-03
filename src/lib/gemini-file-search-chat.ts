@@ -688,6 +688,35 @@ export class GeminiFileSearchChat {
         streamEvidence.failure = "stream_citation_batch";
       }
     };
+    const retainSnapshot = (batches: readonly unknown[]) => {
+      if (streamEvidence.failure) return;
+      try {
+        const arrays: Array<{ values: unknown[]; length: number }> = [];
+        let total = 0;
+        for (const batch of batches) {
+          if (!Array.isArray(batch)) { retainBatch(batch); return; }
+          const length = batch.length;
+          if (!Number.isSafeInteger(length) || length < 0) { retainBatch(null); return; }
+          total += length;
+          if (total > MAX_ANNOTATIONS) {
+            streamEvidence.candidates = [];
+            streamEvidence.failure = "stream_citation_limit";
+            return;
+          }
+          arrays.push({ values: batch, length });
+        }
+        // Preflight the whole bounded snapshot before copying any entries. Only
+        // blocks within this one event are combined; later events replace it.
+        const annotations: unknown[] = [];
+        for (const array of arrays) {
+          for (let index = 0; index < array.length; index++) annotations.push(diagnosticValue(array.values, index));
+        }
+        retainBatch(annotations);
+      } catch {
+        streamEvidence.candidates = [];
+        streamEvidence.failure = "stream_citation_batch";
+      }
+    };
     const observe = (action: () => void) => {
       try { action(); } catch { diagnostics.countsClamped = true; }
     };
@@ -785,16 +814,22 @@ export class GeminiFileSearchChat {
               const content = diagnosticValue(event.step, "content");
               if (content !== undefined) {
                 if (!Array.isArray(content) || content.length > MAX_OUTPUT_BLOCKS) output.supported = false;
-                else for (let index = 0; index < content.length; index++) {
-                  const block = diagnosticValue(content, index);
-                  const text = diagnosticValue(block, "text");
-                  if (diagnosticValue(block, "type") !== "text" || typeof text !== "string") {
-                    output.supported = false;
-                    continue;
+                else {
+                  const batches: unknown[] = [];
+                  const texts: string[] = [];
+                  for (let index = 0; index < content.length; index++) {
+                    const block = diagnosticValue(content, index);
+                    const text = diagnosticValue(block, "text");
+                    if (diagnosticValue(block, "type") !== "text" || typeof text !== "string") {
+                      output.supported = false;
+                      continue;
+                    }
+                    if (text) texts.push(text);
+                    const annotations = diagnosticValue(block, "annotations");
+                    if (annotations !== undefined) batches.push(annotations);
                   }
-                  if (text) await appendText(output, text);
-                  const annotations = diagnosticValue(block, "annotations");
-                  if (annotations !== undefined) retainBatch(annotations);
+                  if (batches.length > 0) retainSnapshot(batches);
+                  for (const text of texts) await appendText(output, text);
                 }
               }
             }

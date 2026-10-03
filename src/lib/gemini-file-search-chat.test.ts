@@ -490,6 +490,13 @@ describe("verified stream file citations", () => {
     } as StreamEvent)));
     return events;
   }
+  function eventsWithInitial(batches: unknown[], laterBatches: unknown[] = []) {
+    const events = eventsWith(laterBatches);
+    const start = events[10];
+    if (start.event_type !== "step.start") throw new Error("fixture");
+    Object.assign(start.step, { content: batches.map(annotations => ({ type: "text", text: "", annotations })) });
+    return events;
+  }
   function eventsWithPrefix(prefix: string, batches: unknown[], answer = "The Constitution applies.") {
     const events = eventsWith(batches, answer).map(event => "index" in event ? { ...event, index: event.index + 1 } : event);
     events.splice(1, 0,
@@ -652,6 +659,48 @@ describe("verified stream file citations", () => {
     const { result, deltas } = await run(events, canonical("Café law."), input(), enabled);
     expect(result.citations).toHaveLength(1);
     expect(deltas.join("")).toBe("Café law.");
+  });
+
+  it("retains selected and related citations from every block of one initial snapshot", async () => {
+    const related = file({ document_uri: "fileSearchStores/accra-law/documents/related-1", custom_metadata: {
+      jurisdiction_id: "accra", resource_id: "related-resource", version_id: "related-version",
+    } });
+    const { result } = await run(eventsWithInitial([[file()], [related]]), canonical(), input(), enabled);
+    expect(result.citations.map(value => value.jurisdictionId)).toEqual(["ghana", "accra"]);
+  });
+
+  it("keeps file evidence alongside empty annotation blocks in one initial snapshot", async () => {
+    expect((await run(eventsWithInitial([[file()], []]), canonical(), input(), enabled)).result.citations).toHaveLength(1);
+  });
+
+  it("validates earlier file identities in the complete initial snapshot", async () => {
+    await expect(run(eventsWithInitial([[file({ custom_metadata: {} })], [file()]]), canonical(), input(), enabled)).rejects.toThrow("citation_identity");
+  });
+
+  it("permanently rejects a malformed later block in an initial snapshot", async () => {
+    await expect(run(eventsWithInitial([[file()], { invalid: true }], [[file()]]), canonical(), input(), enabled)).rejects.toThrow("stream_citation_batch");
+  });
+
+  it("bounds the aggregate initial snapshot before copying any annotation entries", async () => {
+    const excessive = Array.from({ length: 33 }, () => file());
+    let reads = 0;
+    Object.defineProperty(excessive, 0, { get() { reads++; throw new Error("must not read overflow entries"); } });
+    await expect(run(eventsWithInitial([Array.from({ length: 32 }, () => file()), excessive], [[file()]]), canonical(), input(), enabled)).rejects.toThrow("stream_citation_limit");
+    expect(reads).toBe(0);
+  });
+
+  it.each([{ later: [[], []] }, { later: [[], [url]] }])("clears older files with a later complete initial snapshot", async ({ later }) => {
+    const events = eventsWith([[file()]]);
+    events.splice(events.length - 1, 0,
+      { event_type: "step.start", index: 4, step: { type: "model_output", content: later.map(annotations => ({ type: "text", text: "", annotations })) } },
+      { event_type: "step.stop", index: 4 });
+    expect((await run(events, canonical(), input(), enabled)).result.citations).toEqual([]);
+  });
+
+  it("replaces an initial snapshot with a later delta instead of unioning across events", async () => {
+    const later = file({ custom_metadata: { jurisdiction_id: "ghana", resource_id: "later-resource", version_id: "later-version" } });
+    const { result } = await run(eventsWithInitial([[file()], []], [[later]]), canonical(), input(), enabled);
+    expect(result.citations.map(value => value.resourceId)).toEqual(["later-resource"]);
   });
 
   it.each([{}, [{ type: "image", data: "private-image-data" }], [{ type: "text", text: 42 }]].map(content => ({ content })))("rejects unsupported initial output content during fallback", async ({ content }) => {

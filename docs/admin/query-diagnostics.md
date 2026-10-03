@@ -93,7 +93,10 @@ part of the same completed response; it does not have to repeat the answer.
 Canonical content-block and step boundaries need not match the stream's text
 partitions. The complete assembled text must still match exactly.
 
-Every annotation event replaces the retained batch. A later empty or URL-only
+Every annotation event replaces the retained batch. An initial model-output
+snapshot combines its annotated text blocks into one bounded batch before
+replacement, so later blocks in that same snapshot do not erase earlier ones.
+A later empty or URL-only
 batch cannot restore an earlier File Citation. Missing or malformed arrays and
 exceeded observation bounds fail closed. The final batch is a conservative subset
 if provider arrays are additive, or the latest state if they replace; this does not
