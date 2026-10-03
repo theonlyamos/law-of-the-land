@@ -409,30 +409,33 @@ function requestFor(
   };
 }
 
+type ModelOutputText = { text: string; supported: boolean };
+
 function canonicalOutput(interaction: Interactions.Interaction, observeAnnotations: (annotations: Interactions.Annotation[]) => void): {
   answer: string;
   annotations: Interactions.Annotation[];
-  modelOutputCount: number;
-  textBlockCount: number;
+  modelOutputs: ModelOutputText[];
 } {
   if (interaction.status !== "completed" || !Array.isArray(interaction.steps) || interaction.steps.length > MAX_OUTPUT_BLOCKS) {
     return invalidResponse("canonical_state");
   }
   const texts: string[] = [];
   const annotations: Interactions.Annotation[] = [];
-  let modelOutputCount = 0;
+  const modelOutputs: ModelOutputText[] = [];
   for (const step of interaction.steps) {
     if (step.type !== "model_output") continue;
-    modelOutputCount++;
+    const output = { text: "", supported: true };
+    modelOutputs.push(output);
     if (step.content === undefined) continue;
     if (!Array.isArray(step.content) || step.content.length > MAX_OUTPUT_BLOCKS) return invalidResponse("canonical_content");
     for (const content of step.content) {
       if (!content || typeof content !== "object" || Array.isArray(content)) return invalidResponse("canonical_block");
-      if (content.type !== "text") continue;
+      if (content.type !== "text") { output.supported = false; continue; }
       if (typeof content.text !== "string" || (content.annotations !== undefined && !Array.isArray(content.annotations))) {
         return invalidResponse("canonical_text");
       }
       texts.push(content.text);
+      output.text += content.text;
       if (content.annotations) {
         observeAnnotations(content.annotations);
         annotations.push(...content.annotations);
@@ -442,7 +445,7 @@ function canonicalOutput(interaction: Interactions.Interaction, observeAnnotatio
   }
   const answer = texts.join("");
   if (!answer || encoder.encode(answer).byteLength > MAX_OUTPUT_BYTES) return invalidResponse("canonical_answer");
-  return { answer, annotations, modelOutputCount, textBlockCount: texts.length };
+  return { answer, annotations, modelOutputs };
 }
 
 function citationMetadata(value: unknown): Record<string, string> | undefined {
@@ -521,6 +524,10 @@ class StreamFileEvidence {
       // Retain only bounded identity fields and numeric locators; provider source/title/URL text is discarded.
       const boundedString = (key: string) => {
         const field = diagnosticValue(annotation, key);
+        // Preserve a malformed provider-reference signal without retaining an unbounded value.
+        if (key === "file_name" && typeof field === "string" && field.startsWith("fileSearchStores/") && !isIdentifier(field)) {
+          return "fileSearchStores/";
+        }
         return field === undefined ? undefined : isIdentifier(field) ? field : null;
       };
       const numeric = (key: string) => {
@@ -547,7 +554,7 @@ function citationsFor(
     "citationUriKind" | "jurisdictionMetadataPresent" | "resourceMetadataPresent" | "versionMetadataPresent"
   >) => void,
   observeRejected: (annotation: unknown, answerBytes: number) => void,
-  mode: { allowDocumentReference?: boolean; requireDocumentReference?: boolean } = {},
+  mode: { allowDocumentReference?: boolean; requireStreamLocators?: boolean } = {},
 ): ValidatedCitation[] {
   const storesByJurisdictionId = new Map(stores.map((store) => [store.jurisdictionId, store]));
   const encodedAnswer = encoder.encode(answer);
@@ -594,22 +601,22 @@ function citationsFor(
       || !isIdentifier(versionId)
       || !store
       || providerStoreName !== store.storeName
-      || (mode.requireDocumentReference && !providerDocumentName)
     ) {
       return reject("citation_identity");
     }
     const start = annotation.start_index;
     const end = annotation.end_index;
-    if (mode.requireDocumentReference && (start === undefined || end === undefined)) return reject("citation_offsets_missing");
+    if (mode.requireStreamLocators && (start === undefined || end === undefined)) return reject("citation_offsets_missing");
     if ((start === undefined) !== (end === undefined)) return reject("citation_offsets_missing");
     if (start !== undefined && end !== undefined && (
       !Number.isSafeInteger(start)
       || !Number.isSafeInteger(end)
       || start < 0
       || end < start
+      || (mode.requireStreamLocators && end === start)
       || end > answerBytes
     )) return reject("citation_offsets_invalid");
-    if (mode.requireDocumentReference && start !== undefined && end !== undefined
+    if (mode.requireStreamLocators && start !== undefined && end !== undefined
       && ((start < answerBytes && (encodedAnswer[start] & 0xc0) === 0x80)
         || (end < answerBytes && (encodedAnswer[end] & 0xc0) === 0x80))) return reject("citation_offsets_invalid");
     if (annotation.page_number !== undefined && (!Number.isSafeInteger(annotation.page_number) || annotation.page_number <= 0 || annotation.page_number > MAX_PAGE_NUMBER)) {
@@ -714,8 +721,15 @@ export class GeminiFileSearchChat {
       let completed = false;
       let streamedAnswer = "";
       let streamedBytes = 0;
-      let streamedModelOutputCount = 0;
-      let ambiguousStreamContent = false;
+      const streamedModelOutputs = new Map<number, ModelOutputText>();
+      const appendText = async (output: ModelOutputText, text: string) => {
+        const nextBytes = encoder.encode(text).byteLength;
+        if (streamedBytes + nextBytes > MAX_OUTPUT_BYTES) return invalidResponse("output_limit");
+        output.text += text;
+        streamedAnswer += text;
+        streamedBytes += nextBytes;
+        await options.onDelta(text);
+      };
 
       for await (const event of stream) {
         checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
@@ -764,15 +778,21 @@ export class GeminiFileSearchChat {
           )) return invalidResponse("file_search_result");
           if (type === "file_search_result") count("searchResultCount", 1);
           if (type === "model_output") {
-            streamedModelOutputCount++;
+            const output = { text: "", supported: true };
+            streamedModelOutputs.set(event.index, output);
             observe(() => observer.modelOutput("stream", event.step));
             if (allowStreamFileCitations) {
               const content = diagnosticValue(event.step, "content");
               if (content !== undefined) {
-                if (!Array.isArray(content) || content.length > 1) ambiguousStreamContent = true;
-                else if (content.length === 1) {
-                  const block = diagnosticValue(content, 0);
-                  if (diagnosticValue(block, "type") !== "text") ambiguousStreamContent = true;
+                if (!Array.isArray(content) || content.length > MAX_OUTPUT_BLOCKS) output.supported = false;
+                else for (let index = 0; index < content.length; index++) {
+                  const block = diagnosticValue(content, index);
+                  const text = diagnosticValue(block, "text");
+                  if (diagnosticValue(block, "type") !== "text" || typeof text !== "string") {
+                    output.supported = false;
+                    continue;
+                  }
+                  if (text) await appendText(output, text);
                   const annotations = diagnosticValue(block, "annotations");
                   if (annotations !== undefined) retainBatch(annotations);
                 }
@@ -803,11 +823,9 @@ export class GeminiFileSearchChat {
             continue;
           }
           if (event.delta.type !== "text") return invalidResponse("model_delta_type");
-          const nextBytes = encoder.encode(event.delta.text).byteLength;
-          if (streamedBytes + nextBytes > MAX_OUTPUT_BYTES) return invalidResponse("output_limit");
-          streamedAnswer += event.delta.text;
-          streamedBytes += nextBytes;
-          await options.onDelta(event.delta.text);
+          const output = streamedModelOutputs.get(event.index);
+          if (!output) return invalidResponse("missing_stream_state");
+          await appendText(output, event.delta.text);
           continue;
         }
         if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
@@ -862,7 +880,11 @@ export class GeminiFileSearchChat {
             return invalidResponse(streamEvidence.failure);
           }
           if (streamEvidence.candidates.length > 0) {
-            if (streamedModelOutputCount !== 1 || ambiguousStreamContent || final.modelOutputCount !== 1 || final.textBlockCount !== 1) {
+            // FileCitation offsets address the response. Providers may send annotations in
+            // a separate empty output step; source/page citations do not assert inline spans.
+            // Completed interaction identity and exact whole-response text already agree above.
+            if ([...streamedModelOutputs.values()].some(output => !output.supported)
+              || final.modelOutputs.some(output => !output.supported)) {
               return invalidResponse("stream_citation_ambiguous");
             }
             const retained = streamEvidence.candidates;
@@ -876,7 +898,7 @@ export class GeminiFileSearchChat {
                     ...(boundedShape.offsetsWithinAnswer === undefined ? {} : { offsetsWithinAnswer: boundedShape.offsetsWithinAnswer }),
                   };
                 });
-              }, { allowDocumentReference: true, requireDocumentReference: true });
+              }, { allowDocumentReference: true, requireStreamLocators: true });
             report({ reason: "completed" });
             return { answer: final.answer, citations, usage: usageFor(interaction.usage) };
           }

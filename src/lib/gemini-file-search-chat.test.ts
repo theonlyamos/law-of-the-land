@@ -490,6 +490,19 @@ describe("verified stream file citations", () => {
     } as StreamEvent)));
     return events;
   }
+  function eventsWithPrefix(prefix: string, batches: unknown[], answer = "The Constitution applies.") {
+    const events = eventsWith(batches, answer).map(event => "index" in event ? { ...event, index: event.index + 1 } : event);
+    events.splice(1, 0,
+      { event_type: "step.start", index: 0, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 0, delta: { type: "text", text: prefix } },
+      { event_type: "step.stop", index: 0 });
+    return events;
+  }
+  function canonicalWithPrefix(prefix: string, answer = "The Constitution applies.") {
+    const final = canonical(answer);
+    final.steps!.unshift({ type: "model_output", content: [{ type: "text", text: prefix }] });
+    return final;
+  }
   const enabled = { allowStreamFileCitations: true };
 
   it("uses a verified final file batch when canonical annotations contain only URL markers", async () => {
@@ -543,7 +556,6 @@ describe("verified stream file citations", () => {
   it.each([
     { custom_metadata: {} },
     { custom_metadata: [{ key: "jurisdiction_id", string_value: "ghana" }, { key: "resource_id", string_value: "resource-1" }, { key: "version_id", string_value: "version-1" }, { key: "resource_id", string_value: "resource-1" }] },
-    { document_uri: "fileSearchStores/ghana-law", file_name: "document-1.pdf" },
     { document_uri: "fileSearchStores/accra-law/documents/document-1" },
     { file_name: "fileSearchStores/ghana-law/documents/conflicting-document" },
     { document_uri: "https://private.example/document", file_name: documentName },
@@ -556,6 +568,7 @@ describe("verified stream file citations", () => {
     [{ end_index: undefined }, "citation_offsets_missing"],
     [{ start_index: -1 }, "citation_offsets_invalid"],
     [{ end_index: 100 }, "citation_offsets_invalid"],
+    [{ start_index: 0, end_index: 0 }, "citation_offsets_invalid"],
     [{ page_number: 0 }, "citation_page"],
   ] as const)("checks retained file offsets and pages", async (fields, reason) => {
     await expect(run(eventsWith([[file(fields)]]), canonical(), input(), enabled)).rejects.toThrow(reason);
@@ -567,16 +580,98 @@ describe("verified stream file citations", () => {
     await expect(run(eventsWith([[file({ start_index: 4, end_index: 5 })]], answer), canonical(answer), input(), enabled)).rejects.toThrow("citation_offsets_invalid");
   });
 
-  it("requires a single output step and canonical text block", async () => {
+  it("handles empty intermediate outputs and fragmented canonical text blocks", async () => {
     const final = canonical();
     final.steps!.unshift({ type: "model_output", content: [] });
-    await expect(run(eventsWith([[file()]]), final, input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+    expect((await run(eventsWith([[file()]]), final, input(), enabled)).result.citations).toHaveLength(1);
     const split = canonical();
     Object.assign(split.steps![0], { content: [{ type: "text", text: "The " }, { type: "text", text: "Constitution applies." }] });
-    await expect(run(eventsWith([[file()]]), split, input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+    expect((await run(eventsWith([[file()]]), split, input(), enabled)).result.citations).toHaveLength(1);
     const events = eventsWith([[file()]]);
     events.splice(1, 0, { event_type: "step.start", index: 4, step: { type: "model_output" } }, { event_type: "step.stop", index: 4 });
+    expect((await run(events, canonical(), input(), enabled)).result.citations).toHaveLength(1);
+  });
+
+  it("accepts store-only file carriers with all metadata IDs and ignores display labels", async () => {
+    for (const file_name of ["EAC treaty.pdf", "x".repeat(250)]) {
+      const { result } = await run(eventsWith([[file({ document_uri: "fileSearchStores/ghana-law", file_name })]]), canonical(), input(), enabled);
+      expect(result.citations[0]).toEqual({ jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1", providerStoreName: "fileSearchStores/ghana-law" });
+    }
+    await expect(run(eventsWith([[file({ document_uri: "fileSearchStores/ghana-law", file_name: `fileSearchStores/${"x".repeat(250)}` })]]), canonical(), input(), enabled)).rejects.toThrow("citation_identity");
+  });
+
+  it("validates response-level citations across multiple output steps", async () => {
+    const { result } = await run(eventsWithPrefix("Introduction. ", [[file()]]), canonicalWithPrefix("Introduction. "), input(), enabled);
+    expect(result.answer).toBe("Introduction. The Constitution applies.");
+    expect(result.citations).toHaveLength(1);
+  });
+
+  it("allows canonical text regrouping while requiring exact whole-answer text", async () => {
+    const events = eventsWithPrefix("Introduction. ", [[file()]]);
+    expect((await run(events, canonicalWithPrefix("Introduction. The ", "Constitution applies."), input(), enabled)).result.citations).toHaveLength(1);
+    await expect(run(events, canonicalWithPrefix("Introduction. The ", "Constitution differs."), input(), enabled)).rejects.toThrow("canonical_text_mismatch");
+  });
+
+  it("uses one whole-response UTF-8 coordinate frame without rebasing offsets", async () => {
+    const prefix = "Café ";
+    const final = canonicalWithPrefix(prefix);
+    expect((await run(eventsWithPrefix(prefix, [[file({ end_index: 26 })]]), final, input(), enabled)).result.citations).toHaveLength(1);
+    await expect(run(eventsWithPrefix(prefix, [[file({ start_index: 4, end_index: 5 })]]), final, input(), enabled)).rejects.toThrow("citation_offsets_invalid");
+    await expect(run(eventsWithPrefix(prefix, [[file({ end_index: 32 })]]), final, input(), enabled)).rejects.toThrow("citation_offsets_invalid");
+  });
+
+  it("accepts the observed later annotation-only output as response-level document evidence", async () => {
+    const answer = "A".repeat(3036);
+    const events = eventsWith([], answer).map(event => "index" in event && event.index === 3 ? { ...event, index: 11 } : event);
+    events.splice(events.length - 1, 0,
+      { event_type: "step.start", index: 14, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 14, delta: { type: "text_annotation_delta", annotations: [file({ document_uri: "fileSearchStores/ghana-law", file_name: "constitution.pdf", page_number: 2, start_index: 3030, end_index: 3036 })] } },
+      { event_type: "step.stop", index: 14 });
+    const final = canonical(answer);
+    final.steps!.push({ type: "model_output", content: [] });
+    const { result } = await run(events, final, input(), enabled);
+    expect(result).toMatchObject({ answer, citations: [{ resourceId: "resource-1", versionId: "version-1", providerStoreName: "fileSearchStores/ghana-law", pageNumber: 2 }] });
+    expect(result.citations[0]).not.toHaveProperty("start_index");
+    expect((await run(events, final)).result.citations).toEqual([]);
+  });
+
+  it.each([{ last: [] }, { last: [url] }])("clears older file evidence in a later annotation-only output", async ({ last }) => {
+    const clearing = eventsWith([[file()]]);
+    clearing.splice(clearing.length - 1, 0,
+      { event_type: "step.start", index: 4, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 4, delta: { type: "text_annotation_delta", annotations: last } },
+      { event_type: "step.stop", index: 4 });
+    expect((await run(clearing, canonical(), input(), enabled)).result.citations).toEqual([]);
+  });
+
+  it("includes initial text blocks once before appending streamed deltas", async () => {
+    const events = eventsWith([[file({ start_index: 3, end_index: 5 })]], "law.");
+    const start = events[10];
+    if (start.event_type !== "step.start") throw new Error("fixture");
+    Object.assign(start.step, { content: [{ type: "text", text: "Café " }, { type: "text", text: "" }] });
+    const { result, deltas } = await run(events, canonical("Café law."), input(), enabled);
+    expect(result.citations).toHaveLength(1);
+    expect(deltas.join("")).toBe("Café law.");
+  });
+
+  it.each([{}, [{ type: "image", data: "private-image-data" }], [{ type: "text", text: 42 }]].map(content => ({ content })))("rejects unsupported initial output content during fallback", async ({ content }) => {
+    const events = eventsWith([[file()]]);
+    const start = events[10];
+    if (start.event_type !== "step.start") throw new Error("fixture");
+    Object.assign(start.step, { content });
     await expect(run(events, canonical(), input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+  });
+
+  it.each(["stream", "canonical"])("rejects unsupported empty %s outputs despite matching whole text", async channel => {
+    const events = eventsWith([[file()]]);
+    const final = canonical();
+    const unsupported = { type: "model_output", content: [{ type: "image", data: "private-image-data" }] } as Interactions.ModelOutputStep;
+    if (channel === "stream") {
+      events.splice(events.length - 1, 0,
+        { event_type: "step.start", index: 4, step: unsupported },
+        { event_type: "step.stop", index: 4 });
+    } else final.steps!.push(unsupported);
+    await expect(run(events, final, input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
   });
 
   it("fails batch and global observation overflow instead of accepting truncated evidence", async () => {

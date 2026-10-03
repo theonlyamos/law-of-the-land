@@ -227,6 +227,57 @@ describe("POST /api/chat private query diagnostics", () => {
     )?.[1];
   }
 
+  it("authorizes document/page citations from a final annotation-only step after matching the whole answer", async () => {
+    const canonical = canonicalInteraction();
+    canonical.steps = [
+      { type: "model_output", content: [
+        { type: "text", text: "Employees ", annotations: [] },
+        { type: "text", text: "are protected.", annotations: [] },
+      ] },
+      { type: "model_output", content: [] },
+    ];
+    interactionMocks.get.mockResolvedValue(canonical);
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "interaction.created") {
+          yield event;
+          yield { event_type: "step.start", index: 3, step: { type: "model_output", content: [] } };
+          yield { event_type: "step.stop", index: 3 };
+          continue;
+        }
+        if (event.event_type === "step.stop" && event.index === 2) {
+          yield event;
+          yield { event_type: "step.start", index: 4, step: { type: "model_output" } };
+          yield { event_type: "step.delta", index: 4, delta: {
+            type: "text_annotation_delta", annotations: [{
+              type: "file_citation", document_uri: selectedStoreName,
+              file_name: "Untrusted display filename.pdf",
+              custom_metadata: { jurisdiction_id: selectedJurisdictionId,
+                resource_id: selectedResourceId, version_id: selectedVersionId },
+              start_index: 0, end_index: 9, page_number: 12,
+            }],
+          } };
+          yield { event_type: "step.stop", index: 4 };
+          continue;
+        }
+        yield event;
+      }
+    })());
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+    expect(args).toMatchObject({ outcome: "success", citations: [{
+      jurisdictionId: selectedJurisdictionId, resourceId: selectedResourceId,
+      versionId: selectedVersionId, providerStoreName: selectedStoreName, pageNumber: 12,
+    }] });
+    expect(args.citations[0]).not.toHaveProperty("providerDocumentName");
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(streamEvents.map(event => event.type)).toEqual(["delta", "done"]);
+    expect(JSON.stringify(streamEvents)).not.toContain(selectedStoreName);
+    expect(JSON.stringify(streamEvents)).not.toContain("Untrusted display filename");
+  });
+
   it("binds a final streamed file citation to catalog completion when canonical annotations contain only URLs", async () => {
     const providerDocumentName = `${selectedStoreName}/documents/verified-document`;
     const canonical = canonicalInteraction();
