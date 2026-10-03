@@ -500,6 +500,151 @@ describe("GeminiFileSearchChat structural diagnostics", () => {
     return { operation, snapshots, controller };
   }
 
+  it("observes an untyped REST annotation before rejecting it without exposing values", async () => {
+    const secret = "synthetic-private-provider-value";
+    const annotation = {
+      file_name: `fileSearchStores/ghana-law/documents/${secret}`, source: secret,
+      custom_metadata: [
+        { key: "jurisdiction_id", string_value: "ghana" },
+        { key: "resource_id", string_value: secret },
+        { key: "version_id", string_value: secret },
+        { key: "jurisdiction_id", string_value: "ghana" },
+      ], start_index: 0, end_index: 4, page_number: 1,
+    } as unknown as Interactions.Annotation;
+    const { operation, snapshots } = observedRun(undefined, canonical(undefined, [annotation]));
+    await expect(operation).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:citation_type");
+    expect(snapshots.at(-1)?.structure).toMatchObject({
+      canonical: { annotationKinds: { missing_type: 1 }, firstAnnotation: { kind: "missing_type" } },
+      rejectedCanonicalAnnotation: {
+        kind: "missing_type", metadataContainer: "array", documentUriKind: "missing",
+        fileNameKind: "authorized_document", fileNamePresent: true, sourcePresent: true,
+        jurisdictionMetadataPresent: true, resourceMetadataPresent: true, versionMetadataPresent: true,
+        duplicateIdentityMetadata: true, offsetKind: "valid_pair", pageKind: "valid", offsetsWithinAnswer: true,
+      },
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(secret);
+    expect(JSON.stringify(snapshots)).not.toContain("fileSearchStores/");
+  });
+
+  it("counts every closed canonical annotation kind before the first rejection", async () => {
+    const secret = "synthetic-unknown-provider-type";
+    const annotations = [citation(), { type: "url_citation", url: secret }, { type: "place_citation" },
+      { type: "word_info", text: secret }, { type: "speech_metadata", speaker: secret }, {}, { type: secret }, null];
+    const { operation, snapshots } = observedRun(undefined, canonical(undefined, annotations as Interactions.Annotation[]));
+    await expect(operation).rejects.toThrow("citation_type");
+    expect(snapshots.at(-1)?.structure).toMatchObject({
+      canonical: { annotationKinds: { file_citation: 1, url_citation: 1, place_citation: 1, word_info: 1,
+        speech_metadata: 1, missing_type: 1, unknown_type: 1, malformed: 1 },
+        firstAnnotation: { kind: "file_citation", metadataContainer: "object" } },
+      rejectedCanonicalAnnotation: { kind: "url_citation" },
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(secret);
+  });
+
+  it("separates stream, completion and canonical observations without treating them as evidence", async () => {
+    const events = eventStream();
+    events.splice(events.length - 2, 0, { event_type: "step.delta", index: 3,
+      delta: { type: "text_annotation_delta", annotations: [citation(), citation()] } });
+    const completed = events.at(-1);
+    if (completed?.event_type !== "interaction.completed") throw new Error("fixture");
+    Object.assign(completed.interaction, {
+      steps: canonical(undefined, [{ type: "url_citation", url: "https://private.example/secret" }]).steps,
+    });
+    const { operation, snapshots } = observedRun(events, canonical());
+    await expect(operation).resolves.toMatchObject({ citations: [], answer: expect.stringContaining("couldn't find enough") });
+    expect(snapshots.at(-1)?.structure).toMatchObject({
+      completionStepsPresent: true,
+      stream: { annotationKinds: { file_citation: 2 }, firstAnnotation: { kind: "file_citation" } },
+      completion: { annotationKinds: { url_citation: 1 }, firstAnnotation: { kind: "url_citation" } },
+      canonical: { annotationKinds: { file_citation: 0, url_citation: 0 } },
+    });
+    expect(JSON.stringify(snapshots)).not.toContain("private.example");
+  });
+
+  it.each([
+    ["missing", undefined], ["empty_array", []], ["nonempty_array", [{}]], ["other", "synthetic-secret-result"],
+  ] as const)("distinguishes a %s result delta without retaining its contents", async (kind, result) => {
+    const events = eventStream();
+    Object.assign((events[8] as Interactions.StepDelta).delta, { result });
+    const { operation, snapshots } = observedRun(events);
+    await expect(operation).resolves.toMatchObject({ citations: [{ jurisdictionId: "ghana" }] });
+    expect(snapshots.at(-1)?.structure?.fileSearchResultDeltas[kind]).toBe(1);
+    expect(JSON.stringify(snapshots)).not.toContain("synthetic-secret-result");
+  });
+
+  it("deeply freezes fresh structure snapshots and isolates nested observer mutation", async () => {
+    const frozen: boolean[] = [];
+    const modified: boolean[] = [];
+    const { operation, snapshots } = observedRun(undefined, undefined, undefined, (snapshot) => {
+      const structure = snapshot.structure;
+      frozen.push(!!structure && Object.isFrozen(structure) && Object.isFrozen(structure.canonical)
+        && Object.isFrozen(structure.canonical.annotationKinds) && Object.isFrozen(structure.fileSearchResultDeltas));
+      if (structure) modified.push(Reflect.set(structure.canonical.annotationKinds, "file_citation", 999));
+    });
+    await expect(operation).resolves.toMatchObject({ citations: [{ jurisdictionId: "ghana" }] });
+    expect(frozen.every(Boolean)).toBe(true);
+    expect(modified.length).toBeGreaterThan(0);
+    expect(modified.every(value => !value)).toBe(true);
+    expect(snapshots[0].structure?.canonical.annotationKinds.file_citation).toBe(0);
+    expect(snapshots.at(-1)?.structure?.canonical.annotationKinds.file_citation).toBe(1);
+    expect(snapshots[0].structure?.canonical).not.toBe(snapshots.at(-1)?.structure?.canonical);
+    expect(Object.isFrozen(snapshots.at(-1)?.structure?.canonical.firstAnnotation)).toBe(true);
+    expect(snapshots.at(-1)?.structure?.rejectedCanonicalAnnotation).toBeUndefined();
+  });
+
+  it.each([
+    [{ start_index: 0 }, "citation_offsets_missing", "unpaired", "missing", undefined],
+    [{ start_index: -1, end_index: 1 }, "citation_offsets_invalid", "invalid_pair", "missing", false],
+    [{ start_index: 0, end_index: 100 }, "citation_offsets_invalid", "valid_pair", "missing", false],
+    [{ page_number: 0 }, "citation_page", "missing", "invalid", undefined],
+  ] as const)("records downstream gate shapes without changing rejection", async (fields, reason, offsetKind, pageKind, offsetsWithinAnswer) => {
+    const { operation, snapshots } = observedRun(undefined, canonical(undefined, [citation(fields)]));
+    await expect(operation).rejects.toThrow(reason);
+    expect(snapshots.at(-1)?.structure?.rejectedCanonicalAnnotation).toMatchObject({ offsetKind, pageKind });
+    expect(snapshots.at(-1)?.structure?.rejectedCanonicalAnnotation?.offsetsWithinAnswer).toBe(offsetsWithinAnswer);
+  });
+
+  it("bounds ignored completion steps and never invokes observational getters", async () => {
+    const events = eventStream();
+    const steps = Array.from({ length: 33 }, () => ({ type: "model_output", content: [] }));
+    const readOutsideBound = vi.fn(() => { throw new Error("must not read"); });
+    Object.defineProperty(steps, 32, { get: readOutsideBound });
+    const completed = events.at(-1);
+    if (completed?.event_type !== "interaction.completed") throw new Error("fixture");
+    Object.assign(completed.interaction, { steps });
+    const annotation = citation();
+    const readFileName = vi.fn(() => { throw new Error("must not read"); });
+    Object.defineProperty(annotation, "file_name", { get: readFileName });
+    const { operation, snapshots } = observedRun(events, canonical(undefined, [annotation]));
+    await expect(operation).resolves.toMatchObject({ citations: [{ jurisdictionId: "ghana" }] });
+    expect(readOutsideBound).not.toHaveBeenCalled();
+    expect(readFileName).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toMatchObject({ countsClamped: true,
+      structure: { completionStepsPresent: true, canonical: { firstAnnotation: { fileNamePresent: false } } } });
+  });
+
+  it("bounds repeated annotation arrays globally and inspects only documented array metadata", async () => {
+    const metadata = Array.from({ length: 1_025 }, () => ({ key: "unrelated", string_value: "secret" }));
+    const readOutsideBound = vi.fn(() => { throw new Error("must not read"); });
+    Object.defineProperty(metadata, 1_024, { get: readOutsideBound });
+    const annotation = { custom_metadata: metadata } as unknown as Interactions.Annotation;
+    const annotations = Array.from({ length: 512 }, () => annotation);
+    const events = eventStream();
+    const start = events[10];
+    if (start.event_type !== "step.start") throw new Error("fixture");
+    Object.assign(start.step, { content: [{ type: "text", text: "", annotations }] });
+    events.splice(events.length - 2, 0,
+      { event_type: "step.delta", index: 3, delta: { type: "text_annotation_delta", annotations } },
+      { event_type: "step.delta", index: 3, delta: { type: "text_annotation_delta", annotations } });
+    const { operation, snapshots } = observedRun(events, canonical());
+    await expect(operation).resolves.toMatchObject({ citations: [] });
+    expect(readOutsideBound).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toMatchObject({ countsClamped: true, structure: { stream: {
+      annotationKinds: { missing_type: 1_024 }, firstAnnotation: { metadataContainer: "array", jurisdictionMetadataPresent: false },
+    } } });
+    expect(JSON.stringify(snapshots)).not.toContain("secret");
+  });
+
   it("distinguishes streamed annotations and search results from canonical no-evidence", async () => {
     const events = eventStream();
     events.splice(events.length - 2, 0, {

@@ -13,7 +13,7 @@ import {
 } from "./lib/telemetryProof";
 import schema from "./schema";
 import { CHAT_POLICY_RESPONSES } from "./lib/chatPolicy";
-import { queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
+import { emptyQueryDiagnosticStructure, queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 import { completeGovernedInteractionProofParts } from "./chats";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -54,6 +54,20 @@ const TEST_DIAGNOSTICS: QueryDiagnostics = {
   citationUriKind: "authorized_store" as const,
   jurisdictionMetadataPresent: true, resourceMetadataPresent: true, versionMetadataPresent: true,
 };
+function structuralDiagnostics(): QueryDiagnostics {
+  const structure = emptyQueryDiagnosticStructure();
+  structure.canonical.annotationKinds.file_citation = 1;
+  structure.canonical.firstAnnotation = {
+    kind: "file_citation", metadataContainer: "array", documentUriKind: "missing", fileNameKind: "authorized_document",
+    jurisdictionMetadataPresent: true, resourceMetadataPresent: true, versionMetadataPresent: true,
+    fileNamePresent: true, sourcePresent: false, duplicateIdentityMetadata: false,
+    offsetKind: "valid_pair", pageKind: "valid", offsetsWithinAnswer: true,
+  };
+  structure.rejectedCanonicalAnnotation = { ...structure.canonical.firstAnnotation };
+  structure.completionStepsPresent = true;
+  structure.fileSearchResultDeltas.empty_array = 1;
+  return { ...TEST_DIAGNOSTICS, structure };
+}
 type CompletionInput = {
   routeNonce: string;
   externalId: string;
@@ -323,6 +337,7 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
       input.diagnostics.resourceMetadataPresent === undefined ? -1 : input.diagnostics.resourceMetadataPresent ? 1 : 0,
       input.diagnostics.versionMetadataPresent === undefined ? -1 : input.diagnostics.versionMetadataPresent ? 1 : 0,
     ]),
+    ...(input.diagnostics?.structure === undefined ? [] : queryDiagnosticsProofParts(input.diagnostics).slice(14)),
   ];
 }
 
@@ -358,6 +373,59 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("persists proof-bound structural categories while replaying identical observations without writes", async () => {
+    const { t, owner, base } = await fixture();
+    const diagnostics = structuralDiagnostics();
+    await complete(owner.client, { ...base, diagnostics });
+    const before = await terminalState(t);
+    expect(before.runs[0].diagnostics).toEqual(diagnostics);
+    expect(JSON.stringify(before.runs[0].diagnostics)).not.toMatch(/fileSearchStores\/|private-provider-value/);
+    await expect(complete(owner.client, { ...base, diagnostics })).resolves.toEqual({ status: "replayed", outcome: "success" });
+    await expect(complete(owner.client, { ...base, diagnostics, routeNonce: createOpaqueTelemetryToken() }))
+      .resolves.toEqual({ status: "replayed", outcome: "success" });
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["changed", "added", "removed"])("rejects structural diagnostics %s after the service proof was signed", async change => {
+    const { t, owner, base } = await fixture();
+    const signed = { ...base, diagnostics: change === "added" ? TEST_DIAGNOSTICS : structuralDiagnostics() };
+    const diagnostics = change === "removed" ? { ...TEST_DIAGNOSTICS } : structuralDiagnostics();
+    if (change === "changed") diagnostics.structure!.canonical.firstAnnotation!.offsetsWithinAnswer = false;
+    await expect(owner.client.mutation(completeGovernedInteraction, {
+      ...base, diagnostics, serviceProof: await createTelemetryServiceProof(await proofParts(signed)),
+    })).rejects.toThrow("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each([
+    ["changed", false], ["added", false], ["removed", false],
+    ["changed", true], ["added", true], ["removed", true],
+  ] as const)("rejects signed replay with structural diagnostics %s (new nonce: %s)", async (change, newNonce) => {
+    const { t, owner, base } = await fixture();
+    await complete(owner.client, { ...base, diagnostics: change === "added" ? TEST_DIAGNOSTICS : structuralDiagnostics() });
+    const before = await terminalState(t);
+    const diagnostics = change === "removed" ? { ...TEST_DIAGNOSTICS } : structuralDiagnostics();
+    if (change === "changed") diagnostics.structure!.rejectedCanonicalAnnotation!.fileNameKind = "other";
+    await expect(complete(owner.client, { ...base, diagnostics, routeNonce: newNonce ? createOpaqueTelemetryToken() : base.routeNonce }))
+      .rejects.toThrow(newNonce ? "CHAT_CLIENT_ID_CONFLICT" : "GOVERNED_INTERACTION_REPLAY_INVALID");
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["raw payload", "raw type", "raw URI", "out-of-bounds count"])("rejects nested structural %s at the completion boundary", async scenario => {
+    const { t, owner, base } = await fixture();
+    const valid = structuralDiagnostics();
+    const serviceProof = await createTelemetryServiceProof(await proofParts({ ...base, diagnostics: valid }));
+    const diagnostics = structuralDiagnostics();
+    const shape = diagnostics.structure!.canonical.firstAnnotation! as unknown as Record<string, unknown>;
+    if (scenario === "raw payload") shape.payload = "private-provider-value";
+    if (scenario === "raw type") shape.kind = "private-provider-type";
+    if (scenario === "raw URI") shape.documentUriKind = "fileSearchStores/private/documents/private";
+    if (scenario === "out-of-bounds count") diagnostics.structure!.completion.annotationKinds.malformed = 1025;
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...base, diagnostics, serviceProof }))
+      .rejects.toThrow(/INVALID_QUERY_DIAGNOSTICS|Validator error/);
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
   it("persists bounded proof-bound query diagnostics without exposing provider content", async () => {
     const { t, owner, base } = await fixture();
     await expect(complete(owner.client, { ...base, diagnostics: TEST_DIAGNOSTICS })).resolves.toMatchObject({ status: "completed" });
