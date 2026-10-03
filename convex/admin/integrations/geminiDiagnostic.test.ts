@@ -4,7 +4,7 @@ import { inspectGeminiProvider, type DiagnosticTarget, type GeminiDiagnosticClie
 const STORE = "fileSearchStores/ohada-law";
 const OPERATION = `${STORE}/upload/operations/retained-1`;
 const DOCUMENT = `${STORE}/documents/insolvency-2015`;
-const SECRET = "AIza-test-secret-must-never-be-returned";
+const SECRET = "synthetic-provider-secret-for-redaction-tests";
 const target: DiagnosticTarget = {
   storeName: STORE,
   operationName: OPERATION,
