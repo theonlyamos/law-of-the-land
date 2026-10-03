@@ -32,6 +32,24 @@ function structure(): QueryDiagnosticStructure {
 }
 
 describe("structural query diagnostics", () => {
+  it("binds an optional rejected stream shape without changing existing structure proofs", () => {
+    const legacy = { ...base, structure: structure() };
+    const legacyProof = queryDiagnosticsProofParts(legacy);
+    const diagnostic = { ...base, structure: { ...structure(), rejectedStreamAnnotation: shape() } };
+    expect(() => validateQueryDiagnostics(diagnostic)).not.toThrow();
+    validateQueryDiagnostics(diagnostic);
+    const proof = queryDiagnosticsProofParts(diagnostic);
+    expect(proof.slice(0, legacyProof.length)).toEqual(legacyProof);
+    expect(proof[legacyProof.length]).toBe("query-diagnostics-stream-rejection-v1");
+    expect(queryDiagnosticsProofParts({ ...diagnostic, structure: {
+      ...diagnostic.structure,
+      rejectedStreamAnnotation: { ...diagnostic.structure.rejectedStreamAnnotation, pageKind: "invalid" },
+    } })).not.toEqual(proof);
+    expect(() => validateQueryDiagnostics({ ...base, structure: {
+      ...structure(), rejectedStreamAnnotation: { ...shape(), rawDocument: "fileSearchStores/private/documents/private" },
+    } })).toThrow("INVALID_QUERY_DIAGNOSTICS");
+  });
+
   it("preserves the exact old v1 proof when the extension is absent", () => {
     expect(queryDiagnosticsProofParts(base)).toEqual([
       "query-diagnostics-v1", "canonical_read", "citation_type", 1, 2, 3, 4, 5, 1, 0, "", -1, -1, -1,

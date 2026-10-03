@@ -227,6 +227,46 @@ describe("POST /api/chat private query diagnostics", () => {
     )?.[1];
   }
 
+  it("binds a final streamed file citation to catalog completion when canonical annotations contain only URLs", async () => {
+    const providerDocumentName = `${selectedStoreName}/documents/verified-document`;
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations = [{
+      type: "url_citation", url: "https://untrusted.example.test/reference", start_index: 0, end_index: 9,
+    }] as unknown as ReturnType<typeof canonicalInteraction>["steps"][number]["content"][number]["annotations"];
+    interactionMocks.get.mockResolvedValue(canonical);
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "step.stop" && event.index === 2) {
+          yield { event_type: "step.delta", index: 2, delta: {
+            type: "text_annotation_delta", annotations: [{
+              type: "file_citation", document_uri: providerDocumentName,
+              custom_metadata: { jurisdiction_id: selectedJurisdictionId,
+                resource_id: selectedResourceId, version_id: selectedVersionId },
+              start_index: 0, end_index: 9, page_number: 12,
+            }],
+          } };
+        }
+        yield event;
+      }
+    })());
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+    expect(args).toMatchObject({ outcome: "success", citations: [{
+      jurisdictionId: selectedJurisdictionId, resourceId: selectedResourceId,
+      versionId: selectedVersionId, providerStoreName: selectedStoreName, providerDocumentName,
+    }] });
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts({ ...args, citations: [{
+        ...args.citations[0], providerDocumentName: `${selectedStoreName}/documents/different-document`,
+      }] }))).toBe(false);
+    expect(streamEvents.map(event => event.type)).toEqual(["delta", "done"]);
+    expect(JSON.stringify(streamEvents)).not.toContain(providerDocumentName);
+    expect(JSON.stringify(streamEvents)).not.toContain("untrusted.example.test");
+  });
+
   it("proof-binds rejected annotation shape without disclosing provider fields", async () => {
     const privateDocument = "fileSearchStores/ghana/documents/private-document";
     const privateSource = "private-provider-source-text";
@@ -332,6 +372,7 @@ describe("POST /api/chat private query diagnostics", () => {
     const documentName = "fileSearchStores/ghana/documents/private-document-identifier";
     const canonical = canonicalInteraction();
     canonical.steps[0].content[0].annotations[0].document_uri = documentName;
+    canonical.steps[0].content[0].annotations[0].custom_metadata.version_id = "";
     interactionMocks.get.mockResolvedValue(canonical);
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -343,8 +384,15 @@ describe("POST /api/chat private query diagnostics", () => {
       diagnostics: {
         phase: "canonical_read", reason: "citation_identity",
         citationUriKind: "authorized_document",
-        jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
-        versionMetadataPresent: true, canonicalAnnotationCount: 1,
+        jurisdictionMetadataPresent: false, resourceMetadataPresent: false,
+        versionMetadataPresent: false, canonicalAnnotationCount: 1,
+        structure: {
+          rejectedCanonicalAnnotation: {
+            documentUriKind: "authorized_document", metadataContainer: "object",
+            jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
+            versionMetadataPresent: false,
+          },
+        },
       },
     });
     expect(streamEvents.at(-1)?.type).toBe("error");
@@ -435,6 +483,7 @@ describe("POST /api/chat private query diagnostics", () => {
     });
     expect(streamEvents.at(-1)?.type).toBe("error");
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+    expect(streamEvents.some((event) => event.type === "delta")).toBe(false);
   });
 });
 
@@ -731,7 +780,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect((await resultPromise).at(-1)?.type).toBe("error");
   });
 
-  it("uses one selected-first File Search interaction and terminalizes before done", async () => {
+  it("uses one selected-first File Search interaction and authorizes before any answer text", async () => {
     let finishTerminal!: (value: unknown) => void;
     const terminal = new Promise((resolve) => { finishTerminal = resolve; });
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -744,14 +793,14 @@ describe("POST /api/chat streamed governed interaction", () => {
     const response = await POST(request());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    const first = JSON.parse(decoder.decode((await reader.read()).value).trim());
-
-    expect(first).toEqual({ type: "delta", text: "Employees are protected." });
-    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+    let firstReadResolved = false;
+    const firstRead = reader.read().then(value => { firstReadResolved = true; return value; });
     await vi.waitFor(() => {
       expect(interactionMocks.get).toHaveBeenCalledTimes(1);
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     });
+    expect(firstReadResolved).toBe(false);
+    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
     expect(interactionMocks.create.mock.calls[0][0]).toMatchObject({
       model: "gemini-test-model",
       stream: true,
@@ -767,6 +816,8 @@ describe("POST /api/chat streamed governed interaction", () => {
       citationClaim,
       expiresAt: Date.now() + 60_000,
     });
+    const first = JSON.parse(decoder.decode((await firstRead).value).trim());
+    expect(first).toEqual({ type: "delta", text: "Employees are protected." });
     const terminalEvent = JSON.parse(decoder.decode((await reader.read()).value).trim());
     expect(terminalEvent).toEqual({
       type: "done",
@@ -826,11 +877,19 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).not.toHaveProperty("error");
   });
 
-  it("rejects a document URI instead of treating it as a store identity", async () => {
+  it("requires authoritative catalog approval of an exact document URI", async () => {
     const documentName = "fileSearchStores/ghana/documents/wrong-document";
     const canonical = canonicalInteraction();
     canonical.steps[0].content[0].annotations[0].document_uri = documentName;
     interactionMocks.get.mockResolvedValue(canonical);
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      if (args.outcome === "success") {
+        expect(args.citations[0]).toMatchObject({ providerStoreName: selectedStoreName, providerDocumentName: documentName });
+        throw new Error("INVALID_CHAT_CITATIONS");
+      }
+      return { status: "completed", outcome: "failure" };
+    });
 
     const streamEvents = await events(await POST(request()));
 
@@ -839,6 +898,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       error: "We couldn't process your request. Please try again.",
     });
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+    expect(streamEvents.some((event) => event.type === "delta")).toBe(false);
     expect(JSON.stringify(streamEvents)).not.toContain(documentName);
   });
 
@@ -994,7 +1054,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
-  it("emits no done when terminal validation exhausts the shared 110-second deadline", async () => {
+  it("emits no answer text when terminal validation exhausts the shared 110-second deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -1006,13 +1066,15 @@ describe("POST /api/chat streamed governed interaction", () => {
     const response = await POST(request());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    expect(JSON.parse(decoder.decode((await reader.read()).value).trim()).type).toBe("delta");
+    let firstReadResolved = false;
+    const firstRead = reader.read().then(value => { firstReadResolved = true; return value; });
     await vi.waitFor(() => {
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     });
+    expect(firstReadResolved).toBe(false);
 
     await vi.advanceTimersByTimeAsync(110_000);
-    const terminalEvent = JSON.parse(decoder.decode((await reader.read()).value).trim());
+    const terminalEvent = JSON.parse(decoder.decode((await firstRead).value).trim());
 
     expect(terminalEvent).toEqual({
       type: "error",

@@ -33,8 +33,9 @@ Counters saturate at 1024 and set `countsClamped`; a saturated count is not exac
   interaction passed validation. Counts before a failure describe partial progress.
 - `citationUriKind` describes the most recently inspected citation as missing,
   an authorized store URI, a document URI under an authorized store, or other.
-  The three metadata flags indicate valid bounded identity strings were present;
-  they do not assert that those identities passed authorization.
+  The three metadata flags describe the identity values supplied to validation;
+  normalization failure can make all three false. They do not assert authorization.
+  The rejected annotation's structural shape records original field presence.
 - `no_canonical_annotations` identifies the existing legal abstention branch. Zero
   counts never independently establish that a published source is missing, that
   retrieval was empty, or that the model lacked relevant material.
@@ -72,6 +73,42 @@ numeric shapes without retaining numbers. A valid offset pair means safe integer
 in nondecreasing order with a nonnegative start. It does not establish the provider's
 offset coordinate frame. `offsetsWithinAnswer`, when supplied with a full canonical
 answer, checks only the current byte-length bound.
+
+`rejectedStreamAnnotation` uses the same closed shape when an authenticated-chat
+stream citation fails validation. Its proof suffix is added only when present;
+existing structural diagnostic proofs remain unchanged when it is absent.
+
+## Verified final stream batch
+
+Authenticated chat can retain the final annotation-array batch when the canonical
+GET contains no File Citations. This addresses the observed EAC mismatch: File
+Citations appeared during streaming, while the canonical response retained only
+URL citations. The route opts in on the server; guest and embedded routes retain
+their existing behavior.
+
+The fallback requires one streamed model-output step, one canonical text block,
+completed matching interaction IDs and exact whole-text agreement. Every annotation
+event replaces the retained batch. A later empty or URL-only batch cannot restore
+an earlier File Citation. Missing or malformed arrays and exceeded observation
+bounds fail closed. The final batch is a conservative subset if provider arrays
+are additive, or the latest state if they replace; this does not establish complete
+citation coverage.
+
+Each admitted File Citation must supply complete, unique jurisdiction/resource/
+version metadata and an exact document resource name under an authorized store.
+Document names are proof-bound and must equal the current published version's
+catalog name. Current access, active-version, store, publication and lifecycle-lock
+checks still apply. Missing identity fields, display names and URL citations cannot
+supply document authority. Answer text is sent only after authoritative completion.
+
+`stream_citation_batch`, `stream_citation_limit` and `stream_citation_ambiguous`
+identify malformed batches, observation bounds and output-layout ambiguity.
+The application search-call guard now distinguishes `file_search_call_id`,
+`file_search_call_duplicate` and `file_search_budget_exhausted`. Its eight-call cap
+and existing step/time/token limits remain in place. Historical `file_search_call`
+rows cannot identify which of the combined conditions rejected the candidate.
+Interactions exposes no supported provider-side File Search iteration limit;
+SDK automatic-function-calling limits apply to a different API path.
 
 `fileSearchResultDeltas` counts observed result-delta payloads as missing, empty
 arrays, nonempty arrays or other shapes. An absent result delta or result field

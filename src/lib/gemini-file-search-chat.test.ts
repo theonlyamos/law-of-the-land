@@ -129,6 +129,7 @@ async function run(
   events = eventStream(),
   final = canonical(undefined, [citation()]),
   request = input(),
+  options: { allowStreamFileCitations?: boolean; onDiagnostics?: (snapshot: QueryDiagnostics) => void } = {},
 ) {
   const client = new FakeInteractionsClient(events, final);
   const chat = new GeminiFileSearchChat(client, { GEMINI_AI_MODEL: "configured-model" });
@@ -141,6 +142,7 @@ async function run(
     streamSignal: signal,
     streamDeadlineAt: deadlineAt,
     onDelta: (delta) => { deltas.push(delta); },
+    ...options,
   });
   return { client, deltas, result };
 }
@@ -473,6 +475,171 @@ describe("GeminiFileSearchChat", () => {
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(client.getIds).toEqual([]);
   });
+});
+
+describe("verified stream file citations", () => {
+  const documentName = "fileSearchStores/ghana-law/documents/document-1";
+  const url = { type: "url_citation", url: "https://private.example/marker", start_index: 0, end_index: 3 } as const;
+  const file = (fields: Record<string, unknown> = {}) => ({
+    ...citation(), document_uri: documentName, start_index: 0, end_index: 3, ...fields,
+  }) as Interactions.FileCitation;
+  function eventsWith(batches: unknown[], answer = "The Constitution applies.") {
+    const events = eventStream(answer);
+    events.splice(events.length - 2, 0, ...batches.map(annotations => ({
+      event_type: "step.delta", index: 3, delta: { type: "text_annotation_delta", annotations },
+    } as StreamEvent)));
+    return events;
+  }
+  const enabled = { allowStreamFileCitations: true };
+
+  it("uses a verified final file batch when canonical annotations contain only URL markers", async () => {
+    const { result } = await run(eventsWith([[url], [file()]]), canonical(undefined, [url]), input(), enabled);
+    expect(result).toMatchObject({ answer: "The Constitution applies.", citations: [{
+      jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1",
+      providerStoreName: "fileSearchStores/ghana-law", providerDocumentName: documentName,
+    }] });
+    expect(JSON.stringify(result)).not.toContain("private.example");
+  });
+
+  it("keeps default callers on canonical-only evidence", async () => {
+    await expect(run(eventsWith([[file()]]), canonical(undefined, [url]))).rejects.toThrow("citation_type");
+    expect((await run(eventsWith([[file()]]), canonical())).result.citations).toEqual([]);
+  });
+
+  it("prefers canonical files and ignores known URL markers without consulting malformed stream batches", async () => {
+    const { result } = await run(eventsWith([undefined]), canonical(undefined, [url, citation()]), input(), enabled);
+    expect(result.citations).toEqual([{ jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1", providerStoreName: "fileSearchStores/ghana-law" }]);
+  });
+
+  it("never rescues a malformed canonical file or unknown canonical annotation", async () => {
+    await expect(run(eventsWith([[file()]]), canonical(undefined, [citation({ custom_metadata: {} })]), input(), enabled)).rejects.toThrow("citation_identity");
+    await expect(run(eventsWith([[file()]]), canonical(undefined, [{ type: "word_info" } as Interactions.Annotation]), input(), enabled)).rejects.toThrow("citation_type");
+  });
+
+  it("retains exact canonical document identity and normalizes documented unique array metadata", async () => {
+    const { result } = await run(undefined, canonical(undefined, [file({ document_uri: undefined, file_name: documentName,
+      custom_metadata: [{ key: "jurisdiction_id", string_value: "ghana" }, { key: "resource_id", string_value: "resource-1" }, { key: "version_id", string_value: "version-1" }],
+    })]), input(), enabled);
+    expect(result.citations[0].providerDocumentName).toBe(documentName);
+  });
+
+  it("replaces earlier batches instead of unioning them and validates only retained identities", async () => {
+    const last = file({ custom_metadata: { jurisdiction_id: "ghana", resource_id: "resource-2", version_id: "version-2" }, document_uri: "fileSearchStores/ghana-law/documents/document-2" });
+    const { result } = await run(eventsWith([[file({ custom_metadata: {} })], [file()], [last]]), canonical(), input(), enabled);
+    expect(result.citations).toHaveLength(1);
+    expect(result.citations[0]).toMatchObject({ resourceId: "resource-2", versionId: "version-2", providerDocumentName: "fileSearchStores/ghana-law/documents/document-2" });
+  });
+
+  it.each([{ last: [] }, { last: [url] }])("clears older file evidence when the last array has no files", async ({ last }) => {
+    const { result } = await run(eventsWith([[file()], last]), canonical(undefined, [url]), input(), enabled);
+    expect(result.citations).toEqual([]);
+    expect(result.answer).toContain("couldn't find enough");
+  });
+
+  it.each([undefined, null, {}, [null], [{ type: "unknown-private-type" }]].map(invalid => ({ invalid })))("invalidates fallback after a malformed batch even if a valid batch follows", async ({ invalid }) => {
+    await expect(run(eventsWith([[file()], invalid, [file()]]), canonical(), input(), enabled)).rejects.toThrow("stream_citation_batch");
+  });
+
+  it.each([
+    { custom_metadata: {} },
+    { custom_metadata: [{ key: "jurisdiction_id", string_value: "ghana" }, { key: "resource_id", string_value: "resource-1" }, { key: "version_id", string_value: "version-1" }, { key: "resource_id", string_value: "resource-1" }] },
+    { document_uri: "fileSearchStores/ghana-law", file_name: "document-1.pdf" },
+    { document_uri: "fileSearchStores/accra-law/documents/document-1" },
+    { file_name: "fileSearchStores/ghana-law/documents/conflicting-document" },
+    { document_uri: "https://private.example/document", file_name: documentName },
+  ])("rejects incomplete or conflicting retained file identity", async fields => {
+    await expect(run(eventsWith([[file(fields)]]), canonical(), input(), enabled)).rejects.toThrow("citation_identity");
+  });
+
+  it.each([
+    [{ start_index: undefined, end_index: undefined }, "citation_offsets_missing"],
+    [{ end_index: undefined }, "citation_offsets_missing"],
+    [{ start_index: -1 }, "citation_offsets_invalid"],
+    [{ end_index: 100 }, "citation_offsets_invalid"],
+    [{ page_number: 0 }, "citation_page"],
+  ] as const)("checks retained file offsets and pages", async (fields, reason) => {
+    await expect(run(eventsWith([[file(fields)]]), canonical(), input(), enabled)).rejects.toThrow(reason);
+  });
+
+  it("uses UTF-8 byte offsets without rebasing or accepting split code points", async () => {
+    const answer = "Café law.";
+    expect((await run(eventsWith([[file({ start_index: 3, end_index: 5 })]], answer), canonical(answer), input(), enabled)).result.citations).toHaveLength(1);
+    await expect(run(eventsWith([[file({ start_index: 4, end_index: 5 })]], answer), canonical(answer), input(), enabled)).rejects.toThrow("citation_offsets_invalid");
+  });
+
+  it("requires a single output step and canonical text block", async () => {
+    const final = canonical();
+    final.steps!.unshift({ type: "model_output", content: [] });
+    await expect(run(eventsWith([[file()]]), final, input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+    const split = canonical();
+    Object.assign(split.steps![0], { content: [{ type: "text", text: "The " }, { type: "text", text: "Constitution applies." }] });
+    await expect(run(eventsWith([[file()]]), split, input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+    const events = eventsWith([[file()]]);
+    events.splice(1, 0, { event_type: "step.start", index: 4, step: { type: "model_output" } }, { event_type: "step.stop", index: 4 });
+    await expect(run(events, canonical(), input(), enabled)).rejects.toThrow("stream_citation_ambiguous");
+  });
+
+  it("fails batch and global observation overflow instead of accepting truncated evidence", async () => {
+    await expect(run(eventsWith([Array.from({ length: 65 }, () => file())]), canonical(), input(), enabled)).rejects.toThrow("stream_citation_limit");
+    await expect(run(eventsWith(Array.from({ length: 17 }, () => Array.from({ length: 64 }, () => file()))), canonical(), input(), enabled)).rejects.toThrow("stream_citation_limit");
+  });
+
+  it("requires selected jurisdiction evidence and unchanged canonical identity/text agreement", async () => {
+    const foreign = file({ document_uri: "fileSearchStores/accra-law/documents/document-1", custom_metadata: { jurisdiction_id: "accra", resource_id: "resource-1", version_id: "version-1" } });
+    await expect(run(eventsWith([[foreign]]), canonical(), input(), enabled)).rejects.toThrow("selected_evidence_missing");
+    await expect(run(eventsWith([[file()]]), { ...canonical(), id: "different" }, input(), enabled)).rejects.toThrow("canonical_interaction");
+    await expect(run(eventsWith([[file()]]), canonical("Different text"), input(), enabled)).rejects.toThrow("canonical_text_mismatch");
+  });
+
+  it("records a rejected stream shape without leaking file, metadata or source contents", async () => {
+    const snapshots: QueryDiagnostics[] = [];
+    await expect(run(eventsWith([[file({ document_uri: "fileSearchStores/ghana-law/documents/private-document", custom_metadata: {}, source: "private-source" })]]), canonical(), input(), {
+      ...enabled, onDiagnostics: snapshot => snapshots.push(snapshot),
+    })).rejects.toThrow("citation_identity");
+    expect(snapshots.at(-1)?.structure?.rejectedStreamAnnotation).toMatchObject({ kind: "file_citation", documentUriKind: "authorized_document", resourceMetadataPresent: false });
+    expect(Object.isFrozen(snapshots.at(-1)?.structure?.rejectedStreamAnnotation)).toBe(true);
+    expect(JSON.stringify(snapshots)).not.toContain("private-document");
+    expect(JSON.stringify(snapshots)).not.toContain("private-source");
+  });
+
+  it("copies retained identity fields before later provider-object mutation", async () => {
+    const annotation = file({ source: "discarded-private-source", title: "discarded-private-title" });
+    const client = new FakeInteractionsClient(eventsWith([[annotation]]), canonical());
+    vi.spyOn(client.interactions, "get").mockImplementation(async () => {
+      annotation.document_uri = "fileSearchStores/accra-law/documents/changed";
+      annotation.custom_metadata!.resource_id = "changed-resource";
+      return canonical();
+    });
+    const signal = new AbortController().signal;
+    const result = await new GeminiFileSearchChat(client, {}).run(input(), {
+      ...enabled, signal, streamSignal: signal, deadlineAt: Date.now() + 10_000,
+      streamDeadlineAt: Date.now() + 10_000, onDelta: () => undefined,
+    });
+    expect(result.citations[0]).toMatchObject({ providerDocumentName: documentName, resourceId: "resource-1" });
+    expect(JSON.stringify(result)).not.toContain("discarded-private");
+  });
+
+  it.each(["file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted"] as const)(
+    "distinguishes %s without changing the eight-call budget", async reason => {
+      let events = eventStream();
+      if (reason === "file_search_call_id") {
+        const start = events[4];
+        if (start.event_type !== "step.start") throw new Error("fixture");
+        Object.assign(start.step, { id: "invalid call id" });
+      } else if (reason === "file_search_call_duplicate") {
+        events.splice(10, 0, { event_type: "step.start", index: 4, step: { type: "file_search_call", id: "file-search-1" } });
+      } else {
+        events = [events[0], ...Array.from({ length: 9 }, (_, index) => ([
+          { event_type: "step.start", index, step: { type: "file_search_call", id: `call-${index}` } },
+          { event_type: "step.stop", index },
+        ] satisfies StreamEvent[])).flat()];
+      }
+      const snapshots: QueryDiagnostics[] = [];
+      await expect(run(events, undefined, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow(reason);
+      expect(snapshots.at(-1)?.reason).toBe(reason);
+      expect(snapshots.at(-1)?.searchCallCount).toBe(reason === "file_search_budget_exhausted" ? 8 : reason === "file_search_call_duplicate" ? 1 : 0);
+    },
+  );
 });
 
 describe("GeminiFileSearchChat structural diagnostics", () => {

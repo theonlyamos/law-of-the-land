@@ -11,6 +11,8 @@ export const QUERY_DIAGNOSTIC_REASONS = [
   "policy_with_citations", "request_invalid", "response_invalid", "in_progress", "completed",
   "no_canonical_annotations", "deadline_exceeded", "aborted", "provider_request_failed",
   "completion_invalid", "research_unavailable", "not_configured",
+  "file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted",
+  "stream_citation_batch", "stream_citation_limit", "stream_citation_ambiguous",
 ] as const;
 
 export const QUERY_DIAGNOSTIC_ANNOTATION_KINDS = [
@@ -41,6 +43,7 @@ export const queryDiagnosticStructureValidator = v.object({
   completionStepsPresent: v.boolean(),
   fileSearchResultDeltas: v.object({ missing: v.number(), empty_array: v.number(), nonempty_array: v.number(), other: v.number() }),
   rejectedCanonicalAnnotation: v.optional(annotationShapeValidator),
+  rejectedStreamAnnotation: v.optional(annotationShapeValidator),
 });
 export type QueryDiagnosticAnnotationKind = typeof QUERY_DIAGNOSTIC_ANNOTATION_KINDS[number];
 export type QueryDiagnosticAnnotationCounts = Infer<typeof annotationCountsValidator>;
@@ -107,7 +110,7 @@ function validateAnnotationShape(value: unknown): void {
 }
 
 function validateStructure(value: unknown): void {
-  const structure = closedRecord(value, ["stream", "canonical", "completion", "completionStepsPresent", "fileSearchResultDeltas"], ["rejectedCanonicalAnnotation"]);
+  const structure = closedRecord(value, ["stream", "canonical", "completion", "completionStepsPresent", "fileSearchResultDeltas"], ["rejectedCanonicalAnnotation", "rejectedStreamAnnotation"]);
   if (typeof structure.completionStepsPresent !== "boolean") invalid();
   for (const key of ["stream", "canonical", "completion"]) {
     const channel = closedRecord(structure[key], ["annotationKinds"], ["firstAnnotation"]);
@@ -118,6 +121,7 @@ function validateStructure(value: unknown): void {
   const deltas = closedRecord(structure.fileSearchResultDeltas, resultDeltaKinds);
   if (resultDeltaKinds.some(kind => !validCount(deltas[kind]))) invalid();
   if (structure.rejectedCanonicalAnnotation !== undefined) validateAnnotationShape(structure.rejectedCanonicalAnnotation);
+  if (structure.rejectedStreamAnnotation !== undefined) validateAnnotationShape(structure.rejectedStreamAnnotation);
 }
 
 /** Rejects arbitrary provider content; diagnostics contain only closed labels and bounded counters. */
@@ -147,7 +151,10 @@ function structureProofParts(structure?: QueryDiagnosticStructure): readonly (st
     ...QUERY_DIAGNOSTIC_ANNOTATION_KINDS.map(kind => structure[key].annotationKinds[kind]),
     ...annotationShapeProofParts(structure[key].firstAnnotation),
   ]), structure.completionStepsPresent ? 1 : 0, ...resultDeltaKinds.map(kind => structure.fileSearchResultDeltas[kind]),
-  ...annotationShapeProofParts(structure.rejectedCanonicalAnnotation)];
+  ...annotationShapeProofParts(structure.rejectedCanonicalAnnotation),
+  ...(structure.rejectedStreamAnnotation === undefined ? [] : [
+    "query-diagnostics-stream-rejection-v1", ...annotationShapeProofParts(structure.rejectedStreamAnnotation),
+  ])];
 }
 
 /** An absent field adds no parts, preserving completion proofs from older route deployments. */
