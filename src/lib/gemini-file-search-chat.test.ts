@@ -232,7 +232,8 @@ describe("GeminiFileSearchChat", () => {
       "## What is uncertain or missing",
       "## Legislation and provisions",
     ]);
-    expect(request.system_instruction).toContain("PDF pages and printed page labels belong only in the application's Sources display");
+    expect(request.system_instruction).toContain("PDF page numbers belong only in the application's Sources display when citation metadata supplies them");
+    expect(request.system_instruction).toContain("A printed-page label may appear in prose only when it is explicitly exposed for the cited passage in the retrieved text");
     expect(request.system_instruction).toContain("Every legal conclusion must be supported by a specific retrieved provision");
     expect(request.system_instruction).toContain('When the user asks for "exact", "all", or "when"');
     expect(request.system_instruction).toContain("support both its identity and its role in this specific issue");
