@@ -88,6 +88,7 @@ type GovernedCitationIdentity = {
   resourceId: string;
   versionId: string;
   providerStoreName: string;
+  providerDocumentName?: string;
   pageNumber?: number;
 };
 type GovernedJurisdictionCoverage = {
@@ -149,6 +150,7 @@ const governedCitationIdentityValidator = v.object({
   resourceId: v.string(),
   versionId: v.string(),
   providerStoreName: v.string(),
+  providerDocumentName: v.optional(v.string()),
   pageNumber: v.optional(v.number()),
 });
 const governedJurisdictionCoverageValidator = v.object({
@@ -171,6 +173,12 @@ function boundedIdentifier(value: string, maximum: number): boolean {
 
 function validCount(value: number, maximum: number): boolean {
   return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function citationDocumentProofParts(citations: readonly GovernedCitationIdentity[]): readonly (string | number)[] {
+  if (!citations.some(citation => citation.providerDocumentName !== undefined)) return [];
+  return ["governed-provider-documents-v1", citations.length,
+    ...citations.flatMap((citation, index) => [index, citation.providerDocumentName ?? ""])];
 }
 
 export async function completeGovernedInteractionProofParts(
@@ -211,6 +219,7 @@ export async function completeGovernedInteractionProofParts(
       citation.pageNumber ?? 0,
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
+    ...citationDocumentProofParts(input.citations),
   ];
 }
 
@@ -237,6 +246,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
       citation.pageNumber ?? 0,
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
+    ...citationDocumentProofParts(input.citations),
   ]));
   return {
     assistantClientIdBinding: claimBindings.assistantClientIdBinding,
@@ -271,6 +281,8 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
       || !boundedIdentifier(citation.resourceId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.versionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !isGeminiFileSearchStoreName(citation.providerStoreName)
+      || (citation.providerDocumentName !== undefined && (!isGeminiDocumentName(citation.providerDocumentName)
+        || !citation.providerDocumentName.startsWith(`${citation.providerStoreName}/documents/`)))
       || (citation.pageNumber !== undefined
         && (!Number.isSafeInteger(citation.pageNumber)
           || citation.pageNumber <= 0
@@ -681,6 +693,8 @@ export async function validateGovernedCitations(ctx: QueryCtx, storeList: readon
       || version.status !== "published"
       || !documentName
       || !isGeminiDocumentName(documentName)
+      || (citation.providerDocumentName !== undefined && (!isGeminiDocumentName(citation.providerDocumentName)
+        || citation.providerDocumentName !== documentName))
       || citation.providerStoreName !== store.storeName
       || !documentName.startsWith(`${store.storeName}/documents/`)
       || locks.length !== 0
@@ -819,6 +833,7 @@ export const completeGovernedInteraction = mutation({
       throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     }
 
+    const idempotency = await governedCompletionBindings(input);
     const requestNonceHash = await hashOpaqueTelemetryValue(args.routeNonce);
     const nonceRows = await ctx.db
       .query("queryRuns")
@@ -827,13 +842,13 @@ export const completeGovernedInteraction = mutation({
     if (nonceRows.length > 1) throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
     if (nonceRows.length === 1) {
       if (nonceRows[0].chatSessionId !== session._id ||
+          !opaqueEqual(nonceRows[0].completionBinding, idempotency.completionBinding) ||
           JSON.stringify(queryDiagnosticsProofParts(nonceRows[0].diagnostics)) !== JSON.stringify(queryDiagnosticsProofParts(input.diagnostics))) {
         throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
       }
       return { status: "replayed" as const, outcome: nonceRows[0].outcome };
     }
 
-    const idempotency = await governedCompletionBindings(input);
     const clientRows = await ctx.db
       .query("queryRuns")
       .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>

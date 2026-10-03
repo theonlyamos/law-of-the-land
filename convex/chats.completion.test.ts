@@ -39,6 +39,7 @@ type CitationIdentity = {
   resourceId: string;
   versionId: string;
   providerStoreName: string;
+  providerDocumentName?: string;
   pageNumber?: number;
 };
 type Coverage = {
@@ -338,6 +339,10 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
       input.diagnostics.versionMetadataPresent === undefined ? -1 : input.diagnostics.versionMetadataPresent ? 1 : 0,
     ]),
     ...(input.diagnostics?.structure === undefined ? [] : queryDiagnosticsProofParts(input.diagnostics).slice(14)),
+    ...(input.citations.some(citation => citation.providerDocumentName !== undefined) ? [
+      "governed-provider-documents-v1", input.citations.length,
+      ...input.citations.flatMap((citation, index) => [index, citation.providerDocumentName ?? ""]),
+    ] : []),
   ];
 }
 
@@ -373,6 +378,98 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("binds an exact observed provider document to its active published version", async () => {
+    const { t, owner, document, base } = await fixture();
+    const citations = [{ ...base.citations[0], providerDocumentName: document.providerDocumentName }];
+    const result = await complete(owner.client, { ...base, citations });
+    expect(result).toMatchObject({ status: "completed", outcome: "success" });
+    expect(JSON.stringify(result)).not.toContain(document.providerDocumentName);
+    expect(JSON.stringify(await terminalState(t))).not.toContain(document.providerDocumentName);
+  });
+
+  it("preserves legacy proof bytes and appends a positional document-name suffix only when present", async () => {
+    const { document, base } = await fixture();
+    const legacy = await proofParts(base);
+    expect(await completeGovernedInteractionProofParts(base)).toEqual(legacy);
+    const first = { ...base, citations: [
+      { ...base.citations[0], providerDocumentName: document.providerDocumentName },
+      { ...base.citations[0], pageNumber: 5 },
+    ] };
+    const absent = { ...first, citations: first.citations.map(({ providerDocumentName, ...citation }) => {
+      void providerDocumentName;
+      return citation;
+    }) };
+    expect(await completeGovernedInteractionProofParts(first)).toEqual([
+      ...await proofParts(absent), "governed-provider-documents-v1", 2, 0, document.providerDocumentName, 1, "",
+    ]);
+    const moved = { ...absent, citations: [absent.citations[0], { ...absent.citations[1], providerDocumentName: document.providerDocumentName }] };
+    expect(await completeGovernedInteractionProofParts(first)).not.toEqual(await completeGovernedInteractionProofParts(moved));
+  });
+
+  it.each(["wrong same-store", "foreign store", "malformed", "empty"])("rejects an observed document name that is %s", async scenario => {
+    const { t, owner, selection, base } = await fixture();
+    const providerDocumentName = scenario === "wrong same-store" ? `${selection.storeName}/documents/not-the-published-document`
+      : scenario === "foreign store" ? "fileSearchStores/foreign/documents/constitution"
+      : scenario === "malformed" ? "https://provider.invalid/private-document" : "";
+    await expect(complete(owner.client, { ...base, citations: [{ ...base.citations[0], providerDocumentName }] }))
+      .rejects.toThrow(scenario === "wrong same-store" ? "INVALID_CHAT_CITATIONS" : "INVALID_GOVERNED_INTERACTION");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each(["exact document", "legacy unnamed"])("rejects a conflicting duplicate document after a valid %s citation", async firstKind => {
+    const { t, owner, document, selection, base } = await fixture();
+    const first = { ...base.citations[0], ...(firstKind === "exact document" ? { providerDocumentName: document.providerDocumentName } : {}) };
+    const conflicting = { ...base.citations[0], providerDocumentName: `${selection.storeName}/documents/different` };
+    await expect(complete(owner.client, { ...base, citations: [first, conflicting] })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each(["changed", "added", "removed"])("rejects the observed document name %s after signing", async change => {
+    const { t, owner, document, selection, base } = await fixture();
+    const boundCitation = { ...base.citations[0], providerDocumentName: document.providerDocumentName };
+    const signed = { ...base, citations: [change === "added" ? base.citations[0] : boundCitation] };
+    const sent = change === "removed" ? base.citations[0] : { ...boundCitation,
+      providerDocumentName: change === "changed" ? `${selection.storeName}/documents/different` : document.providerDocumentName };
+    await expect(owner.client.mutation(completeGovernedInteraction, {
+      ...base, citations: [sent], serviceProof: await createTelemetryServiceProof(await proofParts(signed)),
+    })).rejects.toThrow("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each([
+    ["changed", false], ["added", false], ["removed", false],
+    ["changed", true], ["added", true], ["removed", true],
+  ] as const)("rejects a signed document-name replay that is %s (new nonce: %s)", async (change, newNonce) => {
+    const { t, owner, document, selection, base } = await fixture();
+    const boundCitation = { ...base.citations[0], providerDocumentName: document.providerDocumentName };
+    await complete(owner.client, { ...base, citations: [change === "added" ? base.citations[0] : boundCitation] });
+    const before = await terminalState(t);
+    const citation = change === "removed" ? base.citations[0] : { ...boundCitation,
+      providerDocumentName: change === "changed" ? `${selection.storeName}/documents/different` : document.providerDocumentName };
+    await expect(complete(owner.client, { ...base, citations: [citation], routeNonce: newNonce ? createOpaqueTelemetryToken() : base.routeNonce }))
+      .rejects.toThrow(newNonce ? "CHAT_CLIENT_ID_CONFLICT" : "GOVERNED_INTERACTION_REPLAY_INVALID");
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it("replays an unchanged exact document binding for either nonce without writing or issuing another claim", async () => {
+    const { t, owner, document, base } = await fixture();
+    const input = { ...base, citations: [{ ...base.citations[0], providerDocumentName: document.providerDocumentName }] };
+    await complete(owner.client, input);
+    const before = await terminalState(t);
+    await expect(complete(owner.client, input)).resolves.toEqual({ status: "replayed", outcome: "success" });
+    await expect(complete(owner.client, { ...input, routeNonce: createOpaqueTelemetryToken() })).resolves.toEqual({ status: "replayed", outcome: "success" });
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it("rejects the observed document after its active version points at a different same-store document", async () => {
+    const { t, owner, document, selection, base } = await fixture();
+    const input = { ...base, citations: [{ ...base.citations[0], providerDocumentName: document.providerDocumentName }] };
+    const serviceProof = await createTelemetryServiceProof(await proofParts(input));
+    await t.run(ctx => ctx.db.patch(document.versionId, { geminiDocumentName: `${selection.storeName}/documents/replaced` }));
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...input, serviceProof })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
   it("persists proof-bound structural categories while replaying identical observations without writes", async () => {
     const { t, owner, base } = await fixture();
     const diagnostics = structuralDiagnostics();
@@ -792,13 +889,17 @@ describe("completeGovernedInteraction", () => {
     },
   );
 
-  it.each(["inactive", "unpublished", "changed document", "locked"] as const)(
-    "rejects a citation whose current manifest is %s",
-    async (state) => {
+  it.each([
+    ["inactive", false], ["unpublished", false], ["changed document", false], ["locked", false], ["active pointer changed", false],
+    ["inactive", true], ["unpublished", true], ["changed document", true], ["locked", true], ["active pointer changed", true],
+  ] as const)(
+    "rejects a citation whose current manifest is %s (exact document: %s)",
+    async (state, exactDocument) => {
       const { t, owner, document, base } = await fixture();
       await t.run(async (ctx) => {
         if (state === "inactive") await ctx.db.patch(document.resourceId, { status: "archived" });
         if (state === "unpublished") await ctx.db.patch(document.versionId, { status: "unpublished" });
+        if (state === "active pointer changed") await ctx.db.patch(document.resourceId, { activeVersionId: undefined });
         if (state === "changed document") {
           await ctx.db.patch(document.versionId, {
             geminiDocumentName: "fileSearchStores/other/documents/constitution",
@@ -818,7 +919,9 @@ describe("completeGovernedInteraction", () => {
         }
       });
 
-      await expect(complete(owner.client, base)).rejects.toThrow("INVALID_CHAT_CITATIONS");
+      await expect(complete(owner.client, { ...base, citations: base.citations.map(citation => ({ ...citation,
+        ...(exactDocument ? { providerDocumentName: document.providerDocumentName } : {}),
+      })) })).rejects.toThrow("INVALID_CHAT_CITATIONS");
       expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
     },
   );

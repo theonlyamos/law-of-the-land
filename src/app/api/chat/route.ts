@@ -533,7 +533,6 @@ function streamResponse(input: {
           if (input.reply !== null) {
             completionModel = "app-policy-v1";
             result = { answer: input.reply, citations: [] };
-            send({ type: "delta", text: input.reply });
           } else {
             phase = "generation";
             if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
@@ -552,7 +551,8 @@ function streamResponse(input: {
               deadlineAt: input.terminalDeadlineAt,
               streamSignal: input.streamSignal,
               streamDeadlineAt: input.modelDeadlineAt,
-              // Gemini text is provisional until the canonical answer and citations are checked.
+              allowStreamFileCitations: true,
+              // Text remains private until canonical checks and catalog authorization complete.
               onDelta: () => undefined,
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
@@ -563,7 +563,6 @@ function streamResponse(input: {
                 clearTimeout(input.modelTimer);
               },
             }), input.providerSignal);
-            send({ type: "delta", text: result.answer });
           }
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
@@ -597,6 +596,7 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          send({ type: "delta", text: result.answer });
           send({
             type: "done",
             result: result.answer,
