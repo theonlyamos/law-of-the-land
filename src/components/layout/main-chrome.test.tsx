@@ -10,8 +10,16 @@ vi.mock("next/navigation", () => ({
   usePathname: () => mocks.pathname,
 }));
 
+vi.mock("next/font/local", () => ({
+  default: ({ variable }: { variable: string }) => ({ variable }),
+}));
+
 vi.mock("@/components/auth/user-nav", () => ({
   UserNav: () => <span>Account controls</span>,
+}));
+
+vi.mock("@/components/providers/account-providers", () => ({
+  AccountProviders: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
 vi.mock("next/image", () => ({
@@ -47,5 +55,17 @@ describe("main route chrome", () => {
     expect(screen.getByText("Settings content")).toBeVisible();
     expect(screen.getByLabelText(/Law of the Land.*home/i)).toBeVisible();
     expect(screen.getByText(/not legal advice/i)).toBeVisible();
+    expect(screen.getByText("Settings content").closest(".chat-editorial")).toBeNull();
+  });
+
+  it("applies the shared editorial theme to the research chrome and content", () => {
+    mocks.pathname = "/research";
+
+    render(<MainLayout><div>Research content</div></MainLayout>);
+
+    const research = screen.getByText("Research content").closest(".chat-editorial");
+    expect(research).toContainElement(screen.getByRole("navigation", { name: "Main navigation" }));
+    expect(research).toContainElement(screen.getByRole("contentinfo"));
+    expect(screen.getByRole("link", { name: /Law of the Land.*home/i })).toHaveAttribute("href", "/");
   });
 });

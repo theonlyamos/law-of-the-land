@@ -1,0 +1,123 @@
+.chat-editorial {
+  --background: 45 33% 98%;
+  --foreground: 155 23% 19%;
+  --card: 48 100% 99%;
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: 153 29% 27%;
+  --primary-foreground: 72 45% 98%;
+  --secondary: 96 19% 91%;
+  --secondary-foreground: var(--foreground);
+  --muted: 47 26% 93%;
+  --muted-foreground: 132 5% 42%;
+  --accent: var(--secondary);
+  --accent-foreground: var(--foreground);
+  --border: 67 12% 86%;
+  --input: var(--border);
+  --brand: 36 38% 42%;
+  --ring: var(--brand);
+  --chat-panel: var(--muted);
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-brand: hsl(var(--brand));
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-chat-sans), var(--font-geist-sans), sans-serif;
+}
+
+.dark .chat-editorial {
+  --background: 150 6% 12%;
+  --foreground: 103 14% 90%;
+  --card: 120 7% 17%;
+  --primary: 118 22% 76%;
+  --primary-foreground: 144 26% 15%;
+  --secondary: 127 12% 23%;
+  --muted: 132 6% 15%;
+  --muted-foreground: 133 9% 68%;
+  --border: 132 8% 25%;
+  --brand: 37 50% 66%;
+}
+
+.chat-editorial .chat-heading {
+  font-family: var(--font-chat-serif), Georgia, serif;
+  font-size: clamp(2.75rem, 5vw, 3.75rem);
+  font-weight: 400;
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+}
+
+.chat-editorial .chat-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: hsl(var(--brand));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.chat-editorial .chat-eyebrow::before {
+  content: "";
+  width: 1.5rem;
+  height: 1px;
+  background: currentColor;
+}
+
+.chat-editorial .chat-scope-label {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--background));
+  padding: 0.5rem 0.625rem;
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.chat-editorial .markdown-content {
+  line-height: 1.85;
+}
+
+.chat-editorial .chat-source {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.625rem;
+  padding: 0.75rem;
+  background: hsl(var(--card));
+}
+
+.chat-editorial .chat-source-number {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.25rem;
+  background: hsl(var(--secondary));
+  color: hsl(var(--primary));
+  font-size: 0.6875rem;
+}
