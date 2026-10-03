@@ -232,7 +232,7 @@ describe("GeminiFileSearchChat", () => {
       "## What is uncertain or missing",
       "## Legislation and provisions",
     ]);
-    expect(request.system_instruction).toContain("Keep PDF pages out of the closing Legislation and provisions list");
+    expect(request.system_instruction).toContain("PDF pages and printed page labels belong only in the application's Sources display");
     expect(request.system_instruction).toContain("Every legal conclusion must be supported by a specific retrieved provision");
     expect(request.system_instruction).toContain('When the user asks for "exact", "all", or "when"');
     expect(request.system_instruction).toContain("support both its identity and its role in this specific issue");

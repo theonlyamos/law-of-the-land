@@ -133,6 +133,20 @@ rows cannot identify which of the combined conditions rejected the candidate.
 Interactions exposes no supported provider-side File Search iteration limit;
 SDK automatic-function-calling limits apply to a different API path.
 
+Research instructions prioritize the requested instrument or provision, treat
+roughly three focused searches as planning guidance, and stop when retrieved
+evidence answers the question. They preserve evidence-gap handling and do not
+require extra research merely to fill the response headings. This guidance does
+not guarantee completion within the eight-call cap or establish why a previous
+request exhausted its search budget.
+
+Answer instructions reserve PDF/printed-page locators for the application Sources
+presentation and prohibit opaque provider reference markers such as `[1.2]` and
+`[1.7-1.8]`. Verified article/section references and exact supporting excerpts
+remain appropriate. This is generation guidance, not a deterministic prose
+validator. The application does not alter trusted provider page values, rewrite
+canonical text, or strip bracketed legal references with regular expressions.
+
 `fileSearchResultDeltas` counts observed result-delta payloads as missing, empty
 arrays, nonempty arrays or other shapes. An absent result delta or result field
 does not prove that File Search retrieved nothing.
