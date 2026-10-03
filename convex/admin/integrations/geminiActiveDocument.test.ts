@@ -180,7 +180,7 @@ describe("active Gemini document proof", () => {
     } catch (caught) {
       expect(caught).toBeInstanceOf(Error);
       expect((caught as Error).message).toBe(FAILURE);
-      expect((caught as Error).cause).toBeUndefined();
+      expect(caught).not.toHaveProperty("cause");
       expect(String(caught)).not.toContain(SECRET);
     }
   });
