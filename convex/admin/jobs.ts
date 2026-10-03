@@ -149,7 +149,7 @@ const GEMINI_JOB_TYPES = [
 type GeminiJobType = (typeof GEMINI_JOB_TYPES)[number];
 type JobType = GeminiJobType;
 type GeminiJobStatus = "queued" | "running" | "waiting_provider" | "succeeded" | "failed" | "cancelled" | "manual_review";
-type GeminiIntegrationJob = Omit<Doc<"integrationJobs">, "type" | "status"> & {
+export type GeminiIntegrationJob = Omit<Doc<"integrationJobs">, "type" | "status"> & {
   type: GeminiJobType;
   status: GeminiJobStatus;
 };
@@ -176,7 +176,7 @@ function jobRunner(type: Doc<"integrationJobs">["type"]) {
   return runGeminiJobRef;
 }
 
-function isGeminiJobDocument(job: Doc<"integrationJobs">): job is GeminiIntegrationJob {
+export function isGeminiJobDocument(job: Doc<"integrationJobs">): job is GeminiIntegrationJob {
   const currentStatus =
     job.status === "queued" ||
     job.status === "running" ||
@@ -202,7 +202,7 @@ async function geminiJobJurisdiction(
   return resource ? await ctx.db.get(resource.jurisdictionId) : null;
 }
 
-async function assertGeminiExecutionPermit(
+export async function assertGeminiExecutionPermit(
   ctx: MutationCtx | QueryCtx,
   job: GeminiIntegrationJob,
   now: number,
@@ -700,6 +700,13 @@ function storedSha256Hex(value: string): string {
   }
 }
 
+export async function assertGeminiOriginal(ctx: MutationCtx | QueryCtx, version: Doc<"documentVersions">): Promise<void> {
+  const metadata = await ctx.db.system.get("_storage", version.originalStorageId);
+  if (!metadata || metadata.size !== version.byteSize || storedSha256Hex(metadata.sha256) !== version.sha256) {
+    throw new ConvexError("DOCUMENT_ORIGINAL_INVALID");
+  }
+}
+
 async function assertNoActiveGeminiStoreTeardown(
   ctx: MutationCtx | QueryCtx,
   jurisdictionId: Id<"jurisdictions">,
@@ -761,8 +768,7 @@ export const getGeminiJobTarget = internalQuery({
     }
     const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
     if (workflow.kind === "delete") return { kind: "delete_document" as const, documentName: workflow.payload.documentName };
-    const metadata = await ctx.db.system.get("_storage", workflow.version.originalStorageId);
-    if (!metadata || metadata.size !== workflow.version.byteSize || storedSha256Hex(metadata.sha256) !== workflow.version.sha256) throw new ConvexError("DOCUMENT_ORIGINAL_INVALID");
+    await assertGeminiOriginal(ctx, workflow.version);
     const environment = process.env.ADMIN_ENVIRONMENT?.trim();
     if (!environment || environment.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(environment)) throw new ConvexError("ADMIN_ENVIRONMENT_INVALID");
     let signedUrl: string | undefined;
@@ -836,7 +842,7 @@ async function markGeminiJurisdictionDrifted(
   if (jurisdiction) await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1, providerSyncState: "drifted", updatedAt: Date.now() });
 }
 
-async function succeedGeminiJob(
+export async function succeedGeminiJob(
   ctx: MutationCtx,
   job: GeminiIntegrationJob,
   executionJurisdiction: Doc<"jurisdictions"> | null,
@@ -1098,7 +1104,7 @@ async function deferJobForExecutionPermit(
   await ctx.scheduler.runAfter(delay, jobRunner(job.type), { jobId: job._id });
 }
 
-async function claimJobDocument(
+export async function claimJobDocument(
   ctx: MutationCtx,
   job: Doc<"integrationJobs">,
   allowStaleRunning = false,
@@ -1234,7 +1240,7 @@ export const reconcileManualReviewJob = internalMutation({
   },
 });
 
-function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string, now = Date.now()) {
+export function assertCurrentLease(job: Doc<"integrationJobs">, leaseToken: string, now = Date.now()) {
   if (
     job.status !== "running" ||
     job.leaseToken === undefined ||

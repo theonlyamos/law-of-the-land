@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import { Building2, CreditCard, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
+import { Building2, ChevronDown, CreditCard, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "@/components/providers/theme-provider";
 import { Button } from "./button";
 
-export function ProfileMenu({ name, image, collapsed = false, onNavigate, onSignOut }: {
+export function ProfileMenu({ name, image, caption, collapsed = false, onNavigate, onSignOut }: {
   name: string;
   image?: string | null;
+  caption?: string;
   collapsed?: boolean;
   onNavigate?: () => void;
   onSignOut: () => Promise<unknown>;
@@ -88,7 +89,11 @@ export function ProfileMenu({ name, image, collapsed = false, onNavigate, onSign
             ? <img src={image} alt="" className="size-full object-cover" onError={() => setFailedImage(image)} />
             : name.charAt(0).toUpperCase()}
         </span>
-        <span className={`min-w-0 flex-1 truncate text-left text-sm ${collapsed ? "md:hidden" : ""}`}>{name}</span>
+        <span className={`min-w-0 flex-1 text-left ${collapsed ? "md:hidden" : ""}`}>
+          <span className={`block truncate ${caption ? "text-[13px]" : "text-sm"}`}>{name}</span>
+          {caption && <span className="mt-0.5 block truncate text-[11px] font-normal text-muted-foreground">{caption}</span>}
+        </span>
+        {caption && <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground ${collapsed ? "md:hidden" : ""}`} aria-hidden="true" />}
       </Button>
     </div>
   );

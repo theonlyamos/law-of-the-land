@@ -69,7 +69,7 @@ export default function ChatRouteWorkspace() {
     <div className="flex h-dvh flex-col">
       <Suspense fallback={
         <div className="flex min-h-0 flex-1">
-          <aside aria-hidden className="hidden w-64 shrink-0 border-r bg-background md:block" />
+          <aside aria-hidden className="hidden w-60 shrink-0 border-r bg-[hsl(var(--chat-panel))] md:block" />
           <PageLoader label="Loading chat…" />
         </div>
       }>
