@@ -328,6 +328,23 @@ describe("POST /api/chat private query diagnostics", () => {
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
   });
 
+  it("records missing provider configuration before attempting a provider request", async () => {
+    delete process.env.GOOGLE_AI_API_KEY;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "configuration",
+      diagnostics: {
+        phase: "generation", reason: "not_configured",
+        searchCallCount: 0, searchResultCount: 0, canonicalReadCompleted: false,
+      },
+    });
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
   it("retains the canonical-read phase and prior search counts when the canonical request fails", async () => {
     interactionMocks.get.mockRejectedValue(new Error("private-canonical-error"));
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);

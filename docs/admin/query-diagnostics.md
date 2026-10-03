@@ -17,6 +17,7 @@ Counters saturate at 1024 and set `countsClamped`; a saturated count is not exac
   deadline or client cancellation explicitly even if a provider request is pending.
 - Local parser rejections retain their closed reason. Native provider exceptions
   use `provider_request_failed`; provider SSE error events use `provider_error`.
+  A missing provider API configuration uses `not_configured` before any request.
   An exception message that resembles an application code is not trusted.
 - `searchCallCount` and `searchResultCount` count accepted streamed call/result
   step starts. `searchResultItemCount` sums entries observed in supported

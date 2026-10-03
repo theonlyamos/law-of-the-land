@@ -10,7 +10,7 @@ export const QUERY_DIAGNOSTIC_REASONS = [
   "output_limit", "tool_delta_type", "incomplete_stream", "canonical_interaction", "canonical_text_mismatch",
   "policy_with_citations", "request_invalid", "response_invalid", "in_progress", "completed",
   "no_canonical_annotations", "deadline_exceeded", "aborted", "provider_request_failed",
-  "completion_invalid", "research_unavailable",
+  "completion_invalid", "research_unavailable", "not_configured",
 ] as const;
 
 export const queryDiagnosticsValidator = v.object({

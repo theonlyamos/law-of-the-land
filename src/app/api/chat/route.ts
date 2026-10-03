@@ -538,7 +538,10 @@ function streamResponse(input: {
             phase = "generation";
             if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
             const apiKey = process.env.GOOGLE_AI_API_KEY;
-            if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            if (!apiKey) {
+              if (diagnostics) diagnostics = { ...diagnostics, reason: "not_configured" };
+              throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            }
             const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
             result = await raceWithAbort(chat.run({
               query: input.body.query,
