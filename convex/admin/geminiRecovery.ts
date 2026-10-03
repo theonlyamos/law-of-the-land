@@ -62,7 +62,8 @@ async function recoveryContext(ctx: MutationCtx, job: GeminiIntegrationJob, now:
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
   if (workflow.kind !== "index" || workflow.payload.operation !== "publish" || workflow.publicationOperation !== "publish" ||
       workflow.previous !== null || workflow.resource.activeVersionId !== undefined || workflow.resource.catalogPublished === true ||
-      workflow.version.geminiDocumentName !== undefined || workflow.jurisdiction.organizationId !== job.organizationId) invalid();
+      workflow.version.geminiDocumentName !== undefined ||
+      (job.organizationId !== undefined && workflow.jurisdiction.organizationId !== job.organizationId)) invalid();
   if (workflow.lock.actorId !== job.actorId || workflow.lock.idempotencyKey !== job.idempotencyKey ||
       (workflow.lock.jurisdictionId !== undefined && workflow.lock.jurisdictionId !== workflow.jurisdiction._id)) invalid();
   await assertGeminiOriginal(ctx, workflow.version);

@@ -112,6 +112,15 @@ async function addOrganization(f: Fixture) {
   });
 }
 
+async function addPlatformOrganization(f: Fixture, retainMembership = false) {
+  const organization = await addOrganization(f);
+  await f.t.run(async ctx => {
+    await ctx.db.patch(f.jobId, { organizationId: undefined, organizationRole: undefined, actorRoles: ["super_admin"] });
+    if (!retainMembership) await ctx.db.delete(organization.membershipId);
+  });
+  return organization;
+}
+
 const invalidTargets = [
   "wrong job type", "wrong target", "queued job", "missing operation", "foreign operation", "wrong recovery",
   "replacement", "rollback", "malformed payload", "checksum mismatch", "existing active version",
@@ -320,9 +329,48 @@ describe("active Gemini document recovery mutations", () => {
       .resolves.toMatchObject({ status: "succeeded" });
   });
 
-  it.each(["membership removed", "review role removed", "organization archived", "organization binding changed"])(
-    "rechecks organization authority before completion: %s", async scenario => {
-      const f = await fixture("user");
+  it.each(["before claim", "before completion"])("does not substitute organization membership for missing platform publish permission %s", async phase => {
+    const f = await fixture(phase === "before claim" ? "user" : "super_admin");
+    const organization = await addPlatformOrganization(f, true);
+    const proof = phase === "before completion" ? await claimProof(f) : null;
+    if (proof) await updateUser(f, { role: "user" });
+    expect(await f.t.run(ctx => ctx.db.get(organization.membershipId))).toMatchObject({ role: "reviewer", status: "active" });
+    const before = await state(f.t);
+    const attempt = proof
+      ? f.t.mutation(completeRef, { ...proof, documentName, verifiedAt: Date.now() })
+      : f.t.mutation(claimRef, f.request);
+    await expect(attempt).rejects.toThrow("GEMINI_RECOVERY_PUBLISHER_UNAUTHORIZED");
+    expect(await state(f.t)).toEqual(before);
+  });
+
+  it.each(["before claim", "before completion"])("keeps an organization-bound super administrator job scoped to its organization %s", async phase => {
+    const f = await fixture();
+    await addOrganization(f);
+    const proof = phase === "before completion" ? await claimProof(f) : null;
+    await f.t.run(async ctx => {
+      const now = Date.now();
+      const foreignOrganizationId = await ctx.db.insert("organizations", {
+        name: "Other organization", slug: "other-org", class: "company", status: "active",
+        createdBy: f.userId, updatedBy: f.userId, createdAt: now, updatedAt: now,
+      });
+      await ctx.db.insert("organizationMemberships", {
+        organizationId: foreignOrganizationId, userId: f.userId, role: "reviewer", status: "active", createdAt: now, updatedAt: now,
+      });
+      await ctx.db.patch(f.jurisdictionId, { organizationId: foreignOrganizationId });
+    });
+    const before = await state(f.t);
+    const attempt = proof
+      ? f.t.mutation(completeRef, { ...proof, documentName, verifiedAt: Date.now() })
+      : f.t.mutation(claimRef, f.request);
+    await expect(attempt).rejects.toThrow("ORGANIZATION_ACCESS_DENIED");
+    expect(await state(f.t)).toEqual(before);
+  });
+
+  it.each([
+    ["membership removed", "user"], ["review role removed", "user"], ["organization archived", "user"],
+    ["organization binding changed", "user"], ["membership removed", "super_admin"],
+  ])("rechecks organization authority before completion: %s for %s", async (scenario, role) => {
+      const f = await fixture(role);
       const org = await addOrganization(f);
       const proof = await claimProof(f);
       await f.t.run(async ctx => {
@@ -334,8 +382,7 @@ describe("active Gemini document recovery mutations", () => {
       const before = await state(f.t);
       await expect(f.t.mutation(completeRef, { ...proof, documentName, verifiedAt: Date.now() })).rejects.toThrow();
       expect(await state(f.t)).toEqual(before);
-    },
-  );
+    });
 
   it.each(["unverified email", "two factor disabled", "banned actor", "withdrawn role", "deployment gate"])(
     "rechecks current authority immediately before completion: %s", async scenario => {
@@ -480,8 +527,13 @@ describe("active Gemini document recovery mutations", () => {
     expect(after.versions[0].status).toBe("published");
   });
 
-  it("runs the registered action through fresh provider GETs and real guarded mutations, then replays without provider access", async () => {
+  it.each(["platform jurisdiction", "organizational jurisdiction"])("runs the registered action through fresh provider GETs for a platform job in the %s, then replays without provider access", async jurisdictionKind => {
     const f = await fixture();
+    if (jurisdictionKind === "organizational jurisdiction") {
+      await addPlatformOrganization(f);
+      expect(await f.t.run(ctx => ctx.db.query("organizationMemberships").take(1))).toEqual([]);
+      expect((await f.t.run(ctx => ctx.db.get(f.jobId)))!.organizationId).toBeUndefined();
+    }
     vi.stubEnv("GOOGLE_AI_API_KEY", "server-only-recovery-key");
     const metadata = { environment: "test", jurisdiction_id: f.jurisdictionId, resource_id: f.resourceId,
       version_id: f.versionId, version_number: "1", sha256: f.sha256 };
