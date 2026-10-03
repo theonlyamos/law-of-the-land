@@ -227,6 +227,64 @@ describe("POST /api/chat private query diagnostics", () => {
     )?.[1];
   }
 
+  it("proof-binds rejected annotation shape without disclosing provider fields", async () => {
+    const privateDocument = "fileSearchStores/ghana/documents/private-document";
+    const privateSource = "private-provider-source-text";
+    const canonical = canonicalInteraction();
+    const annotation = canonical.steps[0].content[0].annotations[0] as unknown as Record<string, unknown>;
+    delete annotation.type;
+    delete annotation.document_uri;
+    annotation.file_name = privateDocument;
+    annotation.source = privateSource;
+    annotation.custom_metadata = [
+      { key: "jurisdiction_id", string_value: selectedJurisdictionId },
+      { key: "resource_id", string_value: selectedResourceId },
+      { key: "version_id", string_value: selectedVersionId },
+    ];
+    interactionMocks.get.mockResolvedValue(canonical);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "validation", citations: [],
+      diagnostics: {
+        reason: "citation_type",
+        structure: {
+          canonical: { annotationKinds: { missing_type: 1 } },
+          rejectedCanonicalAnnotation: {
+            kind: "missing_type", metadataContainer: "array",
+            documentUriKind: "missing", fileNameKind: "authorized_document",
+            jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
+            versionMetadataPresent: true, fileNamePresent: true, sourcePresent: true,
+          },
+        },
+      },
+    });
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts({
+        ...args, diagnostics: {
+          ...args.diagnostics,
+          structure: {
+            ...args.diagnostics.structure,
+            rejectedCanonicalAnnotation: {
+              ...args.diagnostics.structure.rejectedCanonicalAnnotation, sourcePresent: false,
+            },
+          },
+        },
+      }))).toBe(false);
+    for (const privateValue of [privateDocument, privateSource, selectedResourceId, selectedVersionId]) {
+      expect(JSON.stringify(args.diagnostics)).not.toContain(privateValue);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privateValue);
+      expect(JSON.stringify(streamEvents)).not.toContain(privateValue);
+    }
+    expect(JSON.stringify(streamEvents)).not.toContain("rejectedCanonicalAnnotation");
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
   it("binds successful diagnostics to the service proof without exposing them to the browser", async () => {
     const streamEvents = await events(await POST(request()));
     const args = terminalArgs();

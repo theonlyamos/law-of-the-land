@@ -6,6 +6,10 @@ bound into the server service proof and completion replay identity, and excluded
 from browser events and citation claims. Existing requests without diagnostics
 retain their previous proof and replay serialization.
 
+The optional `structure` extension adds a separately versioned proof suffix only
+when present. Older version 1 diagnostic objects retain their exact serialization,
+so an older route can complete requests while the updated backend is deployed.
+
 Diagnostics contain closed phase/reason labels, integer counters from 0 to 1024,
 and structural flags. They never contain questions, answers, snippets, provider
 payloads, raw errors, provider interaction IDs, document/store names or credentials.
@@ -34,6 +38,48 @@ Counters saturate at 1024 and set `countsClamped`; a saturated count is not exac
 - `no_canonical_annotations` identifies the existing legal abstention branch. Zero
   counts never independently establish that a published source is missing, that
   retrieval was empty, or that the model lacked relevant material.
+
+## Structural extension
+
+`structure` compares three annotation carriers: streamed annotation deltas and
+initial model-output text blocks,
+canonical model-output text blocks, and model-output text blocks included in the
+`interaction.completed` event. Each carrier has fixed annotation-kind counters
+and, when observed, the shape of its first annotation. `completionStepsPresent`
+distinguishes a completion event that supplies a steps array from one that omits it.
+These observations do not grant authority to use streamed or completion-event
+annotations as citations.
+
+Kinds are `file_citation`, `url_citation`, `place_citation`, `word_info`,
+`speech_metadata`, `missing_type`, `unknown_type` and `malformed`. Arbitrary
+provider discriminator strings are never stored. Counts describe observations,
+not unique citations. The structural stream counts include initial text blocks,
+while the original `streamedAnnotationCount` counts only annotation deltas.
+A first annotation's shape does not describe every annotation
+in that carrier.
+
+`rejectedCanonicalAnnotation` records the inspected annotation's shape before the
+existing citation checks reject it. Shape fields classify the metadata container,
+document URI and file name, and expose booleans for known identity fields, file-name
+and source presence, and duplicate identity metadata keys. Object metadata and the
+documented array form `{ key, string_value }` are inspected only for these flags;
+they are not normalized into accepted citations. Authorized URI categories mean
+only that a value has the expected syntax under a currently supplied store. They
+do not prove that the document or metadata is authorized.
+
+Offset and page categories distinguish missing, incomplete, malformed and valid
+numeric shapes without retaining numbers. A valid offset pair means safe integers
+in nondecreasing order with a nonnegative start. It does not establish the provider's
+offset coordinate frame. `offsetsWithinAnswer`, when supplied with a full canonical
+answer, checks only the current byte-length bound.
+
+`fileSearchResultDeltas` counts observed result-delta payloads as missing, empty
+arrays, nonempty arrays or other shapes. An absent result delta or result field
+does not prove that File Search retrieved nothing.
+
+All structural counters and scans are bounded. Saturation or truncated observation
+sets `countsClamped`. No new fields contain prompt text, answers, snippets, raw
+provider types, metadata values, names, URLs, identifiers, offsets or credentials.
 
 ## Deployment and investigation
 

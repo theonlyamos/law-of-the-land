@@ -3,7 +3,13 @@ import "server-only";
 import type { GoogleGenAI, Interactions } from "@google/genai";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
 import { CHAT_POLICY_RESPONSES, isChatPolicyResponse } from "../../convex/lib/chatPolicy";
-import type { QueryDiagnostics } from "../../convex/lib/queryDiagnostics";
+import {
+  emptyQueryDiagnosticStructure,
+  type QueryDiagnostics,
+  type QueryDiagnosticAnnotationKind,
+  type QueryDiagnosticAnnotationShape,
+  type QueryDiagnosticStructure,
+} from "../../convex/lib/queryDiagnostics";
 
 export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
@@ -169,6 +175,151 @@ function isIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH;
 }
 
+// Observation never invokes provider-object getters or retains provider values.
+function diagnosticValue(value: unknown, key: string | number): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function diagnosticKind(value: unknown): QueryDiagnosticAnnotationKind {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "malformed";
+  const type = diagnosticValue(value, "type");
+  if (type === undefined) return "missing_type";
+  if (typeof type !== "string") return "unknown_type";
+  switch (type) {
+    case "file_citation": case "url_citation": case "place_citation": case "word_info": case "speech_metadata": return type;
+    default: return "unknown_type";
+  }
+}
+
+type DiagnosticChannel = "stream" | "canonical" | "completion";
+
+class StructuralObserver {
+  readonly state = emptyQueryDiagnosticStructure();
+  private readonly inspected = { stream: 0, canonical: 0, completion: 0 };
+
+  constructor(private readonly stores: readonly ChatStore[], private readonly clamped: () => void) {}
+
+  private boundedLength(values: unknown[], limit: number): number {
+    const length = diagnosticValue(values, "length");
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) return 0;
+    if (length > limit) this.clamped();
+    return Math.min(length, limit);
+  }
+
+  private uriKind(value: unknown): QueryDiagnosticAnnotationShape["documentUriKind"] {
+    if (typeof value !== "string" || value.length === 0) return "missing";
+    if (value.length > MAX_IDENTIFIER_LENGTH) return "other";
+    if (this.stores.some(store => store.storeName === value)) return "authorized_store";
+    return GEMINI_DOCUMENT_NAME.test(value) && this.stores.some(store => value.startsWith(`${store.storeName}/documents/`))
+      ? "authorized_document" : "other";
+  }
+
+  shape(annotation: unknown, answerBytes?: number): QueryDiagnosticAnnotationShape {
+    const metadata = diagnosticValue(annotation, "custom_metadata");
+    const metadataContainer = metadata === undefined ? "missing" : Array.isArray(metadata) ? "array"
+      : metadata !== null && typeof metadata === "object" ? "object" : "other";
+    const present = { jurisdiction_id: false, resource_id: false, version_id: false };
+    let duplicateIdentityMetadata = false;
+    if (Array.isArray(metadata)) {
+      const seen = new Set<string>();
+      for (let index = 0, length = this.boundedLength(metadata, MAX_DIAGNOSTIC_COUNT); index < length; index++) {
+        const entry = diagnosticValue(metadata, index);
+        const key = diagnosticValue(entry, "key");
+        if (key !== "jurisdiction_id" && key !== "resource_id" && key !== "version_id") continue;
+        if (seen.has(key)) duplicateIdentityMetadata = true;
+        seen.add(key);
+        present[key] ||= isIdentifier(diagnosticValue(entry, "string_value"));
+      }
+    } else if (metadataContainer === "object") {
+      present.jurisdiction_id = isIdentifier(diagnosticValue(metadata, "jurisdiction_id"));
+      present.resource_id = isIdentifier(diagnosticValue(metadata, "resource_id"));
+      present.version_id = isIdentifier(diagnosticValue(metadata, "version_id"));
+    }
+    const fileName = diagnosticValue(annotation, "file_name");
+    const source = diagnosticValue(annotation, "source");
+    const start = diagnosticValue(annotation, "start_index");
+    const end = diagnosticValue(annotation, "end_index");
+    const pairPresent = start !== undefined && end !== undefined;
+    const validPair = typeof start === "number" && typeof end === "number"
+      && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end >= start;
+    const offsetKind = start === undefined && end === undefined ? "missing"
+      : !pairPresent ? "unpaired" : validPair ? "valid_pair" : "invalid_pair";
+    const page = diagnosticValue(annotation, "page_number");
+    return {
+      kind: diagnosticKind(annotation), metadataContainer,
+      jurisdictionMetadataPresent: present.jurisdiction_id,
+      resourceMetadataPresent: present.resource_id, versionMetadataPresent: present.version_id,
+      documentUriKind: this.uriKind(diagnosticValue(annotation, "document_uri")), fileNameKind: this.uriKind(fileName),
+      fileNamePresent: typeof fileName === "string" && fileName.length > 0,
+      sourcePresent: typeof source === "string" && source.length > 0, duplicateIdentityMetadata,
+      offsetKind,
+      pageKind: page === undefined ? "missing" : typeof page === "number" && Number.isSafeInteger(page)
+        && page > 0 && page <= MAX_PAGE_NUMBER ? "valid" : "invalid",
+      ...(pairPresent && answerBytes !== undefined ? { offsetsWithinAnswer: validPair && end <= answerBytes } : {}),
+    };
+  }
+
+  annotations(channel: DiagnosticChannel, values: unknown): void {
+    if (!Array.isArray(values)) return;
+    const length = this.boundedLength(values, MAX_DIAGNOSTIC_COUNT - this.inspected[channel]);
+    const state = this.state[channel];
+    for (let index = 0; index < length; index++) {
+      const annotation = diagnosticValue(values, index);
+      state.annotationKinds[diagnosticKind(annotation)]++;
+      if (!state.firstAnnotation) state.firstAnnotation = this.shape(annotation);
+    }
+    this.inspected[channel] += length;
+  }
+
+  modelOutput(channel: DiagnosticChannel, step: unknown): void {
+    if (diagnosticValue(step, "type") !== "model_output") return;
+    const content = diagnosticValue(step, "content");
+    if (!Array.isArray(content)) return;
+    for (let index = 0, length = this.boundedLength(content, MAX_OUTPUT_BLOCKS); index < length; index++) {
+      const block = diagnosticValue(content, index);
+      if (diagnosticValue(block, "type") === "text") this.annotations(channel, diagnosticValue(block, "annotations"));
+    }
+  }
+
+  completion(interaction: unknown): void {
+    const steps = diagnosticValue(interaction, "steps");
+    this.state.completionStepsPresent = Array.isArray(steps);
+    if (!Array.isArray(steps)) return;
+    for (let index = 0, length = this.boundedLength(steps, MAX_OUTPUT_BLOCKS); index < length; index++) {
+      this.modelOutput("completion", diagnosticValue(steps, index));
+    }
+  }
+
+  resultDelta(delta: unknown): void {
+    const result = diagnosticValue(delta, "result");
+    const kind = result === undefined ? "missing" : Array.isArray(result)
+      ? diagnosticValue(result, "length") === 0 ? "empty_array" : "nonempty_array" : "other";
+    const total = this.state.fileSearchResultDeltas[kind] + 1;
+    if (total > MAX_DIAGNOSTIC_COUNT) this.clamped();
+    this.state.fileSearchResultDeltas[kind] = Math.min(total, MAX_DIAGNOSTIC_COUNT);
+  }
+
+  snapshot(): QueryDiagnosticStructure {
+    const channel = (value: QueryDiagnosticStructure[DiagnosticChannel]) => Object.freeze({
+      annotationKinds: Object.freeze({ ...value.annotationKinds }),
+      ...(value.firstAnnotation ? { firstAnnotation: Object.freeze({ ...value.firstAnnotation }) } : {}),
+    });
+    return Object.freeze({
+      stream: channel(this.state.stream), canonical: channel(this.state.canonical), completion: channel(this.state.completion),
+      completionStepsPresent: this.state.completionStepsPresent,
+      fileSearchResultDeltas: Object.freeze({ ...this.state.fileSearchResultDeltas }),
+      ...(this.state.rejectedCanonicalAnnotation
+        ? { rejectedCanonicalAnnotation: Object.freeze({ ...this.state.rejectedCanonicalAnnotation }) } : {}),
+    });
+  }
+}
+
 function validStepIndex(value: unknown): value is number {
   return typeof value === "number"
     && Number.isSafeInteger(value)
@@ -255,7 +406,7 @@ function requestFor(
   };
 }
 
-function canonicalOutput(interaction: Interactions.Interaction, countAnnotations: (count: number) => void): {
+function canonicalOutput(interaction: Interactions.Interaction, observeAnnotations: (annotations: Interactions.Annotation[]) => void): {
   answer: string;
   annotations: Interactions.Annotation[];
 } {
@@ -276,7 +427,7 @@ function canonicalOutput(interaction: Interactions.Interaction, countAnnotations
       }
       texts.push(content.text);
       if (content.annotations) {
-        countAnnotations(content.annotations.length);
+        observeAnnotations(content.annotations);
         annotations.push(...content.annotations);
         if (annotations.length > MAX_ANNOTATIONS) return invalidResponse("canonical_annotations_limit");
       }
@@ -294,14 +445,19 @@ function citationsFor(
   observeCitation: (structure: Pick<QueryDiagnostics,
     "citationUriKind" | "jurisdictionMetadataPresent" | "resourceMetadataPresent" | "versionMetadataPresent"
   >) => void,
+  observeRejected: (annotation: unknown, answerBytes: number) => void,
 ): ValidatedCitation[] {
   const storesByJurisdictionId = new Map(stores.map((store) => [store.jurisdictionId, store]));
   const answerBytes = encoder.encode(answer).byteLength;
   const citations: ValidatedCitation[] = [];
   const seen = new Set<string>();
   for (const annotation of annotations) {
+    const reject = (reason: QueryDiagnostics["reason"]): never => {
+      observeRejected(annotation, answerBytes);
+      return invalidResponse(reason);
+    };
     if (!annotation || typeof annotation !== "object" || Array.isArray(annotation) || annotation.type !== "file_citation") {
-      return invalidResponse("citation_type");
+      return reject("citation_type");
     }
     const metadata: Record<string, unknown> = annotation.custom_metadata ?? {};
     const jurisdictionId = metadata.jurisdiction_id;
@@ -331,20 +487,20 @@ function citationsFor(
       || !store
       || providerStoreName !== store.storeName
     ) {
-      return invalidResponse("citation_identity");
+      return reject("citation_identity");
     }
     const start = annotation.start_index;
     const end = annotation.end_index;
-    if ((start === undefined) !== (end === undefined)) return invalidResponse("citation_offsets_missing");
+    if ((start === undefined) !== (end === undefined)) return reject("citation_offsets_missing");
     if (start !== undefined && end !== undefined && (
       !Number.isSafeInteger(start)
       || !Number.isSafeInteger(end)
       || start < 0
       || end < start
       || end > answerBytes
-    )) return invalidResponse("citation_offsets_invalid");
+    )) return reject("citation_offsets_invalid");
     if (annotation.page_number !== undefined && (!Number.isSafeInteger(annotation.page_number) || annotation.page_number <= 0 || annotation.page_number > MAX_PAGE_NUMBER)) {
-      return invalidResponse("citation_page");
+      return reject("citation_page");
     }
     const citation = {
       jurisdictionId,
@@ -400,10 +556,14 @@ export class GeminiFileSearchChat {
       streamedAnnotationCount: 0, canonicalAnnotationCount: 0,
       countsClamped: false, canonicalReadCompleted: false,
     };
+    const observer = new StructuralObserver(input.stores, () => { diagnostics.countsClamped = true; });
+    const observe = (action: () => void) => {
+      try { action(); } catch { diagnostics.countsClamped = true; }
+    };
     const report = (update: Partial<QueryDiagnostics> = {}) => {
       Object.assign(diagnostics, update);
       try {
-        options.onDiagnostics?.(Object.freeze({ ...diagnostics }));
+        options.onDiagnostics?.(Object.freeze({ ...diagnostics, structure: observer.snapshot() }));
       } catch {
         // Optional diagnostics must not alter generation or authorization outcomes.
       }
@@ -455,6 +615,8 @@ export class GeminiFileSearchChat {
         if (event.event_type === "interaction.completed") {
           if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
           if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
+          observe(() => observer.completion(event.interaction));
+          report();
           completed = true;
           continue;
         }
@@ -477,6 +639,10 @@ export class GeminiFileSearchChat {
             || !calls.has(event.step.call_id)
           )) return invalidResponse("file_search_result");
           if (type === "file_search_result") count("searchResultCount", 1);
+          if (type === "model_output") {
+            observe(() => observer.modelOutput("stream", event.step));
+            report();
+          }
           steps.set(event.index, { type, stopped: false });
           continue;
         }
@@ -494,6 +660,7 @@ export class GeminiFileSearchChat {
         const stepType = step.type;
         if (stepType === "model_output") {
           if (event.delta.type === "text_annotation_delta") {
+            observe(() => observer.annotations("stream", diagnosticValue(event.delta, "annotations")));
             if (Array.isArray(event.delta.annotations)) count("streamedAnnotationCount", event.delta.annotations.length);
             continue;
           }
@@ -508,9 +675,11 @@ export class GeminiFileSearchChat {
         if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
         if (stepType === "file_search_call" && event.delta.type === "file_search_call") continue;
         if (stepType === "file_search_result" && event.delta.type === "file_search_result") {
+          observe(() => observer.resultDelta(event.delta));
           // SDK result entries are exposed on deltas, not result-step starts.
           // This sums observed entries; it does not measure unique hits or prove an empty search.
           if (Array.isArray(event.delta.result)) count("searchResultItemCount", event.delta.result.length);
+          else report();
           continue;
         }
         return invalidResponse("tool_delta_type");
@@ -525,7 +694,10 @@ export class GeminiFileSearchChat {
       report({ canonicalReadCompleted: true });
       checkAbortOrDeadline(options.signal, options.deadlineAt);
       if (interaction.id !== interactionId) return invalidResponse("canonical_interaction");
-      const final = canonicalOutput(interaction, (amount) => count("canonicalAnnotationCount", amount));
+      const final = canonicalOutput(interaction, (annotations) => {
+        observe(() => observer.annotations("canonical", annotations));
+        count("canonicalAnnotationCount", annotations.length);
+      });
       if (final.answer !== streamedAnswer) return invalidResponse("canonical_text_mismatch");
       if (isChatPolicyResponse(final.answer)) {
         if (final.annotations.length !== 0) return invalidResponse("policy_with_citations");
@@ -536,7 +708,9 @@ export class GeminiFileSearchChat {
         report({ reason: "no_canonical_annotations" });
         return { answer: CHAT_NO_EVIDENCE, citations: [], usage: usageFor(interaction.usage) };
       }
-      const citations = citationsFor(final.annotations, input.stores, final.answer, report);
+      const citations = citationsFor(final.annotations, input.stores, final.answer, report, (annotation, answerBytes) => {
+        observe(() => { observer.state.rejectedCanonicalAnnotation = observer.shape(annotation, answerBytes); });
+      });
       report({ reason: "completed" });
       return {
         answer: final.answer,
