@@ -6,10 +6,12 @@ import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Menu } from "lucide-react";
+import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { AssistantMessage, assistantMarkdown } from "./assistant-message";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
+import logo from "@/app/logo-transparent.png";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
@@ -43,7 +45,12 @@ import {
   type RouteEnsureEntry,
 } from "./chat-message-state";
 
-const THREAD_RAIL = "mx-auto w-full max-w-3xl px-4";
+const THREAD_RAIL = "mx-auto w-full max-w-3xl px-5 sm:px-8";
+const SUGGESTED_QUESTIONS = [
+  { label: "Work & employment", icon: BriefcaseBusiness, question: "What should I know about my rights at work?" },
+  { label: "Housing & tenancy", icon: House, question: "What should I look for in a tenancy agreement?" },
+  { label: "Business", icon: Store, question: "What laws apply when starting a business?" },
+];
 
 type ChatResponse = {
   result: string;
@@ -754,6 +761,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const chatStatusLabel = isCurrentChatDeleted
     ? "Chat deleted…"
     : isDeletingCurrentChat ? "Deleting chat…" : "Loading chat…";
+  const jurisdictionLabel = chatResearchJurisdiction
+    ? `${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`
+    : "";
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -781,8 +791,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="border-b">
-          <div className={`${THREAD_RAIL} flex h-12 items-center gap-2`}>
+        <header className="shrink-0">
+          <div className="flex h-16 items-center gap-3 px-5 sm:px-8">
             <Button
               variant="ghost"
               size="icon"
@@ -793,12 +803,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
-              {isChatLoading ? "" : sessionData?.title ?? "New chat"}
+            <h1 className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground sm:text-sm">
+              {isChatLoading ? "" : sessionData?.title ?? "A new conversation"}
             </h1>
-            {chatResearchJurisdiction && <p className="max-w-[55%] truncate text-xs text-muted-foreground" title={`${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`}>{chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}{chatResearchJurisdiction.name}</p>}
+            {chatResearchJurisdiction ? (
+              <p className="flex max-w-[45%] items-center gap-1.5 text-xs text-muted-foreground" title={jurisdictionLabel}>
+                <Globe2 className="size-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{jurisdictionLabel}</span>
+              </p>
+            ) : (
+              <span className="hidden items-center gap-2 text-xs text-muted-foreground lg:flex">
+                <BookOpen className="size-4" aria-hidden="true" />Grounded in legal sources
+              </span>
+            )}
           </div>
-        </div>
+        </header>
 
         {isChatLoading || isCurrentChatDeleted || isDeletingCurrentChat ? (
           <div role="status" aria-label={chatStatusLabel} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4">
@@ -806,46 +825,67 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             <p className="text-sm text-muted-foreground">{chatStatusLabel}</p>
           </div>
         ) : chatId === null ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-4">
-            <div className="w-full max-w-2xl py-8">
-              <h2 className="text-center text-2xl font-semibold tracking-tight sm:text-3xl">
-                What do you want to know?
-              </h2>
-              <p className="mx-auto mt-3 max-w-md text-center text-sm text-muted-foreground">
-                Ask about a law in plain language. Answers come from the legal document library and
-                cite the sections they are based on.
-              </p>
-              {!sessionData && !chatId ? (
-                <div className="mx-auto mt-6 max-w-md text-left">
-                  <ResearchJurisdictionPicker
-                    value={selectedResearchJurisdiction}
-                    onChange={setSelectedResearchJurisdiction}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="flex min-h-full flex-col">
+              <div className="mx-auto my-auto w-full max-w-[43rem] px-6 py-8 sm:px-11 sm:py-12">
+                <p className="chat-eyebrow mb-5">Clarity starts here</p>
+                <h2 className="chat-heading">
+                  The law, in<br />{" "}<em className="text-primary">plain language.</em>
+                </h2>
+                <p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">
+                  Ask a question. Understand the answer.<br />Explore the sources behind it.
+                </p>
+                <div className="mt-7">
+                  <ChatInput
+                    id="new-chat-question"
+                    variant="editorial"
+                    ariaLabel="Your legal question"
+                    describedBy="new-chat-scope-hint new-chat-disclaimer"
+                    query={query}
+                    onQueryChange={setQuery}
+                    onSearch={() => void handleSearch(query)}
+                    onKeyDown={handleKeyDown}
+                    isLoading={isLoading}
+                    submitDisabled={!selectionReady}
+                    rows={2}
+                    placeholder="What would you like to understand?"
+                    footer={
+                      <ResearchJurisdictionPicker
+                        compact
+                        disabled={isLoading}
+                        value={selectedResearchJurisdiction}
+                        onChange={setSelectedResearchJurisdiction}
+                      />
+                    }
                   />
                 </div>
-              ) : null}
-              <div className="mt-8">
-                <ChatInput
-                  query={query}
-                  onQueryChange={setQuery}
-                  onSearch={() => void handleSearch(query)}
-                  onKeyDown={handleKeyDown}
-                  isLoading={
-                    isLoading || !selectionReady
-                  }
-                  rows={3}
-                  placeholder="e.g. What are my rights as a tenant?"
-                />
+                <p id="new-chat-scope-hint" className="mt-3 text-xs leading-5 text-muted-foreground" aria-live="polite">
+                  {selectionReady
+                    ? `Answers will use sources relevant to ${jurisdictionLabel}.`
+                    : "Choose the jurisdiction your question relates to."}
+                </p>
+                <div className="mt-6 flex flex-wrap gap-x-5 gap-y-1" aria-label="Suggested topics">
+                  {SUGGESTED_QUESTIONS.map(({ label, icon: Icon, question }) => (
+                    <button key={label} type="button" disabled={isLoading}
+                      onClick={() => {
+                        setQuery(question);
+                        document.getElementById("new-chat-question")?.focus();
+                      }}
+                      className="inline-flex min-h-11 items-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+                      <Icon className="size-4" aria-hidden="true" />{label}<ArrowUpRight className="size-3.5" aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
               </div>
-              <p className="mt-3 text-center text-xs text-muted-foreground">
-                General legal information, not legal advice. For decisions that affect your rights,
-                talk to a qualified attorney.
+              <p id="new-chat-disclaimer" className="shrink-0 px-6 pb-5 pt-3 text-center text-xs text-muted-foreground">
+                General legal information, not legal advice.
               </p>
             </div>
           </div>
         ) : (
           <>
         <ScrollArea ref={messagesScrollAreaRef} className="min-h-0 flex-1">
-          <div className={`${THREAD_RAIL} flex flex-col py-8`}>
+          <div className={`${THREAD_RAIL} flex flex-col py-6 sm:py-8`}>
             {messagesPaginationStatus === "CanLoadMore" && (
               <div className="mb-4 flex justify-center">
                 <Button variant="ghost" size="sm" onClick={handleLoadOlderMessages}>
@@ -881,12 +921,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   className={`flex min-w-0 ${
                     isUser
                       ? `justify-end ${index > 0 ? "mt-12" : ""}`
-                      : "justify-start mt-4"
+                      : "justify-start mt-7"
                   }`}
                 >
                   {isUser ? (
                     <div className="grid max-w-[85%] justify-items-end gap-1 sm:max-w-[75%]">
-                      <div className="whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground [overflow-wrap:anywhere]">
+                      <div className="whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-5 py-3 text-sm leading-relaxed text-secondary-foreground [overflow-wrap:anywhere]">
                         {message.content}
                       </div>
                       {message.source === "local" && message.state === "error" ? (
@@ -894,28 +934,33 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       ) : null}
                     </div>
                   ) : message.source === "local" && message.state === "pending" && message.content === "..." ? (
-                    <div className="flex gap-1 py-2" aria-label="Preparing answer">
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:0ms]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:150ms]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-primary/60 [animation-delay:300ms]" />
+                    <div className="flex items-center gap-3 py-2 text-sm text-muted-foreground" role="status" aria-label="Preparing answer">
+                      <Spinner className="size-4" />Preparing your answer…
                     </div>
                   ) : (
-                    <div className="min-w-0 text-sm leading-7">
+                    <div className="min-w-0 w-full text-sm leading-7">
+                      <div className="mb-4 flex items-center gap-2 text-xs font-semibold">
+                        <Image src={logo} alt="" width={27} height={20} className="h-5 w-7 object-contain" />
+                        Law of the Land
+                      </div>
                       <div className="markdown-content">
                         <AssistantMessage content={message.content} />
                       </div>
                       {message.citations?.length ? (
-                        <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">
-                          <h2 className="font-semibold text-foreground">Sources</h2>
-                          <ol className="mt-1 list-decimal space-y-1 pl-5">
+                        <section aria-label="Sources" className="mt-6 border-t pt-4 text-xs leading-5 text-muted-foreground">
+                          <h2 className="text-[11px] font-semibold uppercase tracking-wider">Sources · {message.citations.length}</h2>
+                          <ol className="mt-3 space-y-2">
                             {message.citations.map((citation, citationIndex) => {
                               const sourceUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl : null;
                               return (
-                              <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`}>
+                              <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`} className="chat-source">
+                                <span className="chat-source-number" aria-hidden="true">{citationIndex + 1}</span>
+                                <div className="min-w-0 [overflow-wrap:anywhere]">
                                 {sourceUrl && /^https?:\/\//i.test(sourceUrl)
                                   ? <a href={sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={`${citation.label} (opens in a new tab)`} className="font-medium text-foreground underline underline-offset-4">{citation.label}</a>
-                                  : <span className="font-medium text-foreground">{citation.label}</span>}{" — "}
-                                {citation.jurisdictionName} ({citation.jurisdictionKind === "organizational" ? "organization" : "geographic jurisdiction"}; {citation.relation === "selected" ? "selected" : citation.relation === "geographic_ancestor" ? "geographic ancestor" : "organization geography"})
+                                  : <span className="font-medium text-foreground">{citation.label}</span>}
+                                  <p>{citation.jurisdictionName} · {citation.jurisdictionKind === "organizational" ? "Organization" : "Geographic jurisdiction"} · {citation.relation === "selected" ? "Selected jurisdiction" : citation.relation === "geographic_ancestor" ? "Geographic ancestor" : "Organization geography"}</p>
+                                </div>
                               </li>
                               );
                             })}
@@ -943,8 +988,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           </div>
         </ScrollArea>
 
-        <div className="border-t">
-          <div className={`${THREAD_RAIL} py-4`}>
+        <div className="shrink-0">
+          <div className={`${THREAD_RAIL} pb-4 pt-2`}>
             {saveFailed && (
               <p role="alert" className="mb-2 text-sm text-muted-foreground">
                 The last answer is shown above but could not be saved to your account. It may be
@@ -967,21 +1012,29 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               </p>
             )}
             <ChatInput
+              variant="editorial"
+              ariaLabel="Follow-up question"
               query={query}
               onQueryChange={setQuery}
               onSearch={() => void handleSearch(query)}
               onKeyDown={handleKeyDown}
               isLoading={isLoading || !selectionReady}
-              rows={4}
+              rows={2}
+              footer={chatResearchJurisdiction ? (
+                <span className="chat-scope-label" title={`${jurisdictionLabel} — fixed for this conversation`}>
+                  <Globe2 className="size-3.5 shrink-0" aria-hidden="true" />
+                  <span className="truncate">{jurisdictionLabel}</span>
+                  <LockKeyhole className="size-3 shrink-0" aria-label="Fixed for this conversation" />
+                </span>
+              ) : undefined}
               placeholder={
                 displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
-                  : undefined
+                  : "Ask a follow-up…"
               }
             />
-            <p className="pt-2 text-center text-xs text-muted-foreground">
-              General legal information, not legal advice. For decisions that affect your rights,
-              talk to a qualified attorney.
+            <p className="pt-3 text-center text-xs text-muted-foreground">
+              General legal information, not legal advice.
             </p>
           </div>
         </div>

@@ -4,7 +4,7 @@ import { api } from "@/convex/_generated/api";
 import { authClient } from "@/lib/auth-client";
 import type { ResearchJurisdiction, ResearchJurisdictionKind } from "@/lib/countries";
 import { useConvex, useConvexAuth } from "convex/react";
-import { Check, ChevronDown, Search } from "lucide-react";
+import { Check, ChevronDown, Globe2, Search } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 type SearchGroup = "geographic" | "your_organizations" | "public_organizations";
@@ -21,10 +21,11 @@ interface ResultSection {
   rows: ResearchJurisdiction[];
 }
 
-interface ResearchJurisdictionPickerProps {
+export interface ResearchJurisdictionPickerProps {
   value: ResearchJurisdiction | null;
   onChange: (selection: ResearchJurisdiction | null) => void;
   disabled?: boolean;
+  compact?: boolean;
 }
 
 const GROUP_LABELS: Record<SearchGroup, string> = {
@@ -61,6 +62,7 @@ export function ResearchJurisdictionPicker({
   value,
   onChange,
   disabled = false,
+  compact = false,
 }: ResearchJurisdictionPickerProps) {
   const client = useConvex();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
@@ -98,13 +100,14 @@ export function ResearchJurisdictionPicker({
 
   useEffect(() => {
     if (!expanded) return;
-    searchInput.current?.focus();
+    if (kind) searchInput.current?.focus();
+    else root.current?.querySelector<HTMLInputElement>('input[type="radio"]')?.focus();
     const outside = (event: PointerEvent) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false);
     };
     document.addEventListener("pointerdown", outside);
     return () => document.removeEventListener("pointerdown", outside);
-  }, [expanded]);
+  }, [expanded, kind]);
 
   useEffect(() => {
     if (activeIndex >= 0) {
@@ -197,6 +200,31 @@ export function ResearchJurisdictionPicker({
     setOpen(true);
   }
 
+  const kindSelector = (
+    <div className="flex w-fit max-w-full flex-wrap gap-1 rounded bg-muted/50 p-1" role="radiogroup" aria-label="Jurisdiction type">
+      {(["geographic", "organizational"] as const).map((option) => (
+        <label key={option} className="relative cursor-pointer text-sm">
+          <input
+            type="radio"
+            name={`${listboxId}-kind`}
+            value={option}
+            checked={kind === option}
+            onChange={() => {
+              setKind(option);
+              setInput("");
+              setOpen(true);
+              searchInput.current?.focus();
+            }}
+            className="peer absolute inset-0 m-0 h-full w-full cursor-pointer opacity-0"
+          />
+          <span className="pointer-events-none flex min-h-11 items-center rounded px-3 peer-checked:bg-[var(--ink,hsl(var(--primary)))] peer-checked:text-[var(--paper-light,hsl(var(--primary-foreground)))] peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
+            {option === "geographic" ? "Geographic" : "Organizational"}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+
   return (
     <fieldset
       ref={root}
@@ -214,31 +242,8 @@ export function ResearchJurisdictionPicker({
         }
       }}
     >
-      <legend className="mb-2 text-sm font-semibold">Jurisdiction</legend>
-      {(!value || expanded) && (
-        <div className="flex w-fit max-w-full flex-wrap gap-1 rounded bg-muted/50 p-1" role="radiogroup" aria-label="Jurisdiction type">
-          {(["geographic", "organizational"] as const).map((option) => (
-            <label key={option} className="relative cursor-pointer text-sm">
-              <input
-                type="radio"
-                name={`${listboxId}-kind`}
-                value={option}
-                checked={kind === option}
-                onChange={() => {
-                  setKind(option);
-                  setInput("");
-                  setOpen(true);
-                  searchInput.current?.focus();
-                }}
-                className="peer absolute inset-0 m-0 h-full w-full cursor-pointer opacity-0"
-              />
-              <span className="pointer-events-none flex min-h-11 items-center rounded px-3 peer-checked:bg-[var(--ink,hsl(var(--primary)))] peer-checked:text-[var(--paper-light,hsl(var(--primary-foreground)))] peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
-                {option === "geographic" ? "Geographic" : "Organizational"}
-              </span>
-            </label>
-          ))}
-        </div>
-      )}
+      <legend className={compact ? "sr-only" : "mb-2 text-sm font-semibold"}>Jurisdiction</legend>
+      {!compact && (!value || expanded) && kindSelector}
 
       <div className="relative min-w-0">
         <button
@@ -249,15 +254,16 @@ export function ResearchJurisdictionPicker({
           aria-haspopup="dialog"
           aria-expanded={expanded}
           aria-controls={`${listboxId}-panel`}
-          disabled={!kind || disabled || authLoading}
+          disabled={(!compact && !kind) || disabled || authLoading}
           onClick={() => expanded ? setOpen(false) : openPicker()}
-          className="flex min-h-12 w-full items-center justify-between gap-3 rounded border border-input px-3 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className={`flex items-center justify-between border border-input px-3 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${compact ? "min-h-11 max-w-full gap-2 rounded-lg bg-background hover:bg-muted" : "min-h-12 w-full gap-3 rounded"}`}
         >
-          <span id={`${listboxId}-selection`} className="min-w-0 break-words" aria-live="polite">
-            {value ? <><span className="sr-only">Selected: </span>{selectionLabel}</> : kind ? "Choose jurisdiction" : "Choose a type first"}
+          {compact && <Globe2 className="size-4 shrink-0" aria-hidden="true" />}
+          <span id={`${listboxId}-selection`} className={compact ? "min-w-0 truncate" : "min-w-0 break-words"} aria-live="polite" title={selectionLabel}>
+            {value ? <><span className="sr-only">Selected: </span>{selectionLabel}</> : compact || kind ? "Choose jurisdiction" : "Choose a type first"}
           </span>
           <span className="flex shrink-0 items-center gap-2">
-            {value && <span className="text-xs underline underline-offset-4">Change</span>}
+            {value && !compact && <span className="text-xs underline underline-offset-4">Change</span>}
             <ChevronDown className="size-4" aria-hidden="true" />
           </span>
         </button>
@@ -267,9 +273,10 @@ export function ResearchJurisdictionPicker({
             id={`${listboxId}-panel`}
             role="dialog"
             aria-label="Choose jurisdiction"
-            className="absolute left-0 top-full z-50 mt-2 grid w-full min-w-0 gap-2 rounded border border-input p-2 shadow-xl"
+            className={`absolute left-0 z-50 grid min-w-0 gap-2 border border-input p-2 shadow-xl ${compact ? "bottom-full mb-2 w-[min(20rem,calc(100vw-4rem))] max-h-[70dvh] overflow-y-auto rounded-lg" : "top-full mt-2 w-full rounded"}`}
             style={{ backgroundColor: "var(--paper-light, hsl(var(--popover)))" }}
           >
+            {compact && kindSelector}
             <div className="flex items-center gap-2 rounded border border-input px-3">
               <Search className="size-4 shrink-0" aria-hidden="true" />
               <label htmlFor={`${listboxId}-input`} className="sr-only">Find jurisdiction</label>
@@ -282,6 +289,7 @@ export function ResearchJurisdictionPicker({
                 aria-autocomplete="list"
                 aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
                 value={input}
+                disabled={!kind}
                 maxLength={120}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
@@ -296,7 +304,7 @@ export function ResearchJurisdictionPicker({
                     if (activeIndex >= 0 && rows[activeIndex]) choose(rows[activeIndex]);
                   }
                 }}
-                placeholder={kind === "organizational" ? "Search organizations or jurisdictions" : "Search by jurisdiction name"}
+                placeholder={!kind ? "Choose a jurisdiction type" : kind === "organizational" ? "Search organizations or jurisdictions" : "Search by jurisdiction name"}
                 className="min-h-11 w-full min-w-0 bg-transparent text-base text-inherit focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>

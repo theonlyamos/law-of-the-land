@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type FormEvent } from "react";
 import type { ResearchJurisdiction } from "@/lib/countries";
 import { ResearchJurisdictionPicker } from "./research-jurisdiction-picker";
+import { ChatInput } from "@/components/ui/chat-input";
 
 type SearchPage = {
   page: ResearchJurisdiction[];
@@ -74,6 +75,55 @@ afterEach(() => {
 });
 
 describe("ResearchJurisdictionPicker", () => {
+  it("allows drafting before a compact jurisdiction selection and enables sending only after selection", async () => {
+    mocks.query.mockResolvedValue({
+      page: [ghana], group: "geographic", isDone: true, continueCursor: null,
+    } satisfies SearchPage);
+    const onSearch = vi.fn();
+    function Composer() {
+      const [query, setQuery] = useState("");
+      const [value, setValue] = useState<ResearchJurisdiction | null>(null);
+      return <ChatInput variant="editorial" query={query} onQueryChange={setQuery}
+        onSearch={onSearch} onKeyDown={() => {}} isLoading={false} submitDisabled={!value}
+        footer={<ResearchJurisdictionPicker compact value={value} onChange={setValue} />} />;
+    }
+    render(<Composer />);
+
+    const question = screen.getByRole("textbox", { name: "Your legal question" });
+    const send = screen.getByRole("button", { name: "Send question" });
+    fireEvent.change(question, { target: { value: "What are my rights as a tenant?" } });
+    expect(question).toBeEnabled();
+    expect(send).toBeDisabled();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose jurisdiction" }));
+    const dialog = screen.getByRole("dialog", { name: "Choose jurisdiction" });
+    const geographic = within(dialog).getByRole("radio", { name: "Geographic" });
+    expect(geographic).toHaveFocus();
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(mocks.query).not.toHaveBeenCalled();
+    fireEvent.click(geographic);
+    const search = screen.getByRole("combobox", { name: "Find jurisdiction" });
+    expect(search).toHaveFocus();
+    await act(async () => vi.advanceTimersByTime(250));
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    const change = screen.getByRole("button", { name: "Change jurisdiction" });
+    expect(change).toHaveTextContent("Ghana");
+    expect(change).toHaveFocus();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(question).toHaveValue("What are my rights as a tenant?");
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+    expect(onSearch).toHaveBeenCalledOnce();
+
+    fireEvent.click(change);
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+    expect(change).toHaveFocus();
+    expect(change).toHaveTextContent("Ghana");
+  });
+
   it("waits for type selection and the exact 250ms debounce", async () => {
     mocks.query.mockResolvedValue({
       page: [ghana],

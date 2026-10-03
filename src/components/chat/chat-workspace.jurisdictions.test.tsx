@@ -55,6 +55,10 @@ vi.mock("next/image", () => ({
   default: ({ alt }: { alt: string }) => <span aria-label={alt} />,
 }));
 
+vi.mock("next/font/local", () => ({
+  default: () => ({ variable: "chat-font" }),
+}));
+
 vi.mock("@/lib/auth-client", () => ({
   authClient: {
     useSession: () => ({
@@ -235,15 +239,21 @@ describe("unified chat client", () => {
     view.rerender(route());
     expect(screen.getByLabelText("Chat history")).toBe(sidebar);
     expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "What do you want to know?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "The law, in plain language." })).toBeInTheDocument();
   });
 
   it("starts a new chat before navigation finishes and waits only for session creation", async () => {
     let finishEnsure!: () => void;
     mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));
     render(<ChatWorkspace chatId={null} initialQuery={null} />);
-    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    expect(screen.getByRole("textbox")).toBeEnabled();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Hello" } });
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(mocks.ensureSession).not.toHaveBeenCalled();
+    expect(mocks.push).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
     fireEvent.click(screen.getByRole("button", { name: "Send question" }));
 
     await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledTimes(1));
@@ -257,6 +267,16 @@ describe("unified chat client", () => {
     expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string)).toMatchObject({
       query: "Hello", jurisdictionId: jurisdiction.id, externalId,
     });
+  });
+
+  it("prefills a topic question without sending or choosing a jurisdiction", () => {
+    render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Work & employment" }));
+    expect(screen.getByRole("textbox")).toHaveValue("What should I know about my rights at work?");
+    expect(screen.getByRole("textbox")).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    expect(mocks.ensureSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("shows a recoverable error when creating a new chat fails", async () => {

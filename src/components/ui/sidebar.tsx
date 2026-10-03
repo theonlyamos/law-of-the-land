@@ -8,10 +8,9 @@ import { api } from "@/convex/_generated/api";
 import { authClient } from "@/lib/auth-client";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
-  Clock,
-  MessageSquare,
-  MessageSquarePlus,
   PanelLeft,
+  Plus,
+  SquarePen,
   Trash2,
   X,
 } from "lucide-react";
@@ -57,22 +56,24 @@ export function Sidebar({
 
   const displayName = user?.name ?? user?.email ?? "Account";
 
-  const formatTimestamp = (date: Date) => {
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-
-    if (days === 0) {
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    }
-    if (days === 1) {
-      return "Yesterday";
-    }
-    if (days < 7) {
-      return date.toLocaleDateString([], { weekday: "long" });
-    }
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const weekAgo = new Date(today);
+  weekAgo.setDate(today.getDate() - 7);
+  const sessionGroups: Record<string, ChatSession[]> = {
+    Today: [],
+    Yesterday: [],
+    "Previous 7 days": [],
+    Older: [],
   };
+  for (const session of sessions) {
+    const group = session.timestamp >= today ? "Today"
+      : session.timestamp >= yesterday ? "Yesterday"
+      : session.timestamp >= weekAgo ? "Previous 7 days" : "Older";
+    sessionGroups[group].push(session);
+  }
 
   const handleSignOut = async () => {
     const result = await authClient.signOut();
@@ -87,24 +88,24 @@ export function Sidebar({
     <div
       aria-label="Chat history"
       className={`
-        flex h-full min-h-0 w-64 flex-col border-r bg-background
+        flex h-full min-h-0 w-60 shrink-0 flex-col border-r bg-[hsl(var(--chat-panel))]
         fixed inset-y-0 left-0 z-50 transform
-        transition-[transform,width,visibility] duration-300 ease-in-out
+        transition-[transform,visibility] duration-200 ease-out motion-reduce:transition-none
         md:static md:z-20 md:translate-x-0 md:visible
         ${isOpen ? "visible translate-x-0" : "invisible -translate-x-full"}
-        ${collapsed ? "md:w-[4.25rem]" : "md:w-64"}
+        ${collapsed ? "md:w-[4.25rem]" : "md:w-60"}
       `}
     >
-      <div className={`flex items-center gap-1 p-3 ${collapsed ? "md:flex-col md:gap-2" : ""}`}>
+      <div className={`flex items-center px-3 pb-5 pt-4 ${collapsed ? "md:flex-col md:gap-2" : ""}`}>
         <Link
           href="/"
           aria-label="Law of the Land — home"
           className="flex h-11 w-11 shrink-0 items-center justify-center"
         >
-          <Image src={logo} alt="" width={40} />
+          <Image src={logo} alt="" width={34} />
         </Link>
         <span
-          className={`min-w-0 flex-1 truncate text-sm font-semibold ${collapsibleLabel}`}
+          className={`min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight ${collapsibleLabel}`}
         >
           Law of the Land
         </span>
@@ -112,11 +113,11 @@ export function Sidebar({
           variant="ghost"
           size="icon"
           onClick={onToggleCollapse}
-          className="hidden h-11 w-11 shrink-0 md:flex"
+          className="hidden h-11 w-11 shrink-0 text-muted-foreground md:flex"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-expanded={!collapsed}
         >
-          <PanelLeft className="h-5 w-5" />
+          <PanelLeft className="h-4 w-4" />
         </Button>
         <Button
           variant="ghost"
@@ -129,21 +130,22 @@ export function Sidebar({
         </Button>
       </div>
 
-      <div className="px-3 pb-2">
+      <div className="px-3 pb-6">
         <Button
           variant="outline"
           onClick={onNewSession}
-          className={`h-11 w-full justify-start gap-2 ${collapsibleRow}`}
+          className={`h-11 w-full justify-start gap-2.5 rounded-full border-border bg-card px-4 text-[13px] shadow-none ${collapsibleRow}`}
           aria-label="Start a new chat"
           title={collapsed ? "New chat" : undefined}
         >
-          <MessageSquarePlus className="h-5 w-5 shrink-0" />
+          <Plus className="h-4 w-4 shrink-0" />
           <span className={collapsibleLabel}>New chat</span>
+          <SquarePen className={`ml-auto h-4 w-4 text-muted-foreground ${collapsibleLabel}`} />
         </Button>
       </div>
 
       <ScrollArea className={`min-h-0 flex-1 ${collapsed ? "md:invisible" : ""}`}>
-        <div className="space-y-1 p-3 pt-1">
+        <div className="space-y-6 px-3 pb-4">
           {sessionPaginationStatus === "LoadingFirstPage" ? (
             <p className="py-4 text-center text-sm text-muted-foreground">Loading chats…</p>
           ) : sessions.length === 0 ? (
@@ -151,67 +153,69 @@ export function Sidebar({
               No saved chats yet. Ask a question and it will be saved here.
             </div>
           ) : (
-            sessions.map((session) => (
-              <div key={session.id} className="group relative">
-                <Button
-                  asChild
-                  variant={activeSession === session.id ? "secondary" : "ghost"}
-                  className="h-auto w-full min-w-0 justify-start gap-2 px-3 py-2.5"
-                >
-                  <Link
-                    href={`/${session.id}`}
-                    onClick={() => onAfterSessionNavigate?.()}
-                  >
-                    <MessageSquare className="mt-0.5 h-4 w-4 shrink-0" />
-                    <div className="min-w-0 flex-1 pr-10 text-left">
-                      <div className="truncate text-sm font-medium">{session.title}</div>
-                      <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <Clock className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{formatTimestamp(session.timestamp)}</span>
-                      </div>
-                    </div>
-                  </Link>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-0 top-1/2 h-11 w-11 -translate-y-1/2 transition-opacity focus-visible:opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                  aria-label={`Delete chat: ${session.title}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    setDeleteConfirm(session.id);
-                  }}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive dark:text-red-400" />
-                </Button>
-
-                {deleteConfirm === session.id && (
-                  <div className="absolute inset-y-0 right-0 z-10 flex w-full items-center justify-end gap-1 rounded-md bg-background/95 pr-2 backdrop-blur-sm">
+            Object.entries(sessionGroups).filter(([, group]) => group.length > 0).map(([label, group]) => (
+              <section key={label} aria-label={label}>
+                <h2 className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{label}</h2>
+                {group.map((session) => (
+                  <div key={session.id} className="group relative">
                     <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteSession(session.id);
-                        setDeleteConfirm(null);
-                      }}
+                      asChild
+                      variant={activeSession === session.id ? "secondary" : "ghost"}
+                      className="h-11 w-full min-w-0 justify-start rounded-lg px-3 pr-11 shadow-none"
                     >
-                      Delete chat
+                      <Link
+                        href={`/${session.id}`}
+                        aria-current={activeSession === session.id ? "page" : undefined}
+                        title={`${session.title} · ${session.timestamp.toLocaleDateString()}`}
+                        onClick={() => onAfterSessionNavigate?.()}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-left text-[13px] font-normal">{session.title}</span>
+                      </Link>
                     </Button>
                     <Button
-                      size="sm"
                       variant="ghost"
+                      size="icon"
+                      className="absolute right-0 top-1/2 h-11 w-11 -translate-y-1/2 text-muted-foreground transition-opacity hover:text-destructive focus-visible:opacity-100 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+                      aria-label={`Delete chat: ${session.title}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setDeleteConfirm(null);
+                        e.preventDefault();
+                        setDeleteConfirm(session.id);
                       }}
                     >
-                      Keep
+                      <Trash2 className="h-3.5 w-3.5" />
                     </Button>
+
+                    {deleteConfirm === session.id && (
+                      <div className="absolute inset-y-0 right-0 z-10 flex w-full items-center justify-end gap-1 rounded-lg bg-background pr-1">
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          className="h-11"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteSession(session.id);
+                            setDeleteConfirm(null);
+                          }}
+                        >
+                          Delete chat
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-11"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteConfirm(null);
+                          }}
+                        >
+                          Keep
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                ))}
+              </section>
             ))
           )}
           {sessions.length > 0 && (
@@ -219,7 +223,7 @@ export function Sidebar({
               {sessionPaginationStatus === "CanLoadMore" && (
                 <Button
                   variant="ghost"
-                  className="h-10 w-full text-sm text-muted-foreground"
+                  className="h-11 w-full text-xs text-muted-foreground"
                   onClick={onLoadMoreSessions}
                 >
                   Load more chats
@@ -230,18 +234,13 @@ export function Sidebar({
                   Loading more chats…
                 </p>
               )}
-              {sessionPaginationStatus === "Exhausted" && (
-                <p className="py-2 text-center text-xs text-muted-foreground">
-                  All chats loaded
-                </p>
-              )}
             </div>
           )}
         </div>
       </ScrollArea>
 
       <div className="border-t p-3">
-        <ProfileMenu name={displayName} image={user?.image} collapsed={collapsed} onNavigate={onAfterSessionNavigate} onSignOut={handleSignOut} />
+        <ProfileMenu name={displayName} image={user?.image} caption="Account settings" collapsed={collapsed} onNavigate={onAfterSessionNavigate} onSignOut={handleSignOut} />
       </div>
     </div>
   );

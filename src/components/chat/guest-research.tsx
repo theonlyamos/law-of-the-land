@@ -5,9 +5,12 @@ import { AssistantMessage } from "@/components/chat/assistant-message";
 import { AssistantMessageFooter } from "@/components/chat/assistant-message-footer";
 import { Button } from "@/components/ui/button";
 import { ChatInput } from "@/components/ui/chat-input";
-import { PageLoader } from "@/components/ui/spinner";
+import { PageLoader, Spinner } from "@/components/ui/spinner";
 import { clearGuestResearchDraft, readGuestResearchDraft, saveGuestResearchDraft } from "@/lib/guest-research-draft";
 import { useConvexAuth } from "convex/react";
+import { Globe2, LockKeyhole } from "lucide-react";
+import Image from "next/image";
+import logo from "@/app/logo-transparent.png";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -222,14 +225,15 @@ export function GuestResearch({ initialQuery, initialJurisdiction }: {
   const localOnly = localRequest && !session?.turns.some((turn) => turn.requestId === localRequest.requestId);
 
   return (
-    <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-6 sm:py-8">
-      <header className="mb-8 flex flex-wrap items-start justify-between gap-3 border-b pb-4">
+    <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-8 sm:px-8 sm:py-12">
+      <header className="mb-10 flex flex-wrap items-start justify-between gap-5">
         <div>
-          <h1 className="text-lg font-semibold">Your research</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{session?.jurisdictionName ?? "Guest research"}</p>
+          <p className="chat-eyebrow mb-4">{session?.jurisdictionName ?? "Guest research"}</p>
+          <h1 className="chat-heading">Your research</h1>
+          <p className="mt-4 text-sm leading-7 text-muted-foreground">Ask in plain language. Explore the sources behind your answer.</p>
         </div>
         {!isAuthenticated && hasAnswer && (
-          <Link href={SIGNUP} className="text-sm font-medium underline underline-offset-4">Save this research — create a free account</Link>
+          <Link href={SIGNUP} className="inline-flex min-h-11 items-center rounded-full border border-input px-4 py-2 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Save this research — create a free account</Link>
         )}
       </header>
       {initialJurisdiction && session && initialJurisdiction !== session.jurisdictionId && <p role="status" className="mb-6 border-l-2 border-amber-700 pl-3 text-sm text-muted-foreground">
@@ -238,20 +242,27 @@ export function GuestResearch({ initialQuery, initialJurisdiction }: {
       <div aria-label="Research conversation">
         {visibleTurns.map((turn) => (
           <section key={turn.requestId} className="mb-10">
-            <div className="mb-4 flex justify-end">
-              <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground [overflow-wrap:anywhere]">{turn.query}</p>
+            <div className="mb-7 flex justify-end">
+              <p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-5 py-3 text-sm leading-relaxed text-secondary-foreground [overflow-wrap:anywhere]">{turn.query}</p>
             </div>
             {turn.result && <div className="min-w-0 text-sm leading-7">
+              <div className="mb-4 flex items-center gap-2 text-xs font-semibold">
+                <Image src={logo} alt="" width={27} height={20} className="h-5 w-7 object-contain" />
+                Law of the Land
+              </div>
               <div className="markdown-content"><AssistantMessage content={turn.result.answer} /></div>
-              {turn.result.citations.length > 0 && <section aria-label="Sources" className="mt-4 border-t pt-3 text-xs leading-5 text-muted-foreground">
-                <h2 className="font-semibold text-foreground">Sources</h2>
-                <ol className="mt-1 list-decimal space-y-2 pl-5">
+              {turn.result.citations.length > 0 && <section aria-label="Sources" className="mt-6 border-t pt-4 text-xs leading-5 text-muted-foreground">
+                <h2 className="text-[11px] font-semibold uppercase tracking-wider">Sources · {turn.result.citations.length}</h2>
+                <ol className="mt-3 space-y-2">
                   {turn.result.citations.map((citation, index) => (
-                    <li key={`${citation.jurisdictionId}-${index}`}>
+                    <li key={`${citation.jurisdictionId}-${index}`} className="chat-source">
+                      <span className="chat-source-number" aria-hidden="true">{index + 1}</span>
+                      <div className="min-w-0 [overflow-wrap:anywhere]">
                       {citation.sourceUrl && /^https?:\/\//i.test(citation.sourceUrl)
                         ? <a href={citation.sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={`${citation.label} (opens in a new tab)`} className="font-medium text-foreground underline underline-offset-4">{citation.label}</a>
                         : <span className="font-medium text-foreground">{citation.label}</span>}
-                      {" — "}{citation.jurisdictionName}{citation.officialCitation ? `; ${citation.officialCitation}` : ""}
+                        <p>{citation.jurisdictionName}{citation.officialCitation ? ` · ${citation.officialCitation}` : ""}</p>
+                      </div>
                     </li>
                   ))}
                 </ol>
@@ -261,30 +272,36 @@ export function GuestResearch({ initialQuery, initialJurisdiction }: {
             </div>}
           </section>
         ))}
-        {localOnly && sending && <p className="mb-4 whitespace-pre-wrap text-sm">{localRequest.query}</p>}
-        {(sending || pending || claiming) && <p role="status" className="mb-6 text-sm text-muted-foreground">{claiming ? "Saving your research to your account…" : "Researching your question and checking sources…"}</p>}
+        {localOnly && sending && <div className="mb-7 flex justify-end"><p className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-5 py-3 text-sm leading-relaxed text-secondary-foreground [overflow-wrap:anywhere]">{localRequest.query}</p></div>}
+        {(sending || pending || claiming) && <p role="status" className="mb-6 flex items-center gap-3 text-sm text-muted-foreground"><Spinner className="size-4 shrink-0" />{claiming ? "Saving your research to your account…" : "Researching your question and checking sources…"}</p>}
       </div>
-      {error && <div role="alert" className="mb-4 text-sm text-destructive">
+      {error && <div role="alert" className="mb-5 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm leading-6 text-destructive">
         <p>{error}</p>
-        {!restored && <Button variant="outline" className="mt-2" onClick={() => void restore()}>Try again</Button>}
-        {isAuthenticated && hasAnswer && !claiming && <Button variant="outline" className="mt-2" onClick={() => void claim()}>Save research again</Button>}
+        {!restored && <Button variant="outline" className="mt-2 min-h-11 rounded-full" onClick={() => void restore()}>Try again</Button>}
+        {isAuthenticated && hasAnswer && !claiming && <Button variant="outline" className="mt-2 min-h-11 rounded-full" onClick={() => void claim()}>Save research again</Button>}
       </div>}
-      {restored && !isAuthenticated && <div className="border-t pt-4">
-        <p id="guest-allowance" className="mb-3 text-sm text-muted-foreground">
+      {restored && !isAuthenticated && <div className="mt-8">
+        <p id="guest-allowance" className="mb-4 text-xs leading-6 text-muted-foreground">
           {remaining === 0 ? "You’ve used your guest research trial. Create a free account to continue and save this conversation."
             : remaining === 1 ? "One free follow-up remaining. No account required."
             : "Try one question and one follow-up free. No account required."}
         </p>
         {jurisdictionId ? <>
           <label htmlFor="guest-question" className="sr-only">{remaining === 0 ? "Your next question" : "Your legal question"}</label>
-          <ChatInput id="guest-question" describedBy="guest-allowance" maxLength={4000} rows={3}
+          <ChatInput id="guest-question" variant="editorial" ariaLabel={remaining === 0 ? "Your next question" : "Your legal question"}
+            describedBy="guest-allowance" maxLength={4000} rows={2}
             query={query} onQueryChange={updateQuery} isLoading={sending || pending}
             onSearch={() => void send(query)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(query); } }}
-            placeholder={remaining === 2 ? "Ask your legal question…" : undefined} />
-        </> : <Link href="/" className="text-sm underline underline-offset-4">Choose a jurisdiction and start your research</Link>}
-        {remaining === 0 && <Button asChild className="mt-3"><Link href={SIGNUP}>Create a free account</Link></Button>}
-        <p className="mt-3 text-xs text-muted-foreground">{remaining === 0 ? "Free accounts have a daily question allowance. Paid plans offer higher limits. " : ""}Guest research stays in this browser for up to 24 hours. Create an account to keep it.</p>
+            footer={<span className="chat-scope-label" title={`${session?.jurisdictionName ?? "Selected jurisdiction"} — fixed for this conversation`}>
+              <Globe2 className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{session?.jurisdictionName ?? "Selected jurisdiction"}</span>
+              <LockKeyhole className="size-3 shrink-0" aria-label="Fixed for this conversation" />
+            </span>}
+            placeholder={remaining === 2 ? "What would you like to understand?" : "Ask a follow-up…"} />
+        </> : <Link href="/" className="inline-flex min-h-11 items-center text-sm underline underline-offset-4">Choose a jurisdiction and start your research</Link>}
+        {remaining === 0 && <Button asChild className="mt-5 min-h-11 rounded-full px-5"><Link href={SIGNUP}>Create a free account</Link></Button>}
+        <p className="mt-4 text-xs leading-6 text-muted-foreground">{remaining === 0 ? "Free accounts have a daily question allowance. Paid plans offer higher limits. " : ""}Guest research stays in this browser for up to 24 hours. Create an account to keep it.</p>
       </div>}
     </main>
   );
