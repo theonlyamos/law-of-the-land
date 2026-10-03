@@ -13,6 +13,8 @@ import {
 } from "./lib/telemetryProof";
 import schema from "./schema";
 import { CHAT_POLICY_RESPONSES } from "./lib/chatPolicy";
+import { queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
+import { completeGovernedInteractionProofParts } from "./chats";
 
 const modules = import.meta.glob("./**/*.ts");
 const authModules = Object.fromEntries(
@@ -44,6 +46,14 @@ type Coverage = {
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
   coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
+const TEST_DIAGNOSTICS: QueryDiagnostics = {
+  version: 1 as const, phase: "canonical_read" as const, reason: "completed" as const,
+  searchCallCount: 1, searchResultCount: 1, searchResultItemCount: 2,
+  streamedAnnotationCount: 1, canonicalAnnotationCount: 1,
+  canonicalReadCompleted: true, countsClamped: false,
+  citationUriKind: "authorized_store" as const,
+  jurisdictionMetadataPresent: true, resourceMetadataPresent: true, versionMetadataPresent: true,
+};
 type CompletionInput = {
   routeNonce: string;
   externalId: string;
@@ -60,6 +70,7 @@ type CompletionInput = {
   readyStoreCount: number;
   partialCoverage: boolean;
   jurisdictionCoverage: Coverage[];
+  diagnostics?: QueryDiagnostics;
 };
 
 const completeGovernedInteraction = makeFunctionReference<"mutation">(
@@ -302,6 +313,16 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
       citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
+    ...(input.diagnostics === undefined ? [] : [
+      "query-diagnostics-v1", input.diagnostics.phase, input.diagnostics.reason,
+      input.diagnostics.searchCallCount, input.diagnostics.searchResultCount, input.diagnostics.searchResultItemCount,
+      input.diagnostics.streamedAnnotationCount, input.diagnostics.canonicalAnnotationCount,
+      input.diagnostics.canonicalReadCompleted ? 1 : 0, input.diagnostics.countsClamped ? 1 : 0,
+      input.diagnostics.citationUriKind ?? "",
+      input.diagnostics.jurisdictionMetadataPresent === undefined ? -1 : input.diagnostics.jurisdictionMetadataPresent ? 1 : 0,
+      input.diagnostics.resourceMetadataPresent === undefined ? -1 : input.diagnostics.resourceMetadataPresent ? 1 : 0,
+      input.diagnostics.versionMetadataPresent === undefined ? -1 : input.diagnostics.versionMetadataPresent ? 1 : 0,
+    ]),
   ];
 }
 
@@ -337,6 +358,105 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("persists bounded proof-bound query diagnostics without exposing provider content", async () => {
+    const { t, owner, base } = await fixture();
+    await expect(complete(owner.client, { ...base, diagnostics: TEST_DIAGNOSTICS })).resolves.toMatchObject({ status: "completed" });
+    const state = await terminalState(t);
+    expect(state.runs[0]).toHaveProperty("diagnostics", TEST_DIAGNOSTICS);
+    expect(JSON.stringify(state.runs[0].diagnostics)).not.toContain("fileSearchStores/");
+  });
+
+  it("preserves legacy proof parts and completions when diagnostics are absent", async () => {
+    const { t, owner, base } = await fixture();
+    expect(queryDiagnosticsProofParts()).toEqual([]);
+    expect(await completeGovernedInteractionProofParts(base)).toEqual(await proofParts(base));
+    await expect(complete(owner.client, base)).resolves.toMatchObject({ status: "completed" });
+    expect((await terminalState(t)).runs[0]).not.toHaveProperty("diagnostics");
+  });
+
+  it.each(["changed", "added", "removed"])("rejects diagnostics %s after the service proof was signed", async change => {
+    const { t, owner, base } = await fixture();
+    const signed = { ...base, ...(change === "added" ? {} : { diagnostics: TEST_DIAGNOSTICS }) };
+    const sent = { ...base, ...(change === "removed" ? {} : { diagnostics: {
+      ...TEST_DIAGNOSTICS, searchResultCount: change === "changed" ? 2 : 1,
+    } }) };
+    await expect(owner.client.mutation(completeGovernedInteraction, {
+      ...sent, serviceProof: await createTelemetryServiceProof(await proofParts(signed)),
+    })).rejects.toThrow("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it("replays identical diagnostics regardless of key order with the same or a new nonce", async () => {
+    const { t, owner, base } = await fixture();
+    const input = { ...base, diagnostics: TEST_DIAGNOSTICS };
+    await complete(owner.client, input);
+    const before = await terminalState(t);
+    const reordered = Object.fromEntries(Object.entries(TEST_DIAGNOSTICS).reverse()) as QueryDiagnostics;
+    expect(queryDiagnosticsProofParts(reordered)).toEqual(queryDiagnosticsProofParts(TEST_DIAGNOSTICS));
+    await expect(complete(owner.client, { ...input, diagnostics: reordered })).resolves.toEqual({ status: "replayed", outcome: "success" });
+    await expect(complete(owner.client, { ...input, diagnostics: reordered, routeNonce: createOpaqueTelemetryToken() }))
+      .resolves.toEqual({ status: "replayed", outcome: "success" });
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["same nonce", "new nonce"])("rejects changed diagnostics on signed replay with %s", async nonceKind => {
+    const { t, owner, base } = await fixture();
+    await complete(owner.client, { ...base, diagnostics: TEST_DIAGNOSTICS });
+    const before = await terminalState(t);
+    await expect(complete(owner.client, { ...base,
+      routeNonce: nonceKind === "new nonce" ? createOpaqueTelemetryToken() : base.routeNonce,
+      diagnostics: { ...TEST_DIAGNOSTICS, canonicalAnnotationCount: 2 },
+    })).rejects.toThrow(nonceKind === "same nonce" ? "GOVERNED_INTERACTION_REPLAY_INVALID" : "CHAT_CLIENT_ID_CONFLICT");
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["added", "removed"])("rejects diagnostics %s on a signed legacy-compatible replay", async change => {
+    const { t, owner, base } = await fixture();
+    await complete(owner.client, { ...base, ...(change === "removed" ? { diagnostics: TEST_DIAGNOSTICS } : {}) });
+    const before = await terminalState(t);
+    await expect(complete(owner.client, { ...base, ...(change === "added" ? { diagnostics: TEST_DIAGNOSTICS } : {}) }))
+      .rejects.toThrow("GOVERNED_INTERACTION_REPLAY_INVALID");
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each([
+    ["searchCallCount", -1], ["searchResultCount", 1025], ["searchResultItemCount", 0.5],
+    ["streamedAnnotationCount", Number.NaN], ["canonicalAnnotationCount", Number.POSITIVE_INFINITY],
+    ["version", 2], ["phase", "raw_provider"], ["reason", "arbitrary provider error"],
+    ["providerResponse", "private text"], ["citationUriKind", "fileSearchStores/private"],
+    ["resourceMetadataPresent", "yes"], ["canonicalReadCompleted", "yes"],
+  ])("rejects malformed diagnostic field %s", async (field, value) => {
+    const { t, owner, base } = await fixture();
+    const diagnostics = { ...TEST_DIAGNOSTICS, [field]: value };
+    expect(() => validateQueryDiagnostics(diagnostics)).toThrow("INVALID_QUERY_DIAGNOSTICS");
+    await expect(owner.client.mutation(completeGovernedInteraction, {
+      ...base, diagnostics, serviceProof: await createTelemetryServiceProof(await proofParts({ ...base, diagnostics: TEST_DIAGNOSTICS })),
+    })).rejects.toThrow(/INVALID_QUERY_DIAGNOSTICS|Validator error/);
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each([0, 1024])("accepts diagnostic count boundary %s and omitted optional classifications", async count => {
+    const { t, owner, base } = await fixture();
+    const diagnostics: QueryDiagnostics = {
+      version: 1, phase: "completion", reason: "completed", searchCallCount: count,
+      searchResultCount: count, searchResultItemCount: count, streamedAnnotationCount: count, canonicalAnnotationCount: count,
+      canonicalReadCompleted: false, countsClamped: count === 1024,
+    };
+    await complete(owner.client, { ...base, diagnostics });
+    expect((await terminalState(t)).runs[0].diagnostics).toEqual(diagnostics);
+    expect(queryDiagnosticsProofParts(diagnostics).slice(-4)).toEqual(["", -1, -1, -1]);
+  });
+
+  it("records bounded failure diagnostics without creating a citation claim", async () => {
+    const { t, owner, base } = await fixture();
+    const diagnostics: QueryDiagnostics = { ...TEST_DIAGNOSTICS, reason: "citation_identity", citationUriKind: "other", versionMetadataPresent: false };
+    await complete(owner.client, { ...base, finalAnswer: undefined, citations: [], outcome: "failure", failureCategory: "validation",
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "no_evidence" }], diagnostics });
+    const state = await terminalState(t);
+    expect(state.claims).toEqual([]);
+    expect(state.runs[0]).toMatchObject({ outcome: "failure", diagnostics });
+  });
+
   it("persists a fixed policy reply only with its bound kind and claim", async () => {
     const { t, owner, base } = await fixture();
     const finalAnswer = CHAT_POLICY_RESPONSES.out_of_scope;

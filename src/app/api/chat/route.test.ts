@@ -24,6 +24,8 @@ vi.mock("@google/genai", () => ({
 
 import { POST, maxDuration } from "./route";
 import { CHAT_POLICY_RESPONSES } from "../../../../convex/lib/chatPolicy";
+import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
+import { verifyTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -216,6 +218,149 @@ afterEach(() => {
   delete process.env.TELEMETRY_INGEST_SECRET;
   delete process.env.CHAT_INTENT_ROUTING_MODE;
   delete process.env.TYPESAFE_API_KEY;
+});
+
+describe("POST /api/chat private query diagnostics", () => {
+  function terminalArgs() {
+    return authMocks.fetchAuthMutation.mock.calls.findLast(
+      ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+    )?.[1];
+  }
+
+  it("binds successful diagnostics to the service proof without exposing them to the browser", async () => {
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args?.diagnostics).toMatchObject({
+      version: 1, phase: "completion", reason: "completed",
+      searchCallCount: 1, searchResultCount: 1,
+      canonicalReadCompleted: true, canonicalAnnotationCount: 1,
+    });
+    expect(await verifyTelemetryServiceProof(
+      args.serviceProof,
+      await completeGovernedInteractionProofParts(args),
+    )).toBe(true);
+    expect(await verifyTelemetryServiceProof(
+      args.serviceProof,
+      await completeGovernedInteractionProofParts({
+        ...args, diagnostics: { ...args.diagnostics, canonicalAnnotationCount: 0 },
+      }),
+    )).toBe(false);
+    expect(streamEvents.at(-1)?.type).toBe("done");
+    expect(JSON.stringify(streamEvents)).not.toContain("diagnostics");
+    expect(JSON.stringify(streamEvents)).not.toContain("canonicalReadCompleted");
+  });
+
+  it("retains no-canonical-annotation evidence for legal abstentions", async () => {
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.get.mockResolvedValue(canonical);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "success", answerKind: "legal", citations: [],
+      diagnostics: {
+        phase: "completion", reason: "no_canonical_annotations",
+        searchCallCount: 1, searchResultCount: 1,
+        streamedAnnotationCount: 0, canonicalAnnotationCount: 0,
+        canonicalReadCompleted: true,
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("done");
+  });
+
+  it("retains a citation rejection's structure while keeping document identifiers private", async () => {
+    const documentName = "fileSearchStores/ghana/documents/private-document-identifier";
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations[0].document_uri = documentName;
+    interactionMocks.get.mockResolvedValue(canonical);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "validation", citations: [],
+      diagnostics: {
+        phase: "canonical_read", reason: "citation_identity",
+        citationUriKind: "authorized_document",
+        jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
+        versionMetadataPresent: true, canonicalAnnotationCount: 1,
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("error");
+    expect(JSON.stringify(args.diagnostics)).not.toContain(documentName);
+    expect(JSON.stringify(args.diagnostics)).not.toContain(selectedResourceId);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(documentName);
+    expect(JSON.stringify(streamEvents)).not.toContain("citation_identity");
+  });
+
+  it("distinguishes provider error events using a closed reason without retaining their payload", async () => {
+    const privatePayload = "private-provider-error-detail";
+    interactionMocks.create.mockResolvedValue((async function* () {
+      yield { event_type: "error", error: { message: privatePayload } };
+    })());
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "validation",
+      diagnostics: { phase: "generation", reason: "provider_error", canonicalReadCompleted: false },
+    });
+    expect(JSON.stringify(terminalArgs())).not.toContain(privatePayload);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
+  it("does not trust a provider exception that imitates an application error code", async () => {
+    const privatePayload = "GOVERNED_CHAT_PRIVATE_PROVIDER_SECRET";
+    interactionMocks.create.mockRejectedValue(new Error(privatePayload));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await events(await POST(request()));
+
+    expect(terminalArgs()?.diagnostics).toMatchObject({
+      phase: "generation", reason: "provider_request_failed",
+    });
+    expect(JSON.stringify(terminalArgs())).not.toContain(privatePayload);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
+  });
+
+  it("retains the canonical-read phase and prior search counts when the canonical request fails", async () => {
+    interactionMocks.get.mockRejectedValue(new Error("private-canonical-error"));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await events(await POST(request()));
+
+    expect(terminalArgs()?.diagnostics).toMatchObject({
+      phase: "canonical_read", reason: "provider_request_failed",
+      searchCallCount: 1, searchResultCount: 1, canonicalReadCompleted: false,
+    });
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("private-canonical-error");
+  });
+
+  it("distinguishes a rejected completion from a provider parser failure", async () => {
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      if (args.outcome === "success") throw new Error("INVALID_GOVERNED_INTERACTION");
+      return { status: "completed", outcome: "failure" };
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "validation",
+      diagnostics: {
+        phase: "completion", reason: "completion_invalid",
+        canonicalReadCompleted: true, canonicalAnnotationCount: 1,
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("error");
+    expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+  });
 });
 
 describe("POST /api/chat request boundary", () => {
@@ -733,6 +878,10 @@ describe("POST /api/chat streamed governed interaction", () => {
       outcome: "failure",
       failureCategory: "timeout",
       elapsedMs: 90_000,
+      diagnostics: {
+        phase: "generation", reason: "deadline_exceeded",
+        canonicalReadCompleted: false,
+      },
     });
   });
 

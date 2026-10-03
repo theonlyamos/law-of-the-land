@@ -22,6 +22,7 @@ import {
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
+import { validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
 
 export const runtime = "nodejs";
@@ -66,6 +67,7 @@ type CompletionInput = {
   elapsedMs: number;
   outcome: "success" | "failure" | "aborted";
   failureCategory?: FailureCategory;
+  diagnostics?: QueryDiagnostics;
   authorizedScopeSize: number;
   readyStoreCount: number;
   partialCoverage: boolean;
@@ -372,6 +374,7 @@ function failureInput(
   requestStartedAt: number,
   outcome: "failure" | "aborted",
   failureCategory?: FailureCategory,
+  diagnostics?: QueryDiagnostics,
 ): CompletionInput {
   return {
     routeNonce,
@@ -383,6 +386,7 @@ function failureInput(
     elapsedMs: Math.max(0, Math.round(Date.now() - requestStartedAt)),
     outcome,
     ...(failureCategory ? { failureCategory } : {}),
+    ...(diagnostics ? { diagnostics } : {}),
     authorizedScopeSize: manifest.authorizedScopeSize,
     readyStoreCount: manifest.stores.length,
     partialCoverage: manifest.partialCoverage,
@@ -508,7 +512,19 @@ function streamResponse(input: {
         }
       };
       void (async () => {
-        let phase = "generation";
+        let phase: QueryDiagnostics["phase"] = "generation";
+        let diagnostics: QueryDiagnostics | undefined = input.reply === null ? {
+          version: 1,
+          phase: "generation",
+          reason: "in_progress",
+          searchCallCount: 0,
+          searchResultCount: 0,
+          searchResultItemCount: 0,
+          streamedAnnotationCount: 0,
+          canonicalAnnotationCount: 0,
+          canonicalReadCompleted: false,
+          countsClamped: false,
+        } : undefined;
         let completionModel = input.model;
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
@@ -535,6 +551,10 @@ function streamResponse(input: {
               streamDeadlineAt: input.modelDeadlineAt,
               // Gemini text is provisional until the canonical answer and citations are checked.
               onDelta: () => undefined,
+              onDiagnostics: (snapshot) => {
+                validateQueryDiagnostics(snapshot);
+                diagnostics = { ...snapshot };
+              },
               onStreamComplete: () => {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
@@ -557,6 +577,7 @@ function streamResponse(input: {
             model: completionModel,
             elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)),
             outcome: "success",
+            ...(diagnostics ? { diagnostics: { ...diagnostics, phase } } : {}),
             authorizedScopeSize: input.manifest.authorizedScopeSize,
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
@@ -587,11 +608,19 @@ function streamResponse(input: {
           const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
             ? "timeout"
             : classifyFailure(error);
+          const failureDiagnostics: QueryDiagnostics | undefined = diagnostics ? {
+            ...diagnostics,
+            phase,
+            reason: aborted ? "aborted"
+              : category === "timeout" ? "deadline_exceeded"
+              : phase === "completion" ? "completion_invalid"
+              : diagnostics.reason === "in_progress" ? "provider_request_failed"
+              : diagnostics.reason,
+          } : undefined;
           // Do not log provider errors, prompts, answers, tokens, or store identifiers.
           if (!aborted) console.error("chat_request_failed", JSON.stringify({
             phase, category, elapsedMs: Date.now() - input.requestStartedAt,
-            code: error instanceof Error && /^GOVERNED_CHAT_[A-Z_]+(?::[a-z_]+)?$/u.test(error.message)
-              ? error.message : undefined,
+            reason: failureDiagnostics?.reason,
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
           try {
@@ -604,6 +633,7 @@ function streamResponse(input: {
                 input.requestStartedAt,
                 aborted ? "aborted" : "failure",
                 aborted ? undefined : category,
+                failureDiagnostics,
               ),
               input.terminalDeadlineAt,
               aborted ? input.terminalSignal : input.providerSignal,
