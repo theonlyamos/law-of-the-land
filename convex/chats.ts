@@ -35,6 +35,7 @@ import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
+import { queryDiagnosticsProofParts, queryDiagnosticsValidator, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 
 const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"));
 
@@ -95,6 +96,7 @@ type GovernedJurisdictionCoverage = {
   coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
 type GovernedCompletionProofInput = {
+  diagnostics?: QueryDiagnostics;
   routeNonce: string;
   externalId: string;
   jurisdictionId: string;
@@ -208,6 +210,7 @@ export async function completeGovernedInteractionProofParts(
       citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
+    ...queryDiagnosticsProofParts(input.diagnostics),
   ];
 }
 
@@ -233,6 +236,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
       citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
+    ...queryDiagnosticsProofParts(input.diagnostics),
   ]));
   return {
     assistantClientIdBinding: claimBindings.assistantClientIdBinding,
@@ -241,6 +245,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
 }
 
 function validateGovernedCompletionInput(input: GovernedCompletionProofInput): void {
+  if (input.diagnostics !== undefined) validateQueryDiagnostics(input.diagnostics);
   const answer = input.finalAnswer;
   if (
     !isOpaqueTelemetryToken(input.routeNonce)
@@ -765,6 +770,7 @@ const completionResultValidator = v.union(
 
 export const completeGovernedInteraction = mutation({
   args: {
+    diagnostics: v.optional(queryDiagnosticsValidator),
     routeNonce: v.string(),
     externalId: v.string(),
     jurisdictionId: v.string(),
@@ -820,7 +826,8 @@ export const completeGovernedInteraction = mutation({
       .take(2);
     if (nonceRows.length > 1) throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
     if (nonceRows.length === 1) {
-      if (nonceRows[0].chatSessionId !== session._id) {
+      if (nonceRows[0].chatSessionId !== session._id ||
+          JSON.stringify(queryDiagnosticsProofParts(nonceRows[0].diagnostics)) !== JSON.stringify(queryDiagnosticsProofParts(input.diagnostics))) {
         throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
       }
       return { status: "replayed" as const, outcome: nonceRows[0].outcome };
@@ -893,6 +900,7 @@ export const completeGovernedInteraction = mutation({
       claim = { citationClaim, expiresAt };
     }
     await ctx.db.insert("queryRuns", {
+      ...(args.diagnostics === undefined ? {} : { diagnostics: args.diagnostics }),
       requestNonceHash,
       chatSessionId: session._id,
       ...idempotency,

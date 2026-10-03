@@ -3,6 +3,7 @@ import "server-only";
 import type { GoogleGenAI, Interactions } from "@google/genai";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
 import { CHAT_POLICY_RESPONSES, isChatPolicyResponse } from "../../convex/lib/chatPolicy";
+import type { QueryDiagnostics } from "../../convex/lib/queryDiagnostics";
 
 export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
@@ -95,6 +96,8 @@ const MAX_FILE_SEARCH_CALL_ID_LENGTH = 128;
 const MAX_PAGE_NUMBER = 10_000;
 const GEMINI_RESOURCE_ID = "[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?";
 const GEMINI_STORE_NAME = new RegExp(`^fileSearchStores/${GEMINI_RESOURCE_ID}$`, "u");
+const GEMINI_DOCUMENT_NAME = new RegExp(`^fileSearchStores/${GEMINI_RESOURCE_ID}/documents/${GEMINI_RESOURCE_ID}$`, "u");
+const MAX_DIAGNOSTIC_COUNT = 1_024;
 const encoder = new TextEncoder();
 
 export type ChatStore = {
@@ -145,14 +148,20 @@ export type GeminiInteractionsClient = {
 type StreamStepType = "thought" | "file_search_call" | "file_search_result" | "model_output";
 type StreamStep = { type: StreamStepType; stopped: boolean };
 
-function invalidResponse(reason = "unspecified"): never {
-  throw new Error(`GOVERNED_CHAT_RESPONSE_INVALID:${reason}`);
+class GovernedChatDiagnosticError extends Error {
+  constructor(message: string, readonly diagnosticReason: QueryDiagnostics["reason"]) {
+    super(message);
+  }
+}
+
+function invalidResponse(reason: QueryDiagnostics["reason"] = "unspecified"): never {
+  throw new GovernedChatDiagnosticError(`GOVERNED_CHAT_RESPONSE_INVALID:${reason}`, reason);
 }
 
 function checkAbortOrDeadline(signal: AbortSignal, deadlineAt: number): void {
-  if (signal.aborted) throw new Error("GOVERNED_CHAT_ABORTED");
+  if (signal.aborted) throw new GovernedChatDiagnosticError("GOVERNED_CHAT_ABORTED", "aborted");
   if (!Number.isSafeInteger(deadlineAt) || Date.now() >= deadlineAt) {
-    throw new Error("GOVERNED_CHAT_DEADLINE_EXPIRED");
+    throw new GovernedChatDiagnosticError("GOVERNED_CHAT_DEADLINE_EXPIRED", "deadline_exceeded");
   }
 }
 
@@ -175,7 +184,7 @@ function validFileSearchCallId(value: unknown): value is string {
 
 function validateInput(input: GovernedChatInput): void {
   if (typeof input.query !== "string" || !input.query.trim() || input.query.length > MAX_QUERY_LENGTH || input.stores.length === 0 || input.stores.length > MAX_STORES) {
-    throw new Error("GOVERNED_CHAT_REQUEST_INVALID");
+    throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
   }
   const jurisdictionIds = new Set<string>();
   for (const [index, store] of input.stores.entries()) {
@@ -189,12 +198,12 @@ function validateInput(input: GovernedChatInput): void {
       || jurisdictionIds.has(store.jurisdictionId)
       || (index === 0 && store.relation !== "selected")
       || (index > 0 && store.relation === "selected")
-    ) throw new Error("GOVERNED_CHAT_REQUEST_INVALID");
+    ) throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
     jurisdictionIds.add(store.jurisdictionId);
   }
   for (const message of input.history) {
     if ((message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string") {
-      throw new Error("GOVERNED_CHAT_REQUEST_INVALID");
+      throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
     }
   }
 }
@@ -246,7 +255,7 @@ function requestFor(
   };
 }
 
-function canonicalOutput(interaction: Interactions.Interaction): {
+function canonicalOutput(interaction: Interactions.Interaction, countAnnotations: (count: number) => void): {
   answer: string;
   annotations: Interactions.Annotation[];
 } {
@@ -267,6 +276,7 @@ function canonicalOutput(interaction: Interactions.Interaction): {
       }
       texts.push(content.text);
       if (content.annotations) {
+        countAnnotations(content.annotations.length);
         annotations.push(...content.annotations);
         if (annotations.length > MAX_ANNOTATIONS) return invalidResponse("canonical_annotations_limit");
       }
@@ -281,6 +291,9 @@ function citationsFor(
   annotations: readonly Interactions.Annotation[],
   stores: readonly ChatStore[],
   answer: string,
+  observeCitation: (structure: Pick<QueryDiagnostics,
+    "citationUriKind" | "jurisdictionMetadataPresent" | "resourceMetadataPresent" | "versionMetadataPresent"
+  >) => void,
 ): ValidatedCitation[] {
   const storesByJurisdictionId = new Map(stores.map((store) => [store.jurisdictionId, store]));
   const answerBytes = encoder.encode(answer).byteLength;
@@ -298,6 +311,19 @@ function citationsFor(
       ? storesByJurisdictionId.get(jurisdictionId)
       : undefined;
     const providerStoreName = annotation.document_uri;
+    observeCitation({
+      citationUriKind: typeof providerStoreName !== "string" || providerStoreName.length === 0
+        ? "missing"
+        : stores.some((candidate) => candidate.storeName === providerStoreName)
+          ? "authorized_store"
+          : GEMINI_DOCUMENT_NAME.test(providerStoreName)
+            && stores.some((candidate) => providerStoreName.startsWith(`${candidate.storeName}/documents/`))
+            ? "authorized_document"
+            : "other",
+      jurisdictionMetadataPresent: isIdentifier(jurisdictionId),
+      resourceMetadataPresent: isIdentifier(resourceId),
+      versionMetadataPresent: isIdentifier(versionId),
+    });
     if (
       !isIdentifier(jurisdictionId)
       || !isIdentifier(resourceId)
@@ -365,117 +391,167 @@ export class GeminiFileSearchChat {
       streamDeadlineAt: number;
       onDelta: (text: string) => void | Promise<void>;
       onStreamComplete?: () => void;
+      onDiagnostics?: (snapshot: QueryDiagnostics) => void;
     },
   ): Promise<GovernedChatResult> {
-    if (input.maxOutputTokens !== undefined && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 8192)) throw new Error("Invalid output token limit");
-    validateInput(input);
-    checkAbortOrDeadline(options.signal, options.deadlineAt);
-    checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-    const stream = await this.client.interactions.create(requestFor(this.model, input), {
-      signal: options.streamSignal,
-    });
-    const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
-    const fileSearchCallIds = new Map<string, Set<string>>();
-    let interactionId: string | undefined;
-    let completed = false;
-    let streamedAnswer = "";
-    let streamedBytes = 0;
-
-    for await (const event of stream) {
+    const diagnostics: QueryDiagnostics = {
+      version: 1, phase: "generation", reason: "in_progress",
+      searchCallCount: 0, searchResultCount: 0, searchResultItemCount: 0,
+      streamedAnnotationCount: 0, canonicalAnnotationCount: 0,
+      countsClamped: false, canonicalReadCompleted: false,
+    };
+    const report = (update: Partial<QueryDiagnostics> = {}) => {
+      Object.assign(diagnostics, update);
+      try {
+        options.onDiagnostics?.(Object.freeze({ ...diagnostics }));
+      } catch {
+        // Optional diagnostics must not alter generation or authorization outcomes.
+      }
+    };
+    const count = (field: "searchCallCount" | "searchResultCount" | "searchResultItemCount" | "streamedAnnotationCount" | "canonicalAnnotationCount", amount: number) => {
+      const total = diagnostics[field] + amount;
+      report({
+        [field]: Math.min(total, MAX_DIAGNOSTIC_COUNT),
+        countsClamped: diagnostics.countsClamped || total > MAX_DIAGNOSTIC_COUNT,
+      });
+    };
+    report();
+    try {
+      if (input.maxOutputTokens !== undefined && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 8192)) throw new GovernedChatDiagnosticError("Invalid output token limit", "request_invalid");
+      validateInput(input);
+      checkAbortOrDeadline(options.signal, options.deadlineAt);
       checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-      if (completed) return invalidResponse("event_after_completion");
-      if (event.event_type === "error") return invalidResponse("provider_error");
-      if (event.event_type === "interaction.created") {
-        // Creation payloads may omit status; the fetched canonical response must still be completed.
-        if (interactionId || !isIdentifier(event.interaction.id) ||
-          (event.interaction.status !== undefined && event.interaction.status !== "in_progress")) return invalidResponse("creation_state");
-        interactionId = event.interaction.id;
-        stepsByInteraction.set(interactionId, new Map());
-        fileSearchCallIds.set(interactionId, new Set());
-        continue;
-      }
-      if (!interactionId) return invalidResponse("missing_interaction");
-      const steps = stepsByInteraction.get(interactionId);
-      const calls = fileSearchCallIds.get(interactionId);
-      if (!steps || !calls) return invalidResponse("missing_stream_state");
-      if (event.event_type === "interaction.status_update") {
-        if (event.interaction_id !== interactionId || (event.status !== "in_progress" && event.status !== "queued")) return invalidResponse("status_update");
-        continue;
-      }
-      if (event.event_type === "interaction.completed") {
-        if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
-        if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
-        completed = true;
-        continue;
-      }
-      if (event.event_type === "step.start") {
-        if (!validStepIndex(event.index)) return invalidResponse("step_index");
-        const type = event.step.type;
-        if (type !== "thought" && type !== "file_search_call" && type !== "file_search_result" && type !== "model_output") return invalidResponse("step_type");
-        if (steps.has(event.index)) return invalidResponse("duplicate_step");
-        if (type === "file_search_call") {
-          if (
-            !validFileSearchCallId(event.step.id)
-            || calls.has(event.step.id)
-            || calls.size >= MAX_FILE_SEARCH_CALLS
-          ) return invalidResponse("file_search_call");
-          calls.add(event.step.id);
+      const stream = await this.client.interactions.create(requestFor(this.model, input), {
+        signal: options.streamSignal,
+      });
+      const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
+      const fileSearchCallIds = new Map<string, Set<string>>();
+      let interactionId: string | undefined;
+      let completed = false;
+      let streamedAnswer = "";
+      let streamedBytes = 0;
+
+      for await (const event of stream) {
+        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        if (completed) return invalidResponse("event_after_completion");
+        if (event.event_type === "error") return invalidResponse("provider_error");
+        if (event.event_type === "interaction.created") {
+          // Creation payloads may omit status; the fetched canonical response must still be completed.
+          if (interactionId || !isIdentifier(event.interaction.id) ||
+            (event.interaction.status !== undefined && event.interaction.status !== "in_progress")) return invalidResponse("creation_state");
+          interactionId = event.interaction.id;
+          stepsByInteraction.set(interactionId, new Map());
+          fileSearchCallIds.set(interactionId, new Set());
+          continue;
         }
-        if (type === "file_search_result" && (
-          !validFileSearchCallId(event.step.call_id)
-          || !calls.has(event.step.call_id)
-        )) return invalidResponse("file_search_result");
-        steps.set(event.index, { type, stopped: false });
-        continue;
-      }
-      if (event.event_type === "step.stop") {
+        if (!interactionId) return invalidResponse("missing_interaction");
+        const steps = stepsByInteraction.get(interactionId);
+        const calls = fileSearchCallIds.get(interactionId);
+        if (!steps || !calls) return invalidResponse("missing_stream_state");
+        if (event.event_type === "interaction.status_update") {
+          if (event.interaction_id !== interactionId || (event.status !== "in_progress" && event.status !== "queued")) return invalidResponse("status_update");
+          continue;
+        }
+        if (event.event_type === "interaction.completed") {
+          if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
+          if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
+          completed = true;
+          continue;
+        }
+        if (event.event_type === "step.start") {
+          if (!validStepIndex(event.index)) return invalidResponse("step_index");
+          const type = event.step.type;
+          if (type !== "thought" && type !== "file_search_call" && type !== "file_search_result" && type !== "model_output") return invalidResponse("step_type");
+          if (steps.has(event.index)) return invalidResponse("duplicate_step");
+          if (type === "file_search_call") {
+            if (
+              !validFileSearchCallId(event.step.id)
+              || calls.has(event.step.id)
+              || calls.size >= MAX_FILE_SEARCH_CALLS
+            ) return invalidResponse("file_search_call");
+            calls.add(event.step.id);
+            count("searchCallCount", 1);
+          }
+          if (type === "file_search_result" && (
+            !validFileSearchCallId(event.step.call_id)
+            || !calls.has(event.step.call_id)
+          )) return invalidResponse("file_search_result");
+          if (type === "file_search_result") count("searchResultCount", 1);
+          steps.set(event.index, { type, stopped: false });
+          continue;
+        }
+        if (event.event_type === "step.stop") {
+          if (!validStepIndex(event.index)) return invalidResponse("step_index");
+          const step = steps.get(event.index);
+          if (!step || step.stopped) return invalidResponse("step_stop");
+          step.stopped = true;
+          continue;
+        }
+        if (event.event_type !== "step.delta") return invalidResponse("event_type");
         if (!validStepIndex(event.index)) return invalidResponse("step_index");
         const step = steps.get(event.index);
-        if (!step || step.stopped) return invalidResponse("step_stop");
-        step.stopped = true;
-        continue;
+        if (!step || step.stopped) return invalidResponse("step_delta");
+        const stepType = step.type;
+        if (stepType === "model_output") {
+          if (event.delta.type === "text_annotation_delta") {
+            if (Array.isArray(event.delta.annotations)) count("streamedAnnotationCount", event.delta.annotations.length);
+            continue;
+          }
+          if (event.delta.type !== "text") return invalidResponse("model_delta_type");
+          const nextBytes = encoder.encode(event.delta.text).byteLength;
+          if (streamedBytes + nextBytes > MAX_OUTPUT_BYTES) return invalidResponse("output_limit");
+          streamedAnswer += event.delta.text;
+          streamedBytes += nextBytes;
+          await options.onDelta(event.delta.text);
+          continue;
+        }
+        if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
+        if (stepType === "file_search_call" && event.delta.type === "file_search_call") continue;
+        if (stepType === "file_search_result" && event.delta.type === "file_search_result") {
+          // SDK result entries are exposed on deltas, not result-step starts.
+          // This sums observed entries; it does not measure unique hits or prove an empty search.
+          if (Array.isArray(event.delta.result)) count("searchResultItemCount", event.delta.result.length);
+          continue;
+        }
+        return invalidResponse("tool_delta_type");
       }
-      if (event.event_type !== "step.delta") return invalidResponse("event_type");
-      if (!validStepIndex(event.index)) return invalidResponse("step_index");
-      const step = steps.get(event.index);
-      if (!step || step.stopped) return invalidResponse("step_delta");
-      const stepType = step.type;
-      if (stepType === "model_output") {
-        if (event.delta.type === "text_annotation_delta") continue;
-        if (event.delta.type !== "text") return invalidResponse("model_delta_type");
-        const nextBytes = encoder.encode(event.delta.text).byteLength;
-        if (streamedBytes + nextBytes > MAX_OUTPUT_BYTES) return invalidResponse("output_limit");
-        streamedAnswer += event.delta.text;
-        streamedBytes += nextBytes;
-        await options.onDelta(event.delta.text);
-        continue;
-      }
-      if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
-      if (stepType === "file_search_call" && event.delta.type === "file_search_call") continue;
-      if (stepType === "file_search_result" && event.delta.type === "file_search_result") continue;
-      return invalidResponse("tool_delta_type");
-    }
 
-    checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-    if (!completed || !interactionId) return invalidResponse("incomplete_stream");
-    options.onStreamComplete?.();
-    checkAbortOrDeadline(options.signal, options.deadlineAt);
-    const interaction = await this.client.interactions.get(interactionId, undefined, { signal: options.signal });
-    checkAbortOrDeadline(options.signal, options.deadlineAt);
-    if (interaction.id !== interactionId) return invalidResponse("canonical_interaction");
-    const final = canonicalOutput(interaction);
-    if (final.answer !== streamedAnswer) return invalidResponse("canonical_text_mismatch");
-    if (isChatPolicyResponse(final.answer)) {
-      if (final.annotations.length !== 0) return invalidResponse("policy_with_citations");
-      return { answer: final.answer, citations: [], usage: usageFor(interaction.usage) };
+      checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+      if (!completed || !interactionId) return invalidResponse("incomplete_stream");
+      report({ phase: "canonical_read" });
+      options.onStreamComplete?.();
+      checkAbortOrDeadline(options.signal, options.deadlineAt);
+      const interaction = await this.client.interactions.get(interactionId, undefined, { signal: options.signal });
+      report({ canonicalReadCompleted: true });
+      checkAbortOrDeadline(options.signal, options.deadlineAt);
+      if (interaction.id !== interactionId) return invalidResponse("canonical_interaction");
+      const final = canonicalOutput(interaction, (amount) => count("canonicalAnnotationCount", amount));
+      if (final.answer !== streamedAnswer) return invalidResponse("canonical_text_mismatch");
+      if (isChatPolicyResponse(final.answer)) {
+        if (final.annotations.length !== 0) return invalidResponse("policy_with_citations");
+        report({ reason: "completed" });
+        return { answer: final.answer, citations: [], usage: usageFor(interaction.usage) };
+      }
+      if (final.annotations.length === 0) {
+        report({ reason: "no_canonical_annotations" });
+        return { answer: CHAT_NO_EVIDENCE, citations: [], usage: usageFor(interaction.usage) };
+      }
+      const citations = citationsFor(final.annotations, input.stores, final.answer, report);
+      report({ reason: "completed" });
+      return {
+        answer: final.answer,
+        citations,
+        usage: usageFor(interaction.usage),
+      };
+    } catch (error) {
+      const deadlineAt = diagnostics.phase === "generation" ? options.streamDeadlineAt : options.deadlineAt;
+      const signal = diagnostics.phase === "generation" ? options.streamSignal : options.signal;
+      report({ reason: error instanceof GovernedChatDiagnosticError
+        ? error.diagnosticReason
+        : signal.aborted
+          ? Date.now() >= deadlineAt ? "deadline_exceeded" : "aborted"
+          : "provider_request_failed" });
+      throw error;
     }
-    if (final.annotations.length === 0) {
-      return { answer: CHAT_NO_EVIDENCE, citations: [], usage: usageFor(interaction.usage) };
-    }
-    return {
-      answer: final.answer,
-      citations: citationsFor(final.annotations, input.stores, final.answer),
-      usage: usageFor(interaction.usage),
-    };
   }
 }

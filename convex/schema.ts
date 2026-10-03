@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
 import {
@@ -876,6 +877,7 @@ export default defineSchema({
     .index("by_grantOperationId", ["grantOperationId"])
     .index("by_revokeOperationId", ["revokeOperationId"]),
   queryRuns: defineTable({
+    diagnostics: v.optional(queryDiagnosticsValidator),
     requestNonceHash: v.string(),
     chatSessionId: v.id("chatSessions"),
     assistantClientIdBinding: v.string(),

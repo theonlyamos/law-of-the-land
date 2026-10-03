@@ -11,6 +11,7 @@ import {
   type GovernedChatInput,
 } from "./gemini-file-search-chat";
 import { CHAT_POLICY_RESPONSES } from "../../convex/lib/chatPolicy";
+import type { QueryDiagnostics } from "../../convex/lib/queryDiagnostics";
 
 const stores = [
   {
@@ -471,5 +472,184 @@ describe("GeminiFileSearchChat", () => {
       onDelta: () => { controller.abort(); },
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(client.getIds).toEqual([]);
+  });
+});
+
+describe("GeminiFileSearchChat structural diagnostics", () => {
+  function observedRun(
+    events = eventStream(),
+    final = canonical(undefined, [citation()]),
+    configure?: (client: FakeInteractionsClient) => void,
+    observe?: (snapshot: QueryDiagnostics) => void,
+  ) {
+    const client = new FakeInteractionsClient(events, final);
+    configure?.(client);
+    const snapshots: QueryDiagnostics[] = [];
+    const controller = new AbortController();
+    const operation = new GeminiFileSearchChat(client, {}).run(input(), {
+      signal: controller.signal,
+      streamSignal: controller.signal,
+      deadlineAt: Date.now() + 10_000,
+      streamDeadlineAt: Date.now() + 10_000,
+      onDelta: () => undefined,
+      onDiagnostics: (snapshot: QueryDiagnostics) => {
+        snapshots.push(snapshot);
+        observe?.(snapshot);
+      },
+    });
+    return { operation, snapshots, controller };
+  }
+
+  it("distinguishes streamed annotations and search results from canonical no-evidence", async () => {
+    const events = eventStream();
+    events.splice(events.length - 2, 0, {
+      event_type: "step.delta", index: 3,
+      delta: { type: "text_annotation_delta", annotations: [citation()] },
+    });
+    const resultEvent = events[8] as Interactions.StepDelta;
+    resultEvent.delta = { type: "file_search_result", result: [{}, {}] };
+    const { operation, snapshots } = observedRun(events, canonical());
+    await expect(operation).resolves.toMatchObject({
+      answer: "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.",
+      citations: [],
+    });
+    expect(snapshots.at(-1)).toMatchObject({
+      version: 1, phase: "canonical_read", reason: "no_canonical_annotations",
+      searchCallCount: 1, searchResultCount: 1, searchResultItemCount: 2,
+      streamedAnnotationCount: 1, canonicalAnnotationCount: 0,
+      canonicalReadCompleted: true, countsClamped: false,
+    });
+  });
+
+  it("reports the exact rejected citation structure without retaining its contents", async () => {
+    const secret = "synthetic-private-provider-value";
+    const { operation, snapshots } = observedRun(undefined, canonical(undefined, [citation({
+      document_uri: `fileSearchStores/ghana-law/documents/${secret}`,
+      custom_metadata: { jurisdiction_id: "ghana", resource_id: secret, version_id: secret },
+    })]));
+    await expect(operation).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:citation_identity");
+    expect(snapshots.at(-1)).toMatchObject({
+      phase: "canonical_read", reason: "citation_identity", canonicalAnnotationCount: 1,
+      canonicalReadCompleted: true, citationUriKind: "authorized_document",
+      jurisdictionMetadataPresent: true, resourceMetadataPresent: true, versionMetadataPresent: true,
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(secret);
+    expect(JSON.stringify(snapshots)).not.toContain("fileSearchStores/");
+  });
+
+  it("records bounded metadata validity flags without serializing malicious metadata", async () => {
+    const secret = "synthetic-malicious-payload";
+    const { operation, snapshots } = observedRun(undefined, canonical(undefined, [citation({
+      document_uri: `https://private.example/${secret}`,
+      custom_metadata: { jurisdiction_id: { raw: secret }, resource_id: "", version_id: "x".repeat(201), extra: secret },
+    })]));
+    await expect(operation).rejects.toThrow("citation_identity");
+    expect(snapshots.at(-1)).toMatchObject({
+      citationUriKind: "other", jurisdictionMetadataPresent: false,
+      resourceMetadataPresent: false, versionMetadataPresent: false,
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(secret);
+    expect(JSON.stringify(snapshots)).not.toContain("private.example");
+  });
+
+  it("records provider SSE errors as a closed reason without their payload", async () => {
+    const secret = "synthetic-provider-sse-secret";
+    const event = { event_type: "error", error: { message: secret, code: 503 } } as unknown as StreamEvent;
+    const { operation, snapshots } = observedRun([...eventStream().slice(0, 10), event]);
+    await expect(operation).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:provider_error");
+    expect(snapshots.at(-1)).toMatchObject({
+      phase: "generation", reason: "provider_error", searchCallCount: 1,
+      searchResultCount: 1, canonicalReadCompleted: false,
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(secret);
+  });
+
+  it("does not trust provider error messages that imitate local diagnostic codes", async () => {
+    const error = new Error("GOVERNED_CHAT_RESPONSE_INVALID:citation_identity_secret");
+    const { operation, snapshots } = observedRun(undefined, undefined, (client) => {
+      vi.spyOn(client.interactions, "create").mockRejectedValue(error);
+    });
+    await expect(operation).rejects.toBe(error);
+    expect(snapshots.at(-1)).toMatchObject({ phase: "generation", reason: "provider_request_failed" });
+    expect(JSON.stringify(snapshots)).not.toContain(error.message);
+  });
+
+  it("keeps stream progress when the canonical provider read fails", async () => {
+    const error = new Error("synthetic-private-canonical-error");
+    const { operation, snapshots } = observedRun(undefined, undefined, (client) => {
+      vi.spyOn(client.interactions, "get").mockRejectedValue(error);
+    });
+    await expect(operation).rejects.toBe(error);
+    expect(snapshots.at(-1)).toMatchObject({
+      phase: "canonical_read", reason: "provider_request_failed", searchCallCount: 1,
+      searchResultCount: 1, canonicalReadCompleted: false,
+    });
+    expect(JSON.stringify(snapshots)).not.toContain(error.message);
+  });
+
+  it("keeps progress and reports a deadline reached late in the stream", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const { operation, snapshots } = observedRun(undefined, undefined, undefined, (snapshot) => {
+        if (snapshot.searchResultCount === 1) vi.setSystemTime(20_000);
+      });
+      await expect(operation).rejects.toThrow("GOVERNED_CHAT_DEADLINE_EXPIRED");
+      expect(snapshots.at(-1)).toMatchObject({
+        phase: "generation", reason: "deadline_exceeded", searchCallCount: 1,
+        searchResultCount: 1, canonicalReadCompleted: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clamps structural counts without changing the uncited answer behavior", async () => {
+    const events = eventStream();
+    events.splice(events.length - 2, 0, {
+      event_type: "step.delta", index: 3,
+      delta: { type: "text_annotation_delta", annotations: Array.from({ length: 1_025 }, () => citation()) },
+    });
+    (events[8] as Interactions.StepDelta).delta = { type: "file_search_result", result: Array.from({ length: 1_025 }, () => ({})) };
+    const { operation, snapshots } = observedRun(events, canonical());
+    await expect(operation).resolves.toMatchObject({ citations: [] });
+    expect(snapshots.at(-1)).toMatchObject({
+      reason: "no_canonical_annotations", searchResultItemCount: 1_024,
+      streamedAnnotationCount: 1_024, canonicalAnnotationCount: 0, countsClamped: true,
+    });
+  });
+
+  it("emits fresh immutable snapshots and isolates observer failures", async () => {
+    const frozen: boolean[] = [];
+    const modified: boolean[] = [];
+    const { operation, snapshots } = observedRun(undefined, undefined, undefined, (snapshot) => {
+      frozen.push(Object.isFrozen(snapshot));
+      modified.push(Reflect.set(snapshot, "reason", "synthetic-malicious-value"));
+      throw new Error("synthetic-observer-error");
+    });
+    await expect(operation).resolves.toMatchObject({ citations: [{ jurisdictionId: "ghana" }] });
+    expect(snapshots.length).toBeGreaterThan(1);
+    expect(new Set(snapshots).size).toBe(snapshots.length);
+    expect(frozen.every(Boolean)).toBe(true);
+    expect(modified.every((changed) => !changed)).toBe(true);
+    expect(snapshots[0]).toMatchObject({ reason: "in_progress", searchCallCount: 0 });
+    expect(snapshots.at(-1)).toMatchObject({
+      reason: "completed", canonicalReadCompleted: true, canonicalAnnotationCount: 1,
+      citationUriKind: "authorized_store", jurisdictionMetadataPresent: true,
+      resourceMetadataPresent: true, versionMetadataPresent: true,
+    });
+    expect(JSON.stringify(snapshots)).not.toContain("synthetic-malicious-value");
+  });
+
+  it.each([
+    ["citation_identity", canonical(undefined, [citation({ document_uri: undefined })])],
+    ["canonical_text_mismatch", canonical("different text", [citation()])],
+    ["citation_offsets_invalid", canonical(undefined, [citation({ start_index: -1, end_index: 1 })])],
+    ["canonical_annotations_limit", canonical(undefined, Array.from({ length: 65 }, () => citation()))],
+  ] as const)("preserves the exact local %s failure reason", async (reason, final) => {
+    const { operation, snapshots } = observedRun(undefined, final);
+    await expect(operation).rejects.toThrow(`GOVERNED_CHAT_RESPONSE_INVALID:${reason}`);
+    expect(snapshots.at(-1)).toMatchObject({ phase: "canonical_read", reason, canonicalReadCompleted: true });
+    if (reason === "citation_identity") expect(snapshots.at(-1)?.citationUriKind).toBe("missing");
   });
 });
