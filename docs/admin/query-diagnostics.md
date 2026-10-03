@@ -86,23 +86,46 @@ Citations appeared during streaming, while the canonical response retained only
 URL citations. The route opts in on the server; guest and embedded routes retain
 their existing behavior.
 
-The fallback requires one streamed model-output step, one canonical text block,
-completed matching interaction IDs and exact whole-text agreement. Every annotation
-event replaces the retained batch. A later empty or URL-only batch cannot restore
-an earlier File Citation. Missing or malformed arrays and exceeded observation
-bounds fail closed. The final batch is a conservative subset if provider arrays
-are additive, or the latest state if they replace; this does not establish complete
-citation coverage.
+The fallback requires completed matching interaction IDs, exact whole-text
+agreement, and supported text content. Gemini can emit its final File Citations in
+an annotation-only model-output step after the answer text. That empty carrier is
+part of the same completed response; it does not have to repeat the answer.
+Canonical content-block and step boundaries need not match the stream's text
+partitions. The complete assembled text must still match exactly.
+
+Every annotation event replaces the retained batch. An initial model-output
+snapshot combines its annotated text blocks into one bounded batch before
+replacement, so later blocks in that same snapshot do not erase earlier ones.
+A later empty or URL-only
+batch cannot restore an earlier File Citation. Missing or malformed arrays and
+exceeded observation bounds fail closed. The final batch is a conservative subset
+if provider arrays are additive, or the latest state if they replace; this does not
+establish complete citation coverage.
 
 Each admitted File Citation must supply complete, unique jurisdiction/resource/
-version metadata and an exact document resource name under an authorized store.
-Document names are proof-bound and must equal the current published version's
-catalog name. Current access, active-version, store, publication and lifecycle-lock
+version metadata and a reference to an authorized store. A store URI uses the same
+catalog identity contract as canonical File Citations. An exact provider document
+resource, when supplied, is additionally proof-bound and must equal the current
+published version's catalog name. Conflicting or malformed document references are
+rejected. Current access, active-version, store, publication and lifecycle-lock
 checks still apply. Missing identity fields, display names and URL citations cannot
 supply document authority. Answer text is sent only after authoritative completion.
 
+Streamed citation locators must be nonempty paired ranges within the complete
+answer's UTF-8 byte length and code-point boundaries. They are never rebased.
+These are bounded source-provenance checks; only document/page citations are
+exposed, with no claim of precise inline span attribution.
+
+The [Interactions API reference](https://ai.google.dev/api/interactions-api)
+describes File Citation offsets as byte positions in the response. It does not
+establish step-local offsets. The
+[streaming guide](https://ai.google.dev/gemini-api/docs/streaming) describes step
+assembly without guaranteeing that a later GET preserves text partitions.
+
 `stream_citation_batch`, `stream_citation_limit` and `stream_citation_ambiguous`
-identify malformed batches, observation bounds and output-layout ambiguity.
+identify malformed batches, observation bounds and unsupported output content.
+Historical `stream_citation_ambiguous` rows also include the former empty-owner
+and per-step text-partition guards; that reason alone cannot distinguish them.
 The application search-call guard now distinguishes `file_search_call_id`,
 `file_search_call_duplicate` and `file_search_budget_exhausted`. Its eight-call cap
 and existing step/time/token limits remain in place. Historical `file_search_call`
