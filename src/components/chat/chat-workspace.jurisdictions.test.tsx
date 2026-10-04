@@ -175,6 +175,195 @@ afterEach(() => {
 });
 
 describe("unified chat client", () => {
+  function mockAttachmentUpload({ failFirst = false, answerFails = false } = {}) {
+    let uploadedCount = 0;
+    let preparedCount = 0;
+    class Upload {
+      upload = { onprogress: null as null | ((event: { lengthComputable: boolean; loaded: number; total: number }) => void) };
+      headers = new Map<string, string>();
+      status = 200;
+      responseText = "";
+      onload?: () => void;
+      onerror?: () => void;
+      onabort?: () => void;
+      open() {}
+      setRequestHeader(name: string, value: string) { this.headers.set(name, value); }
+      abort() { this.onabort?.(); }
+      send(file: File) {
+        uploadedCount += 1;
+        queueMicrotask(() => {
+          if (failFirst && uploadedCount === 1) { this.onerror?.(); return; }
+          this.responseText = JSON.stringify({ attachment: { id: this.headers.get("x-attachment-id"), filename: file.name, mimeType: file.type, byteSize: file.size, kind: "text" } });
+          this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal("XMLHttpRequest", Upload);
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
+      if (url === "/api/chat/attachments") {
+        preparedCount += 1;
+        return Promise.resolve(Response.json({ attachmentId: `attachment-${preparedCount}`, uploadUrl: "https://upload.test", token: "token" }));
+      }
+      return Promise.resolve(answerFails
+        ? Response.json({ error: "Answer temporarily unavailable" }, { status: 500 })
+        : ndjsonResponse([{ type: "done", result: "Your document says the code is ORCHARD-72.", answerKind: "document", citations: [], citationClaim, partialCoverage: false }]));
+    }));
+  }
+
+  it("sends files-only questions, saves attachment references, and restores private file links after reload", async () => {
+    mockAttachmentUpload();
+    mocks.session = { title: "Documents", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    const view = render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["ORCHARD-72"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith("/api/chat", expect.objectContaining({ body: expect.stringContaining('"attachmentIds":["attachment-1"]') }));
+    const saved = mocks.appendMessages.mock.calls[0][0].messages;
+    expect(saved[0]).toMatchObject({ content: "Summarize these files.", attachmentIds: ["attachment-1"] });
+    expect(screen.getByText("Based on your files")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Remove notes.txt" })).not.toBeInTheDocument();
+    mocks.messages = saved.map((message: PersistedChatMessage, index: number) => ({
+      ...message, storageId: `persisted-${index}`, creationTime: message.createdAt,
+      ...(index === 0 ? { attachments: [{ id: "attachment-1", filename: "notes.txt", mimeType: "text/plain", byteSize: 10, kind: "text" as const }] } : {}),
+    }));
+    view.unmount();
+    render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    expect(screen.getByRole("link", { name: "Download notes.txt" })).toHaveAttribute("href", "/api/chat/attachments/attachment-1?download=1");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "What was the code again?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(2));
+    const chatCalls = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => url === "/api/chat");
+    expect(JSON.parse(chatCalls[1][1].body)).toMatchObject({ query: "What was the code again?", attachmentIds: [] });
+  });
+
+  it("retains files and text after upload and answer failures and exposes an upload retry", async () => {
+    mockAttachmentUpload({ failFirst: true, answerFails: true });
+    mocks.session = { title: "Documents", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Please read my file" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["ORCHARD-72"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    expect(await screen.findByRole("button", { name: "Retry notes.txt" })).toBeEnabled();
+    expect(screen.getByRole("textbox")).toHaveValue("Please read my file");
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => url === "/api/chat")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Retry notes.txt" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send question" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    expect(await screen.findByText("Answer temporarily unavailable")).toBeVisible();
+    expect(screen.getByRole("textbox")).toHaveValue("Please read my file");
+    expect(screen.getByRole("button", { name: "Remove notes.txt" })).toBeEnabled();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("retains an upload failure and a background retry after leaving and remounting the workspace", async () => {
+    mockAttachmentUpload();
+    let finishPrepare!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValueOnce(new Promise<Response>((resolve) => { finishPrepare = resolve; }));
+    mocks.session = { title: "Documents", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    const workspace = <ChatWorkspace chatId={chatId} initialQuery={null} />;
+    const view = render(workspace);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Please read my file" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["ORCHARD-72"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/chat/attachments", expect.anything()));
+    view.rerender(<div>Settings</div>);
+    await act(async () => finishPrepare(Response.json({ error: "Upload preparation failed" }, { status: 503 })));
+    view.rerender(workspace);
+    expect(screen.getByRole("textbox")).toHaveValue("Please read my file");
+    expect(screen.getByText("Upload preparation failed")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Retry notes.txt" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+
+    vi.mocked(fetch).mockReturnValueOnce(new Promise<Response>((resolve) => { finishPrepare = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry notes.txt" }));
+    view.rerender(<div>Settings</div>);
+    await act(async () => finishPrepare(Response.json({ attachmentId: "background-file", uploadUrl: "https://upload.test", token: "token" })));
+    view.rerender(workspace);
+    expect(screen.getByRole("textbox")).toHaveValue("Please read my file");
+    expect(screen.getByText(/Uploaded/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(mocks.appendMessages.mock.calls[0][0].messages[0]).toMatchObject({ attachmentIds: ["background-file"] });
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/chat/attachments")).toHaveLength(2);
+    view.rerender(<div>Settings</div>);
+    view.rerender(workspace);
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Remove notes.txt" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["deadline_exceeded", /took too long/i],
+    ["file_search_budget_exhausted", /search limit/i],
+  ] as const)("retains uploaded files after %s and reuses them for a clean document retry", async (reason, message) => {
+    mockAttachmentUpload();
+    const attachmentFetch = vi.mocked(fetch).getMockImplementation()!;
+    const cancel = vi.fn();
+    let attempts = 0;
+    vi.mocked(fetch).mockImplementation((url, init) => {
+      if (url !== "/api/chat" || attempts++ > 0) return attachmentFetch(url, init);
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error", reason, error: "Generic fallback" })}\n`));
+          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "done", answerKind: "document", result: "Late file answer", citations: [], citationClaim, partialCoverage: false })}\n`));
+        },
+        cancel,
+      }), { headers: { "content-type": "application/x-ndjson" } }));
+    });
+    mocks.session = { title: "Documents", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Read this document" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["ORCHARD-72"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByRole("textbox")).toHaveValue("Read this document");
+    expect(screen.getByRole("button", { name: "Remove notes.txt" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeEnabled();
+    expect(screen.queryByText("Late file answer")).not.toBeInTheDocument();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    const chatCalls = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/chat");
+    expect(JSON.parse(chatCalls[1][1]!.body as string)).toMatchObject({ attachmentIds: ["attachment-1"], messages: [] });
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/chat/attachments")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove notes.txt" })).not.toBeInTheDocument();
+    expect(screen.getByText("Based on your files")).toBeVisible();
+  });
+
+  it("keeps the allocated new-chat attachment draft through navigation and background completion", async () => {
+    mockAttachmentUpload();
+    let finishEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>((resolve) => { finishEnsure = resolve; }));
+    const view = render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Read A" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["A"], "a.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    const externalId = mocks.ensureSession.mock.calls[0][0].externalId;
+    view.rerender(<ChatWorkspace chatId={externalId} initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    expect(screen.getByRole("textbox")).toHaveValue("Read A");
+    expect(screen.getByRole("button", { name: "Remove a.txt" })).toBeDisabled();
+    view.rerender(<ChatWorkspace chatId="chat-b" initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    expect(screen.queryByRole("button", { name: "Remove a.txt" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Draft B" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["B"], "b.txt", { type: "text/plain" })] } });
+    await act(async () => finishEnsure());
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledWith(expect.objectContaining({ externalId })));
+    expect(screen.getByRole("textbox")).toHaveValue("Draft B");
+    expect(screen.getByRole("button", { name: "Remove b.txt" })).toBeEnabled();
+    view.rerender(<ChatWorkspace chatId={externalId} initialQuery={null} initialJurisdiction={jurisdiction.id} />);
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Remove a.txt" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download a.txt" })).toBeVisible();
+  });
+
   it("keeps verified source links when a guest answer is saved to the account", () => {
     mocks.session = { title: "Claimed research", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
     mocks.messages = [{
@@ -277,6 +466,20 @@ describe("unified chat client", () => {
     expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
     expect(mocks.ensureSession).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("allocates only one new conversation for synchronous repeated sends", async () => {
+    mocks.ensureSession.mockReturnValue(new Promise<void>(() => {}));
+    render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Read my files" } });
+    const send = screen.getByRole("button", { name: "Send question" });
+    act(() => {
+      send.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      send.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.ensureSession).toHaveBeenCalledTimes(1);
+    expect(mocks.push).toHaveBeenCalledTimes(1);
   });
 
   it("shows a recoverable error when creating a new chat fails", async () => {
@@ -528,6 +731,7 @@ describe("unified chat client", () => {
       messages: [],
       externalId: chatId,
       assistantClientId: expect.any(String),
+      attachmentIds: [],
     });
     expect(mocks.appendMessages.mock.calls[0][0]).toMatchObject({
       externalId: chatId,

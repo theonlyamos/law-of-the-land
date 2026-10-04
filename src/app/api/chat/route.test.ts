@@ -9,6 +9,7 @@ const authMocks = vi.hoisted(() => ({
 }));
 const rateLimitMocks = vi.hoisted(() => ({ rateLimit: vi.fn() }));
 const interactionMocks = vi.hoisted(() => ({ create: vi.fn(), get: vi.fn() }));
+const attachmentMocks = vi.hoisted(() => ({ loadChatAttachmentContext: vi.fn() }));
 
 vi.mock("@/lib/auth-server", () => authMocks);
 vi.mock("@/lib/rate-limit", () => ({
@@ -16,6 +17,10 @@ vi.mock("@/lib/rate-limit", () => ({
   rateLimit: rateLimitMocks.rateLimit,
 }));
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/chat-attachment-server", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/chat-attachment-server")>(),
+  loadChatAttachmentContext: attachmentMocks.loadChatAttachmentContext,
+}));
 vi.mock("@google/genai", () => ({
   GoogleGenAI: class {
     interactions = interactionMocks;
@@ -24,6 +29,7 @@ vi.mock("@google/genai", () => ({
 
 import { POST, maxDuration } from "./route";
 import { CHAT_POLICY_RESPONSES } from "../../../../convex/lib/chatPolicy";
+import { ChatAttachmentError } from "@/lib/chat-attachment-server";
 import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
 import { verifyTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
 
@@ -179,6 +185,7 @@ beforeEach(() => {
   process.env.CHAT_INTENT_ROUTING_MODE = "off";
   authMocks.isAuthenticated.mockResolvedValue(true);
   authMocks.getToken.mockResolvedValue("user-session-token");
+  attachmentMocks.loadChatAttachmentContext.mockResolvedValue({ attachments: [], attachmentIds: [], selectedJurisdiction: { id: selectedJurisdictionId, name: "Ghana", kind: "geographic" } });
   authMocks.fetchAuthQuery.mockResolvedValue({
     allowed: true,
     canRecord: true,
@@ -218,6 +225,69 @@ afterEach(() => {
   delete process.env.TELEMETRY_INGEST_SECRET;
   delete process.env.CHAT_INTENT_ROUTING_MODE;
   delete process.env.TYPESAFE_API_KEY;
+});
+
+describe("POST /api/chat attachment integration", () => {
+  const fileContext = {
+    attachments: [{ id: "saved-file", filename: "notes.txt", mimeType: "text/plain", kind: "text", text: "The monthly rent is 900." }],
+    attachmentIds: ["saved-file"],
+    selectedJurisdiction: { id: selectedJurisdictionId, name: "Ghana", kind: "geographic" },
+  };
+
+  it("summarizes files without a legal store and binds all resolved files to completion", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
+    const canonical = canonicalInteraction("The monthly rent is 900.");
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.create.mockResolvedValue(successfulStream("The monthly rent is 900."));
+    interactionMocks.get.mockResolvedValue(canonical);
+    const response = await POST(request({ query: "", attachmentIds: ["saved-file"] }));
+    expect(response.status).toBe(200);
+    expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "document", result: "The monthly rent is 900.", citations: [] });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(attachmentMocks.loadChatAttachmentContext).toHaveBeenCalledWith("chat-external-id", ["saved-file"], "user-session-token", expect.any(AbortSignal));
+    const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+    expect(completion).toMatchObject({ answerKind: "document", attachmentIds: ["saved-file"], authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
+  });
+
+  it("resolves saved attachments on follow-up while keeping legal citations required", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
+    const response = await POST(request({ attachmentIds: [] }));
+    expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal", citations: [publicCitation] });
+    expect(attachmentMocks.loadChatAttachmentContext.mock.calls[0][1]).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(interactionMocks.create.mock.calls[0][0])).toContain("The monthly rent is 900.");
+  });
+
+  it("rejects inaccessible files and mismatched scope before consuming quota", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockRejectedValueOnce(new ChatAttachmentError("Attachment unavailable.", 404));
+    expect((await POST(request({ attachmentIds: ["missing"] }))).status).toBe(404);
+    expect(mutationNames()).not.toContain("usage:recordQuestion");
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValueOnce({ ...fileContext, selectedJurisdiction: { ...fileContext.selectedJurisdiction, id: "another-jurisdiction" } });
+    expect((await POST(request({ attachmentIds: [] }))).status).toBe(400);
+    expect(mutationNames()).not.toContain("usage:recordQuestion");
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate or excessive attachment IDs", async () => {
+    for (const attachmentIds of [["one", "one"], ["a", "b", "c", "d", "e", "f"]]) {
+      expect((await POST(request({ attachmentIds }))).status).toBe(400);
+    }
+    expect(attachmentMocks.loadChatAttachmentContext).not.toHaveBeenCalled();
+    expect(mutationNames()).not.toContain("usage:recordQuestion");
+  });
+
+  it("withholds file-derived text when access is revoked before completion", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
+    const original = authMocks.fetchAuthMutation.getMockImplementation()!;
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "chats:completeGovernedInteraction") throw new Error("CHAT_ATTACHMENT_UNAVAILABLE");
+      return original(reference, args);
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(request({ attachmentIds: [] }));
+    const result = await events(response);
+    expect(result).toEqual([{ type: "error", error: "We couldn't process your request. Please try again." }]);
+  });
 });
 
 describe("POST /api/chat private query diagnostics", () => {

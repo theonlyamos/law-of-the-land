@@ -24,6 +24,9 @@ import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
 import { emptyQueryDiagnosticExecution, validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
+import { isDocumentQuestion } from "@/lib/chat-document-intent";
+import { ChatAttachmentError, loadChatAttachmentContext, type ChatAttachmentContext } from "@/lib/chat-attachment-server";
+import { MAX_CHAT_FILES } from "../../../../shared/chat-attachments";
 import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 
 export const runtime = "nodejs";
@@ -37,6 +40,7 @@ type ChatBody = {
   messages: Message[];
   externalId: string;
   assistantClientId: string;
+  attachmentIds?: string[];
 };
 type ResearchManifest = {
   authorizedScopeSize: number;
@@ -73,6 +77,7 @@ type CompletionInput = {
   readyStoreCount: number;
   partialCoverage: boolean;
   jurisdictionCoverage: Coverage[];
+  attachmentIds?: string[];
 };
 type PublicCitation = {
   label: string;
@@ -218,10 +223,15 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     "messages",
     "externalId",
     "assistantClientId",
+    ...(Object.hasOwn(value, "attachmentIds") ? ["attachmentIds"] : []),
   ])) return null;
+  if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds)
+    || value.attachmentIds.length > MAX_CHAT_FILES
+    || value.attachmentIds.some(id => !boundedIdentifier(id, 128))
+    || new Set(value.attachmentIds).size !== value.attachmentIds.length)) return null;
   if (
     typeof value.query !== "string"
-    || !value.query.trim()
+    || (!value.query.trim() && !(Array.isArray(value.attachmentIds) && value.attachmentIds.length > 0))
     || value.query.trim().length > MAX_QUERY_LENGTH
     || !boundedIdentifier(value.jurisdictionId)
     || !boundedIdentifier(value.externalId)
@@ -242,11 +252,12 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     messages.push({ role: message.role, content: message.content });
   }
   return {
-    query: value.query.trim(),
+    query: value.query.trim() || "Summarize these files.",
     jurisdictionId: value.jurisdictionId,
     messages,
     externalId: value.externalId,
     assistantClientId: value.assistantClientId,
+    ...(value.attachmentIds === undefined ? {} : { attachmentIds: value.attachmentIds as string[] }),
   };
 }
 
@@ -375,6 +386,7 @@ function failureInput(
   requestStartedAt: number,
   outcome: "failure" | "aborted",
   failureCategory?: FailureCategory,
+  attachmentIds?: string[],
   diagnostics?: QueryDiagnostics,
 ): CompletionInput {
   return {
@@ -387,6 +399,7 @@ function failureInput(
     elapsedMs: Math.max(0, Math.round(Date.now() - requestStartedAt)),
     outcome,
     ...(failureCategory ? { failureCategory } : {}),
+    ...(attachmentIds?.length ? { attachmentIds } : {}),
     ...(diagnostics ? { diagnostics } : {}),
     authorizedScopeSize: manifest.authorizedScopeSize,
     readyStoreCount: manifest.stores.length,
@@ -461,8 +474,8 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
     || result.outcome !== "success"
     || result.answerKind !== answerKind
     || !Array.isArray(result.citations)
-    || (result.citations.length === 0 && !(answerKind === "policy" ? isChatPolicyResponse(answer) : answer === CHAT_NO_EVIDENCE))
-    || (answerKind === "policy" && result.citations.length !== 0)
+    || (result.citations.length === 0 && !(answerKind === "document" || (answerKind === "policy" ? isChatPolicyResponse(answer) : answer === CHAT_NO_EVIDENCE)))
+    || ((answerKind === "policy" || answerKind === "document") && result.citations.length !== 0)
     || result.citations.length > MAX_PUBLIC_CITATIONS
     || typeof result.partialCoverage !== "boolean"
     || typeof result.citationClaim !== "string"
@@ -497,6 +510,8 @@ function streamResponse(input: {
   terminalTimer: ReturnType<typeof setTimeout>;
   request: Request;
   detachRequestAbort: () => void;
+  attachmentContext?: ChatAttachmentContext;
+  answerMode?: "legal" | "document";
 }) {
   const encoder = new TextEncoder();
   let cancelled = input.request.signal.aborted;
@@ -549,7 +564,7 @@ function streamResponse(input: {
             result = { answer: input.reply, citations: [] };
           } else {
             phase = "generation";
-            if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
+            if (input.manifest.stores.length === 0 && input.answerMode !== "document") throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
             const apiKey = process.env.GOOGLE_AI_API_KEY;
             if (!apiKey) {
               if (diagnostics) diagnostics = { ...diagnostics, reason: "not_configured" };
@@ -560,6 +575,11 @@ function streamResponse(input: {
               query: input.body.query,
               stores: input.manifest.stores,
               history: input.body.messages,
+              ...(input.attachmentContext?.attachments.length ? {
+                attachments: input.attachmentContext.attachments,
+                answerKind: input.answerMode ?? "legal",
+                selectedJurisdiction: input.attachmentContext.selectedJurisdiction,
+              } : {}),
             }, {
               signal: input.providerSignal,
               deadlineAt: input.terminalDeadlineAt,
@@ -581,7 +601,7 @@ function streamResponse(input: {
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
           phase = "completion";
-          const answerKind: ChatAnswerKind = isChatPolicyResponse(result.answer) ? "policy" : "legal";
+          const answerKind: ChatAnswerKind = input.answerMode === "document" ? "document" : isChatPolicyResponse(result.answer) ? "policy" : "legal";
           const terminalInput: CompletionInput = {
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
@@ -598,6 +618,7 @@ function streamResponse(input: {
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
             jurisdictionCoverage: coverageFor(input.manifest, result.citations, completionModel === "app-policy-v1"),
+            ...(input.attachmentContext?.attachmentIds.length ? { attachmentIds: input.attachmentContext.attachmentIds } : {}),
           };
           const completed = parseCompletionResult(
             await completeWithinDeadline(
@@ -610,6 +631,7 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          // Completion rechecks current scope and file access before any answer leaves the server.
           send({ type: "delta", text: result.answer });
           send({
             type: "done",
@@ -660,6 +682,7 @@ function streamResponse(input: {
                 input.requestStartedAt,
                 aborted ? "aborted" : "failure",
                 aborted ? undefined : category,
+                input.attachmentContext?.attachmentIds,
                 failureDiagnostics,
               ),
               input.terminalDeadlineAt,
@@ -758,17 +781,32 @@ export async function POST(request: Request): Promise<Response> {
         400,
       ));
     }
+    let attachmentContext: ChatAttachmentContext | undefined;
+    let attachmentToken: string | undefined;
+    if (body.attachmentIds !== undefined) {
+      const token = await raceWithAbort(getToken(), streamSignal);
+      if (!token) return stopEarly(jsonError("Sign in to attach files.", 401));
+      attachmentToken = token;
+      try {
+        attachmentContext = await raceWithAbort(loadChatAttachmentContext(body.externalId, body.attachmentIds, token, streamSignal), streamSignal);
+        if (attachmentContext.selectedJurisdiction.id !== body.jurisdictionId) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
+      } catch (error) {
+        return stopEarly(jsonError(error instanceof ChatAttachmentError ? error.message : "The attachments could not be read. Please try again.", error instanceof ChatAttachmentError ? error.status : 400));
+      }
+    }
+    const hasAttachments = Boolean(attachmentContext?.attachments.length);
+    const answerMode = hasAttachments && isDocumentQuestion(body.query, body.messages) ? "document" : "legal";
     const mode = chatRoutingMode();
-    let reply: string | null = mode === "on" && exactFormality(body.query)
+    let reply: string | null = !hasAttachments && mode === "on" && exactFormality(body.query)
       ? policyReply("courtesy") : null;
     if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
-    if (mode === "shadow" || (mode === "on" && reply === null)) {
+    if (!hasAttachments && (mode === "shadow" || (mode === "on" && reply === null))) {
       const choice = await classifyChatIntent(body.query, body.messages, providerSignal, mode);
       if (mode === "on") reply = policyReply(choice);
     }
     let manifest: ResearchManifest = POLICY_MANIFEST;
-    if (reply === null) {
-      const token = await raceWithAbort(getToken(), streamSignal);
+    if (reply === null && answerMode !== "document") {
+      const token = attachmentToken ?? await raceWithAbort(getToken(), streamSignal);
       if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
       let loaded: ResearchManifest | null = null;
       try {
@@ -819,6 +857,8 @@ export async function POST(request: Request): Promise<Response> {
       terminalTimer,
       request,
       detachRequestAbort,
+      attachmentContext,
+      answerMode,
     });
   } catch {
     return stopEarly(jsonError(CHAT_FAILURE, 500));

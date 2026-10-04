@@ -41,6 +41,15 @@ function execution() {
 }
 
 describe("execution query diagnostics", () => {
+  it("accepts and proof-binds the document citation rejection reason", () => {
+    const diagnostics = { ...base, reason: "document_with_citations" as const };
+    expect(() => validateQueryDiagnostics(diagnostics)).not.toThrow();
+    expect(queryDiagnosticsProofParts(diagnostics)).toContain("document_with_citations");
+    expect(queryDiagnosticsProofParts(diagnostics)).not.toEqual(queryDiagnosticsProofParts(base));
+    expect(() => validateQueryDiagnostics({ ...base, reason: "document-private-content" }))
+      .toThrow("INVALID_QUERY_DIAGNOSTICS");
+  });
+
   it("returns a fresh observation with no execution event recorded", () => {
     const first = emptyQueryDiagnosticExecution();
     const second = emptyQueryDiagnosticExecution();

@@ -35,9 +35,11 @@ import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
+import { attachmentMetadata, checkedAttachments } from "./chatAttachments";
+import { chatAttachmentMetadataValidator, MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
 import { queryDiagnosticsProofParts, queryDiagnosticsValidator, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 
-const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"));
+const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"), v.literal("document"));
 
 const messageValidator = v.union(
   v.object({
@@ -45,6 +47,7 @@ const messageValidator = v.union(
     content: v.string(),
     clientId: v.optional(v.string()),
     createdAt: v.optional(v.number()),
+    attachmentIds: v.optional(v.array(v.id("chatAttachments"))),
   }),
   v.object({
     role: v.literal("assistant"),
@@ -113,6 +116,7 @@ type GovernedCompletionProofInput = {
   readyStoreCount: number;
   partialCoverage: boolean;
   jurisdictionCoverage: readonly GovernedJurisdictionCoverage[];
+  attachmentIds?: readonly string[];
 };
 
 function unavailable(): never {
@@ -220,6 +224,7 @@ export async function completeGovernedInteractionProofParts(
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
+    ...(input.attachmentIds?.length ? ["attachment-context-v1", input.attachmentIds.length, ...input.attachmentIds] : []),
   ];
 }
 
@@ -247,6 +252,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
+    ...(input.attachmentIds?.length ? [input.attachmentIds] : []),
   ]));
   return {
     assistantClientIdBinding: claimBindings.assistantClientIdBinding,
@@ -257,6 +263,8 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
 function validateGovernedCompletionInput(input: GovernedCompletionProofInput): void {
   if (input.diagnostics !== undefined) validateQueryDiagnostics(input.diagnostics);
   const answer = input.finalAnswer;
+  const attachmentContext = (input.attachmentIds?.length ?? 0) > 0;
+  const withoutResearch = attachmentContext && (input.answerKind === "document" || input.outcome !== "success");
   if (
     !isOpaqueTelemetryToken(input.routeNonce)
     || !boundedIdentifier(input.externalId, MAX_CHAT_EXTERNAL_ID_LENGTH)
@@ -267,9 +275,12 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
     || input.elapsedMs < 0
     || input.elapsedMs > MAX_PROVIDER_LATENCY_MS
     || !validCount(input.authorizedScopeSize, MAX_ROUTE_SCOPE_SIZE)
-    || (input.authorizedScopeSize === 0 && input.model !== "app-policy-v1")
+    || (input.authorizedScopeSize === 0 && input.model !== "app-policy-v1" && !withoutResearch)
     || !validCount(input.readyStoreCount, input.authorizedScopeSize)
-    || (input.readyStoreCount === 0 && input.model !== "app-policy-v1")
+    || (input.readyStoreCount === 0 && input.model !== "app-policy-v1" && !withoutResearch)
+    || (input.attachmentIds !== undefined && (input.attachmentIds.length > MAX_CONTEXT_ATTACHMENTS
+      || new Set(input.attachmentIds).size !== input.attachmentIds.length
+      || input.attachmentIds.some(id => !boundedIdentifier(id, MAX_CHAT_EXTERNAL_ID_LENGTH))))
     || input.jurisdictionCoverage.length !== input.readyStoreCount
     || input.jurisdictionCoverage.some((item, index) =>
       item.ordinal !== index
@@ -292,18 +303,20 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
   }
   if (input.outcome === "success") {
     const policy = input.answerKind === "policy" && answer !== undefined && isChatPolicyResponse(answer);
+    const document = input.answerKind === "document" && attachmentContext;
     const noEvidence = input.answerKind === "legal" && input.citations.length === 0 && answer === CHAT_NO_EVIDENCE;
     const notSearched = input.model === "app-policy-v1";
     if (
-      (input.answerKind !== "legal" && input.answerKind !== "policy")
+      (input.answerKind !== "legal" && input.answerKind !== "policy" && !document)
       || answer === undefined
       || !answer.trim()
       || new TextEncoder().encode(answer).byteLength > MAX_ASSISTANT_CONTENT_BYTES
-      || (input.citations.length === 0 && !noEvidence && !policy)
+      || (input.citations.length === 0 && !noEvidence && !policy && !document)
+      || (document && (input.citations.length !== 0 || input.authorizedScopeSize !== 0 || input.readyStoreCount !== 0 || input.partialCoverage))
       || (policy && input.citations.length !== 0)
       || (notSearched && !policy)
       || input.failureCategory !== undefined
-      || (policy
+      || (document ? false : policy
         ? input.jurisdictionCoverage.some((item) => item.coverage !== (notSearched ? "not_searched" : "no_evidence"))
         : noEvidence
           ? input.jurisdictionCoverage.some((item) => item.coverage !== "no_evidence")
@@ -476,7 +489,7 @@ async function assertActualCitationRelationships(
   }
 }
 
-async function canAccessSession(
+export async function canAccessSession(
   ctx: ChatCtx,
   session: Doc<"chatSessions">,
   activeOrganizationIds?: Set<Id<"organizations">> | null,
@@ -588,6 +601,7 @@ function samePendingMessage(
     createdAt?: number;
     citations?: Doc<"messages">["citations"];
     answerKind?: ChatAnswerKind;
+    attachmentIds?: readonly string[];
   },
   right: {
     role: "user" | "assistant";
@@ -595,10 +609,12 @@ function samePendingMessage(
     createdAt?: number;
     citations?: Doc<"messages">["citations"];
     answerKind?: ChatAnswerKind;
+    attachmentIds?: readonly string[];
   },
 ): boolean {
   return left.role === right.role &&
     left.content === right.content &&
+    JSON.stringify(left.attachmentIds ?? []) === JSON.stringify(right.attachmentIds ?? []) &&
     (left.role !== "assistant" || left.answerKind === right.answerKind) &&
     (left.createdAt === undefined
       ? right.createdAt === undefined
@@ -645,6 +661,7 @@ const chatMessageValidator = v.object({
   answerKind: v.optional(answerKindValidator),
   completedAt: v.optional(v.number()),
   durationMs: v.optional(v.number()),
+  attachments: v.optional(v.array(chatAttachmentMetadataValidator)),
 });
 
 type GovernedCompletionAuthority = {
@@ -801,6 +818,7 @@ export const completeGovernedInteraction = mutation({
     partialCoverage: v.boolean(),
     jurisdictionCoverage: v.array(governedJurisdictionCoverageValidator),
     serviceProof: v.string(),
+    attachmentIds: v.optional(v.array(v.string())),
   },
   returns: completionResultValidator,
   handler: async (ctx, args) => {
@@ -824,6 +842,7 @@ export const completeGovernedInteraction = mutation({
       || session.jurisdictionId !== jurisdictionId
       || !(await canAccessSession(ctx, session))
     ) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
+    const attachmentContext = await checkedAttachments(ctx, session, args.attachmentIds ?? []);
     const selected = await ctx.db.get("jurisdictions", jurisdictionId);
     if (!selected) throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     let kind: JurisdictionKind;
@@ -866,7 +885,9 @@ export const completeGovernedInteraction = mutation({
 
     let authority: GovernedCompletionAuthority | null = null;
     if (args.outcome === "success") {
-      authority = await resolveGovernedCompletionAuthority(
+      authority = args.answerKind === "document" ? {
+        publicCitations: [], authorizedScopeSize: 0, readyStoreCount: 0, partialCoverage: false, jurisdictionCoverage: [],
+      } : await resolveGovernedCompletionAuthority(
         ctx,
         session,
         jurisdictionId,
@@ -910,6 +931,7 @@ export const completeGovernedInteraction = mutation({
         answerKind: args.answerKind!,
         ...claimBindings,
         expiresAt,
+        ...(attachmentContext.length ? { attachmentIds: attachmentContext.map(row => row._id) } : {}),
       });
       await ctx.scheduler.runAt(expiresAt, expireCitationClaimRef, { tokenHash });
       claim = { citationClaim, expiresAt };
@@ -980,6 +1002,8 @@ async function consumeCitationClaim(
     !opaqueEqual(row.orderedCitationBinding, bindings.orderedCitationBinding)) {
     invalidCitationClaim();
   }
+  await checkedAttachments(ctx, session, row.attachmentIds ?? []);
+  if (message.answerKind === "document" && !row.attachmentIds?.length) invalidCitationClaim();
   await ctx.db.delete(row._id);
 }
 
@@ -1126,6 +1150,11 @@ export const listMessages = query({
           citations: message.citations,
           guestSources: message.guestSources,
           answerKind: message.answerKind,
+          ...(message.attachmentIds?.length ? { attachments: await Promise.all(message.attachmentIds.map(async id => {
+            const row = await ctx.db.get("chatAttachments", id);
+            if (!row || row.sessionId !== session._id || row.status !== "ready") throw new ConvexError("CHAT_ATTACHMENT_UNAVAILABLE");
+            return attachmentMetadata(row);
+          })) } : {}),
           ...timing,
         };
       })),
@@ -1237,6 +1266,7 @@ export const appendMessages = mutation({
           .unique();
         if (existing) {
           if (existing.role !== message.role || existing.content !== message.content ||
+            JSON.stringify(existing.attachmentIds ?? []) !== JSON.stringify(message.role === "user" ? message.attachmentIds ?? [] : []) ||
             (message.createdAt !== undefined && !Object.is(existing.createdAt, message.createdAt)) ||
             (message.role === "assistant" && existing.answerKind !== message.answerKind) ||
             !sameCitationSnapshots(existing.citations, message.role === "assistant" ? message.citations : undefined)) {
@@ -1252,6 +1282,14 @@ export const appendMessages = mutation({
     if (unsavedMessages.length === 0) return { id: session.externalId };
     for (const message of unsavedMessages) {
       await validateCitations(ctx, session, [message]);
+      if (message.role === "user" && message.attachmentIds?.length) {
+        if (!message.clientId) throw new ConvexError("CHAT_ATTACHMENT_MESSAGE_ID_REQUIRED");
+        const attachments = await checkedAttachments(ctx, session, message.attachmentIds, MAX_MESSAGE_ATTACHMENTS);
+        for (const attachment of attachments) {
+          if (attachment.messageClientId !== undefined && attachment.messageClientId !== message.clientId) throw new ConvexError("CHAT_ATTACHMENT_ALREADY_SENT");
+          await ctx.db.patch(attachment._id, { messageClientId: message.clientId, expiresAt: undefined });
+        }
+      }
       if (message.role === "assistant") {
         if (!message.answerKind || message.citations === undefined) invalidCitationClaim();
         await consumeCitationClaim(ctx, session, {
@@ -1271,6 +1309,7 @@ export const appendMessages = mutation({
         citations: message.role === "assistant" ? message.citations : undefined,
         answerKind: message.role === "assistant" ? message.answerKind : undefined,
         createdAt: message.createdAt ?? Date.now(),
+        attachmentIds: message.role === "user" ? message.attachmentIds : undefined,
       });
     }
 
@@ -1301,12 +1340,13 @@ export const remove = mutation({
       .unique();
 
     if (!session) return { deleted: false };
-    if (!(await canAccessSession(ctx, session))) unavailable();
+    // The owner can erase retained messages/files even after research access is revoked.
 
     await ctx.db.delete(session._id);
     await ctx.scheduler.runAfter(0, internal.chats.deleteMessageBatch, {
       sessionId: session._id,
     });
+    await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch"), { sessionId: session._id });
     return { deleted: true };
   },
 });

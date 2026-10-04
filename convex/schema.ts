@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
+import { attachmentKindValidator } from "./lib/chatAttachmentContracts";
 import {
   chatCitationValidator,
   geographicLevelValidator,
@@ -831,13 +832,25 @@ export default defineSchema({
     .index("by_userId_and_updatedAt", ["userId", "updatedAt"])
     .index("by_user_externalId", ["userId", "externalId"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
+  chatAttachments: defineTable({
+    sessionId: v.id("chatSessions"), userId: v.string(), filename: v.string(), mimeType: v.string(), byteSize: v.number(),
+    kind: attachmentKindValidator, status: v.union(v.literal("pending"), v.literal("ready")),
+    storageId: v.optional(v.id("_storage")), extractedText: v.optional(v.string()), pageCount: v.optional(v.number()),
+    messageClientId: v.optional(v.string()), createdAt: v.number(), expiresAt: v.optional(v.number()),
+  }).index("by_sessionId", ["sessionId"])
+    .index("by_sessionId_and_messageClientId", ["sessionId", "messageClientId"])
+    .index("by_sessionId_and_expiresAt", ["sessionId", "expiresAt"])
+    .index("by_userId_and_expiresAt", ["userId", "expiresAt"])
+    .index("by_storageId", ["storageId"])
+    .index("by_expiresAt", ["expiresAt"]),
   chatCitationClaims: defineTable({
     tokenHash: v.string(),
     ownerBinding: v.string(),
     sessionBinding: v.string(),
     chatSessionId: v.id("chatSessions"),
     jurisdictionId: v.id("jurisdictions"),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
+    attachmentIds: v.optional(v.array(v.id("chatAttachments"))),
     assistantClientIdBinding: v.string(),
     assistantContentBinding: v.string(),
     orderedCitationBinding: v.string(),
@@ -891,7 +904,7 @@ export default defineSchema({
       v.literal("failure"),
       v.literal("aborted"),
     ),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
     failureCategory: v.optional(v.union(
       v.literal("authentication"),
       v.literal("configuration"),
@@ -954,7 +967,8 @@ export default defineSchema({
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
     guestSources: v.optional(v.array(guestSourceValidator)),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
+    attachmentIds: v.optional(v.array(v.id("chatAttachments"))),
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])

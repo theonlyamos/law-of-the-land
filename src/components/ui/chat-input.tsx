@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowUp, Send } from "lucide-react";
+import { ArrowUp, Paperclip, Send } from "lucide-react";
 import React from "react";
 
 export interface ChatInputProps {
@@ -22,6 +22,13 @@ export interface ChatInputProps {
   footer?: React.ReactNode;
   submitDisabled?: boolean;
   ariaLabel?: string;
+  attachments?: {
+    accept: string;
+    hasFiles: boolean;
+    disabled?: boolean;
+    tray: React.ReactNode;
+    onFiles: (files: File[]) => void;
+  };
 }
 
 export function ChatInput({
@@ -38,14 +45,18 @@ export function ChatInput({
   footer,
   submitDisabled = false,
   ariaLabel,
+  attachments,
 }: ChatInputProps) {
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = React.useState(false);
+  const attachmentDisabled = disabled || isLoading || attachments?.disabled;
   const editorial = variant === "editorial";
   const SendIcon = editorial ? ArrowUp : Send;
   const sendButton = (
     <Button
       type="button"
       onClick={onSearch}
-      disabled={disabled || isLoading || submitDisabled || !query.trim()}
+      disabled={disabled || isLoading || submitDisabled || (!query.trim() && !attachments?.hasFiles)}
       size="icon"
       className={`h-11 w-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${editorial ? "rounded-lg shadow-none" : "absolute right-2 top-1/2 -translate-y-1/2"}`}
     >
@@ -55,7 +66,29 @@ export function ChatInput({
   );
 
   return (
-    <div className={`relative ${editorial ? "rounded-xl border border-input bg-card p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring" : "flex items-center"} ${className || ""}`}>
+    <div className={`relative ${editorial ? "rounded-xl border border-input bg-card p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring" : "flex items-center"} ${dragging ? "ring-2 ring-primary" : ""} ${className || ""}`}
+      onDragOver={attachments ? (event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        if (!attachmentDisabled) setDragging(true);
+      } : undefined}
+      onDragLeave={attachments ? (event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+      } : undefined}
+      onDrop={attachments ? (event) => {
+        if (!event.dataTransfer.files.length) return;
+        event.preventDefault();
+        setDragging(false);
+        if (!attachmentDisabled) attachments.onFiles(Array.from(event.dataTransfer.files));
+      } : undefined}
+      onPaste={attachments ? (event) => {
+        const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+        if (!images.length) return;
+        event.preventDefault();
+        if (!attachmentDisabled) attachments.onFiles(images);
+      } : undefined}>
+      {attachments?.tray}
+      {dragging && <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-background/95 text-sm font-medium text-primary">Drop files to attach</div>}
       <Textarea
         id={id} maxLength={maxLength} aria-describedby={describedBy}
         aria-label={ariaLabel ?? (editorial ? "Your legal question" : undefined)}
@@ -72,6 +105,17 @@ export function ChatInput({
       />
       {editorial ? (
         <div className="mt-2 flex items-center justify-between gap-2 pl-1">
+          {attachments && <>
+            <input ref={fileInputRef} type="file" multiple accept={attachments.accept} className="hidden" aria-label="Choose files to attach" disabled={attachmentDisabled}
+              onChange={(event) => {
+                attachments.onFiles(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }} />
+            <Button type="button" variant="ghost" size="icon" disabled={attachmentDisabled}
+              onClick={() => fileInputRef.current?.click()} aria-label="Attach files" title="Attach documents, text files or images" className="h-11 w-11 shrink-0 rounded-lg text-muted-foreground">
+              <Paperclip className="size-4" aria-hidden="true" />
+            </Button>
+          </>}
           <div className="min-w-0 flex-1">{footer}</div>
           {sendButton}
         </div>

@@ -2,6 +2,7 @@ import type { ChatCitation } from "@/lib/countries";
 import type { ChatErrorReason } from "@/lib/chat-errors";
 import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
+import type { ChatAttachment } from "../../../shared/chat-attachments";
 
 export type MessageRole = "user" | "assistant";
 
@@ -17,6 +18,7 @@ export interface PersistedChatMessage {
   citations?: ChatCitation[];
   guestSources?: NonNullable<GuestTurnView["result"]>["citations"];
   answerKind?: ChatAnswerKind;
+  attachments?: ChatAttachment[];
 }
 
 export interface LocalChatMessage {
@@ -31,6 +33,7 @@ export interface LocalChatMessage {
   citations?: ChatCitation[];
   answerKind?: ChatAnswerKind;
   partialCoverage?: boolean;
+  attachments?: ChatAttachment[];
 }
 
 export type DisplayChatMessage =

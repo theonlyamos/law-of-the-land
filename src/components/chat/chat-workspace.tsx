@@ -4,6 +4,9 @@ import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
+import { useChatAttachments } from "./use-chat-attachments";
+import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
+import { CHAT_ATTACHMENT_ACCEPT, type ChatAttachment } from "../../../shared/chat-attachments";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
@@ -119,7 +122,7 @@ async function postChat(
         } else if (
           event.type === "done"
           && typeof event.result === "string"
-          && (event.answerKind === "legal" || event.answerKind === "policy")
+          && (event.answerKind === "legal" || event.answerKind === "policy" || event.answerKind === "document")
           && Array.isArray(event.citations)
           && event.citations.every(isChatCitation)
           && typeof event.partialCoverage === "boolean"
@@ -214,7 +217,9 @@ interface ChatWorkspaceProps {
 export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const [query, setQuery] = useState("");
+  const attachments = useChatAttachments(chatId);
+  const { query, setQuery, files, addFiles, removeFile, retryFile, uploadFiles, transferToChat, clearSentDraft } = attachments;
+  const attachmentBlocked = files.some((file) => file.state === "uploading" || file.state === "error" || file.state === "removing");
   const [selectedResearchJurisdiction, setSelectedResearchJurisdiction] = useState<ResearchJurisdiction | null>(null);
   const {
     store: requests, messages: localMessages, isLoading: requestLoading,
@@ -232,7 +237,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
-  const queryChatIdRef = useRef(chatId);
+  const allocatedNewChatIdRef = useRef<string | null>(null);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
   const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
@@ -284,6 +289,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         citations: message.citations,
         guestSources: message.guestSources,
         answerKind: message.answerKind,
+        attachments: message.attachments,
       });
     }
     return [...byStorageId.values()].sort(
@@ -328,9 +334,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   // Navigation resets the view; requests and provisional messages stay with their chat.
   useEffect(() => {
     resetChatView();
+    allocatedNewChatIdRef.current = null;
     routeEnsureRef.current = null;
-    if (queryChatIdRef.current !== chatId) setQuery("");
-    queryChatIdRef.current = chatId;
     setSelectedResearchJurisdiction(null);
   }, [chatId, resetChatView]);
 
@@ -340,7 +345,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     if (!draft) return;
     setQuery((current) => current || draft);
     clearGuestResearchDraft(chatId);
-  }, [chatId, isAuthenticated, selectionReady, sessionData]);
+  }, [chatId, isAuthenticated, selectionReady, sessionData, setQuery]);
 
   useEffect(() => {
     const request = requests.get(chatId);
@@ -478,17 +483,20 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
-      const trimmed = searchQuery.trim();
-      if (!trimmed || isLoading || !selectionReady) return;
+      const trimmed = searchQuery.trim() || (files.length ? "Summarize these files." : "");
+      if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
+      const submittedFiles = files;
 
-      const submissionChatId = chatId ?? crypto.randomUUID();
+      const submissionChatId = chatId ?? allocatedNewChatIdRef.current ?? crypto.randomUUID();
+      const request = requests.start(submissionChatId);
+      if (!request) return;
       if (!chatId) {
+        allocatedNewChatIdRef.current = submissionChatId;
         setIsStartingNewChat(true);
+        transferToChat(submissionChatId);
       }
 
       const requestGeneration = requestGenerationRef.current;
-      const request = requests.start(submissionChatId);
-      if (!request) return;
       const controller = request.controller;
       const setLocalMessages = (update: (previous: LocalChatMessage[]) => LocalChatMessage[]) =>
         requests.update(submissionChatId, request, { messages: update(request.state.messages) });
@@ -560,8 +568,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest()) return;
       }
 
+      let uploadedAttachments: ChatAttachment[] = [];
+      if (submittedFiles.length) {
+        try {
+          uploadedAttachments = await uploadFiles(submissionChatId, submittedFiles, controller.signal);
+        } catch {
+          if (isCurrentRequest()) requests.update(submissionChatId, request, { isLoading: false });
+          return;
+        }
+        if (!isCurrentRequest()) return;
+        userMessage.attachments = uploadedAttachments;
+      }
+
       if (isVisibleRoute()) {
-        setQuery("");
         prependScrollIntentRef.current = null;
         composerScrollIntentRef.current = beginComposerBottomScroll({
           routeGeneration: requestGeneration,
@@ -593,6 +612,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           messages: priorForApi,
           externalId: submissionChatId,
           assistantClientId: assistantMessage.clientId,
+          attachmentIds: uploadedAttachments.map((file) => file.id),
         }, (text) => {
           streamedAnswer += text;
           if (!isCurrentRequest() || streamRenderFrame !== undefined) return;
@@ -603,7 +623,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (
           (chatData.answerKind === "policy"
             ? (chatData.citations.length !== 0 || !isChatPolicyResponse(chatData.result))
-            : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
+            : chatData.answerKind === "document"
+              ? chatData.citations.length !== 0
+              : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
           || !chatData.citationClaim
           || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
         ) {
@@ -643,6 +665,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   content: userMessage.content,
                   clientId: userMessage.clientId,
                   createdAt: userMessage.createdAt,
+                  ...(uploadedAttachments.length ? { attachmentIds: uploadedAttachments.map((file) => file.id as Id<"chatAttachments">) } : {}),
                 },
                 {
                   role: "assistant" as const,
@@ -659,6 +682,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               ],
             }),
           });
+          if (isCurrentRequest()) clearSentDraft(submissionChatId, searchQuery, submittedFiles);
         } catch (error) {
           if (!isCurrentRequest()) return;
           console.error("Failed to save chat:", error);
@@ -705,6 +729,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       router,
       selectionReady,
       requests,
+      files,
+      attachmentBlocked,
+      transferToChat,
+      uploadFiles,
+      clearSentDraft,
     ]
   );
 
@@ -778,6 +807,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const jurisdictionLabel = chatResearchJurisdiction
     ? `${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`
     : "";
+  const composerAttachments = {
+    accept: CHAT_ATTACHMENT_ACCEPT,
+    hasFiles: files.length > 0,
+    onFiles: addFiles,
+    disabled: files.some((file) => file.state === "uploading" || file.state === "removing"),
+    tray: <DraftAttachmentTray files={files} error={attachments.error} disabled={isLoading}
+      onRemove={(file) => void removeFile(file)} onRetry={(file) => void retryFile(file)} />,
+  };
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -860,9 +897,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     onSearch={() => void handleSearch(query)}
                     onKeyDown={handleKeyDown}
                     isLoading={isLoading}
-                    submitDisabled={!selectionReady}
+                    submitDisabled={!selectionReady || attachmentBlocked}
+                    attachments={composerAttachments}
                     rows={2}
-                    placeholder="What would you like to understand?"
+                    placeholder={files.length ? "Send to summarize these files, or add a question." : "What would you like to understand?"}
                     footer={
                       <ResearchJurisdictionPicker
                         compact
@@ -943,6 +981,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       <div className="whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-5 py-3 text-sm leading-relaxed text-secondary-foreground [overflow-wrap:anywhere]">
                         {message.content}
                       </div>
+                      <MessageAttachments attachments={message.attachments} />
                       {message.source === "local" && message.state === "error" ? (
                         <p className="text-xs font-medium text-destructive">Failed</p>
                       ) : null}
@@ -960,6 +999,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       <div className="markdown-content">
                         <AssistantMessage content={message.content} />
                       </div>
+                      {message.answerKind === "document" && <p className="mt-4 text-xs text-muted-foreground">Based on your files</p>}
                       {message.citations?.length ? (
                         <section aria-label="Sources" className="mt-6 border-t pt-4 text-xs leading-5 text-muted-foreground">
                           <h2 className="text-[11px] font-semibold uppercase tracking-wider">Sources · {message.citations.length}</h2>
@@ -1041,6 +1081,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               onSearch={() => void handleSearch(query)}
               onKeyDown={handleKeyDown}
               isLoading={isLoading || !selectionReady}
+              submitDisabled={attachmentBlocked}
+              attachments={composerAttachments}
               rows={2}
               footer={chatResearchJurisdiction ? (
                 <span className="chat-scope-label" title={`${jurisdictionLabel} — fixed for this conversation`}>
@@ -1050,7 +1092,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                 </span>
               ) : undefined}
               placeholder={
-                displayMessages.length === 0
+                files.length
+                  ? "Send to summarize these files, or add a question."
+                  : displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
                   : "Ask a follow-up…"
               }
