@@ -725,6 +725,29 @@ describe("closed execution telemetry", () => {
     expect(JSON.stringify(test.snapshots)).not.toMatch(/private-sse-detail|private-sse-cursor|DEADLINE_EXCEEDED|CANCELLED|UNAVAILABLE/);
   });
 
+  it("does not mark a closed stream aborted when local cancellation reaches canonical retrieval", async () => {
+    const providerController = new AbortController();
+    const streamController = new AbortController();
+    const streamSignal = AbortSignal.any([providerController.signal, streamController.signal]);
+    const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
+    const error = new Error("private-canonical-cancellation");
+    vi.spyOn(client.interactions, "get").mockImplementation(async () => {
+      providerController.abort(error);
+      throw error;
+    });
+    const test = observe(client, { signal: providerController.signal, streamSignal });
+    await expect(test.operation).rejects.toBe(error);
+    expect(streamSignal.aborted).toBe(true);
+    expect(test.snapshots.at(-1)).toMatchObject({
+      phase: "canonical_read", reason: "aborted", canonicalReadCompleted: false,
+      execution: {
+        completionEventAccepted: true, streamClosed: true, streamAbortObserved: false, providerFailure: "none",
+        resumeAttempted: false, resumeOutcome: "not_attempted",
+      },
+    });
+    expect(JSON.stringify(test.snapshots)).not.toContain("private-canonical-cancellation");
+  });
+
   it("records a terminal deadline guard separately from provider failure without relying on a timer callback", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

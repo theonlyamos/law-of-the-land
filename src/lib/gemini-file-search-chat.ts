@@ -769,7 +769,7 @@ export class GeminiFileSearchChat {
     };
     const report = (update: Partial<QueryDiagnostics> = {}) => {
       Object.assign(diagnostics, update);
-      execution.streamAbortObserved ||= options.streamSignal.aborted;
+      if (diagnostics.phase === "generation") execution.streamAbortObserved ||= options.streamSignal.aborted;
       try {
         options.onDiagnostics?.(Object.freeze({ ...diagnostics, execution: Object.freeze({ ...execution }), structure: observer.snapshot() }));
       } catch {
