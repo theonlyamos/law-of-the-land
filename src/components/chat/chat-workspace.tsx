@@ -17,6 +17,7 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
+import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 import { clearGuestResearchDraft, readGuestResearchDraft } from "@/lib/guest-research-draft";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import {
@@ -86,8 +87,9 @@ async function postChat(
     signal,
   });
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: unknown } | null;
-    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined);
+    const data = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined,
+      publicChatErrorReason(data?.reason) ?? undefined);
   }
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) throw new ApiError(500);
   if (!response.body) throw new ApiError(500);
@@ -96,63 +98,72 @@ async function postChat(
   const decoder = new TextDecoder();
   let buffer = "";
   let completed: ChatResponse | null = null;
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    let lineEnd = buffer.indexOf("\n");
-    while (lineEnd >= 0) {
-      const line = buffer.slice(0, lineEnd);
-      buffer = buffer.slice(lineEnd + 1);
-      lineEnd = buffer.indexOf("\n");
-      if (!line) continue;
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        throw new ApiError(500);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let lineEnd = buffer.indexOf("\n");
+      while (lineEnd >= 0) {
+        const line = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 1);
+        lineEnd = buffer.indexOf("\n");
+        if (!line) continue;
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          throw new ApiError(500);
+        }
+        if (event.type === "delta" && typeof event.text === "string") {
+          onDelta(event.text);
+        } else if (
+          event.type === "done"
+          && typeof event.result === "string"
+          && (event.answerKind === "legal" || event.answerKind === "policy")
+          && Array.isArray(event.citations)
+          && event.citations.every(isChatCitation)
+          && typeof event.partialCoverage === "boolean"
+        ) {
+          completed = {
+            result: event.result,
+            answerKind: event.answerKind,
+            citations: event.citations,
+            ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
+            partialCoverage: event.partialCoverage,
+          };
+        } else if (event.type === "error" && typeof event.error === "string") {
+          throw new ApiError(500, event.error, publicChatErrorReason(event.reason) ?? undefined);
+        } else {
+          throw new ApiError(500);
+        }
       }
-      if (event.type === "delta" && typeof event.text === "string") {
-        onDelta(event.text);
-      } else if (
-        event.type === "done"
-        && typeof event.result === "string"
-        && (event.answerKind === "legal" || event.answerKind === "policy")
-        && Array.isArray(event.citations)
-        && event.citations.every(isChatCitation)
-        && typeof event.partialCoverage === "boolean"
-      ) {
-        completed = {
-          result: event.result,
-          answerKind: event.answerKind,
-          citations: event.citations,
-          ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
-          partialCoverage: event.partialCoverage,
-        };
-      } else if (event.type === "error" && typeof event.error === "string") {
-        throw new ApiError(500, event.error);
-      } else {
-        throw new ApiError(500);
-      }
+      if (done) break;
     }
-    if (done) break;
+    if (!completed) throw new ApiError(500);
+    return completed;
+  } finally {
+    // A terminal error must release the composer without waiting for EOF or telemetry.
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  if (!completed) throw new ApiError(500);
-  return completed;
 }
 
 class ApiError extends Error {
   status: number;
   serverMessage?: string;
+  reason?: ChatErrorReason;
 
-  constructor(status: number, serverMessage?: string) {
+  constructor(status: number, serverMessage?: string, reason?: ChatErrorReason) {
     super(serverMessage ?? `Request failed with status ${status}`);
     this.status = status;
     this.serverMessage = serverMessage;
+    this.reason = reason;
   }
 }
 
 function answerErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.reason) return publicChatErrorMessage(error.reason);
     if (error.status === 504) {
       return "The answer took too long to finish. Please try again.";
     }
@@ -207,7 +218,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const [selectedResearchJurisdiction, setSelectedResearchJurisdiction] = useState<ResearchJurisdiction | null>(null);
   const {
     store: requests, messages: localMessages, isLoading: requestLoading,
-    saveFailed, ensureError, deleteError,
+    saveFailed, ensureError, deleteError, errorReason,
     isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted,
   } = useChatRequests(chatId);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
@@ -485,7 +496,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         localSequenceRef.current += 1;
         return localSequenceRef.current;
       };
-      const priorForApi = displayMessages.slice(-10).map((message) => ({
+      // Failed local turns are never persisted and must not become research context.
+      const priorForApi = displayMessages.filter((message) => message.source !== "local" || message.state !== "error").slice(-10).map((message) => ({
         role: message.role,
         content: message.content,
       }));
@@ -664,12 +676,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           return;
         }
         console.error("Error:", error);
+        const reason = error instanceof ApiError ? error.reason : undefined;
+        requests.update(submissionChatId, request, { errorReason: reason ?? null });
         setLocalMessages((previous) =>
           previous.map((message) => {
             if (message.localId === assistantMessage.localId) {
-              return { ...message, content: answerErrorMessage(error), state: "error" };
+              return { ...message, content: answerErrorMessage(error), state: "error", errorReason: reason };
             }
-            if (message.localId === userMessage.localId) return { ...message, state: "error" };
+            if (message.localId === userMessage.localId) return { ...message, state: "error", errorReason: reason };
             return message;
           })
         );
@@ -1011,9 +1025,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                 That jurisdiction is not available for research.
               </p>
             )}
+            {errorReason && (
+              <p id="chat-request-error" role="alert" className="mb-2 text-sm text-destructive">
+                {errorReason === "file_search_budget_exhausted"
+                  ? "That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, or start a new chat."
+                  : "This answer took too long. You can ask a more focused question or try again later."}
+              </p>
+            )}
             <ChatInput
               variant="editorial"
               ariaLabel="Follow-up question"
+              describedBy={errorReason ? "chat-request-error" : undefined}
               query={query}
               onQueryChange={setQuery}
               onSearch={() => void handleSearch(query)}

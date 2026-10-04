@@ -24,6 +24,8 @@ vi.mock("@google/genai", () => ({
 
 import { POST, maxDuration } from "./route";
 import { CHAT_POLICY_RESPONSES } from "../../../../convex/lib/chatPolicy";
+import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
+import { verifyTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -216,6 +218,427 @@ afterEach(() => {
   delete process.env.TELEMETRY_INGEST_SECRET;
   delete process.env.CHAT_INTENT_ROUTING_MODE;
   delete process.env.TYPESAFE_API_KEY;
+});
+
+describe("POST /api/chat private query diagnostics", () => {
+  function terminalArgs() {
+    return authMocks.fetchAuthMutation.mock.calls.findLast(
+      ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+    )?.[1];
+  }
+
+  it("authorizes document/page citations from a final annotation-only step after matching the whole answer", async () => {
+    const canonical = canonicalInteraction();
+    canonical.steps = [
+      { type: "model_output", content: [
+        { type: "text", text: "Employees ", annotations: [] },
+        { type: "text", text: "are protected.", annotations: [] },
+      ] },
+      { type: "model_output", content: [] },
+    ];
+    interactionMocks.get.mockResolvedValue(canonical);
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "interaction.created") {
+          yield event;
+          yield { event_type: "step.start", index: 3, step: { type: "model_output", content: [] } };
+          yield { event_type: "step.stop", index: 3 };
+          continue;
+        }
+        if (event.event_type === "step.stop" && event.index === 2) {
+          yield event;
+          yield { event_type: "step.start", index: 4, step: { type: "model_output" } };
+          yield { event_type: "step.delta", index: 4, delta: {
+            type: "text_annotation_delta", annotations: [{
+              type: "file_citation", document_uri: selectedStoreName,
+              file_name: "Untrusted display filename.pdf",
+              custom_metadata: { jurisdiction_id: selectedJurisdictionId,
+                resource_id: selectedResourceId, version_id: selectedVersionId },
+              start_index: 0, end_index: 9, page_number: 12,
+            }],
+          } };
+          yield { event_type: "step.stop", index: 4 };
+          continue;
+        }
+        yield event;
+      }
+    })());
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+    expect(args).toMatchObject({ outcome: "success", citations: [{
+      jurisdictionId: selectedJurisdictionId, resourceId: selectedResourceId,
+      versionId: selectedVersionId, providerStoreName: selectedStoreName, pageNumber: 12,
+    }] });
+    expect(args.citations[0]).not.toHaveProperty("providerDocumentName");
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(streamEvents.map(event => event.type)).toEqual(["delta", "done"]);
+    expect(JSON.stringify(streamEvents)).not.toContain(selectedStoreName);
+    expect(JSON.stringify(streamEvents)).not.toContain("Untrusted display filename");
+  });
+
+  it("binds a final streamed file citation to catalog completion when canonical annotations contain only URLs", async () => {
+    const providerDocumentName = `${selectedStoreName}/documents/verified-document`;
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations = [{
+      type: "url_citation", url: "https://untrusted.example.test/reference", start_index: 0, end_index: 9,
+    }] as unknown as ReturnType<typeof canonicalInteraction>["steps"][number]["content"][number]["annotations"];
+    interactionMocks.get.mockResolvedValue(canonical);
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "step.stop" && event.index === 2) {
+          yield { event_type: "step.delta", index: 2, delta: {
+            type: "text_annotation_delta", annotations: [{
+              type: "file_citation", document_uri: providerDocumentName,
+              custom_metadata: { jurisdiction_id: selectedJurisdictionId,
+                resource_id: selectedResourceId, version_id: selectedVersionId },
+              start_index: 0, end_index: 9, page_number: 12,
+            }],
+          } };
+        }
+        yield event;
+      }
+    })());
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+    expect(args).toMatchObject({ outcome: "success", citations: [{
+      jurisdictionId: selectedJurisdictionId, resourceId: selectedResourceId,
+      versionId: selectedVersionId, providerStoreName: selectedStoreName, providerDocumentName,
+    }] });
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts({ ...args, citations: [{
+        ...args.citations[0], providerDocumentName: `${selectedStoreName}/documents/different-document`,
+      }] }))).toBe(false);
+    expect(streamEvents.map(event => event.type)).toEqual(["delta", "done"]);
+    expect(JSON.stringify(streamEvents)).not.toContain(providerDocumentName);
+    expect(JSON.stringify(streamEvents)).not.toContain("untrusted.example.test");
+  });
+
+  it("proof-binds rejected annotation shape without disclosing provider fields", async () => {
+    const privateDocument = "fileSearchStores/ghana/documents/private-document";
+    const privateSource = "private-provider-source-text";
+    const canonical = canonicalInteraction();
+    const annotation = canonical.steps[0].content[0].annotations[0] as unknown as Record<string, unknown>;
+    delete annotation.type;
+    delete annotation.document_uri;
+    annotation.file_name = privateDocument;
+    annotation.source = privateSource;
+    annotation.custom_metadata = [
+      { key: "jurisdiction_id", string_value: selectedJurisdictionId },
+      { key: "resource_id", string_value: selectedResourceId },
+      { key: "version_id", string_value: selectedVersionId },
+    ];
+    interactionMocks.get.mockResolvedValue(canonical);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "validation", citations: [],
+      diagnostics: {
+        reason: "citation_type",
+        structure: {
+          canonical: { annotationKinds: { missing_type: 1 } },
+          rejectedCanonicalAnnotation: {
+            kind: "missing_type", metadataContainer: "array",
+            documentUriKind: "missing", fileNameKind: "authorized_document",
+            jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
+            versionMetadataPresent: true, fileNamePresent: true, sourcePresent: true,
+          },
+        },
+      },
+    });
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts(args))).toBe(true);
+    expect(await verifyTelemetryServiceProof(args.serviceProof,
+      await completeGovernedInteractionProofParts({
+        ...args, diagnostics: {
+          ...args.diagnostics,
+          structure: {
+            ...args.diagnostics.structure,
+            rejectedCanonicalAnnotation: {
+              ...args.diagnostics.structure.rejectedCanonicalAnnotation, sourcePresent: false,
+            },
+          },
+        },
+      }))).toBe(false);
+    for (const privateValue of [privateDocument, privateSource, selectedResourceId, selectedVersionId]) {
+      expect(JSON.stringify(args.diagnostics)).not.toContain(privateValue);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privateValue);
+      expect(JSON.stringify(streamEvents)).not.toContain(privateValue);
+    }
+    expect(JSON.stringify(streamEvents)).not.toContain("rejectedCanonicalAnnotation");
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
+  it("binds successful diagnostics to the service proof without exposing them to the browser", async () => {
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args?.diagnostics).toMatchObject({
+      version: 1, phase: "completion", reason: "completed",
+      searchCallCount: 1, searchResultCount: 1,
+      canonicalReadCompleted: true, canonicalAnnotationCount: 1,
+    });
+    expect(await verifyTelemetryServiceProof(
+      args.serviceProof,
+      await completeGovernedInteractionProofParts(args),
+    )).toBe(true);
+    expect(await verifyTelemetryServiceProof(
+      args.serviceProof,
+      await completeGovernedInteractionProofParts({
+        ...args, diagnostics: { ...args.diagnostics, canonicalAnnotationCount: 0 },
+      }),
+    )).toBe(false);
+    expect(streamEvents.at(-1)?.type).toBe("done");
+    expect(JSON.stringify(streamEvents)).not.toContain("diagnostics");
+    expect(JSON.stringify(streamEvents)).not.toContain("canonicalReadCompleted");
+  });
+
+  it("retains no-canonical-annotation evidence for legal abstentions", async () => {
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.get.mockResolvedValue(canonical);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "success", answerKind: "legal", citations: [],
+      diagnostics: {
+        phase: "completion", reason: "no_canonical_annotations",
+        searchCallCount: 1, searchResultCount: 1,
+        streamedAnnotationCount: 0, canonicalAnnotationCount: 0,
+        canonicalReadCompleted: true,
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("done");
+  });
+
+  it("retains a citation rejection's structure while keeping document identifiers private", async () => {
+    const documentName = "fileSearchStores/ghana/documents/private-document-identifier";
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations[0].document_uri = documentName;
+    canonical.steps[0].content[0].annotations[0].custom_metadata.version_id = "";
+    interactionMocks.get.mockResolvedValue(canonical);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+    const args = terminalArgs();
+
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "validation", citations: [],
+      diagnostics: {
+        phase: "canonical_read", reason: "citation_identity",
+        citationUriKind: "authorized_document",
+        jurisdictionMetadataPresent: false, resourceMetadataPresent: false,
+        versionMetadataPresent: false, canonicalAnnotationCount: 1,
+        structure: {
+          rejectedCanonicalAnnotation: {
+            documentUriKind: "authorized_document", metadataContainer: "object",
+            jurisdictionMetadataPresent: true, resourceMetadataPresent: true,
+            versionMetadataPresent: false,
+          },
+        },
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("error");
+    expect(JSON.stringify(args.diagnostics)).not.toContain(documentName);
+    expect(JSON.stringify(args.diagnostics)).not.toContain(selectedResourceId);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(documentName);
+    expect(JSON.stringify(streamEvents)).not.toContain("citation_identity");
+  });
+
+  it("distinguishes provider error events using a closed reason without retaining their payload", async () => {
+    const privatePayload = "private-provider-error-detail";
+    interactionMocks.create.mockResolvedValue((async function* () {
+      yield { event_type: "error", error: { message: privatePayload } };
+    })());
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "validation",
+      diagnostics: { phase: "generation", reason: "provider_error", canonicalReadCompleted: false },
+    });
+    expect(JSON.stringify(terminalArgs())).not.toContain(privatePayload);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
+  it("does not trust a provider exception that imitates an application error code", async () => {
+    const privatePayload = "GOVERNED_CHAT_PRIVATE_PROVIDER_SECRET";
+    interactionMocks.create.mockRejectedValue(new Error(privatePayload));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await events(await POST(request()));
+
+    expect(terminalArgs()?.diagnostics).toMatchObject({
+      phase: "generation", reason: "provider_request_failed",
+    });
+    expect(JSON.stringify(terminalArgs())).not.toContain(privatePayload);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
+  });
+
+  it("reports confirmed search exhaustion before failure persistence finishes, without releasing answer text", async () => {
+    let finishPersistence!: () => void;
+    const persistence = new Promise<void>((resolve) => { finishPersistence = resolve; });
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      await persistence;
+      return { status: "completed", outcome: args.outcome };
+    });
+    interactionMocks.create.mockResolvedValue((async function* () {
+      yield { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } };
+      for (let index = 0; index < 21; index++) {
+        yield { event_type: "step.start", interaction_id: "interaction-1", index: index * 2,
+          step: { type: "file_search_call", id: `search-${index}` } };
+        yield { event_type: "step.stop", interaction_id: "interaction-1", index: index * 2 };
+        yield { event_type: "step.start", interaction_id: "interaction-1", index: index * 2 + 1,
+          step: { type: "file_search_result", call_id: `search-${index}` } };
+        yield { event_type: "step.stop", interaction_id: "interaction-1", index: index * 2 + 1 };
+      }
+    })());
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reader = (await POST(request())).body!.getReader();
+    let first: ReadableStreamReadResult<Uint8Array> | undefined;
+    const firstRead = reader.read().then((value) => { first = value; });
+    try {
+      await vi.waitFor(() => expect(first).toBeDefined());
+      expect(JSON.parse(new TextDecoder().decode(first!.value))).toEqual({
+        type: "error", reason: "file_search_budget_exhausted",
+        error: expect.stringContaining("Each answer has its own search limit"),
+      });
+      // The client stops reading as soon as it receives the terminal failure.
+      await reader.cancel();
+      await vi.waitFor(() => expect(terminalArgs()).toMatchObject({
+        outcome: "failure", failureCategory: "validation", citations: [],
+        diagnostics: { reason: "file_search_budget_exhausted", searchCallCount: 20, canonicalReadCompleted: false },
+      }));
+      expect(terminalArgs().finalAnswer).toBeUndefined();
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+    } finally {
+      finishPersistence();
+      await firstRead;
+      await reader.cancel();
+    }
+  });
+
+  it("does not expose search-limit handling for a provider exception with that text", async () => {
+    interactionMocks.create.mockRejectedValue(new Error("GOVERNED_CHAT_file_search_budget_exhausted"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+    expect(streamEvents).toEqual([{ type: "error", error: "We couldn't process your request. Please try again." }]);
+    expect(terminalArgs().diagnostics.reason).toBe("provider_request_failed");
+  });
+
+  it.each([408, 504])("reports provider timeout status %s without claiming an application deadline", async (status) => {
+    const privatePayload = "private provider message and document reference";
+    interactionMocks.create.mockRejectedValue(Object.assign(new Error(privatePayload), { status }));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+
+    expect(streamEvents).toEqual([{
+      type: "error", reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
+    }]);
+    const args = terminalArgs();
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "timeout", citations: [],
+      diagnostics: { reason: "deadline_exceeded", execution: {
+        modelDeadlineReached: false, terminalDeadlineReached: false, clientAbortObserved: false,
+        streamAbortObserved: false, providerFailure: "timeout", completionEventAccepted: false,
+        streamClosed: false, resumeAttempted: false, resumeOutcome: "not_attempted",
+      } },
+    });
+    expect(args.finalAnswer).toBeUndefined();
+    expect(JSON.stringify([args, errorLog.mock.calls, streamEvents])).not.toContain(privatePayload);
+    expect(JSON.stringify(streamEvents)).not.toContain("execution");
+  });
+
+  it("delivers timeout guidance before failure persistence and preserves the original cause after reader cancellation", async () => {
+    let finishPersistence!: () => void;
+    const persistence = new Promise<void>((resolve) => { finishPersistence = resolve; });
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      return await persistence;
+    });
+    interactionMocks.create.mockRejectedValue(Object.assign(new Error("provider request exceeded its time limit"), { status: 504 }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(request());
+    const reader = response.body!.getReader();
+    let first: ReadableStreamReadResult<Uint8Array> | undefined;
+    const read = reader.read().then(value => { first = value; });
+    try {
+      await vi.waitFor(() => expect(first).toBeDefined());
+      expect(JSON.parse(new TextDecoder().decode(first!.value))).toMatchObject({ type: "error", reason: "deadline_exceeded" });
+      await reader.cancel();
+      await vi.waitFor(() => expect(terminalArgs()).toMatchObject({ outcome: "failure", diagnostics: {
+        reason: "deadline_exceeded", execution: { providerFailure: "timeout", clientAbortObserved: false, modelDeadlineReached: false },
+      } }));
+      expect(terminalArgs().finalAnswer).toBeUndefined();
+    } finally {
+      finishPersistence();
+      await read;
+    }
+  });
+
+  it("records missing provider configuration before attempting a provider request", async () => {
+    delete process.env.GOOGLE_AI_API_KEY;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "configuration",
+      diagnostics: {
+        phase: "generation", reason: "not_configured",
+        searchCallCount: 0, searchResultCount: 0, canonicalReadCompleted: false,
+      },
+    });
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+    expect(streamEvents.at(-1)?.type).toBe("error");
+  });
+
+  it("retains the canonical-read phase and prior search counts when the canonical request fails", async () => {
+    interactionMocks.get.mockRejectedValue(new Error("private-canonical-error"));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await events(await POST(request()));
+
+    expect(terminalArgs()?.diagnostics).toMatchObject({
+      phase: "canonical_read", reason: "provider_request_failed",
+      searchCallCount: 1, searchResultCount: 1, canonicalReadCompleted: false,
+    });
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("private-canonical-error");
+  });
+
+  it("distinguishes a rejected completion from a provider parser failure", async () => {
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      if (args.outcome === "success") throw new Error("INVALID_GOVERNED_INTERACTION");
+      return { status: "completed", outcome: "failure" };
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const streamEvents = await events(await POST(request()));
+
+    expect(terminalArgs()).toMatchObject({
+      outcome: "failure", failureCategory: "validation",
+      diagnostics: {
+        phase: "completion", reason: "completion_invalid",
+        canonicalReadCompleted: true, canonicalAnnotationCount: 1,
+      },
+    });
+    expect(streamEvents.at(-1)?.type).toBe("error");
+    expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+    expect(streamEvents.some((event) => event.type === "delta")).toBe(false);
+  });
 });
 
 describe("POST /api/chat request boundary", () => {
@@ -505,13 +928,41 @@ describe("POST /api/chat streamed governed interaction", () => {
 
   it("closes at the application deadline even when the canonical read ignores cancellation", async () => {
     vi.useFakeTimers();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     interactionMocks.get.mockImplementation(() => new Promise(() => undefined));
     const resultPromise = events(await POST(request()));
     await vi.advanceTimersByTimeAsync(110_000);
     expect((await resultPromise).at(-1)?.type).toBe("error");
+    const summary = JSON.parse(errorLog.mock.calls.at(-1)![1]);
+    expect(summary).toMatchObject({ phase: "canonical_read", category: "timeout", execution: {
+      modelDeadlineReached: false, terminalDeadlineReached: true, clientAbortObserved: false,
+      completionEventAccepted: true, streamClosed: true,
+    } });
   });
 
-  it("uses one selected-first File Search interaction and terminalizes before done", async () => {
+  it("records the terminal deadline guard when proof work crosses the limit before the timer callback", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-10-04T08:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "sign").mockImplementationOnce(async (...args) => {
+      const proof = await sign(...args);
+      // A clock jump advances the deadline guard without dispatching timer callbacks.
+      vi.setSystemTime(startedAt + 110_000);
+      return proof;
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+    expect(streamEvents).toEqual([{ type: "error", reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later." }]);
+    expect(JSON.parse(errorLog.mock.calls.at(-1)![1])).toMatchObject({ phase: "completion", execution: {
+      modelDeadlineReached: false, terminalDeadlineReached: true, clientAbortObserved: false,
+      providerFailure: "none", completionEventAccepted: true, streamClosed: true,
+    } });
+    expect(mutationNames()).toEqual(["usage:recordQuestion"]);
+  });
+
+  it("uses one selected-first File Search interaction and authorizes before any answer text", async () => {
     let finishTerminal!: (value: unknown) => void;
     const terminal = new Promise((resolve) => { finishTerminal = resolve; });
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -524,14 +975,14 @@ describe("POST /api/chat streamed governed interaction", () => {
     const response = await POST(request());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    const first = JSON.parse(decoder.decode((await reader.read()).value).trim());
-
-    expect(first).toEqual({ type: "delta", text: "Employees are protected." });
-    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+    let firstReadResolved = false;
+    const firstRead = reader.read().then(value => { firstReadResolved = true; return value; });
     await vi.waitFor(() => {
       expect(interactionMocks.get).toHaveBeenCalledTimes(1);
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     });
+    expect(firstReadResolved).toBe(false);
+    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
     expect(interactionMocks.create.mock.calls[0][0]).toMatchObject({
       model: "gemini-test-model",
       stream: true,
@@ -547,6 +998,8 @@ describe("POST /api/chat streamed governed interaction", () => {
       citationClaim,
       expiresAt: Date.now() + 60_000,
     });
+    const first = JSON.parse(decoder.decode((await firstRead).value).trim());
+    expect(first).toEqual({ type: "delta", text: "Employees are protected." });
     const terminalEvent = JSON.parse(decoder.decode((await reader.read()).value).trim());
     expect(terminalEvent).toEqual({
       type: "done",
@@ -606,11 +1059,19 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).not.toHaveProperty("error");
   });
 
-  it("rejects a document URI instead of treating it as a store identity", async () => {
+  it("requires authoritative catalog approval of an exact document URI", async () => {
     const documentName = "fileSearchStores/ghana/documents/wrong-document";
     const canonical = canonicalInteraction();
     canonical.steps[0].content[0].annotations[0].document_uri = documentName;
     interactionMocks.get.mockResolvedValue(canonical);
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      if (args.outcome === "success") {
+        expect(args.citations[0]).toMatchObject({ providerStoreName: selectedStoreName, providerDocumentName: documentName });
+        throw new Error("INVALID_CHAT_CITATIONS");
+      }
+      return { status: "completed", outcome: "failure" };
+    });
 
     const streamEvents = await events(await POST(request()));
 
@@ -619,6 +1080,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       error: "We couldn't process your request. Please try again.",
     });
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
+    expect(streamEvents.some((event) => event.type === "delta")).toBe(false);
     expect(JSON.stringify(streamEvents)).not.toContain(documentName);
   });
 
@@ -701,7 +1163,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it("aborts the provider at the single 90-second model cutoff and remains inside the terminal window", async () => {
+  it.each([8, 14, 16])("records the 90-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
@@ -712,6 +1174,14 @@ describe("POST /api/chat streamed governed interaction", () => {
           event_type: "interaction.created",
           interaction: { id: "interaction-timeout", status: "in_progress" },
         };
+        for (let index = 0; index < searches; index += 1) {
+          yield { event_type: "step.start", interaction_id: "interaction-timeout", index: index * 2,
+            step: { type: "file_search_call", id: `search-${index}` } };
+          yield { event_type: "step.stop", interaction_id: "interaction-timeout", index: index * 2 };
+          yield { event_type: "step.start", interaction_id: "interaction-timeout", index: index * 2 + 1,
+            step: { type: "file_search_result", call_id: `search-${index}` } };
+          yield { event_type: "step.stop", interaction_id: "interaction-timeout", index: index * 2 + 1 };
+        }
         await new Promise<never>((_, reject) => {
           options.signal.addEventListener("abort", () => reject(new Error("deadline")), { once: true });
         });
@@ -726,13 +1196,22 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
     expect(streamEvents.at(-1)).toEqual({
       type: "error",
-      error: "We couldn't process your request. Please try again.",
+      reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
     });
     const terminalArgs = authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1];
     expect(terminalArgs).toMatchObject({
       outcome: "failure",
       failureCategory: "timeout",
       elapsedMs: 90_000,
+      diagnostics: {
+        phase: "generation", reason: "deadline_exceeded",
+        searchCallCount: searches, searchResultCount: searches,
+        canonicalReadCompleted: false,
+        execution: { modelDeadlineReached: true, terminalDeadlineReached: false,
+          clientAbortObserved: false, streamAbortObserved: true, providerFailure: "none",
+          completionEventAccepted: false, streamClosed: false, resumeAttempted: false },
+      },
     });
   });
 
@@ -770,7 +1249,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
-  it("emits no done when terminal validation exhausts the shared 110-second deadline", async () => {
+  it("emits no answer text when terminal validation exhausts the shared 110-second deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -782,17 +1261,20 @@ describe("POST /api/chat streamed governed interaction", () => {
     const response = await POST(request());
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
-    expect(JSON.parse(decoder.decode((await reader.read()).value).trim()).type).toBe("delta");
+    let firstReadResolved = false;
+    const firstRead = reader.read().then(value => { firstReadResolved = true; return value; });
     await vi.waitFor(() => {
       expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     });
+    expect(firstReadResolved).toBe(false);
 
     await vi.advanceTimersByTimeAsync(110_000);
-    const terminalEvent = JSON.parse(decoder.decode((await reader.read()).value).trim());
+    const terminalEvent = JSON.parse(decoder.decode((await firstRead).value).trim());
 
     expect(terminalEvent).toEqual({
       type: "error",
-      error: "We couldn't process your request. Please try again.",
+      reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
     });
     expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     await expect(reader.read()).resolves.toMatchObject({ done: true });
@@ -819,6 +1301,8 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
       outcome: "aborted",
       citations: [],
+      diagnostics: { reason: "aborted", execution: { clientAbortObserved: true,
+        modelDeadlineReached: false, terminalDeadlineReached: false, streamAbortObserved: true } },
     });
   });
 });

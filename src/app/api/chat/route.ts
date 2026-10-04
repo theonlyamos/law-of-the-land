@@ -22,7 +22,9 @@ import {
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
+import { emptyQueryDiagnosticExecution, validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
+import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -66,6 +68,7 @@ type CompletionInput = {
   elapsedMs: number;
   outcome: "success" | "failure" | "aborted";
   failureCategory?: FailureCategory;
+  diagnostics?: QueryDiagnostics;
   authorizedScopeSize: number;
   readyStoreCount: number;
   partialCoverage: boolean;
@@ -97,7 +100,7 @@ type StreamEvent =
     citationClaim: string;
     partialCoverage: boolean;
   }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; reason?: ChatErrorReason };
 
 const MAX_QUERY_LENGTH = 4_000;
 const MAX_HISTORY_MESSAGES = 20;
@@ -372,6 +375,7 @@ function failureInput(
   requestStartedAt: number,
   outcome: "failure" | "aborted",
   failureCategory?: FailureCategory,
+  diagnostics?: QueryDiagnostics,
 ): CompletionInput {
   return {
     routeNonce,
@@ -383,6 +387,7 @@ function failureInput(
     elapsedMs: Math.max(0, Math.round(Date.now() - requestStartedAt)),
     outcome,
     ...(failureCategory ? { failureCategory } : {}),
+    ...(diagnostics ? { diagnostics } : {}),
     authorizedScopeSize: manifest.authorizedScopeSize,
     readyStoreCount: manifest.stores.length,
     partialCoverage: manifest.partialCoverage,
@@ -394,13 +399,17 @@ function failureInput(
   };
 }
 
+class ChatTerminalDeadlineError extends Error {
+  constructor() { super("CHAT_TERMINAL_DEADLINE_EXPIRED"); }
+}
+
 async function completeWithinDeadline(
   input: CompletionInput,
   terminalDeadlineAt: number,
   signal: AbortSignal,
 ): Promise<unknown> {
   if (Date.now() >= terminalDeadlineAt) {
-    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+    throw new ChatTerminalDeadlineError();
   }
   const proofParts = await raceWithAbort(
     completeGovernedInteractionProofParts(input),
@@ -411,7 +420,7 @@ async function completeWithinDeadline(
     signal,
   );
   if (Date.now() >= terminalDeadlineAt) {
-    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+    throw new ChatTerminalDeadlineError();
   }
   return await raceWithAbort(
     fetchAuthMutation(completeGovernedInteraction, { ...input, serviceProof }),
@@ -508,7 +517,28 @@ function streamResponse(input: {
         }
       };
       void (async () => {
-        let phase = "generation";
+        let phase: QueryDiagnostics["phase"] = "generation";
+        let diagnostics: QueryDiagnostics | undefined = input.reply === null ? {
+          version: 1,
+          phase: "generation",
+          reason: "in_progress",
+          searchCallCount: 0,
+          searchResultCount: 0,
+          searchResultItemCount: 0,
+          streamedAnnotationCount: 0,
+          canonicalAnnotationCount: 0,
+          canonicalReadCompleted: false,
+          countsClamped: false,
+          execution: emptyQueryDiagnosticExecution(),
+        } : undefined;
+        const executionSnapshot = (terminalGuardReached = false) => ({
+          ...(diagnostics?.execution ?? emptyQueryDiagnosticExecution()),
+          modelDeadlineReached: diagnostics?.execution?.modelDeadlineReached === true || input.streamCutoffSignal.aborted,
+          terminalDeadlineReached: terminalGuardReached || diagnostics?.execution?.terminalDeadlineReached === true || input.terminalSignal.aborted,
+          clientAbortObserved: cancelled || input.request.signal.aborted || input.clientSignal.aborted,
+          streamAbortObserved: diagnostics?.execution?.streamAbortObserved === true
+            || (phase === "generation" && input.streamSignal.aborted),
+        });
         let completionModel = input.model;
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
@@ -517,12 +547,14 @@ function streamResponse(input: {
           if (input.reply !== null) {
             completionModel = "app-policy-v1";
             result = { answer: input.reply, citations: [] };
-            send({ type: "delta", text: input.reply });
           } else {
             phase = "generation";
             if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
             const apiKey = process.env.GOOGLE_AI_API_KEY;
-            if (!apiKey) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            if (!apiKey) {
+              if (diagnostics) diagnostics = { ...diagnostics, reason: "not_configured" };
+              throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            }
             const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
             result = await raceWithAbort(chat.run({
               query: input.body.query,
@@ -533,14 +565,18 @@ function streamResponse(input: {
               deadlineAt: input.terminalDeadlineAt,
               streamSignal: input.streamSignal,
               streamDeadlineAt: input.modelDeadlineAt,
-              // Gemini text is provisional until the canonical answer and citations are checked.
+              allowStreamFileCitations: true,
+              // Text remains private until canonical checks and catalog authorization complete.
               onDelta: () => undefined,
+              onDiagnostics: (snapshot) => {
+                validateQueryDiagnostics(snapshot);
+                diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
+              },
               onStreamComplete: () => {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
               },
             }), input.providerSignal);
-            send({ type: "delta", text: result.answer });
           }
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
@@ -557,6 +593,7 @@ function streamResponse(input: {
             model: completionModel,
             elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)),
             outcome: "success",
+            ...(diagnostics ? { diagnostics: { ...diagnostics, phase, execution: executionSnapshot() } } : {}),
             authorizedScopeSize: input.manifest.authorizedScopeSize,
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
@@ -573,6 +610,7 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          send({ type: "delta", text: result.answer });
           send({
             type: "done",
             result: result.answer,
@@ -584,16 +622,34 @@ function streamResponse(input: {
           return;
         } catch (error) {
           const aborted = cancelled || input.request.signal.aborted || input.clientSignal.aborted;
-          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
+          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted
+            || diagnostics?.execution?.modelDeadlineReached || diagnostics?.execution?.terminalDeadlineReached
+            || diagnostics?.execution?.providerFailure === "timeout") && !aborted
             ? "timeout"
             : classifyFailure(error);
+          const failureDiagnostics: QueryDiagnostics | undefined = diagnostics ? {
+            ...diagnostics,
+            phase,
+            execution: executionSnapshot(error instanceof ChatTerminalDeadlineError),
+            reason: aborted ? "aborted"
+              : category === "timeout" ? "deadline_exceeded"
+              : phase === "completion" ? "completion_invalid"
+              : diagnostics.reason === "in_progress" ? "provider_request_failed"
+              : diagnostics.reason,
+          } : undefined;
           // Do not log provider errors, prompts, answers, tokens, or store identifiers.
           if (!aborted) console.error("chat_request_failed", JSON.stringify({
             phase, category, elapsedMs: Date.now() - input.requestStartedAt,
-            code: error instanceof Error && /^GOVERNED_CHAT_[A-Z_]+(?::[a-z_]+)?$/u.test(error.message)
-              ? error.message : undefined,
+            reason: failureDiagnostics?.reason,
+            execution: failureDiagnostics?.execution,
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
+          // Only closed, actionable failures reach the client before bounded persistence.
+          // Freeze their diagnostics before reader cancellation or cleanup aborts the stream.
+          const publicReason = !aborted ? publicChatErrorReason(
+            category === "timeout" ? "deadline_exceeded" : failureDiagnostics?.reason,
+          ) : null;
+          if (publicReason) send({ type: "error", error: publicChatErrorMessage(publicReason), reason: publicReason });
           try {
             await completeWithinDeadline(
               failureInput(
@@ -604,14 +660,17 @@ function streamResponse(input: {
                 input.requestStartedAt,
                 aborted ? "aborted" : "failure",
                 aborted ? undefined : category,
+                failureDiagnostics,
               ),
               input.terminalDeadlineAt,
-              aborted ? input.terminalSignal : input.providerSignal,
+              // A client may stop reading after the terminal error. Keep that confirmed
+              // failure's telemetry bounded by the terminal deadline, not reader lifetime.
+              aborted || publicReason ? input.terminalSignal : input.providerSignal,
             );
           } catch {
-            // The client still receives only the generic terminal state.
+            // Failure persistence cannot replace or delay an actionable terminal error.
           }
-          if (!aborted) send({ type: "error", error: CHAT_FAILURE });
+          if (!aborted && !publicReason) send({ type: "error", error: CHAT_FAILURE });
         } finally {
           clearTimeout(input.modelTimer);
           clearTimeout(input.terminalTimer);

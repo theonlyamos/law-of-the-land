@@ -1,4 +1,5 @@
 import type { ChatCitation } from "@/lib/countries";
+import type { ChatErrorReason } from "@/lib/chat-errors";
 import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
 
@@ -26,6 +27,7 @@ export interface LocalChatMessage {
   createdAt: number;
   sequence: number;
   state: "pending" | "error";
+  errorReason?: ChatErrorReason;
   citations?: ChatCitation[];
   answerKind?: ChatAnswerKind;
   partialCoverage?: boolean;

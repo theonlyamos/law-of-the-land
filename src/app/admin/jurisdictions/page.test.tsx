@@ -12,6 +12,11 @@ vi.mock("@/components/admin/catalog-actions", () => ({
   JurisdictionLifecycleActions: (props: unknown) => <output data-testid="lifecycle-props">{JSON.stringify(props)}</output>,
   JurisdictionSetupRefresh: (props: unknown) => <output data-testid="setup-refresh-props">{JSON.stringify(props)}</output>,
 }));
+// This server-page suite checks the projections passed to client controls.
+vi.mock("@/components/admin/organization-widget-controls", () => ({
+  OrganizationWidgetControls: (props: unknown) => <output data-testid="organization-widget-props">{JSON.stringify(props)}</output>,
+  WidgetAllowanceControl: (props: unknown) => <output data-testid="widget-allowance-props">{JSON.stringify(props)}</output>,
+}));
 import JurisdictionsPage from "./page";
 
 beforeEach(() => {
@@ -63,6 +68,7 @@ describe("typed jurisdiction register", () => {
     render(await JurisdictionsPage({ searchParams: Promise.resolve({}) }));
     expect(mocks.fetchAuthQuery).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("editor-props")).toBeNull();
+    expect(screen.queryByTestId("widget-allowance-props")).toBeNull();
     expect(screen.getByText("Ready")).toBeVisible();
     expect(screen.getByText("models/gemini-embedding-2")).toBeVisible();
     expect(screen.queryByText(/bucket/i)).toBeNull();
@@ -86,6 +92,7 @@ describe("typed jurisdiction register", () => {
     expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"status":"draft"');
     expect(screen.getByTestId("lifecycle-props")).toHaveTextContent('"editable":true');
     expect(screen.getByTestId("setup-refresh-props")).toHaveTextContent('"pending":true');
+    expect(screen.getByTestId("widget-allowance-props")).toHaveTextContent('"jurisdictionId":"geo_1"');
   });
 
   it("keeps legacy migration rows on lifecycle transitions without typed editing", async () => {

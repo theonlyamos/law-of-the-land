@@ -35,6 +35,7 @@ import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
+import { queryDiagnosticsProofParts, queryDiagnosticsValidator, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 
 const answerKindValidator = v.union(v.literal("legal"), v.literal("policy"));
 
@@ -87,6 +88,7 @@ type GovernedCitationIdentity = {
   resourceId: string;
   versionId: string;
   providerStoreName: string;
+  providerDocumentName?: string;
   pageNumber?: number;
 };
 type GovernedJurisdictionCoverage = {
@@ -95,6 +97,7 @@ type GovernedJurisdictionCoverage = {
   coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
 type GovernedCompletionProofInput = {
+  diagnostics?: QueryDiagnostics;
   routeNonce: string;
   externalId: string;
   jurisdictionId: string;
@@ -147,6 +150,7 @@ const governedCitationIdentityValidator = v.object({
   resourceId: v.string(),
   versionId: v.string(),
   providerStoreName: v.string(),
+  providerDocumentName: v.optional(v.string()),
   pageNumber: v.optional(v.number()),
 });
 const governedJurisdictionCoverageValidator = v.object({
@@ -169,6 +173,12 @@ function boundedIdentifier(value: string, maximum: number): boolean {
 
 function validCount(value: number, maximum: number): boolean {
   return Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+}
+
+function citationDocumentProofParts(citations: readonly GovernedCitationIdentity[]): readonly (string | number)[] {
+  if (!citations.some(citation => citation.providerDocumentName !== undefined)) return [];
+  return ["governed-provider-documents-v1", citations.length,
+    ...citations.flatMap((citation, index) => [index, citation.providerDocumentName ?? ""])];
 }
 
 export async function completeGovernedInteractionProofParts(
@@ -208,6 +218,8 @@ export async function completeGovernedInteractionProofParts(
       citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
+    ...queryDiagnosticsProofParts(input.diagnostics),
+    ...citationDocumentProofParts(input.citations),
   ];
 }
 
@@ -233,6 +245,8 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
       citation.providerStoreName,
       citation.pageNumber ?? 0,
     ]),
+    ...queryDiagnosticsProofParts(input.diagnostics),
+    ...citationDocumentProofParts(input.citations),
   ]));
   return {
     assistantClientIdBinding: claimBindings.assistantClientIdBinding,
@@ -241,6 +255,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
 }
 
 function validateGovernedCompletionInput(input: GovernedCompletionProofInput): void {
+  if (input.diagnostics !== undefined) validateQueryDiagnostics(input.diagnostics);
   const answer = input.finalAnswer;
   if (
     !isOpaqueTelemetryToken(input.routeNonce)
@@ -266,6 +281,8 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
       || !boundedIdentifier(citation.resourceId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !boundedIdentifier(citation.versionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
       || !isGeminiFileSearchStoreName(citation.providerStoreName)
+      || (citation.providerDocumentName !== undefined && (!isGeminiDocumentName(citation.providerDocumentName)
+        || !citation.providerDocumentName.startsWith(`${citation.providerStoreName}/documents/`)))
       || (citation.pageNumber !== undefined
         && (!Number.isSafeInteger(citation.pageNumber)
           || citation.pageNumber <= 0
@@ -676,6 +693,8 @@ export async function validateGovernedCitations(ctx: QueryCtx, storeList: readon
       || version.status !== "published"
       || !documentName
       || !isGeminiDocumentName(documentName)
+      || (citation.providerDocumentName !== undefined && (!isGeminiDocumentName(citation.providerDocumentName)
+        || citation.providerDocumentName !== documentName))
       || citation.providerStoreName !== store.storeName
       || !documentName.startsWith(`${store.storeName}/documents/`)
       || locks.length !== 0
@@ -765,6 +784,7 @@ const completionResultValidator = v.union(
 
 export const completeGovernedInteraction = mutation({
   args: {
+    diagnostics: v.optional(queryDiagnosticsValidator),
     routeNonce: v.string(),
     externalId: v.string(),
     jurisdictionId: v.string(),
@@ -813,6 +833,7 @@ export const completeGovernedInteraction = mutation({
       throw new ConvexError("INVALID_GOVERNED_INTERACTION");
     }
 
+    const idempotency = await governedCompletionBindings(input);
     const requestNonceHash = await hashOpaqueTelemetryValue(args.routeNonce);
     const nonceRows = await ctx.db
       .query("queryRuns")
@@ -820,13 +841,14 @@ export const completeGovernedInteraction = mutation({
       .take(2);
     if (nonceRows.length > 1) throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
     if (nonceRows.length === 1) {
-      if (nonceRows[0].chatSessionId !== session._id) {
+      if (nonceRows[0].chatSessionId !== session._id ||
+          !opaqueEqual(nonceRows[0].completionBinding, idempotency.completionBinding) ||
+          JSON.stringify(queryDiagnosticsProofParts(nonceRows[0].diagnostics)) !== JSON.stringify(queryDiagnosticsProofParts(input.diagnostics))) {
         throw new ConvexError("GOVERNED_INTERACTION_REPLAY_INVALID");
       }
       return { status: "replayed" as const, outcome: nonceRows[0].outcome };
     }
 
-    const idempotency = await governedCompletionBindings(input);
     const clientRows = await ctx.db
       .query("queryRuns")
       .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>
@@ -893,6 +915,7 @@ export const completeGovernedInteraction = mutation({
       claim = { citationClaim, expiresAt };
     }
     await ctx.db.insert("queryRuns", {
+      ...(args.diagnostics === undefined ? {} : { diagnostics: args.diagnostics }),
       requestNonceHash,
       chatSessionId: session._id,
       ...idempotency,
