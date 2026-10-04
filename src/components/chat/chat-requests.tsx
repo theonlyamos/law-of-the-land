@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
 import { authClient } from "@/lib/auth-client";
 import type { LocalChatMessage } from "./chat-message-state";
+import type { ChatErrorReason } from "@/lib/chat-errors";
 
 type RequestState = {
   messages: LocalChatMessage[];
@@ -12,10 +13,11 @@ type RequestState = {
   deleteError: string | null;
   isDeleting: boolean;
   isDeleted: boolean;
+  errorReason: ChatErrorReason | null;
 };
 const emptyState: RequestState = {
   messages: [], isLoading: false, saveFailed: false, ensureError: null,
-  deleteError: null, isDeleting: false, isDeleted: false,
+  deleteError: null, isDeleting: false, isDeleted: false, errorReason: null,
 };
 type ChatRequest = {
   controller: AbortController;

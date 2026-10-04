@@ -485,6 +485,58 @@ describe("POST /api/chat private query diagnostics", () => {
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privatePayload);
   });
 
+  it("reports confirmed search exhaustion before failure persistence finishes, without releasing answer text", async () => {
+    let finishPersistence!: () => void;
+    const persistence = new Promise<void>((resolve) => { finishPersistence = resolve; });
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      await persistence;
+      return { status: "completed", outcome: args.outcome };
+    });
+    interactionMocks.create.mockResolvedValue((async function* () {
+      yield { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } };
+      for (let index = 0; index < 21; index++) {
+        yield { event_type: "step.start", interaction_id: "interaction-1", index: index * 2,
+          step: { type: "file_search_call", id: `search-${index}` } };
+        yield { event_type: "step.stop", interaction_id: "interaction-1", index: index * 2 };
+        yield { event_type: "step.start", interaction_id: "interaction-1", index: index * 2 + 1,
+          step: { type: "file_search_result", call_id: `search-${index}` } };
+        yield { event_type: "step.stop", interaction_id: "interaction-1", index: index * 2 + 1 };
+      }
+    })());
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reader = (await POST(request())).body!.getReader();
+    let first: ReadableStreamReadResult<Uint8Array> | undefined;
+    const firstRead = reader.read().then((value) => { first = value; });
+    try {
+      await vi.waitFor(() => expect(first).toBeDefined());
+      expect(JSON.parse(new TextDecoder().decode(first!.value))).toEqual({
+        type: "error", reason: "file_search_budget_exhausted",
+        error: expect.stringContaining("Each answer has its own search limit"),
+      });
+      // The client stops reading as soon as it receives the terminal failure.
+      await reader.cancel();
+      await vi.waitFor(() => expect(terminalArgs()).toMatchObject({
+        outcome: "failure", failureCategory: "validation", citations: [],
+        diagnostics: { reason: "file_search_budget_exhausted", searchCallCount: 20, canonicalReadCompleted: false },
+      }));
+      expect(terminalArgs().finalAnswer).toBeUndefined();
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+    } finally {
+      finishPersistence();
+      await firstRead;
+      await reader.cancel();
+    }
+  });
+
+  it("does not expose search-limit handling for a provider exception with that text", async () => {
+    interactionMocks.create.mockRejectedValue(new Error("GOVERNED_CHAT_file_search_budget_exhausted"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+    expect(streamEvents).toEqual([{ type: "error", error: "We couldn't process your request. Please try again." }]);
+    expect(terminalArgs().diagnostics.reason).toBe("provider_request_failed");
+  });
+
   it("records missing provider configuration before attempting a provider request", async () => {
     delete process.env.GOOGLE_AI_API_KEY;
     vi.spyOn(console, "error").mockImplementation(() => undefined);

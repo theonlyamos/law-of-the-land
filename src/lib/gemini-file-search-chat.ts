@@ -12,6 +12,7 @@ import {
 } from "../../convex/lib/queryDiagnostics";
 
 export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
+const MAX_FILE_SEARCH_CALLS = 20;
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
 
 LEGAL-ONLY SCOPE
@@ -31,6 +32,7 @@ Do not rely on general legal knowledge to fill gaps. Do not invent legal require
 If retrieved material is insufficient, say what is missing instead of constructing a plausible answer. Never use a loosely related Act as a substitute for the legislation that directly governs the issue.
 
 FOCUSED RESEARCH
+The application permits at most ${MAX_FILE_SEARCH_CALLS} File Search calls for this answer, including all follow-ups. Plan research within this limit and stop as soon as the retrieved provisions sufficiently support an answer. After the last permitted search result, give the final answer without another search: answer only the supported parts and explain unresolved evidence gaps, or abstain when support is insufficient. Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit.
 Keep research proportional to the user's actual question. When the question names an instrument or provision, search for that instrument and the requested issue or provision first; do not guess a provision number. For a narrow, single-issue question, normally plan about three targeted searches: an initial search and focused follow-ups for specific missing conditions, exceptions, or cross-references. Stop searching once retrieved provisions adequately answer the requested issue. Use further searches only to resolve a material evidence gap; if it remains unresolved, answer only the supported parts and explain the gap, or abstain when there is not enough support.
 Do not research ancillary agencies, remedies, procedures, or unrelated legal issues merely to fill the six required headings. For an informational question, state when no additional practical action is established or needed for the requested explanation. Keep all source restrictions, material qualifications, and evidence-gap disclosures.
 
@@ -100,9 +102,13 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_OUTPUT_BLOCKS = 32;
 const MAX_ANNOTATIONS = 64;
 const MAX_IDENTIFIER_LENGTH = 200;
-const MAX_STREAM_STEP_INDEX = 31;
-const MAX_FILE_SEARCH_CALLS = 8;
+// Each search needs a call and result step. Preserve the former full-budget
+// headroom (32 total minus 16 search steps), without increasing output limits.
+const MAX_INTERACTION_STEPS = 16 + 2 * MAX_FILE_SEARCH_CALLS;
+const MAX_NON_SEARCH_STEPS = 32;
+const MAX_STREAM_STEP_INDEX = MAX_INTERACTION_STEPS - 1;
 const MAX_FILE_SEARCH_CALL_ID_LENGTH = 128;
+const MAX_STREAM_EVENT_ID_BYTES = 4_096;
 const MAX_PAGE_NUMBER = 10_000;
 const GEMINI_RESOURCE_ID = "[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?";
 const GEMINI_STORE_NAME = new RegExp(`^fileSearchStores/${GEMINI_RESOURCE_ID}$`, "u");
@@ -150,9 +156,9 @@ export type GeminiInteractionsClient = {
     ): Promise<AsyncIterable<Interactions.InteractionSSEEvent>>;
     get(
       interactionId: string,
-      params?: Interactions.InteractionGetParamsNonStreaming | null,
+      params?: Interactions.InteractionGetParamsNonStreaming | Interactions.InteractionGetParamsStreaming | null,
       options?: GeminiInteractionRequestOptions,
-    ): Promise<Interactions.Interaction>;
+    ): Promise<Interactions.Interaction | AsyncIterable<Interactions.InteractionSSEEvent>>;
   };
 };
 
@@ -178,6 +184,19 @@ function checkAbortOrDeadline(signal: AbortSignal, deadlineAt: number): void {
 
 function isIdentifier(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH;
+}
+
+function streamCursor(value: unknown): string | undefined {
+  // The provider token is opaque. Bound its bytes without assuming an ID format.
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_STREAM_EVENT_ID_BYTES
+    && !/[\u0000-\u0020\u007f]/u.test(value) && encoder.encode(value).byteLength <= MAX_STREAM_EVENT_ID_BYTES
+    ? value : undefined;
+}
+
+function isInteractionStream(
+  value: Interactions.Interaction | AsyncIterable<Interactions.InteractionSSEEvent>,
+): value is AsyncIterable<Interactions.InteractionSSEEvent> {
+  return Symbol.asyncIterator in value && typeof value[Symbol.asyncIterator] === "function";
 }
 
 // Observation never invokes provider-object getters or retains provider values.
@@ -420,13 +439,17 @@ function canonicalOutput(interaction: Interactions.Interaction, observeAnnotatio
   annotations: Interactions.Annotation[];
   modelOutputs: ModelOutputText[];
 } {
-  if (interaction.status !== "completed" || !Array.isArray(interaction.steps) || interaction.steps.length > MAX_OUTPUT_BLOCKS) {
+  if (interaction.status !== "completed" || !Array.isArray(interaction.steps) || interaction.steps.length > MAX_INTERACTION_STEPS) {
     return invalidResponse("canonical_state");
   }
   const texts: string[] = [];
   const annotations: Interactions.Annotation[] = [];
   const modelOutputs: ModelOutputText[] = [];
+  let nonSearchSteps = 0;
   for (const step of interaction.steps) {
+    if (step.type !== "file_search_call" && step.type !== "file_search_result" && ++nonSearchSteps > MAX_NON_SEARCH_STEPS) {
+      return invalidResponse("canonical_state");
+    }
     if (step.type !== "model_output") continue;
     const output = { text: "", supported: true };
     modelOutputs.push(output);
@@ -745,13 +768,16 @@ export class GeminiFileSearchChat {
       validateInput(input);
       checkAbortOrDeadline(options.signal, options.deadlineAt);
       checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-      const stream = await this.client.interactions.create(requestFor(this.model, input), {
+      let stream = await this.client.interactions.create(requestFor(this.model, input), {
         signal: options.streamSignal,
       });
       const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
       const fileSearchCallIds = new Map<string, Set<string>>();
       let interactionId: string | undefined;
+      let lastEventId: string | undefined;
+      let resumed = false;
       let completed = false;
+      let nonSearchSteps = 0;
       let streamedAnswer = "";
       let streamedBytes = 0;
       const streamedModelOutputs = new Map<number, ModelOutputText>();
@@ -764,128 +790,146 @@ export class GeminiFileSearchChat {
         await options.onDelta(text);
       };
 
-      for await (const event of stream) {
-        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-        if (completed) return invalidResponse("event_after_completion");
-        if (event.event_type === "error") return invalidResponse("provider_error");
-        if (event.event_type === "interaction.created") {
-          // Creation payloads may omit status; the fetched canonical response must still be completed.
-          if (interactionId || !isIdentifier(event.interaction.id) ||
-            (event.interaction.status !== undefined && event.interaction.status !== "in_progress")) return invalidResponse("creation_state");
-          interactionId = event.interaction.id;
-          stepsByInteraction.set(interactionId, new Map());
-          fileSearchCallIds.set(interactionId, new Set());
-          continue;
-        }
-        if (!interactionId) return invalidResponse("missing_interaction");
-        const steps = stepsByInteraction.get(interactionId);
-        const calls = fileSearchCallIds.get(interactionId);
-        if (!steps || !calls) return invalidResponse("missing_stream_state");
-        if (event.event_type === "interaction.status_update") {
-          if (event.interaction_id !== interactionId || (event.status !== "in_progress" && event.status !== "queued")) return invalidResponse("status_update");
-          continue;
-        }
-        if (event.event_type === "interaction.completed") {
-          if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
-          if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
-          observe(() => observer.completion(event.interaction));
-          report();
-          completed = true;
-          continue;
-        }
-        if (event.event_type === "step.start") {
-          if (!validStepIndex(event.index)) return invalidResponse("step_index");
-          const type = event.step.type;
-          if (type !== "thought" && type !== "file_search_call" && type !== "file_search_result" && type !== "model_output") return invalidResponse("step_type");
-          if (steps.has(event.index)) return invalidResponse("duplicate_step");
-          if (type === "file_search_call") {
-            if (!validFileSearchCallId(event.step.id)) return invalidResponse("file_search_call_id");
-            if (calls.has(event.step.id)) return invalidResponse("file_search_call_duplicate");
-            if (calls.size >= MAX_FILE_SEARCH_CALLS) return invalidResponse("file_search_budget_exhausted");
-            calls.add(event.step.id);
-            count("searchCallCount", 1);
-          }
-          if (type === "file_search_result" && (
-            !validFileSearchCallId(event.step.call_id)
-            || !calls.has(event.step.call_id)
-          )) return invalidResponse("file_search_result");
-          if (type === "file_search_result") count("searchResultCount", 1);
-          if (type === "model_output") {
-            const output = { text: "", supported: true };
-            streamedModelOutputs.set(event.index, output);
-            observe(() => observer.modelOutput("stream", event.step));
-            if (allowStreamFileCitations) {
-              const content = diagnosticValue(event.step, "content");
-              if (content !== undefined) {
-                if (!Array.isArray(content) || content.length > MAX_OUTPUT_BLOCKS) output.supported = false;
-                else {
-                  const batches: unknown[] = [];
-                  const texts: string[] = [];
-                  for (let index = 0; index < content.length; index++) {
-                    const block = diagnosticValue(content, index);
-                    const text = diagnosticValue(block, "text");
-                    if (diagnosticValue(block, "type") !== "text" || typeof text !== "string") {
-                      output.supported = false;
-                      continue;
-                    }
-                    if (text) texts.push(text);
-                    const annotations = diagnosticValue(block, "annotations");
-                    if (annotations !== undefined) batches.push(annotations);
-                  }
-                  if (batches.length > 0) retainSnapshot(batches);
-                  for (const text of texts) await appendText(output, text);
-                }
-              }
-            }
-            report();
-          }
-          steps.set(event.index, { type, stopped: false });
-          continue;
-        }
-        if (event.event_type === "step.stop") {
-          if (!validStepIndex(event.index)) return invalidResponse("step_index");
-          const step = steps.get(event.index);
-          if (!step || step.stopped) return invalidResponse("step_stop");
-          step.stopped = true;
-          continue;
-        }
-        if (event.event_type !== "step.delta") return invalidResponse("event_type");
-        if (!validStepIndex(event.index)) return invalidResponse("step_index");
-        const step = steps.get(event.index);
-        if (!step || step.stopped) return invalidResponse("step_delta");
-        const stepType = step.type;
-        if (stepType === "model_output") {
-          if (event.delta.type === "text_annotation_delta") {
-            observe(() => observer.annotations("stream", diagnosticValue(event.delta, "annotations")));
-            if (allowStreamFileCitations) retainBatch(diagnosticValue(event.delta, "annotations"));
-            if (Array.isArray(event.delta.annotations)) count("streamedAnnotationCount", event.delta.annotations.length);
+      while (true) {
+        for await (const event of stream) {
+          checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+          // Only a clean EOF can reach recovery; any rejected event or iterator error
+          // escapes it. An absent/invalid tail cursor must not reuse an earlier token.
+          lastEventId = streamCursor(diagnosticValue(event, "event_id"));
+          if (completed) return invalidResponse("event_after_completion");
+          if (event.event_type === "error") return invalidResponse("provider_error");
+          if (event.event_type === "interaction.created") {
+            // Creation payloads may omit status; the fetched canonical response must still be completed.
+            if (interactionId || !isIdentifier(event.interaction.id) ||
+              (event.interaction.status !== undefined && event.interaction.status !== "in_progress")) return invalidResponse("creation_state");
+            interactionId = event.interaction.id;
+            stepsByInteraction.set(interactionId, new Map());
+            fileSearchCallIds.set(interactionId, new Set());
             continue;
           }
-          if (event.delta.type !== "text") return invalidResponse("model_delta_type");
-          const output = streamedModelOutputs.get(event.index);
-          if (!output) return invalidResponse("missing_stream_state");
-          await appendText(output, event.delta.text);
-          continue;
+          if (!interactionId) return invalidResponse("missing_interaction");
+          const steps = stepsByInteraction.get(interactionId);
+          const calls = fileSearchCallIds.get(interactionId);
+          if (!steps || !calls) return invalidResponse("missing_stream_state");
+          if (event.event_type === "interaction.status_update") {
+            if (event.interaction_id !== interactionId || (event.status !== "in_progress" && event.status !== "queued")) return invalidResponse("status_update");
+            continue;
+          }
+          if (event.event_type === "interaction.completed") {
+            if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
+            if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
+            observe(() => observer.completion(event.interaction));
+            report();
+            completed = true;
+            continue;
+          }
+          if (event.event_type === "step.start") {
+            if (!validStepIndex(event.index)) return invalidResponse("step_index");
+            const type = event.step.type;
+            if (type !== "thought" && type !== "file_search_call" && type !== "file_search_result" && type !== "model_output") return invalidResponse("step_type");
+            if (steps.has(event.index)) return invalidResponse("duplicate_step");
+            if (type !== "file_search_call" && type !== "file_search_result" && ++nonSearchSteps > MAX_NON_SEARCH_STEPS) {
+              return invalidResponse("step_index");
+            }
+            if (type === "file_search_call") {
+              if (!validFileSearchCallId(event.step.id)) return invalidResponse("file_search_call_id");
+              if (calls.has(event.step.id)) return invalidResponse("file_search_call_duplicate");
+              if (calls.size >= MAX_FILE_SEARCH_CALLS) return invalidResponse("file_search_budget_exhausted");
+              calls.add(event.step.id);
+              count("searchCallCount", 1);
+            }
+            if (type === "file_search_result" && (
+              !validFileSearchCallId(event.step.call_id)
+              || !calls.has(event.step.call_id)
+            )) return invalidResponse("file_search_result");
+            if (type === "file_search_result") count("searchResultCount", 1);
+            if (type === "model_output") {
+              const output = { text: "", supported: true };
+              streamedModelOutputs.set(event.index, output);
+              observe(() => observer.modelOutput("stream", event.step));
+              if (allowStreamFileCitations) {
+                const content = diagnosticValue(event.step, "content");
+                if (content !== undefined) {
+                  if (!Array.isArray(content) || content.length > MAX_OUTPUT_BLOCKS) output.supported = false;
+                  else {
+                    const batches: unknown[] = [];
+                    const texts: string[] = [];
+                    for (let index = 0; index < content.length; index++) {
+                      const block = diagnosticValue(content, index);
+                      const text = diagnosticValue(block, "text");
+                      if (diagnosticValue(block, "type") !== "text" || typeof text !== "string") {
+                        output.supported = false;
+                        continue;
+                      }
+                      if (text) texts.push(text);
+                      const annotations = diagnosticValue(block, "annotations");
+                      if (annotations !== undefined) batches.push(annotations);
+                    }
+                    if (batches.length > 0) retainSnapshot(batches);
+                    for (const text of texts) await appendText(output, text);
+                  }
+                }
+              }
+              report();
+            }
+            steps.set(event.index, { type, stopped: false });
+            continue;
+          }
+          if (event.event_type === "step.stop") {
+            if (!validStepIndex(event.index)) return invalidResponse("step_index");
+            const step = steps.get(event.index);
+            if (!step || step.stopped) return invalidResponse("step_stop");
+            step.stopped = true;
+            continue;
+          }
+          if (event.event_type !== "step.delta") return invalidResponse("event_type");
+          if (!validStepIndex(event.index)) return invalidResponse("step_index");
+          const step = steps.get(event.index);
+          if (!step || step.stopped) return invalidResponse("step_delta");
+          const stepType = step.type;
+          if (stepType === "model_output") {
+            if (event.delta.type === "text_annotation_delta") {
+              observe(() => observer.annotations("stream", diagnosticValue(event.delta, "annotations")));
+              if (allowStreamFileCitations) retainBatch(diagnosticValue(event.delta, "annotations"));
+              if (Array.isArray(event.delta.annotations)) count("streamedAnnotationCount", event.delta.annotations.length);
+              continue;
+            }
+            if (event.delta.type !== "text") return invalidResponse("model_delta_type");
+            const output = streamedModelOutputs.get(event.index);
+            if (!output) return invalidResponse("missing_stream_state");
+            await appendText(output, event.delta.text);
+            continue;
+          }
+          if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
+          if (stepType === "file_search_call" && event.delta.type === "file_search_call") continue;
+          if (stepType === "file_search_result" && event.delta.type === "file_search_result") {
+            observe(() => observer.resultDelta(event.delta));
+            // SDK result entries are exposed on deltas, not result-step starts.
+            // This sums observed entries; it does not measure unique hits or prove an empty search.
+            if (Array.isArray(event.delta.result)) count("searchResultItemCount", event.delta.result.length);
+            else report();
+            continue;
+          }
+          return invalidResponse("tool_delta_type");
         }
-        if (stepType === "thought" && (event.delta.type === "thought_summary" || event.delta.type === "thought_signature")) continue;
-        if (stepType === "file_search_call" && event.delta.type === "file_search_call") continue;
-        if (stepType === "file_search_result" && event.delta.type === "file_search_result") {
-          observe(() => observer.resultDelta(event.delta));
-          // SDK result entries are exposed on deltas, not result-step starts.
-          // This sums observed entries; it does not measure unique hits or prove an empty search.
-          if (Array.isArray(event.delta.result)) count("searchResultItemCount", event.delta.result.length);
-          else report();
-          continue;
-        }
-        return invalidResponse("tool_delta_type");
-      }
 
-      checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        if (completed) break;
+        if (resumed || !interactionId || !lastEventId) return invalidResponse("incomplete_stream");
+        resumed = true;
+        const continuation = await this.client.interactions.get(interactionId, {
+          stream: true, last_event_id: lastEventId,
+        }, { signal: options.streamSignal, maxRetries: 0 });
+        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        if (!isInteractionStream(continuation)) return invalidResponse("incomplete_stream");
+        stream = continuation;
+      }
       if (!completed || !interactionId) return invalidResponse("incomplete_stream");
       report({ phase: "canonical_read" });
       options.onStreamComplete?.();
       checkAbortOrDeadline(options.signal, options.deadlineAt);
       const interaction = await this.client.interactions.get(interactionId, undefined, { signal: options.signal });
+      if (isInteractionStream(interaction)) return invalidResponse("canonical_state");
       report({ canonicalReadCompleted: true });
       checkAbortOrDeadline(options.signal, options.deadlineAt);
       if (interaction.id !== interactionId) return invalidResponse("canonical_interaction");

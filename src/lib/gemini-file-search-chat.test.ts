@@ -38,27 +38,30 @@ class FakeInteractionsClient implements GeminiInteractionsClient {
   readonly getIds: string[] = [];
   readonly createOptions: Array<object | undefined> = [];
   readonly getOptions: Array<object | undefined> = [];
+  readonly getParams: Array<object | null | undefined> = [];
 
   constructor(
-    private readonly events: readonly StreamEvent[],
+    private readonly events: Iterable<StreamEvent> | AsyncIterable<StreamEvent>,
     private readonly canonical: CanonicalInteraction,
+    private readonly resumedEvents: Iterable<StreamEvent> | AsyncIterable<StreamEvent> = [],
   ) {}
 
   readonly interactions = {
     create: async (request: Interactions.CreateModelInteractionParamsStreaming, options?: object) => {
       this.requests.push(request);
       this.createOptions.push(options);
-      return this.stream();
+      return this.stream(this.events);
     },
-    get: async (interactionId: string, _params?: object | null, options?: object) => {
+    get: async (interactionId: string, params?: Interactions.InteractionGetParamsNonStreaming | Interactions.InteractionGetParamsStreaming | null, options?: object) => {
       this.getIds.push(interactionId);
       this.getOptions.push(options);
-      return this.canonical;
+      this.getParams.push(params);
+      return params?.stream ? this.stream(this.resumedEvents) : this.canonical;
     },
   };
 
-  private async *stream(): AsyncIterable<StreamEvent> {
-    for (const event of this.events) yield event;
+  private async *stream(events: Iterable<StreamEvent> | AsyncIterable<StreamEvent>): AsyncIterable<StreamEvent> {
+    for await (const event of events) yield event;
   }
 }
 
@@ -123,6 +126,34 @@ function citation(overrides: Partial<Interactions.FileCitation> = {}): Interacti
     },
     ...overrides,
   };
+}
+
+function researchedAnswer(callCount: number) {
+  const events: StreamEvent[] = [eventStream()[0]];
+  const steps: NonNullable<CanonicalInteraction["steps"]> = [];
+  for (let index = 0; index < 15; index++) {
+    const step = { type: "thought" } as const;
+    steps.push(step);
+    events.push({ event_type: "step.start", index, step }, { event_type: "step.stop", index });
+  }
+  for (let call = 0; call < callCount; call++) {
+    const index = 15 + call * 2;
+    const callStep = { type: "file_search_call", id: `call-${call}` } as const;
+    const resultStep = { type: "file_search_result", call_id: `call-${call}` } as const;
+    steps.push(callStep, resultStep);
+    events.push(
+      { event_type: "step.start", index, step: callStep },
+      { event_type: "step.stop", index },
+      { event_type: "step.start", index: index + 1, step: resultStep },
+      { event_type: "step.delta", index: index + 1, delta: { type: "file_search_result", result: [] } },
+      { event_type: "step.stop", index: index + 1 },
+    );
+  }
+  const outputIndex = 15 + callCount * 2;
+  events.push(...eventStream().slice(10).map(event => "index" in event ? { ...event, index: outputIndex } : event));
+  const final = canonical(undefined, [citation()]);
+  final.steps = [...steps, ...final.steps!];
+  return { events, final };
 }
 
 async function run(
@@ -234,6 +265,9 @@ describe("GeminiFileSearchChat", () => {
     ]);
     expect(request.system_instruction).toContain("PDF page numbers belong only in the application's Sources display when citation metadata supplies them");
     expect(request.system_instruction).toContain("A printed-page label may appear in prose only when it is explicitly exposed for the cited passage in the retrieved text");
+    expect(request.system_instruction).toContain("The application permits at most 20 File Search calls for this answer, including all follow-ups");
+    expect(request.system_instruction).toContain("After the last permitted search result, give the final answer without another search");
+    expect(request.system_instruction).toContain("Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit");
     expect(request.system_instruction).toContain("Every legal conclusion must be supported by a specific retrieved provision");
     expect(request.system_instruction).toContain('When the user asks for "exact", "all", or "when"');
     expect(request.system_instruction).toContain("support both its identity and its role in this specific issue");
@@ -375,26 +409,55 @@ describe("GeminiFileSearchChat", () => {
     await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
   });
 
-  it("rejects more than eight File Search call IDs", async () => {
-    const answer = "The Constitution applies.";
-    const events: StreamEvent[] = [
-      { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } },
-      ...Array.from({ length: 9 }, (_, index) => ([
-        { event_type: "step.start", index, step: { type: "file_search_call", id: `file-search-${index}` } },
-        { event_type: "step.stop", index },
-      ] satisfies StreamEvent[])).flat(),
-      { event_type: "step.start", index: 9, step: { type: "model_output" } },
-      { event_type: "step.delta", index: 9, delta: { type: "text", text: answer } },
-      { event_type: "step.stop", index: 9 },
-      { event_type: "interaction.completed", interaction: { id: "interaction-1", status: "completed" } },
-    ];
+  it("accepts twenty searches with complete canonical tool steps and the existing non-search headroom", async () => {
+    const { events, final } = researchedAnswer(20);
+    expect(final.steps).toHaveLength(56);
+    const snapshots: QueryDiagnostics[] = [];
+    const { result } = await run(events, final, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) });
+    expect(result.citations).toHaveLength(1);
+    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 20, searchResultCount: 20, reason: "completed" });
+  });
 
-    await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
+  it("rejects the twenty-first File Search call before canonical retrieval", async () => {
+    const { events, final } = researchedAnswer(21);
+    const snapshots: QueryDiagnostics[] = [];
+    await expect(run(events, final, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow("file_search_budget_exhausted");
+    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 20, canonicalReadCompleted: false });
+  });
+
+  it("bounds total canonical steps separately from the unchanged content-block limit", async () => {
+    const { events, final } = researchedAnswer(20);
+    final.steps!.push({ type: "thought" });
+    await expect(run(events, final)).rejects.toThrow("canonical_state");
+    const tooManyBlocks = canonical();
+    tooManyBlocks.steps = [{ type: "model_output", content: [
+      { type: "text", text: "The Constitution applies.", annotations: [citation()] },
+      ...Array.from({ length: 32 }, () => ({ type: "text" as const, text: "" })),
+    ] }];
+    await expect(run(eventStream(), tooManyBlocks)).rejects.toThrow("canonical_content");
+  });
+
+  it("rejects thirty-three non-search stream steps even within the larger total-step bound", async () => {
+    const events: StreamEvent[] = [eventStream()[0], ...Array.from({ length: 33 }, (_, index) => [
+      { event_type: "step.start", index, step: { type: "thought" } },
+      { event_type: "step.stop", index },
+    ] satisfies StreamEvent[]).flat(), ...eventStream().slice(10).map(event => "index" in event ? { ...event, index: 33 } : event)];
+    const snapshots: QueryDiagnostics[] = [];
+    await expect(run(events, undefined, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow("step_index");
+    expect(snapshots.at(-1)?.canonicalReadCompleted).toBe(false);
+  });
+
+  it("keeps the absolute canonical non-search-step allowance at thirty-two", async () => {
+    const final = canonical(undefined, [citation()]);
+    final.steps!.unshift(...Array.from({ length: 31 }, () => ({ type: "thought" as const })));
+    expect((await run(eventStream(), final)).result.citations).toHaveLength(1);
+    final.steps!.unshift({ type: "thought" });
+    await expect(run(eventStream(), final)).rejects.toThrow("canonical_state");
   });
 
   it.each([
     ["an excessive step index", eventStream().map((event) =>
-      "index" in event && event.index === 0 ? { ...event, index: 32 } : event) as StreamEvent[]],
+      "index" in event && event.index === 0 ? { ...event, index: 56 } : event) as StreamEvent[]],
     ["an oversized File Search call ID", eventStream().map((event) => {
       if (event.event_type === "step.start" && event.step.type === "file_search_call") {
         return { ...event, step: { ...event.step, id: "x".repeat(129) } };
@@ -475,6 +538,199 @@ describe("GeminiFileSearchChat", () => {
       onDelta: () => { controller.abort(); },
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(client.getIds).toEqual([]);
+  });
+});
+
+describe("bounded recovery of a clean premature stream EOF", () => {
+  function cursors(events = eventStream()): StreamEvent[] {
+    return events.map((event, index) => ({ ...event, event_id: `private-cursor-${index}` }));
+  }
+
+  function attempt(
+    events: Iterable<StreamEvent> | AsyncIterable<StreamEvent>,
+    resumed: Iterable<StreamEvent> | AsyncIterable<StreamEvent> = [],
+    final = canonical(undefined, [citation()]),
+    overrides: Partial<Parameters<GeminiFileSearchChat["run"]>[1]> = {},
+  ) {
+    const client = new FakeInteractionsClient(events, final, resumed);
+    const signal = new AbortController().signal;
+    const streamSignal = new AbortController().signal;
+    const snapshots: QueryDiagnostics[] = [];
+    const deltas: string[] = [];
+    const onStreamComplete = vi.fn();
+    const operation = new GeminiFileSearchChat(client, {}).run(input(), {
+      signal, streamSignal,
+      deadlineAt: Date.now() + 20_000,
+      streamDeadlineAt: Date.now() + 10_000,
+      onDelta: text => { deltas.push(text); },
+      onDiagnostics: snapshot => { snapshots.push(snapshot); },
+      onStreamComplete,
+      ...overrides,
+    });
+    return { client, operation, snapshots, deltas, signal, streamSignal, onStreamComplete };
+  }
+
+  it.each([10, 12, 14])("resumes the exact interaction and latest cursor at split %i, retaining text and citations", async split => {
+    const events = eventStream();
+    events.splice(13, 0, {
+      event_type: "step.delta", index: 3,
+      delta: { type: "text_annotation_delta", annotations: [citation({ start_index: 0, end_index: 3, page_number: 2 })] },
+    });
+    const withCursors = cursors(events);
+    const test = attempt(withCursors.slice(0, split), withCursors.slice(split), canonical(), { allowStreamFileCitations: true });
+    await expect(test.operation).resolves.toMatchObject({ answer: "The Constitution applies.", citations: [{ resourceId: "resource-1", pageNumber: 2 }] });
+    expect(test.deltas.join("")).toBe("The Constitution applies.");
+    expect(test.client.requests).toHaveLength(1);
+    expect(test.client.getIds).toEqual(["interaction-1", "interaction-1"]);
+    expect(test.client.getParams).toEqual([{ stream: true, last_event_id: `private-cursor-${split - 1}` }, undefined]);
+    expect(test.client.getOptions).toEqual([{ signal: test.streamSignal, maxRetries: 0 }, { signal: test.signal }]);
+    expect(test.onStreamComplete).toHaveBeenCalledTimes(1);
+    expect(test.snapshots.at(-1)).toMatchObject({ reason: "completed", searchCallCount: 1, searchResultCount: 1, canonicalReadCompleted: true });
+    expect(JSON.stringify(test.snapshots)).not.toContain("private-cursor");
+  });
+
+  it.each([undefined, "", " ", "cursor\nvalue", 42, "x".repeat(4097)])("does not use an older cursor when the final accepted event has invalid cursor %j", async cursor => {
+    const events = cursors(eventStream().slice(0, 10));
+    Object.assign(events[events.length - 1], { event_id: cursor, id: "raw-sse-id-is-not-a-payload-cursor" });
+    const test = attempt(events, eventStream().slice(10));
+    await expect(test.operation).rejects.toThrow("incomplete_stream");
+    expect(test.client.getIds).toEqual([]);
+    expect(test.onStreamComplete).not.toHaveBeenCalled();
+  });
+
+  it("validates a resumed empty annotation-only output against the whole canonical answer", async () => {
+    const initial = cursors(eventStream().slice(0, -1));
+    const resumed: StreamEvent[] = [
+      { event_type: "step.start", index: 4, step: { type: "model_output" } },
+      { event_type: "step.delta", index: 4, delta: { type: "text_annotation_delta", annotations: [citation({
+        document_uri: "fileSearchStores/ghana-law/documents/document-1", start_index: 20, end_index: 25, page_number: 2,
+      })] } },
+      { event_type: "step.stop", index: 4 },
+      eventStream().at(-1)!,
+    ];
+    const final = canonical();
+    final.steps!.push({ type: "model_output", content: [] });
+    const test = attempt(initial, resumed, final, { allowStreamFileCitations: true });
+    await expect(test.operation).resolves.toMatchObject({ answer: "The Constitution applies.", citations: [{
+      jurisdictionId: "ghana", resourceId: "resource-1", versionId: "version-1",
+      providerDocumentName: "fileSearchStores/ghana-law/documents/document-1", pageNumber: 2,
+    }] });
+    expect(test.client.getIds).toEqual(["interaction-1", "interaction-1"]);
+  });
+
+  it("retains the total output-byte bound across resume", async () => {
+    const events = eventStream("x".repeat(64 * 1024));
+    const firstText = events[11];
+    const secondText = events[12];
+    if (firstText.event_type !== "step.delta" || secondText.event_type !== "step.delta") throw new Error("fixture");
+    firstText.delta = { type: "text", text: "x".repeat(32 * 1024) };
+    secondText.delta = { type: "text", text: "x".repeat(32 * 1024 + 1) };
+    const test = attempt(cursors(events.slice(0, 12)), events.slice(12));
+    await expect(test.operation).rejects.toThrow("output_limit");
+    expect(test.client.getIds).toHaveLength(1);
+    expect(test.onStreamComplete).not.toHaveBeenCalled();
+  });
+
+  it("does not resume without an accepted interaction identity", async () => {
+    const test = attempt([]);
+    await expect(test.operation).rejects.toThrow("incomplete_stream");
+    expect(test.client.getIds).toEqual([]);
+  });
+
+  it("performs at most one resume and never accepts partial text after a second clean EOF", async () => {
+    const events = cursors();
+    const test = attempt(events.slice(0, 12), events.slice(12, -1));
+    await expect(test.operation).rejects.toThrow("incomplete_stream");
+    expect(test.client.getIds).toEqual(["interaction-1"]);
+    expect(test.client.getParams).toEqual([{ stream: true, last_event_id: "private-cursor-11" }]);
+    expect(test.onStreamComplete).not.toHaveBeenCalled();
+    expect(test.snapshots.at(-1)?.canonicalReadCompleted).toBe(false);
+  });
+
+  it("does not resume an ordinarily completed stream", async () => {
+    const test = attempt(cursors());
+    await expect(test.operation).resolves.toMatchObject({ citations: [{ resourceId: "resource-1" }] });
+    expect(test.client.getParams).toEqual([undefined]);
+  });
+
+  it.each(["parser", "provider"])("does not resume after a %s error", async kind => {
+    async function* broken() {
+      yield* cursors(eventStream().slice(0, 10));
+      if (kind === "parser") throw new Error("synthetic parser failure");
+      yield { event_type: "error", error: { code: "synthetic", message: "synthetic provider failure" }, event_id: "unused-cursor" } as StreamEvent;
+    }
+    const test = attempt(broken());
+    await expect(test.operation).rejects.toThrow(kind === "parser" ? "synthetic parser failure" : "provider_error");
+    expect(test.client.getIds).toEqual([]);
+  });
+
+  it.each([
+    ["duplicate_step", { event_type: "step.start", index: 1, step: { type: "file_search_call", id: "new-call" } }],
+    ["file_search_call_duplicate", { event_type: "step.start", index: 4, step: { type: "file_search_call", id: "file-search-1" } }],
+  ] as const)("keeps pre-resume state and rejects %s", async (reason, replay) => {
+    const test = attempt(cursors(eventStream().slice(0, 10)), [replay]);
+    await expect(test.operation).rejects.toThrow(reason);
+    expect(test.client.getIds).toHaveLength(1);
+    expect(test.snapshots.at(-1)?.searchCallCount).toBe(1);
+  });
+
+  it.each([20, 21])("keeps the twenty-call budget across resume for %i total searches", async totalCalls => {
+    const { events, final } = researchedAnswer(totalCalls);
+    // Disconnect after ten complete searches; subsequent searches share the budget.
+    const split = 1 + 15 * 2 + 10 * 5;
+    const test = attempt(cursors(events.slice(0, split)), events.slice(split), final);
+    if (totalCalls === 21) await expect(test.operation).rejects.toThrow("file_search_budget_exhausted");
+    else await expect(test.operation).resolves.toMatchObject({ citations: [{ resourceId: "resource-1" }] });
+    expect(test.snapshots.at(-1)).toMatchObject({ searchCallCount: 20, searchResultCount: 20 });
+    expect(test.client.getIds).toHaveLength(totalCalls === 21 ? 1 : 2);
+  });
+
+  it.each([
+    ["canonical_text_mismatch", canonical("Different answer", [citation()])],
+    ["canonical_interaction", { ...canonical(undefined, [citation()]), id: "other-interaction" }],
+    ["citation_identity", canonical(undefined, [citation({ custom_metadata: {} })])],
+  ] as const)("still rejects %s after a successful resume", async (reason, final) => {
+    const events = cursors();
+    const test = attempt(events.slice(0, 10), events.slice(10), final);
+    await expect(test.operation).rejects.toThrow(reason);
+    expect(test.client.getIds).toHaveLength(2);
+  });
+
+  it.each(["before", "during"])("honors stream abort %s the resume without canonical retrieval", async when => {
+    const controller = new AbortController();
+    async function* first() {
+      yield* cursors(eventStream().slice(0, 10));
+      if (when === "before") controller.abort();
+    }
+    async function* resumed() {
+      controller.abort();
+      yield* eventStream().slice(10);
+    }
+    const test = attempt(first(), resumed(), undefined, { streamSignal: controller.signal });
+    await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_ABORTED");
+    expect(test.client.getIds).toHaveLength(when === "before" ? 0 : 1);
+    expect(test.onStreamComplete).not.toHaveBeenCalled();
+  });
+
+  it.each(["before", "during"])("honors the original stream deadline %s the resume", async when => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      async function* first() {
+        yield* cursors(eventStream().slice(0, 10));
+        if (when === "before") vi.setSystemTime(11_000);
+      }
+      async function* resumed() {
+        vi.setSystemTime(11_000);
+        yield* eventStream().slice(10);
+      }
+      const test = attempt(first(), resumed());
+      await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_DEADLINE_EXPIRED");
+      expect(test.client.getIds).toHaveLength(when === "before" ? 0 : 1);
+      expect(test.onStreamComplete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -765,7 +1021,7 @@ describe("verified stream file citations", () => {
   });
 
   it.each(["file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted"] as const)(
-    "distinguishes %s without changing the eight-call budget", async reason => {
+    "distinguishes %s at the twenty-call budget", async reason => {
       let events = eventStream();
       if (reason === "file_search_call_id") {
         const start = events[4];
@@ -774,7 +1030,7 @@ describe("verified stream file citations", () => {
       } else if (reason === "file_search_call_duplicate") {
         events.splice(10, 0, { event_type: "step.start", index: 4, step: { type: "file_search_call", id: "file-search-1" } });
       } else {
-        events = [events[0], ...Array.from({ length: 9 }, (_, index) => ([
+        events = [events[0], ...Array.from({ length: 21 }, (_, index) => ([
           { event_type: "step.start", index, step: { type: "file_search_call", id: `call-${index}` } },
           { event_type: "step.stop", index },
         ] satisfies StreamEvent[])).flat()];
@@ -782,7 +1038,7 @@ describe("verified stream file citations", () => {
       const snapshots: QueryDiagnostics[] = [];
       await expect(run(events, undefined, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow(reason);
       expect(snapshots.at(-1)?.reason).toBe(reason);
-      expect(snapshots.at(-1)?.searchCallCount).toBe(reason === "file_search_budget_exhausted" ? 8 : reason === "file_search_call_duplicate" ? 1 : 0);
+      expect(snapshots.at(-1)?.searchCallCount).toBe(reason === "file_search_budget_exhausted" ? 20 : reason === "file_search_call_duplicate" ? 1 : 0);
     },
   );
 });
