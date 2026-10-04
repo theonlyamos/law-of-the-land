@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyQueryDiagnosticStructure, queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnosticAnnotationShape, type QueryDiagnosticStructure } from "./queryDiagnostics";
+import { emptyQueryDiagnosticExecution, emptyQueryDiagnosticStructure, queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnosticAnnotationShape, type QueryDiagnosticStructure } from "./queryDiagnostics";
 
 const base = {
   version: 1 as const, phase: "canonical_read" as const, reason: "citation_type" as const,
@@ -30,6 +30,85 @@ function structure(): QueryDiagnosticStructure {
     rejectedCanonicalAnnotation: shape(),
   };
 }
+
+function execution() {
+  return {
+    modelDeadlineReached: false, terminalDeadlineReached: false,
+    clientAbortObserved: false, streamAbortObserved: false,
+    providerFailure: "none" as const, completionEventAccepted: false,
+    streamClosed: false, resumeAttempted: false, resumeOutcome: "not_attempted" as const,
+  };
+}
+
+describe("execution query diagnostics", () => {
+  it("returns a fresh observation with no execution event recorded", () => {
+    const first = emptyQueryDiagnosticExecution();
+    const second = emptyQueryDiagnosticExecution();
+    expect(first).toEqual(execution());
+    first.modelDeadlineReached = true;
+    first.providerFailure = "timeout";
+    first.resumeOutcome = "pending";
+    expect(second).toEqual(execution());
+    expect(() => validateQueryDiagnostics({ ...base, execution: second })).not.toThrow();
+  });
+
+  it("appends an exact versioned proof after legacy fields and existing structure", () => {
+    const suffix = ["query-diagnostics-execution-v1", 0, 0, 0, 0, "none", 0, 0, 0, "not_attempted"];
+    for (const legacy of [base, { ...base, structure: structure() }]) {
+      const diagnostics = { ...legacy, execution: execution() };
+      expect(() => validateQueryDiagnostics(diagnostics)).not.toThrow();
+      expect(queryDiagnosticsProofParts(diagnostics)).toEqual([...queryDiagnosticsProofParts(legacy), ...suffix]);
+    }
+  });
+
+  it("binds every execution field independently and preserves key-order independence", () => {
+    const original = { ...base, execution: execution() };
+    const proof = queryDiagnosticsProofParts(original);
+    const changes = [
+      { modelDeadlineReached: true }, { terminalDeadlineReached: true },
+      { clientAbortObserved: true }, { streamAbortObserved: true },
+      { providerFailure: "timeout" }, { completionEventAccepted: true },
+      { streamClosed: true }, { resumeAttempted: true }, { resumeOutcome: "pending" },
+    ];
+    for (const change of changes) {
+      const diagnostics = { ...base, execution: { ...execution(), ...change } };
+      validateQueryDiagnostics(diagnostics);
+      expect(queryDiagnosticsProofParts(diagnostics)).not.toEqual(proof);
+    }
+    const reordered = { ...base, execution: Object.fromEntries(Object.entries(execution()).reverse()) };
+    validateQueryDiagnostics(reordered);
+    expect(queryDiagnosticsProofParts(reordered)).toEqual(proof);
+  });
+
+  it.each(["none", "timeout", "abort", "other"])("accepts the closed provider failure label %s", providerFailure => {
+    expect(() => validateQueryDiagnostics({ ...base, execution: { ...execution(), providerFailure } })).not.toThrow();
+  });
+
+  it.each(["not_attempted", "pending", "completed", "incomplete", "failed", "aborted"])("accepts the closed resume outcome label %s", resumeOutcome => {
+    expect(() => validateQueryDiagnostics({ ...base, execution: { ...execution(), resumeOutcome } })).not.toThrow();
+  });
+
+  it.each(Object.keys(execution()))("requires execution field %s", field => {
+    const observation: Record<string, unknown> = execution();
+    delete observation[field];
+    expect(() => validateQueryDiagnostics({ ...base, execution: observation })).toThrow("INVALID_QUERY_DIAGNOSTICS");
+  });
+
+  it.each([
+    ["modelDeadlineReached", 1], ["terminalDeadlineReached", "true"], ["clientAbortObserved", null],
+    ["streamAbortObserved", undefined], ["providerFailure", "private-provider-message"],
+    ["completionEventAccepted", []], ["streamClosed", {}], ["resumeAttempted", "yes"],
+    ["resumeOutcome", "fileSearchStores/private/documents/private"], ["rawPayload", "private-provider-value"],
+    ["eventId", "private-resume-cursor"],
+  ])("rejects invalid or raw execution field %s", (field, value) => {
+    expect(() => validateQueryDiagnostics({ ...base, execution: { ...execution(), [String(field)]: value } }))
+      .toThrow("INVALID_QUERY_DIAGNOSTICS");
+  });
+
+  it.each([null, [], "private-provider-value", 0])("rejects a non-object execution value %s", value => {
+    expect(() => validateQueryDiagnostics({ ...base, execution: value })).toThrow("INVALID_QUERY_DIAGNOSTICS");
+  });
+});
 
 describe("structural query diagnostics", () => {
   it("binds an optional rejected stream shape without changing existing structure proofs", () => {

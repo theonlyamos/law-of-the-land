@@ -22,9 +22,9 @@ import {
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
-import { validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
+import { emptyQueryDiagnosticExecution, validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
-import { CHAT_SEARCH_LIMIT_MESSAGE, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
+import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -399,13 +399,17 @@ function failureInput(
   };
 }
 
+class ChatTerminalDeadlineError extends Error {
+  constructor() { super("CHAT_TERMINAL_DEADLINE_EXPIRED"); }
+}
+
 async function completeWithinDeadline(
   input: CompletionInput,
   terminalDeadlineAt: number,
   signal: AbortSignal,
 ): Promise<unknown> {
   if (Date.now() >= terminalDeadlineAt) {
-    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+    throw new ChatTerminalDeadlineError();
   }
   const proofParts = await raceWithAbort(
     completeGovernedInteractionProofParts(input),
@@ -416,7 +420,7 @@ async function completeWithinDeadline(
     signal,
   );
   if (Date.now() >= terminalDeadlineAt) {
-    throw new Error("CHAT_TERMINAL_DEADLINE_EXPIRED");
+    throw new ChatTerminalDeadlineError();
   }
   return await raceWithAbort(
     fetchAuthMutation(completeGovernedInteraction, { ...input, serviceProof }),
@@ -525,7 +529,16 @@ function streamResponse(input: {
           canonicalAnnotationCount: 0,
           canonicalReadCompleted: false,
           countsClamped: false,
+          execution: emptyQueryDiagnosticExecution(),
         } : undefined;
+        const executionSnapshot = (terminalGuardReached = false) => ({
+          ...(diagnostics?.execution ?? emptyQueryDiagnosticExecution()),
+          modelDeadlineReached: diagnostics?.execution?.modelDeadlineReached === true || input.streamCutoffSignal.aborted,
+          terminalDeadlineReached: terminalGuardReached || diagnostics?.execution?.terminalDeadlineReached === true || input.terminalSignal.aborted,
+          clientAbortObserved: cancelled || input.request.signal.aborted || input.clientSignal.aborted,
+          streamAbortObserved: diagnostics?.execution?.streamAbortObserved === true
+            || (phase === "generation" && input.streamSignal.aborted),
+        });
         let completionModel = input.model;
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
@@ -557,7 +570,7 @@ function streamResponse(input: {
               onDelta: () => undefined,
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
-                diagnostics = { ...snapshot };
+                diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
               },
               onStreamComplete: () => {
                 phase = "canonical_read";
@@ -580,7 +593,7 @@ function streamResponse(input: {
             model: completionModel,
             elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)),
             outcome: "success",
-            ...(diagnostics ? { diagnostics: { ...diagnostics, phase } } : {}),
+            ...(diagnostics ? { diagnostics: { ...diagnostics, phase, execution: executionSnapshot() } } : {}),
             authorizedScopeSize: input.manifest.authorizedScopeSize,
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
@@ -609,12 +622,15 @@ function streamResponse(input: {
           return;
         } catch (error) {
           const aborted = cancelled || input.request.signal.aborted || input.clientSignal.aborted;
-          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted) && !aborted
+          const category = (input.streamCutoffSignal.aborted || input.terminalSignal.aborted
+            || diagnostics?.execution?.modelDeadlineReached || diagnostics?.execution?.terminalDeadlineReached
+            || diagnostics?.execution?.providerFailure === "timeout") && !aborted
             ? "timeout"
             : classifyFailure(error);
           const failureDiagnostics: QueryDiagnostics | undefined = diagnostics ? {
             ...diagnostics,
             phase,
+            execution: executionSnapshot(error instanceof ChatTerminalDeadlineError),
             reason: aborted ? "aborted"
               : category === "timeout" ? "deadline_exceeded"
               : phase === "completion" ? "completion_invalid"
@@ -625,12 +641,15 @@ function streamResponse(input: {
           if (!aborted) console.error("chat_request_failed", JSON.stringify({
             phase, category, elapsedMs: Date.now() - input.requestStartedAt,
             reason: failureDiagnostics?.reason,
+            execution: failureDiagnostics?.execution,
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
-          // This is a per-answer limit confirmed by the adapter's validated diagnostics.
-          // Inform the client before bounded failure persistence; no answer is released.
-          const publicReason = !aborted ? publicChatErrorReason(failureDiagnostics?.reason) : null;
-          if (publicReason) send({ type: "error", error: CHAT_SEARCH_LIMIT_MESSAGE, reason: publicReason });
+          // Only closed, actionable failures reach the client before bounded persistence.
+          // Freeze their diagnostics before reader cancellation or cleanup aborts the stream.
+          const publicReason = !aborted ? publicChatErrorReason(
+            category === "timeout" ? "deadline_exceeded" : failureDiagnostics?.reason,
+          ) : null;
+          if (publicReason) send({ type: "error", error: publicChatErrorMessage(publicReason), reason: publicReason });
           try {
             await completeWithinDeadline(
               failureInput(

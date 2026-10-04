@@ -17,7 +17,7 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { CHAT_SEARCH_LIMIT_MESSAGE, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
+import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 import { clearGuestResearchDraft, readGuestResearchDraft } from "@/lib/guest-research-draft";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
 import {
@@ -87,8 +87,9 @@ async function postChat(
     signal,
   });
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: unknown } | null;
-    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined);
+    const data = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined,
+      publicChatErrorReason(data?.reason) ?? undefined);
   }
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) throw new ApiError(500);
   if (!response.body) throw new ApiError(500);
@@ -162,7 +163,7 @@ class ApiError extends Error {
 
 function answerErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.reason === "file_search_budget_exhausted") return CHAT_SEARCH_LIMIT_MESSAGE;
+    if (error.reason) return publicChatErrorMessage(error.reason);
     if (error.status === 504) {
       return "The answer took too long to finish. Please try again.";
     }
@@ -1024,15 +1025,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                 That jurisdiction is not available for research.
               </p>
             )}
-            {errorReason === "file_search_budget_exhausted" && (
-              <p id="chat-search-limit" role="alert" className="mb-2 text-sm text-destructive">
-                That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, or start a new chat.
+            {errorReason && (
+              <p id="chat-request-error" role="alert" className="mb-2 text-sm text-destructive">
+                {errorReason === "file_search_budget_exhausted"
+                  ? "That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, or start a new chat."
+                  : "This answer took too long. You can ask a more focused question or try again later."}
               </p>
             )}
             <ChatInput
               variant="editorial"
               ariaLabel="Follow-up question"
-              describedBy={errorReason === "file_search_budget_exhausted" ? "chat-search-limit" : undefined}
+              describedBy={errorReason ? "chat-request-error" : undefined}
               query={query}
               onQueryChange={setQuery}
               onSearch={() => void handleSearch(query)}
