@@ -24,6 +24,7 @@ import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
 import { validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
+import { CHAT_SEARCH_LIMIT_MESSAGE, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -99,7 +100,7 @@ type StreamEvent =
     citationClaim: string;
     partialCoverage: boolean;
   }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; reason?: ChatErrorReason };
 
 const MAX_QUERY_LENGTH = 4_000;
 const MAX_HISTORY_MESSAGES = 20;
@@ -626,6 +627,10 @@ function streamResponse(input: {
             reason: failureDiagnostics?.reason,
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
+          // This is a per-answer limit confirmed by the adapter's validated diagnostics.
+          // Inform the client before bounded failure persistence; no answer is released.
+          const publicReason = !aborted ? publicChatErrorReason(failureDiagnostics?.reason) : null;
+          if (publicReason) send({ type: "error", error: CHAT_SEARCH_LIMIT_MESSAGE, reason: publicReason });
           try {
             await completeWithinDeadline(
               failureInput(
@@ -639,12 +644,14 @@ function streamResponse(input: {
                 failureDiagnostics,
               ),
               input.terminalDeadlineAt,
-              aborted ? input.terminalSignal : input.providerSignal,
+              // A client may stop reading after the terminal error. Keep that confirmed
+              // failure's telemetry bounded by the terminal deadline, not reader lifetime.
+              aborted || publicReason ? input.terminalSignal : input.providerSignal,
             );
           } catch {
-            // The client still receives only the generic terminal state.
+            // Failure persistence cannot replace or delay an actionable terminal error.
           }
-          if (!aborted) send({ type: "error", error: CHAT_FAILURE });
+          if (!aborted && !publicReason) send({ type: "error", error: CHAT_FAILURE });
         } finally {
           clearTimeout(input.modelTimer);
           clearTimeout(input.terminalTimer);

@@ -602,6 +602,84 @@ describe("unified chat client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("explains the per-answer search limit immediately and accepts a narrower next question", async () => {
+    let sendLimit!: () => void;
+    const cancel = vi.fn();
+    const encoder = new TextEncoder();
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(new ReadableStream({
+        start(controller) {
+          sendLimit = () => {
+            controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "error", reason: "file_search_budget_exhausted", error: "Generic fallback",
+            })}\n`));
+            // Already buffered late data cannot replace a terminal failure.
+            controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: "done", result: "Late answer that must stay hidden", answerKind: "legal",
+              citations: [citation], citationClaim, partialCoverage: false,
+            })}\n`));
+          };
+        },
+        cancel,
+      }), { headers: { "content-type": "application/x-ndjson" } }))
+      .mockResolvedValueOnce(ndjsonResponse([
+        { type: "done", result: "Verified narrower answer", citations: [citation], citationClaim, partialCoverage: false },
+      ])));
+
+    render(<ChatWorkspace chatId={chatId} initialQuery="What should I know about working here?" initialJurisdiction={jurisdiction.id} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    await act(async () => sendLimit());
+
+    expect(await screen.findByText(/Each answer has its own search limit/)).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("Ask about one issue at a time");
+    expect(screen.getByRole("alert")).toHaveTextContent("This limit applies only to that answer");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("You can send another question now");
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("textbox")).toHaveAccessibleDescription(/search limit/i);
+    expect(screen.queryByRole("status", { name: "Preparing answer" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Generic fallback")).not.toBeInTheDocument();
+    expect(screen.queryByText("Late answer that must stay hidden")).not.toBeInTheDocument();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "How much paid time off can I take?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    expect(await screen.findByText("Verified narrower answer")).toBeVisible();
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    const nextBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
+    expect(nextBody.query).toBe("How much paid time off can I take?");
+    expect(nextBody.messages).toEqual([]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(mocks.appendMessages.mock.calls[0][0].messages.map((message: { content: string }) => message.content))
+      .toEqual(["How much paid time off can I take?", "Verified narrower answer"]);
+  });
+
+  it("keeps a search-limit failure scoped to its chat and leaves a new chat usable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "error", reason: "file_search_budget_exhausted", error: "Generic fallback" },
+    ])));
+    const view = render(<ChatWorkspace chatId={chatId} initialQuery="What should I know?" initialJurisdiction={jurisdiction.id} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/search limit/i);
+    view.rerender(<ChatWorkspace chatId={null} initialQuery={null} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Can I take paid time off?" } });
+    expect(screen.getByRole("button", { name: "Send question" })).toBeEnabled();
+  });
+
+  it("does not interpret an unknown server reason as a search limit", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([
+      { type: "error", reason: "provider_request_failed", error: "We could not finish that answer." },
+    ])));
+    render(<ChatWorkspace chatId={chatId} initialQuery="What should I know?" initialJurisdiction={jurisdiction.id} />);
+    expect(await screen.findByText("We could not finish that answer.")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
   it("persists the fixed no-evidence answer with its claim instead of showing Failed", async () => {
     const answer = "I couldn't find enough supporting material in this jurisdiction's library to answer. Try asking a more specific legal question.";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ndjsonResponse([

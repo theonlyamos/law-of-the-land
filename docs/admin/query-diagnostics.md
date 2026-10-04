@@ -80,6 +80,31 @@ existing structural diagnostic proofs remain unchanged when it is absent.
 
 ## Verified final stream batch
 
+### Bounded stream reconnection
+
+If a stream iterator ends before an accepted `interaction.completed`, the adapter
+may make one streaming GET for the same interaction using the `event_id` on the
+last accepted event as `last_event_id`. A missing or invalid cursor on that last
+event prevents reconnection; an older cursor is not used because it could replay
+already applied events. Payload event IDs remain only in request memory and are
+never diagnostic values. Malformed streams, explicit provider errors, aborts and
+deadlines are not retried by this path.
+
+The resumed stream retains the original steps, search call IDs, answer bytes and
+citation batches. Its GET uses the existing stream signal/deadline and disables
+SDK HTTP retries. It cannot increase the twenty-call allowance, reset a bound, or
+accept duplicate steps or search calls. A valid same-ID terminal event, closed steps, canonical
+GET and exact whole-answer agreement remain mandatory before citation validation.
+Repeated premature EOF still fails closed; no replacement interaction is created.
+
+The [API reference](https://ai.google.dev/api/interactions-api#getinteractionbyid)
+defines resume as starting after the supplied event. Google's continued-execution
+guarantee after disconnect is documented for background execution. These requests
+remain in their existing foreground mode, so reconnection is a bounded retrieval
+attempt rather than a guarantee that interrupted generation will finish.
+
+### Citation batch validation
+
 Authenticated chat can retain the final annotation-array batch when the canonical
 GET contains no File Citations. This addresses the observed EAC mismatch: File
 Citations appeared during streaming, while the canonical response retained only
@@ -127,17 +152,31 @@ identify malformed batches, observation bounds and unsupported output content.
 Historical `stream_citation_ambiguous` rows also include the former empty-owner
 and per-step text-partition guards; that reason alone cannot distinguish them.
 The application search-call guard now distinguishes `file_search_call_id`,
-`file_search_call_duplicate` and `file_search_budget_exhausted`. Its eight-call cap
-and existing step/time/token limits remain in place. Historical `file_search_call`
+`file_search_call_duplicate` and `file_search_budget_exhausted`. The per-answer cap
+is twenty calls, shared across any stream reconnection. The interaction-step
+allowance accommodates forty search call/result steps plus sixteen other steps,
+with an independent maximum of thirty-two non-search steps. Output-block, byte,
+annotation, time and token limits remain unchanged. Historical `file_search_call`
 rows cannot identify which of the combined conditions rejected the candidate.
 Interactions exposes no supported provider-side File Search iteration limit;
 SDK automatic-function-calling limits apply to a different API path.
 
+Authenticated chat exposes `file_search_budget_exhausted` as an allowlisted
+public error reason as soon as the guard rejects the next call. Its explanation
+does not wait for bounded failure telemetry to finish. The failed answer is not
+released, and the composer explains that the limit applies to each answer and
+suggests a narrower question or a new chat. Sending another question clears the
+notice; failed local turns are excluded from subsequent model history. This is
+not a persistent account quota, so there is no reset timer or permanent input
+lock. Other internal failure reasons remain private.
+
 Research instructions prioritize the requested instrument or provision, treat
 roughly three focused searches as planning guidance, and stop when retrieved
-evidence answers the question. They preserve evidence-gap handling and do not
+evidence answers the question. They also state the enforced twenty-call limit and
+require final output after the last permitted result, without another search.
+They preserve material conditions, evidence-gap handling and abstention and do not
 require extra research merely to fill the response headings. This guidance does
-not guarantee completion within the eight-call cap or establish why a previous
+not guarantee completion within the twenty-call cap or establish why a previous
 request exhausted its search budget.
 
 Answer instructions reserve PDF page numbers for the application Sources
