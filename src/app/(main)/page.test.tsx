@@ -19,6 +19,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }));
 
+vi.mock("next/font/local", () => ({
+  default: ({ variable }: { variable: string }) => ({ variable }),
+}));
+
 vi.mock("convex/react", () => ({
   useConvexAuth: () => mocks.auth,
   usePaginatedQuery: () => ({ results: mocks.sessions, status: "Exhausted" }),
@@ -56,18 +60,25 @@ afterEach(() => {
 });
 
 describe("public home jurisdiction selection", () => {
-  it("always uses the unified jurisdiction picker", () => {
+  it("allows drafting but gates Enter and form submission until a jurisdiction is selected", () => {
     render(<Home />);
 
     expect(screen.getByRole("button", { name: "Choose Ghana" })).toBeVisible();
     expect(screen.queryByRole("combobox", { name: "Research jurisdiction" })).not.toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "Your legal question" });
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "Tenant rights?" } });
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.submit(screen.getByRole("form", { name: "Legal research" }));
+    expect(mocks.push).not.toHaveBeenCalled();
   });
 
   it("starts guest research with the question and stable jurisdiction ID without sign-in", () => {
     render(<Home />);
     fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
       "/research?q=Tenant%20rights%3F&jurisdiction=ghana-id",
@@ -79,7 +90,7 @@ describe("public home jurisdiction selection", () => {
     render(<Home />);
     fireEvent.click(screen.getByRole("button", { name: "Choose organization" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Employment policy?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
 
     expect(mocks.push).toHaveBeenCalledWith(
       "/new-chat?q=Employment%20policy%3F&jurisdiction=university-id",
@@ -91,7 +102,7 @@ describe("public home jurisdiction selection", () => {
     render(<Home />);
     fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Tenant rights?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
     expect(mocks.push).toHaveBeenCalledWith("/signin?mode=signup&redirect=%2Fnew-chat%3Fq%3DTenant%2520rights%253F%26jurisdiction%3Dghana-id");
     expect(screen.queryByText(/No account required/)).not.toBeInTheDocument();
     expect(screen.getByText(/to research this question and save your work/)).toBeVisible();
@@ -103,7 +114,7 @@ describe("public home jurisdiction selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Choose Ghana" }));
 
     expect(screen.getByRole("textbox")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
   });
 
   it("keeps the full landing page and saved chat navigation", () => {
