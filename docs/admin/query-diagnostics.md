@@ -168,7 +168,11 @@ released, and the composer explains that the limit applies to each answer and
 suggests a narrower question or a new chat. Sending another question clears the
 notice; failed local turns are excluded from subsequent model history. This is
 not a persistent account quota, so there is no reset timer or permanent input
-lock. Other internal failure reasons remain private.
+lock. Confirmed timeouts also expose the closed `deadline_exceeded` reason with
+guidance that the answer took too long and could not be verified. The user can
+ask a more focused question or try later; the app does not retry automatically
+or promise that either action will succeed. Both actionable errors are sent
+before bounded failure persistence. Other internal reasons remain private.
 
 Research instructions prioritize the requested instrument or provision, treat
 roughly three focused searches as planning guidance, and stop when retrieved
@@ -199,6 +203,58 @@ sets `countsClamped`. No new fields contain prompt text, answers, snippets, raw
 provider types, metadata values, names, URLs, identifiers, offsets or credentials.
 
 ## Deployment and investigation
+
+### Execution observations
+
+The optional `execution` object contains only seven booleans and two closed
+labels. It adds a separate versioned service-proof suffix when present; absent
+execution data preserves existing proofs and completion replay identities.
+
+- `modelDeadlineReached` and `terminalDeadlineReached` record application
+  deadline signals or a route/adapter deadline guard. `clientAbortObserved` records
+  client cancellation. These independent flags may coexist; they do not assert
+  which simultaneous condition caused the provider to stop.
+- `streamAbortObserved` records a local stream cancellation or a provider/SDK
+  abort observed at the streaming boundary. `providerFailure` is `none`,
+  `timeout`, `abort`, or `other`. Exceptions from an actual SDK request or
+  iterator read and supported SSE error envelopes receive a provider label;
+  application validation and callbacks do not. Local signal cancellation does
+  not become a provider timeout. Classification examines bounded status, code,
+  name, and message values without storing them. A provider timeout label means
+  a timeout-shaped SDK exception or SSE error envelope, not proof
+  of a remote service outage.
+- `completionEventAccepted` becomes true after the terminal event passes the
+  existing identity/status/open-step checks. It does not imply canonical or
+  catalog validation. `streamClosed` means the current stream iterator reached
+  clean EOF, and resets when a same-interaction resume starts. A completion event
+  followed by a stalled iterator can therefore be distinguished from a stream
+  that never supplied an accepted completion.
+- `resumeAttempted` records the existing single bounded same-ID GET.
+  `resumeOutcome` is `not_attempted`, `pending`, `completed`, `incomplete`,
+  `failed`, or `aborted`. Completion here requires accepted terminal state plus
+  clean EOF; later canonical failure does not erase that observation. These
+  fields do not add retries or change the cursor, deadline, or search limits.
+
+Failure snapshots are taken before cleanup and before sending a terminal public
+error, so the reader cancelling after that error cannot rewrite the original
+cause. Diagnostics are private in persisted query runs and the bounded server
+failure summary; they do not appear in public answer/citation events. If the
+110-second terminal deadline expires, no additional persistence allowance is
+created: the server summary may be the only final observation. Existing rows
+without `execution` cannot retrospectively identify these distinctions.
+
+### Representative validation
+
+Lifecycle fixtures cover the observed 8-, 14-, and 16-search timeout shapes,
+provider timeout/abort, accepted completion followed by a stalled stream, and
+same-ID recovery outcomes. They establish state handling and authorization
+invariants, not live retrieval latency. The current DEV Ghana corpus has one
+published resource while production has 101; a local DEV success is only a smoke
+test. Use the existing authenticated production app for one coordinated real
+corpus observation after release. Reproducing that corpus locally requires a
+separate decision about approved source uploads/indexing or a normally authorized
+candidate environment; never substitute store IDs or move credentials to bypass
+the deployment's session and catalog authorization.
 
 The optional Convex schema/function contract must be deployed before the route
 sends the new argument. The documented Vercel main build runs

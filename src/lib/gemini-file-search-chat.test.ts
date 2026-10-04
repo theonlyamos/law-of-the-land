@@ -541,6 +541,233 @@ describe("GeminiFileSearchChat", () => {
   });
 });
 
+describe("closed execution telemetry", () => {
+  function observe(
+    client: GeminiInteractionsClient,
+    overrides: Partial<Parameters<GeminiFileSearchChat["run"]>[1]> = {},
+  ) {
+    const snapshots: QueryDiagnostics[] = [];
+    const controller = new AbortController();
+    const operation = new GeminiFileSearchChat(client, {}).run(input(), {
+      signal: controller.signal, streamSignal: controller.signal,
+      deadlineAt: Date.now() + 20_000, streamDeadlineAt: Date.now() + 10_000,
+      onDelta: () => undefined, onDiagnostics: snapshot => snapshots.push(snapshot), ...overrides,
+    });
+    return { operation, snapshots, controller };
+  }
+
+  it("reports accepted completion while the iterator is still open without bypassing canonical validation", async () => {
+    const controller = new AbortController();
+    let reachedStall!: () => void;
+    const stalled = new Promise<void>(resolve => { reachedStall = resolve; });
+    async function* stream() {
+      yield* eventStream();
+      reachedStall();
+      await new Promise<never>((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("private abort payload")), { once: true }));
+    }
+    const client = new FakeInteractionsClient(stream(), canonical(undefined, [citation()]));
+    const test = observe(client, { streamSignal: controller.signal });
+    const rejected = test.operation.catch(error => error);
+    try {
+      await stalled;
+      expect(test.snapshots.at(-1)?.execution).toEqual({
+        modelDeadlineReached: false, terminalDeadlineReached: false, clientAbortObserved: false,
+        streamAbortObserved: false, providerFailure: "none", completionEventAccepted: true, streamClosed: false,
+        resumeAttempted: false, resumeOutcome: "not_attempted",
+      });
+      expect(test.snapshots[0].execution?.completionEventAccepted).toBe(false);
+      expect(client.getIds).toEqual([]);
+    } finally {
+      controller.abort();
+      await rejected;
+    }
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      completionEventAccepted: true, streamClosed: false, streamAbortObserved: true, providerFailure: "none",
+    });
+    expect(JSON.stringify(test.snapshots)).not.toContain("private abort payload");
+  });
+
+  it.each(["create", "iterator", "resume", "canonical"] as const)("classifies a provider timeout at %s before the local deadline without retaining error details", async boundary => {
+    const error = Object.assign(new Error("private-provider-payload"), { status: 504 });
+    const initial = eventStream().map((event, index) => ({ ...event, event_id: `private-cursor-${index}` }));
+    async function* stream() {
+      yield* boundary === "iterator" || boundary === "resume" ? initial.slice(0, 10) : initial;
+      if (boundary === "iterator") throw error;
+    }
+    const client = new FakeInteractionsClient(stream(), canonical(undefined, [citation()]));
+    if (boundary === "create") vi.spyOn(client.interactions, "create").mockRejectedValue(error);
+    if (boundary === "resume" || boundary === "canonical") vi.spyOn(client.interactions, "get").mockRejectedValue(error);
+    const test = observe(client);
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      providerFailure: "timeout", streamAbortObserved: false,
+      modelDeadlineReached: false, terminalDeadlineReached: false, clientAbortObserved: false,
+      resumeAttempted: boundary === "resume", resumeOutcome: boundary === "resume" ? "failed" : "not_attempted",
+    });
+    expect(JSON.stringify(test.snapshots)).not.toMatch(/private-provider-payload|private-cursor/);
+  });
+
+  it.each([
+    [{ name: "APIConnectionTimeoutError" }, "timeout"],
+    [{ name: "RequestTimeoutError" }, "timeout"],
+    [{ name: "APITimeoutError" }, "timeout"],
+    [{ status: 408 }, "timeout"],
+    [{ message: "provider timed out: private-detail" }, "timeout"],
+    [{ message: "provider DEADLINE_EXCEEDED private-detail" }, "timeout"],
+    [{ name: "AbortError" }, "abort"],
+    [{ name: "RequestAbortedError" }, "abort"],
+    [{ name: "APIUserAbortError" }, "abort"],
+    [{ status: 503 }, "other"],
+  ] as const)("classifies only a fixed provider failure label for %j", async (fields, expected) => {
+    const error = Object.assign(new Error("private-detail"), fields);
+    const client = new FakeInteractionsClient(eventStream(), canonical());
+    vi.spyOn(client.interactions, "create").mockRejectedValue(error);
+    const test = observe(client);
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({ providerFailure: expected, streamAbortObserved: expected === "abort" });
+    expect(JSON.stringify(test.snapshots)).not.toContain("private-detail");
+  });
+
+  it("does not classify a local callback exception as a provider failure", async () => {
+    const error = new Error("local callback TIMEOUT private-detail");
+    const client = new FakeInteractionsClient(eventStream(), canonical());
+    const test = observe(client, { onDelta: () => { throw error; } });
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({ providerFailure: "none", streamClosed: false });
+  });
+
+  it("does not classify local response validation as a provider failure", async () => {
+    const client = new FakeInteractionsClient(eventStream(), canonical("mismatching answer", [citation()]));
+    const test = observe(client);
+    await expect(test.operation).rejects.toThrow("canonical_text_mismatch");
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      providerFailure: "none", completionEventAccepted: true, streamClosed: true,
+    });
+  });
+
+  it("marks a malformed resumed stream as failed without blaming the provider transport", async () => {
+    const initial = eventStream().slice(0, 10).map((event, index) => ({ ...event, event_id: `cursor-${index}` }));
+    const client = new FakeInteractionsClient(initial, canonical(), [eventStream()[0]]);
+    const test = observe(client);
+    await expect(test.operation).rejects.toThrow("creation_state");
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeAttempted: true, resumeOutcome: "failed", streamClosed: false, providerFailure: "none",
+    });
+  });
+
+  it("keeps a completed resume outcome if later canonical retrieval fails", async () => {
+    const events = eventStream().map((event, index) => ({ ...event, event_id: `cursor-${index}` }));
+    const client = new FakeInteractionsClient(events.slice(0, 10), canonical(), events.slice(10));
+    const get = client.interactions.get;
+    const error = Object.assign(new Error("private canonical error"), { status: 504 });
+    vi.spyOn(client.interactions, "get").mockImplementation((id, params, options) => {
+      if (!params?.stream) return Promise.reject(error);
+      return get(id, params, options);
+    });
+    const test = observe(client);
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeAttempted: true, resumeOutcome: "completed", completionEventAccepted: true, streamClosed: true,
+      providerFailure: "timeout",
+    });
+  });
+
+  it("marks a provider-aborted resume without claiming client cancellation", async () => {
+    const initial = eventStream().slice(0, 10).map((event, index) => ({ ...event, event_id: `cursor-${index}` }));
+    const client = new FakeInteractionsClient(initial, canonical());
+    const error = Object.assign(new Error("private abort details"), { name: "APIUserAbortError" });
+    vi.spyOn(client.interactions, "get").mockRejectedValue(error);
+    const test = observe(client);
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeOutcome: "aborted", providerFailure: "abort", streamAbortObserved: true, clientAbortObserved: false,
+    });
+  });
+
+  it.each(["create", "iterator", "resume", "canonical"] as const)("records SDK abort at %s without treating canonical retrieval as streaming", async boundary => {
+    const error = Object.assign(new Error("private-sdk-abort"), { name: "APIUserAbortError" });
+    const initial = eventStream().map((event, index) => ({ ...event, event_id: `private-cursor-${index}` }));
+    async function* stream() {
+      yield* boundary === "iterator" || boundary === "resume" ? initial.slice(0, 10) : initial;
+      if (boundary === "iterator") throw error;
+    }
+    const client = new FakeInteractionsClient(stream(), canonical(undefined, [citation()]));
+    if (boundary === "create") vi.spyOn(client.interactions, "create").mockRejectedValue(error);
+    if (boundary === "resume" || boundary === "canonical") vi.spyOn(client.interactions, "get").mockRejectedValue(error);
+    const test = observe(client);
+    await expect(test.operation).rejects.toBe(error);
+    expect(test.controller.signal.aborted).toBe(false);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      providerFailure: "abort", streamAbortObserved: boundary !== "canonical", clientAbortObserved: false,
+      modelDeadlineReached: false, terminalDeadlineReached: false,
+      resumeOutcome: boundary === "resume" ? "aborted" : "not_attempted",
+    });
+    expect(JSON.stringify(test.snapshots)).not.toMatch(/private-sdk-abort|private-cursor/);
+  });
+
+  it.each([
+    [{ code: "DEADLINE_EXCEEDED", message: "private-sse-detail" }, "timeout"],
+    [{ message: "private-sse-detail timed out" }, "timeout"],
+    [{ code: "CANCELLED", message: "private-sse-detail" }, "abort"],
+    [{ code: "UNAVAILABLE", message: "private-sse-detail" }, "other"],
+  ] as const)("classifies the supported SSE error fields for %j without retry or disclosure", async (error, expected) => {
+    const client = new FakeInteractionsClient([
+      { ...eventStream()[0], event_id: "private-sse-cursor" },
+      { event_type: "error", error },
+    ], canonical());
+    const test = observe(client);
+    await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:provider_error");
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      providerFailure: expected, streamAbortObserved: expected === "abort", streamClosed: false,
+      resumeAttempted: false, modelDeadlineReached: false, terminalDeadlineReached: false,
+    });
+    expect(client.getIds).toEqual([]);
+    expect(JSON.stringify(test.snapshots)).not.toMatch(/private-sse-detail|private-sse-cursor|DEADLINE_EXCEEDED|CANCELLED|UNAVAILABLE/);
+  });
+
+  it("does not mark a closed stream aborted when local cancellation reaches canonical retrieval", async () => {
+    const providerController = new AbortController();
+    const streamController = new AbortController();
+    const streamSignal = AbortSignal.any([providerController.signal, streamController.signal]);
+    const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
+    const error = new Error("private-canonical-cancellation");
+    vi.spyOn(client.interactions, "get").mockImplementation(async () => {
+      providerController.abort(error);
+      throw error;
+    });
+    const test = observe(client, { signal: providerController.signal, streamSignal });
+    await expect(test.operation).rejects.toBe(error);
+    expect(streamSignal.aborted).toBe(true);
+    expect(test.snapshots.at(-1)).toMatchObject({
+      phase: "canonical_read", reason: "aborted", canonicalReadCompleted: false,
+      execution: {
+        completionEventAccepted: true, streamClosed: true, streamAbortObserved: false, providerFailure: "none",
+        resumeAttempted: false, resumeOutcome: "not_attempted",
+      },
+    });
+    expect(JSON.stringify(test.snapshots)).not.toContain("private-canonical-cancellation");
+  });
+
+  it("records a terminal deadline guard separately from provider failure without relying on a timer callback", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
+      vi.spyOn(client.interactions, "get").mockImplementation(async () => {
+        vi.setSystemTime(21_000);
+        return canonical(undefined, [citation()]);
+      });
+      const test = observe(client);
+      await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_DEADLINE_EXPIRED");
+      expect(test.snapshots.at(-1)?.execution).toMatchObject({
+        terminalDeadlineReached: true, modelDeadlineReached: false, providerFailure: "none", streamAbortObserved: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("bounded recovery of a clean premature stream EOF", () => {
   function cursors(events = eventStream()): StreamEvent[] {
     return events.map((event, index) => ({ ...event, event_id: `private-cursor-${index}` }));
@@ -586,6 +813,11 @@ describe("bounded recovery of a clean premature stream EOF", () => {
     expect(test.client.getOptions).toEqual([{ signal: test.streamSignal, maxRetries: 0 }, { signal: test.signal }]);
     expect(test.onStreamComplete).toHaveBeenCalledTimes(1);
     expect(test.snapshots.at(-1)).toMatchObject({ reason: "completed", searchCallCount: 1, searchResultCount: 1, canonicalReadCompleted: true });
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeAttempted: true, resumeOutcome: "completed", completionEventAccepted: true, streamClosed: true,
+      streamAbortObserved: false, providerFailure: "none",
+    });
+    expect(test.snapshots.some(snapshot => snapshot.execution?.resumeOutcome === "pending")).toBe(true);
     expect(JSON.stringify(test.snapshots)).not.toContain("private-cursor");
   });
 
@@ -596,6 +828,9 @@ describe("bounded recovery of a clean premature stream EOF", () => {
     await expect(test.operation).rejects.toThrow("incomplete_stream");
     expect(test.client.getIds).toEqual([]);
     expect(test.onStreamComplete).not.toHaveBeenCalled();
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeAttempted: false, resumeOutcome: "not_attempted", streamClosed: true,
+    });
   });
 
   it("validates a resumed empty annotation-only output against the whole canonical answer", async () => {
@@ -645,6 +880,10 @@ describe("bounded recovery of a clean premature stream EOF", () => {
     expect(test.client.getParams).toEqual([{ stream: true, last_event_id: "private-cursor-11" }]);
     expect(test.onStreamComplete).not.toHaveBeenCalled();
     expect(test.snapshots.at(-1)?.canonicalReadCompleted).toBe(false);
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      resumeAttempted: true, resumeOutcome: "incomplete", streamClosed: true, completionEventAccepted: false,
+      providerFailure: "none",
+    });
   });
 
   it("does not resume an ordinarily completed stream", async () => {
@@ -710,6 +949,10 @@ describe("bounded recovery of a clean premature stream EOF", () => {
     await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(test.client.getIds).toHaveLength(when === "before" ? 0 : 1);
     expect(test.onStreamComplete).not.toHaveBeenCalled();
+    expect(test.snapshots.at(-1)?.execution).toMatchObject({
+      streamAbortObserved: true, providerFailure: "none",
+      resumeOutcome: when === "before" ? "not_attempted" : "aborted",
+    });
   });
 
   it.each(["before", "during"])("honors the original stream deadline %s the resume", async when => {
@@ -728,6 +971,10 @@ describe("bounded recovery of a clean premature stream EOF", () => {
       await expect(test.operation).rejects.toThrow("GOVERNED_CHAT_DEADLINE_EXPIRED");
       expect(test.client.getIds).toHaveLength(when === "before" ? 0 : 1);
       expect(test.onStreamComplete).not.toHaveBeenCalled();
+      expect(test.snapshots.at(-1)?.execution).toMatchObject({
+        modelDeadlineReached: true, terminalDeadlineReached: false, streamAbortObserved: false, providerFailure: "none",
+        resumeOutcome: when === "before" ? "not_attempted" : "aborted",
+      });
     } finally {
       vi.useRealTimers();
     }

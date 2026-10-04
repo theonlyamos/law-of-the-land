@@ -537,6 +537,57 @@ describe("POST /api/chat private query diagnostics", () => {
     expect(terminalArgs().diagnostics.reason).toBe("provider_request_failed");
   });
 
+  it.each([408, 504])("reports provider timeout status %s without claiming an application deadline", async (status) => {
+    const privatePayload = "private provider message and document reference";
+    interactionMocks.create.mockRejectedValue(Object.assign(new Error(privatePayload), { status }));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+
+    expect(streamEvents).toEqual([{
+      type: "error", reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
+    }]);
+    const args = terminalArgs();
+    expect(args).toMatchObject({
+      outcome: "failure", failureCategory: "timeout", citations: [],
+      diagnostics: { reason: "deadline_exceeded", execution: {
+        modelDeadlineReached: false, terminalDeadlineReached: false, clientAbortObserved: false,
+        streamAbortObserved: false, providerFailure: "timeout", completionEventAccepted: false,
+        streamClosed: false, resumeAttempted: false, resumeOutcome: "not_attempted",
+      } },
+    });
+    expect(args.finalAnswer).toBeUndefined();
+    expect(JSON.stringify([args, errorLog.mock.calls, streamEvents])).not.toContain(privatePayload);
+    expect(JSON.stringify(streamEvents)).not.toContain("execution");
+  });
+
+  it("delivers timeout guidance before failure persistence and preserves the original cause after reader cancellation", async () => {
+    let finishPersistence!: () => void;
+    const persistence = new Promise<void>((resolve) => { finishPersistence = resolve; });
+    authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
+      if (getFunctionName(reference) === "usage:recordQuestion") return { used: 1, limit: 10, isPro: false };
+      return await persistence;
+    });
+    interactionMocks.create.mockRejectedValue(Object.assign(new Error("provider request exceeded its time limit"), { status: 504 }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await POST(request());
+    const reader = response.body!.getReader();
+    let first: ReadableStreamReadResult<Uint8Array> | undefined;
+    const read = reader.read().then(value => { first = value; });
+    try {
+      await vi.waitFor(() => expect(first).toBeDefined());
+      expect(JSON.parse(new TextDecoder().decode(first!.value))).toMatchObject({ type: "error", reason: "deadline_exceeded" });
+      await reader.cancel();
+      await vi.waitFor(() => expect(terminalArgs()).toMatchObject({ outcome: "failure", diagnostics: {
+        reason: "deadline_exceeded", execution: { providerFailure: "timeout", clientAbortObserved: false, modelDeadlineReached: false },
+      } }));
+      expect(terminalArgs().finalAnswer).toBeUndefined();
+    } finally {
+      finishPersistence();
+      await read;
+    }
+  });
+
   it("records missing provider configuration before attempting a provider request", async () => {
     delete process.env.GOOGLE_AI_API_KEY;
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -877,10 +928,38 @@ describe("POST /api/chat streamed governed interaction", () => {
 
   it("closes at the application deadline even when the canonical read ignores cancellation", async () => {
     vi.useFakeTimers();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     interactionMocks.get.mockImplementation(() => new Promise(() => undefined));
     const resultPromise = events(await POST(request()));
     await vi.advanceTimersByTimeAsync(110_000);
     expect((await resultPromise).at(-1)?.type).toBe("error");
+    const summary = JSON.parse(errorLog.mock.calls.at(-1)![1]);
+    expect(summary).toMatchObject({ phase: "canonical_read", category: "timeout", execution: {
+      modelDeadlineReached: false, terminalDeadlineReached: true, clientAbortObserved: false,
+      completionEventAccepted: true, streamClosed: true,
+    } });
+  });
+
+  it("records the terminal deadline guard when proof work crosses the limit before the timer callback", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-10-04T08:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "sign").mockImplementationOnce(async (...args) => {
+      const proof = await sign(...args);
+      // A clock jump advances the deadline guard without dispatching timer callbacks.
+      vi.setSystemTime(startedAt + 110_000);
+      return proof;
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const streamEvents = await events(await POST(request()));
+    expect(streamEvents).toEqual([{ type: "error", reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later." }]);
+    expect(JSON.parse(errorLog.mock.calls.at(-1)![1])).toMatchObject({ phase: "completion", execution: {
+      modelDeadlineReached: false, terminalDeadlineReached: true, clientAbortObserved: false,
+      providerFailure: "none", completionEventAccepted: true, streamClosed: true,
+    } });
+    expect(mutationNames()).toEqual(["usage:recordQuestion"]);
   });
 
   it("uses one selected-first File Search interaction and authorizes before any answer text", async () => {
@@ -1084,7 +1163,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it("aborts the provider at the single 90-second model cutoff and remains inside the terminal window", async () => {
+  it.each([8, 14, 16])("records the 90-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
@@ -1095,6 +1174,14 @@ describe("POST /api/chat streamed governed interaction", () => {
           event_type: "interaction.created",
           interaction: { id: "interaction-timeout", status: "in_progress" },
         };
+        for (let index = 0; index < searches; index += 1) {
+          yield { event_type: "step.start", interaction_id: "interaction-timeout", index: index * 2,
+            step: { type: "file_search_call", id: `search-${index}` } };
+          yield { event_type: "step.stop", interaction_id: "interaction-timeout", index: index * 2 };
+          yield { event_type: "step.start", interaction_id: "interaction-timeout", index: index * 2 + 1,
+            step: { type: "file_search_result", call_id: `search-${index}` } };
+          yield { event_type: "step.stop", interaction_id: "interaction-timeout", index: index * 2 + 1 };
+        }
         await new Promise<never>((_, reject) => {
           options.signal.addEventListener("abort", () => reject(new Error("deadline")), { once: true });
         });
@@ -1109,7 +1196,8 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.some((event) => event.type === "done")).toBe(false);
     expect(streamEvents.at(-1)).toEqual({
       type: "error",
-      error: "We couldn't process your request. Please try again.",
+      reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
     });
     const terminalArgs = authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1];
     expect(terminalArgs).toMatchObject({
@@ -1118,7 +1206,11 @@ describe("POST /api/chat streamed governed interaction", () => {
       elapsedMs: 90_000,
       diagnostics: {
         phase: "generation", reason: "deadline_exceeded",
+        searchCallCount: searches, searchResultCount: searches,
         canonicalReadCompleted: false,
+        execution: { modelDeadlineReached: true, terminalDeadlineReached: false,
+          clientAbortObserved: false, streamAbortObserved: true, providerFailure: "none",
+          completionEventAccepted: false, streamClosed: false, resumeAttempted: false },
       },
     });
   });
@@ -1181,7 +1273,8 @@ describe("POST /api/chat streamed governed interaction", () => {
 
     expect(terminalEvent).toEqual({
       type: "error",
-      error: "We couldn't process your request. Please try again.",
+      reason: "deadline_exceeded",
+      error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
     });
     expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
     await expect(reader.read()).resolves.toMatchObject({ done: true });
@@ -1208,6 +1301,8 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
       outcome: "aborted",
       citations: [],
+      diagnostics: { reason: "aborted", execution: { clientAbortObserved: true,
+        modelDeadlineReached: false, terminalDeadlineReached: false, streamAbortObserved: true } },
     });
   });
 });

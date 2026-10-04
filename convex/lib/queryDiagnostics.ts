@@ -50,6 +50,27 @@ export type QueryDiagnosticAnnotationCounts = Infer<typeof annotationCountsValid
 export type QueryDiagnosticAnnotationShape = Infer<typeof annotationShapeValidator>;
 export type QueryDiagnosticStructure = Infer<typeof queryDiagnosticStructureValidator>;
 
+const providerFailures = ["none", "timeout", "abort", "other"] as const;
+const resumeOutcomes = ["not_attempted", "pending", "completed", "incomplete", "failed", "aborted"] as const;
+export const queryDiagnosticExecutionValidator = v.object({
+  modelDeadlineReached: v.boolean(), terminalDeadlineReached: v.boolean(),
+  clientAbortObserved: v.boolean(), streamAbortObserved: v.boolean(),
+  providerFailure: v.union(...providerFailures.map(value => v.literal(value))),
+  completionEventAccepted: v.boolean(), streamClosed: v.boolean(), resumeAttempted: v.boolean(),
+  resumeOutcome: v.union(...resumeOutcomes.map(value => v.literal(value))),
+});
+export type QueryDiagnosticExecution = Infer<typeof queryDiagnosticExecutionValidator>;
+
+/** Private execution observations start unobserved and belong to one request. */
+export function emptyQueryDiagnosticExecution(): QueryDiagnosticExecution {
+  return {
+    modelDeadlineReached: false, terminalDeadlineReached: false,
+    clientAbortObserved: false, streamAbortObserved: false,
+    providerFailure: "none", completionEventAccepted: false,
+    streamClosed: false, resumeAttempted: false, resumeOutcome: "not_attempted",
+  };
+}
+
 /** Every call owns its nested counters, so one request cannot mutate another observation. */
 export function emptyQueryDiagnosticStructure(): QueryDiagnosticStructure {
   const channel = () => ({ annotationKinds: {
@@ -72,6 +93,7 @@ export const queryDiagnosticsValidator = v.object({
   resourceMetadataPresent: v.optional(v.boolean()),
   versionMetadataPresent: v.optional(v.boolean()),
   structure: v.optional(queryDiagnosticStructureValidator),
+  execution: v.optional(queryDiagnosticExecutionValidator),
 });
 
 export type QueryDiagnostics = Infer<typeof queryDiagnosticsValidator>;
@@ -79,7 +101,7 @@ export type QueryDiagnostics = Infer<typeof queryDiagnosticsValidator>;
 const countFields = ["searchCallCount", "searchResultCount", "searchResultItemCount", "streamedAnnotationCount", "canonicalAnnotationCount"] as const;
 const metadataFields = ["jurisdictionMetadataPresent", "resourceMetadataPresent", "versionMetadataPresent"] as const;
 const allowedFields = new Set<string>([
-  "version", "phase", "reason", ...countFields, "canonicalReadCompleted", "countsClamped", "citationUriKind", ...metadataFields, "structure",
+  "version", "phase", "reason", ...countFields, "canonicalReadCompleted", "countsClamped", "citationUriKind", ...metadataFields, "structure", "execution",
 ]);
 const reasons = new Set<string>(QUERY_DIAGNOSTIC_REASONS);
 
@@ -124,6 +146,17 @@ function validateStructure(value: unknown): void {
   if (structure.rejectedStreamAnnotation !== undefined) validateAnnotationShape(structure.rejectedStreamAnnotation);
 }
 
+const executionBooleanFields = [
+  "modelDeadlineReached", "terminalDeadlineReached", "clientAbortObserved", "streamAbortObserved",
+  "completionEventAccepted", "streamClosed", "resumeAttempted",
+] as const;
+function validateExecution(value: unknown): void {
+  const execution = closedRecord(value, [...executionBooleanFields, "providerFailure", "resumeOutcome"]);
+  if (executionBooleanFields.some(key => typeof execution[key] !== "boolean") ||
+      !providerFailures.includes(execution.providerFailure as typeof providerFailures[number]) ||
+      !resumeOutcomes.includes(execution.resumeOutcome as typeof resumeOutcomes[number])) invalid();
+}
+
 /** Rejects arbitrary provider content; diagnostics contain only closed labels and bounded counters. */
 export function validateQueryDiagnostics(value: unknown): asserts value is QueryDiagnostics {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
@@ -136,6 +169,7 @@ export function validateQueryDiagnostics(value: unknown): asserts value is Query
       (diagnostic.citationUriKind !== undefined && !["missing", "authorized_store", "authorized_document", "other"].includes(diagnostic.citationUriKind as string)) ||
       metadataFields.some(key => diagnostic[key] !== undefined && typeof diagnostic[key] !== "boolean")) invalid();
   if (diagnostic.structure !== undefined) validateStructure(diagnostic.structure);
+  if (diagnostic.execution !== undefined) validateExecution(diagnostic.execution);
 }
 
 function annotationShapeProofParts(shape?: QueryDiagnosticAnnotationShape): readonly (string | number)[] {
@@ -157,6 +191,15 @@ function structureProofParts(structure?: QueryDiagnosticStructure): readonly (st
   ])];
 }
 
+function executionProofParts(execution?: QueryDiagnosticExecution): readonly (string | number)[] {
+  if (execution === undefined) return [];
+  return ["query-diagnostics-execution-v1",
+    execution.modelDeadlineReached ? 1 : 0, execution.terminalDeadlineReached ? 1 : 0,
+    execution.clientAbortObserved ? 1 : 0, execution.streamAbortObserved ? 1 : 0,
+    execution.providerFailure, execution.completionEventAccepted ? 1 : 0,
+    execution.streamClosed ? 1 : 0, execution.resumeAttempted ? 1 : 0, execution.resumeOutcome];
+}
+
 /** An absent field adds no parts, preserving completion proofs from older route deployments. */
 export function queryDiagnosticsProofParts(diagnostics?: QueryDiagnostics): readonly (string | number)[] {
   if (diagnostics === undefined) return [];
@@ -171,5 +214,6 @@ export function queryDiagnosticsProofParts(diagnostics?: QueryDiagnostics): read
     optionalBoolean(diagnostics.jurisdictionMetadataPresent), optionalBoolean(diagnostics.resourceMetadataPresent),
     optionalBoolean(diagnostics.versionMetadataPresent),
     ...structureProofParts(diagnostics.structure),
+    ...executionProofParts(diagnostics.execution),
   ];
 }

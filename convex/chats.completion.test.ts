@@ -69,6 +69,18 @@ function structuralDiagnostics(): QueryDiagnostics {
   structure.fileSearchResultDeltas.empty_array = 1;
   return { ...TEST_DIAGNOSTICS, structure };
 }
+
+function executionDiagnostics(includeStructure = false) {
+  return {
+    ...(includeStructure ? structuralDiagnostics() : TEST_DIAGNOSTICS),
+    execution: {
+      modelDeadlineReached: false, terminalDeadlineReached: false,
+      clientAbortObserved: false, streamAbortObserved: false,
+      providerFailure: "none" as const, completionEventAccepted: true,
+      streamClosed: true, resumeAttempted: true, resumeOutcome: "completed" as const,
+    },
+  };
+}
 type CompletionInput = {
   routeNonce: string;
   externalId: string;
@@ -338,7 +350,7 @@ async function proofParts(input: CompletionInput): Promise<readonly (string | nu
       input.diagnostics.resourceMetadataPresent === undefined ? -1 : input.diagnostics.resourceMetadataPresent ? 1 : 0,
       input.diagnostics.versionMetadataPresent === undefined ? -1 : input.diagnostics.versionMetadataPresent ? 1 : 0,
     ]),
-    ...(input.diagnostics?.structure === undefined ? [] : queryDiagnosticsProofParts(input.diagnostics).slice(14)),
+    ...(input.diagnostics === undefined ? [] : queryDiagnosticsProofParts(input.diagnostics).slice(14)),
     ...(input.citations.some(citation => citation.providerDocumentName !== undefined) ? [
       "governed-provider-documents-v1", input.citations.length,
       ...input.citations.flatMap((citation, index) => [index, citation.providerDocumentName ?? ""]),
@@ -378,6 +390,86 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it.each([false, true])("persists private execution diagnostics and replays without writes (structure: %s)", async includeStructure => {
+    const { t, owner, base } = await fixture();
+    const diagnostics = executionDiagnostics(includeStructure);
+    const result = await complete(owner.client, { ...base, diagnostics });
+    expect(result).toMatchObject({ status: "completed", outcome: "success" });
+    expect(result).not.toHaveProperty("diagnostics");
+    expect(JSON.stringify(result)).not.toMatch(/modelDeadlineReached|resumeOutcome/);
+    const before = await terminalState(t);
+    expect(before.runs).toHaveLength(1);
+    expect(before.claims).toHaveLength(1);
+    expect(before.runs[0].diagnostics).toEqual(diagnostics);
+    const reordered = { ...diagnostics, execution: Object.fromEntries(Object.entries(diagnostics.execution).reverse()) };
+    validateQueryDiagnostics(reordered);
+    await expect(complete(owner.client, { ...base, diagnostics: reordered })).resolves.toEqual({ status: "replayed", outcome: "success" });
+    await expect(complete(owner.client, { ...base, diagnostics: reordered, routeNonce: createOpaqueTelemetryToken() }))
+      .resolves.toEqual({ status: "replayed", outcome: "success" });
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["changed", "added", "removed"])("rejects execution diagnostics %s after signing", async change => {
+    const { t, owner, base } = await fixture();
+    const signed = { ...base, diagnostics: change === "added" ? TEST_DIAGNOSTICS : executionDiagnostics() };
+    const diagnostics = change === "removed" ? { ...TEST_DIAGNOSTICS } : executionDiagnostics();
+    if (change === "changed" && "execution" in diagnostics) diagnostics.execution!.modelDeadlineReached = true;
+    await expect(owner.client.mutation(completeGovernedInteraction, {
+      ...base, diagnostics, serviceProof: await createTelemetryServiceProof(await proofParts(signed)),
+    })).rejects.toThrow("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each([
+    ["changed", false], ["added", false], ["removed", false],
+    ["changed", true], ["added", true], ["removed", true],
+  ] as const)("rejects signed replay with execution diagnostics %s (new nonce: %s)", async (change, newNonce) => {
+    const { t, owner, base } = await fixture();
+    await complete(owner.client, { ...base, diagnostics: change === "added" ? TEST_DIAGNOSTICS : executionDiagnostics() });
+    const before = await terminalState(t);
+    const diagnostics = change === "removed" ? { ...TEST_DIAGNOSTICS } : executionDiagnostics();
+    if (change === "changed" && "execution" in diagnostics) diagnostics.execution!.streamClosed = false;
+    await expect(complete(owner.client, { ...base, diagnostics, routeNonce: newNonce ? createOpaqueTelemetryToken() : base.routeNonce }))
+      .rejects.toThrow(newNonce ? "CHAT_CLIENT_ID_CONFLICT" : "GOVERNED_INTERACTION_REPLAY_INVALID");
+    expect(await terminalState(t)).toEqual(before);
+  });
+
+  it.each(["raw payload", "raw provider failure", "raw cursor", "missing field"])("rejects execution %s at the completion boundary", async scenario => {
+    const { t, owner, base } = await fixture();
+    const serviceProof = await createTelemetryServiceProof(await proofParts({ ...base, diagnostics: executionDiagnostics() }));
+    const diagnostics = executionDiagnostics();
+    const execution = diagnostics.execution as Record<string, unknown>;
+    if (scenario === "raw payload") execution.payload = "private-provider-value";
+    if (scenario === "raw provider failure") execution.providerFailure = "private-provider-error";
+    if (scenario === "raw cursor") execution.eventId = "private-resume-cursor";
+    if (scenario === "missing field") delete execution.streamClosed;
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...base, diagnostics, serviceProof }))
+      .rejects.toThrow(/INVALID_QUERY_DIAGNOSTICS|Validator error/);
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it("persists private timeout execution diagnostics without issuing a citation claim", async () => {
+    const { t, owner, base } = await fixture();
+    const diagnostics = {
+      ...TEST_DIAGNOSTICS, phase: "generation" as const, reason: "deadline_exceeded" as const,
+      canonicalReadCompleted: false,
+      execution: { ...executionDiagnostics().execution, modelDeadlineReached: true, streamAbortObserved: true,
+        completionEventAccepted: false, streamClosed: false, resumeOutcome: "aborted" as const },
+    };
+    const input: CompletionInput = { ...base, finalAnswer: undefined, citations: [], outcome: "failure", failureCategory: "timeout",
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "no_evidence" }], diagnostics };
+    const result = await complete(owner.client, input);
+    expect(result).toEqual({ status: "completed", outcome: "failure" });
+    const before = await terminalState(t);
+    expect(before.claims).toEqual([]);
+    expect(before.runs).toHaveLength(1);
+    expect(before.runs[0]).toMatchObject({ outcome: "failure", failureCategory: "timeout", diagnostics });
+    await expect(complete(owner.client, input)).resolves.toEqual({ status: "replayed", outcome: "failure" });
+    await expect(complete(owner.client, { ...input, routeNonce: createOpaqueTelemetryToken() }))
+      .resolves.toEqual({ status: "replayed", outcome: "failure" });
+    expect(await terminalState(t)).toEqual(before);
+  });
+
   it("binds an exact observed provider document to its active published version", async () => {
     const { t, owner, document, base } = await fixture();
     const citations = [{ ...base.citations[0], providerDocumentName: document.providerDocumentName }];

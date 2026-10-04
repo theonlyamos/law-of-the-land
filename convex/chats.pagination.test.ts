@@ -112,7 +112,7 @@ async function issueClaim(
     }
     return { identities };
   });
-  const currentScope = await t.query(internal.jurisdictions.resolveChatResearchStores, {
+  const currentScope = await client.query(internal.jurisdictions.resolveChatResearchStores, {
     jurisdictionId: input.jurisdictionId,
   });
   const citedJurisdictionIds = new Set(
@@ -124,6 +124,7 @@ async function issueClaim(
     jurisdictionId: input.jurisdictionId,
     assistantClientId: input.clientId,
     finalAnswer: input.content,
+    answerKind: "legal" as const,
     citations: citationIds.identities,
     model: "gemini-3.5-flash-lite",
     elapsedMs: 1,
@@ -485,7 +486,7 @@ describe("chat pagination", () => {
       externalId: "cited",
       lastMessage: "Answer",
       jurisdictionId,
-      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     });
     const page = await client.query(api.chats.listMessages, {
       externalId: "cited",
@@ -497,13 +498,13 @@ describe("chat pagination", () => {
       externalId: "cited",
       lastMessage: "Answer",
       jurisdictionId,
-      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Answer", clientId: "cited-answer", citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     })).resolves.toEqual({ id: "cited" });
     await expect(client.mutation(api.chats.appendMessages, {
       externalId: "cited",
       lastMessage: "Forged metadata",
       jurisdictionId,
-      messages: [{ role: "assistant", content: "Forged answer", clientId: "cited-answer", citations, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Forged answer", clientId: "cited-answer", citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     })).rejects.toThrow("CHAT_CLIENT_ID_CONFLICT");
     await expect(client.query(api.chats.getByExternalId, { externalId: "cited" }))
       .resolves.toMatchObject({ lastMessage: "Answer", messageCount: 1 });
@@ -550,7 +551,7 @@ describe("chat pagination", () => {
       externalId: "claim-chat", jurisdictionId, lastMessage: "Bound answer",
       messages: [{
         role: "assistant", content: "Bound answer", clientId: "assistant-1",
-        citations, citationClaim: claim.citationClaim,
+        citations, answerKind: "legal", citationClaim: claim.citationClaim,
       }],
     });
     expect(await t.run((ctx) => ctx.db.query("chatCitationClaims").take(2))).toEqual([]);
@@ -559,7 +560,7 @@ describe("chat pagination", () => {
       externalId: "claim-chat", jurisdictionId, lastMessage: "Replay",
       messages: [{
         role: "assistant", content: "Bound answer", clientId: "assistant-replay",
-        citations, citationClaim: claim.citationClaim,
+        citations, answerKind: "legal", citationClaim: claim.citationClaim,
       }],
     })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
     const messages = await client.query(api.chats.listMessages, {
@@ -606,7 +607,7 @@ describe("chat pagination", () => {
           content: forgedContent,
           clientId: "unicode-assistant",
           citations: forgedCitations,
-          citationClaim: claim.citationClaim,
+          answerKind: "legal", citationClaim: claim.citationClaim,
         }],
       })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
       expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
@@ -615,6 +616,7 @@ describe("chat pagination", () => {
       expect(Object.keys(claims[0]).sort()).toEqual([
         "_creationTime",
         "_id",
+        "answerKind",
         "assistantClientIdBinding",
         "assistantContentBinding",
         "chatSessionId",
@@ -683,7 +685,7 @@ describe("chat pagination", () => {
         content: forged.content ?? "Original",
         clientId: forged.clientId ?? "assistant-original",
         citations: forgedCitations,
-        citationClaim: claim.citationClaim,
+        answerKind: "legal", citationClaim: claim.citationClaim,
       }],
     })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
     expect(await t.run((ctx) => ctx.db.query("messages").take(2))).toEqual([]);
@@ -708,7 +710,7 @@ describe("chat pagination", () => {
     });
     const append = (client: typeof ownerClient, externalId = "bound-chat") => client.mutation(api.chats.appendMessages, {
       externalId, jurisdictionId, lastMessage: "Bound",
-      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     });
     await expect(append(otherClient)).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
     const secondSessionId = await t.run(async (ctx) => (await ctx.runMutation(components.betterAuth.adapter.create, {
@@ -719,7 +721,7 @@ describe("chat pagination", () => {
     await expect(append(ownerClient, "other-chat")).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
     await expect(ownerClient.mutation(api.chats.appendMessages, {
       externalId: "other-selection", jurisdictionId: otherJurisdictionId, lastMessage: "Bound",
-      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Bound", clientId: "bound-assistant", citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     })).rejects.toThrow("INVALID_CHAT_CITATIONS");
     expect(await t.run((ctx) => ctx.db.query("messages").take(5))).toEqual([]);
   });
@@ -754,7 +756,7 @@ describe("chat pagination", () => {
       vi.advanceTimersByTime(120_001);
       await expect(client.mutation(api.chats.appendMessages, {
         externalId: "expiry-chat", jurisdictionId: selectedId, lastMessage: "Expires",
-        messages: [{ role: "assistant", content: "Expires", clientId: "expiring", citations: selectedCitation, citationClaim: claim.citationClaim }],
+        messages: [{ role: "assistant", content: "Expires", clientId: "expiring", citations: selectedCitation, answerKind: "legal", citationClaim: claim.citationClaim }],
       })).rejects.toThrow("INVALID_CHAT_CITATION_CLAIM");
 
       const unrelated: Citation[] = [{ label: "Forged", jurisdictionId: unrelatedId, jurisdictionName: "Unrelated", jurisdictionKind: "geographic", relation: "geographic_ancestor" }];
@@ -819,7 +821,7 @@ describe("chat pagination", () => {
     });
     await expect(client.mutation(api.chats.appendMessages, {
       externalId: "linked-org-chat", jurisdictionId: organizationId, lastMessage: "Linked answer",
-      messages: [{ role: "assistant", content: "Linked answer", clientId: "linked-answer", citations: allowed, citationClaim: claim.citationClaim }],
+      messages: [{ role: "assistant", content: "Linked answer", clientId: "linked-answer", citations: allowed, answerKind: "legal", citationClaim: claim.citationClaim }],
     })).resolves.toEqual({ id: "linked-org-chat" });
 
     const unrelated: Citation[] = [{
@@ -928,6 +930,7 @@ describe("chat pagination", () => {
 
   it("removes every member-only chat boundary immediately when membership becomes inactive", async () => {
     const t = createTestBackend();
+    process.env.TELEMETRY_INGEST_SECRET = CLAIM_SECRET;
     const owner = await createUser(t, `chat-member-${crypto.randomUUID()}@example.com`);
     const { jurisdictionId, membershipId } = await t.run(async (ctx) => {
       const now = Date.now();
@@ -950,9 +953,17 @@ describe("chat pagination", () => {
     });
     const client = t.withIdentity({ subject: owner.userId, sessionId: owner.sessionId });
     await client.mutation(api.chats.ensure, { externalId: "private-chat", jurisdictionId });
+    const citations: Citation[] = [{
+      label: "University rules", jurisdictionId, jurisdictionName: "Private University Rules",
+      jurisdictionKind: "organizational", relation: "selected",
+    }];
+    const claim = await issueClaim(t, client, {
+      externalId: "private-chat", jurisdictionId, clientId: "saved-assistant", content: "Saved", citations,
+    });
     await client.mutation(api.chats.appendMessages, {
       externalId: "private-chat", jurisdictionId, lastMessage: "Saved",
-      messages: [{ role: "assistant", content: "Saved" }],
+      messages: [{ role: "assistant", content: "Saved", clientId: "saved-assistant",
+        citations, answerKind: "legal", citationClaim: claim.citationClaim }],
     });
     await t.run((ctx) => ctx.db.patch(membershipId, { status: "inactive", updatedAt: Date.now() }));
 

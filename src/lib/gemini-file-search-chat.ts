@@ -4,8 +4,10 @@ import type { GoogleGenAI, Interactions } from "@google/genai";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
 import { CHAT_POLICY_RESPONSES, isChatPolicyResponse } from "../../convex/lib/chatPolicy";
 import {
+  emptyQueryDiagnosticExecution,
   emptyQueryDiagnosticStructure,
   type QueryDiagnostics,
+  type QueryDiagnosticExecution,
   type QueryDiagnosticAnnotationKind,
   type QueryDiagnosticAnnotationShape,
   type QueryDiagnosticStructure,
@@ -208,6 +210,22 @@ function diagnosticValue(value: unknown, key: string | number): unknown {
   } catch {
     return undefined;
   }
+}
+
+function providerFailureKind(error: unknown): Exclude<QueryDiagnosticExecution["providerFailure"], "none"> {
+  // Inspect only bounded scalar fields at the SDK boundary; never retain errors,
+  // messages, response bodies, nested causes, or provider identifiers in telemetry.
+  const field = (key: string) => {
+    const value = diagnosticValue(error, key);
+    return typeof value === "string" ? value.slice(0, 4_096) : "";
+  };
+  const name = field("name");
+  const message = field("message");
+  const code = field("code");
+  const status = diagnosticValue(error, "status") ?? diagnosticValue(error, "statusCode");
+  if (status === 408 || status === 504 || /timeout|timed\s*out|deadline/iu.test(name + " " + code + " " + message)) return "timeout";
+  if (/abort|cancelled|canceled/iu.test(name + " " + code + " " + message)) return "abort";
+  return "other";
 }
 
 function diagnosticKind(value: unknown): QueryDiagnosticAnnotationKind {
@@ -699,11 +717,13 @@ export class GeminiFileSearchChat {
       allowStreamFileCitations?: boolean;
     },
   ): Promise<GovernedChatResult> {
+    const execution = emptyQueryDiagnosticExecution();
     const diagnostics: QueryDiagnostics = {
       version: 1, phase: "generation", reason: "in_progress",
       searchCallCount: 0, searchResultCount: 0, searchResultItemCount: 0,
       streamedAnnotationCount: 0, canonicalAnnotationCount: 0,
       countsClamped: false, canonicalReadCompleted: false,
+      execution,
     };
     const observer = new StructuralObserver(input.stores, () => { diagnostics.countsClamped = true; });
     const allowStreamFileCitations = options.allowStreamFileCitations === true;
@@ -749,12 +769,38 @@ export class GeminiFileSearchChat {
     };
     const report = (update: Partial<QueryDiagnostics> = {}) => {
       Object.assign(diagnostics, update);
+      if (diagnostics.phase === "generation") execution.streamAbortObserved ||= options.streamSignal.aborted;
       try {
-        options.onDiagnostics?.(Object.freeze({ ...diagnostics, structure: observer.snapshot() }));
+        options.onDiagnostics?.(Object.freeze({ ...diagnostics, execution: Object.freeze({ ...execution }), structure: observer.snapshot() }));
       } catch {
         // Optional diagnostics must not alter generation or authorization outcomes.
       }
     };
+    const providerFailure = (error: unknown, signal: AbortSignal, streaming: boolean) => {
+      if (!signal.aborted) {
+        const failure = providerFailureKind(error);
+        if (execution.providerFailure === "none") execution.providerFailure = failure;
+        if (streaming && failure === "abort") execution.streamAbortObserved = true;
+      }
+      report();
+    };
+    const providerOperation = async <T>(operation: () => Promise<T>, signal: AbortSignal, streaming: boolean): Promise<T> => {
+      try { return await operation(); }
+      catch (error) { providerFailure(error, signal, streaming); throw error; }
+    };
+    const providerEvents = async function* (stream: AsyncIterable<Interactions.InteractionSSEEvent>) {
+      try { yield* stream; }
+      catch (error) { providerFailure(error, options.streamSignal, true); throw error; }
+    };
+    const checkDeadline = (signal: AbortSignal, deadlineAt: number, flag: "modelDeadlineReached" | "terminalDeadlineReached") => {
+      try { checkAbortOrDeadline(signal, deadlineAt); }
+      catch (error) {
+        if (error instanceof GovernedChatDiagnosticError && error.diagnosticReason === "deadline_exceeded") execution[flag] = true;
+        throw error;
+      }
+    };
+    const checkStream = () => checkDeadline(options.streamSignal, options.streamDeadlineAt, "modelDeadlineReached");
+    const checkTerminal = () => checkDeadline(options.signal, options.deadlineAt, "terminalDeadlineReached");
     const count = (field: "searchCallCount" | "searchResultCount" | "searchResultItemCount" | "streamedAnnotationCount" | "canonicalAnnotationCount", amount: number) => {
       const total = diagnostics[field] + amount;
       report({
@@ -766,11 +812,12 @@ export class GeminiFileSearchChat {
     try {
       if (input.maxOutputTokens !== undefined && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 8192)) throw new GovernedChatDiagnosticError("Invalid output token limit", "request_invalid");
       validateInput(input);
-      checkAbortOrDeadline(options.signal, options.deadlineAt);
-      checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
-      let stream = await this.client.interactions.create(requestFor(this.model, input), {
+      checkTerminal();
+      checkStream();
+      const request = requestFor(this.model, input);
+      let stream = await providerOperation(() => this.client.interactions.create(request, {
         signal: options.streamSignal,
-      });
+      }), options.streamSignal, true);
       const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
       const fileSearchCallIds = new Map<string, Set<string>>();
       let interactionId: string | undefined;
@@ -791,13 +838,16 @@ export class GeminiFileSearchChat {
       };
 
       while (true) {
-        for await (const event of stream) {
-          checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        for await (const event of providerEvents(stream)) {
+          checkStream();
           // Only a clean EOF can reach recovery; any rejected event or iterator error
           // escapes it. An absent/invalid tail cursor must not reuse an earlier token.
           lastEventId = streamCursor(diagnosticValue(event, "event_id"));
           if (completed) return invalidResponse("event_after_completion");
-          if (event.event_type === "error") return invalidResponse("provider_error");
+          if (event.event_type === "error") {
+            providerFailure(diagnosticValue(event, "error"), options.streamSignal, true);
+            return invalidResponse("provider_error");
+          }
           if (event.event_type === "interaction.created") {
             // Creation payloads may omit status; the fetched canonical response must still be completed.
             if (interactionId || !isIdentifier(event.interaction.id) ||
@@ -819,6 +869,7 @@ export class GeminiFileSearchChat {
             if (event.interaction.id !== interactionId || event.interaction.status !== "completed") return invalidResponse("completion_state");
             if ([...steps.values()].some((step) => !step.stopped)) return invalidResponse("open_step");
             observe(() => observer.completion(event.interaction));
+            execution.completionEventAccepted = true;
             report();
             completed = true;
             continue;
@@ -913,25 +964,32 @@ export class GeminiFileSearchChat {
           return invalidResponse("tool_delta_type");
         }
 
-        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        execution.streamClosed = true;
+        if (resumed) execution.resumeOutcome = completed ? "completed" : "incomplete";
+        report();
+        checkStream();
         if (completed) break;
         if (resumed || !interactionId || !lastEventId) return invalidResponse("incomplete_stream");
         resumed = true;
-        const continuation = await this.client.interactions.get(interactionId, {
+        execution.resumeAttempted = true;
+        execution.resumeOutcome = "pending";
+        execution.streamClosed = false;
+        report();
+        const continuation = await providerOperation(() => this.client.interactions.get(interactionId!, {
           stream: true, last_event_id: lastEventId,
-        }, { signal: options.streamSignal, maxRetries: 0 });
-        checkAbortOrDeadline(options.streamSignal, options.streamDeadlineAt);
+        }, { signal: options.streamSignal, maxRetries: 0 }), options.streamSignal, true);
+        checkStream();
         if (!isInteractionStream(continuation)) return invalidResponse("incomplete_stream");
         stream = continuation;
       }
       if (!completed || !interactionId) return invalidResponse("incomplete_stream");
       report({ phase: "canonical_read" });
       options.onStreamComplete?.();
-      checkAbortOrDeadline(options.signal, options.deadlineAt);
-      const interaction = await this.client.interactions.get(interactionId, undefined, { signal: options.signal });
+      checkTerminal();
+      const interaction = await providerOperation(() => this.client.interactions.get(interactionId!, undefined, { signal: options.signal }), options.signal, false);
       if (isInteractionStream(interaction)) return invalidResponse("canonical_state");
       report({ canonicalReadCompleted: true });
-      checkAbortOrDeadline(options.signal, options.deadlineAt);
+      checkTerminal();
       if (interaction.id !== interactionId) return invalidResponse("canonical_interaction");
       const final = canonicalOutput(interaction, (annotations) => {
         observe(() => observer.annotations("canonical", annotations));
@@ -1000,6 +1058,10 @@ export class GeminiFileSearchChat {
         usage: usageFor(interaction.usage),
       };
     } catch (error) {
+      if (execution.resumeOutcome === "pending") {
+        execution.resumeOutcome = options.streamSignal.aborted || execution.modelDeadlineReached || execution.providerFailure === "abort"
+          ? "aborted" : "failed";
+      }
       const deadlineAt = diagnostics.phase === "generation" ? options.streamDeadlineAt : options.deadlineAt;
       const signal = diagnostics.phase === "generation" ? options.streamSignal : options.signal;
       report({ reason: error instanceof GovernedChatDiagnosticError
