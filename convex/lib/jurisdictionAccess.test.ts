@@ -229,6 +229,10 @@ describe("jurisdiction membership access", () => {
     const member = await asUser(t, "user");
     const jurisdictionId = await t.run(async (ctx) => {
       const now = Date.now();
+      const organizationId = await ctx.db.insert("organizations", {
+        name: "Public University", slug: "public-university", class: "university", status: "active",
+        createdBy: "fixture", updatedBy: "fixture", createdAt: now, updatedAt: now,
+      });
       return await ctx.db.insert("jurisdictions", {
         name: "Public rules",
         slug: "public-rules",
@@ -237,6 +241,7 @@ describe("jurisdiction membership access", () => {
         providerSyncState: "synced",
         kind: "organizational",
         visibility: "public",
+        organizationId,
         createdBy: "fixture",
         updatedBy: "fixture",
         createdAt: now,
