@@ -8,8 +8,13 @@ import { polar } from "./polar";
 import type { ChatResearchStores } from "./jurisdictions";
 import { verifyWidgetServiceProof } from "./lib/widgetProof";
 import { verifyAdminFileProof } from "./lib/adminFileProof";
+import { attachmentUploadOptions, uploadAttachment, resolveAttachments } from "./chatAttachmentHttp";
 
 const http = httpRouter();
+http.route({ path: "/chat-attachments/upload", method: "OPTIONS", handler: attachmentUploadOptions });
+http.route({ path: "/chat-attachments/upload", method: "POST", handler: uploadAttachment });
+http.route({ path: "/private/chat-attachments/resolve", method: "POST", handler: resolveAttachments });
+http.route({ path: "/private/chat-attachments/file", method: "POST", handler: resolveAttachments });
 
 for (const [operation, functionName] of Object.entries({ session: "createSession", read: "readSession", begin: "beginTurn", finish: "finishTurn", adopt: "adoptSession" })) {
   http.route({ path: `/private/guest-research/${operation}`, method: "POST", handler: httpAction(async (ctx, request) => {

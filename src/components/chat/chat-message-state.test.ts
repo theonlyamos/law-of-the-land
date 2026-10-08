@@ -7,6 +7,7 @@ import {
   consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
+  restoreBackgroundMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
@@ -306,5 +307,24 @@ describe("route-scoped chat creation", () => {
     });
 
     expect(clearRejectedRouteEnsure(currentEntry, oldEntry)).toBe(currentEntry);
+  });
+});
+
+
+describe("background message attachment restoration", () => {
+  it.each(["running", "cancelled", "blocked"] as const)("keeps only the matching user turn's attachments for %s", status => {
+    const attachment = { id: "matched-file", filename: "work.txt", mimeType: "text/plain", byteSize: 12, kind: "text" as const };
+    const other = { ...attachment, id: "other-file", filename: "unrelated.txt" };
+    const job = { jobId: "job-1", externalId: "chat-1", userClientId: "job-user", assistantClientId: "job-assistant",
+      question: "My question", status, progress: "consent" as const, createdAt: 1,
+      verificationDeadlineAt: 240001, terminalDeadlineAt: 270001,
+      errorReason: status === "cancelled" ? "cancelled" as const : status === "blocked" ? "verification_blocked" as const : null };
+    const result = restoreBackgroundMessages(job, [
+      local({ clientId: "unrelated-user", attachments: [other] }),
+      local({ clientId: job.userClientId, attachments: [attachment] }),
+    ]);
+    expect(result.find(message => message.clientId === job.userClientId)?.attachments).toEqual([attachment]);
+    expect(result.find(message => message.clientId === "unrelated-user")?.attachments).toEqual([other]);
+    expect(result.find(message => message.clientId === job.assistantClientId)?.attachments).toBeUndefined();
   });
 });

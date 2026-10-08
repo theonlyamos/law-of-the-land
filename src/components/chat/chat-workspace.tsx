@@ -4,6 +4,10 @@ import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
+import { findAcceptedChatBackgroundJob, useChatBackgroundJob } from "./use-chat-background-job";
+import { useChatAttachments } from "./use-chat-attachments";
+import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
+import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentUploadsEnabled, type ChatAttachment } from "../../../shared/chat-attachments";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
@@ -34,6 +38,7 @@ import {
   consumeComposerBottomScroll,
   consumePrependScroll,
   reconcileChatMessages,
+  restoreBackgroundMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
@@ -59,7 +64,12 @@ type ChatResponse = {
   citations: ChatCitation[];
   citationClaim?: string;
   partialCoverage: boolean;
+  persisted?: true;
 };
+
+type BackgroundChatResponse = { type: "background_job"; jobId: string; status: "queued" | "running" };
+class ChatSubmissionTransportError extends Error {}
+class BackgroundAcknowledgementError extends Error {}
 
 function isChatCitation(value: unknown): value is ChatCitation {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -79,17 +89,30 @@ async function postChat(
   body: unknown,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
-): Promise<ChatResponse> {
-  const response = await fetch("/api/chat", {
+): Promise<ChatResponse | BackgroundChatResponse> {
+  let response: Response;
+  try { response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
     body: JSON.stringify(body),
     signal,
-  });
+  }); } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ChatSubmissionTransportError("The submission response could not be read.");
+  }
   if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+    const data = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown; type?: unknown } | null;
+    if (response.status === 500 && data?.type === "background_job_uncertain") {
+      throw new BackgroundAcknowledgementError("The job acknowledgement could not be confirmed.");
+    }
     throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined,
       publicChatErrorReason(data?.reason) ?? undefined);
+  }
+  if (response.status === 202) {
+    const data = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (data?.type !== "background_job" || typeof data.jobId !== "string" || !data.jobId
+      || (data.status !== "queued" && data.status !== "running")) throw new BackgroundAcknowledgementError("The job acknowledgement could not be read.");
+    return { type: "background_job", jobId: data.jobId, status: data.status };
   }
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) throw new ApiError(500);
   if (!response.body) throw new ApiError(500);
@@ -119,10 +142,11 @@ async function postChat(
         } else if (
           event.type === "done"
           && typeof event.result === "string"
-          && (event.answerKind === "legal" || event.answerKind === "policy")
+          && (event.answerKind === "legal" || event.answerKind === "policy" || event.answerKind === "document")
           && Array.isArray(event.citations)
           && event.citations.every(isChatCitation)
           && typeof event.partialCoverage === "boolean"
+          && (event.persisted === undefined || event.persisted === true)
         ) {
           completed = {
             result: event.result,
@@ -130,6 +154,7 @@ async function postChat(
             citations: event.citations,
             ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
             partialCoverage: event.partialCoverage,
+            ...(event.persisted === true ? { persisted: true as const } : {}),
           };
         } else if (event.type === "error" && typeof event.error === "string") {
           throw new ApiError(500, event.error, publicChatErrorReason(event.reason) ?? undefined);
@@ -214,17 +239,25 @@ interface ChatWorkspaceProps {
 export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const [query, setQuery] = useState("");
+  const attachments = useChatAttachments(chatId);
+  const { query, setQuery, files, addFiles, removeFile, retryFile, uploadFiles, transferToChat, clearSentDraft } = attachments;
+  const newUploadsEnabled = chatAttachmentUploadsEnabled({
+    NODE_ENV: process.env.NODE_ENV,
+    NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED: process.env.NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED,
+  });
+  const attachmentBlocked = files.some((file) => file.state === "uploading" || file.state === "error" || file.state === "removing"
+    || (!newUploadsEnabled && !file.attachment));
   const [selectedResearchJurisdiction, setSelectedResearchJurisdiction] = useState<ResearchJurisdiction | null>(null);
   const {
     store: requests, messages: localMessages, isLoading: requestLoading,
     saveFailed, ensureError, deleteError, errorReason,
-    isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted,
+    isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted, backgroundJobId, backgroundRecovery,
   } = useChatRequests(chatId);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
-  const isLoading = requestLoading || isStartingNewChat;
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [unavailableSavedAnswerKey, setUnavailableSavedAnswerKey] = useState<string | null>(null);
+  const savedAnswerPagingRef = useRef<{ key: string; pages: number; lastRequestedCount: number | null } | null>(null);
   const messagesScrollAreaRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const processedBootstrap = useRef<Set<string>>(new Set());
@@ -232,7 +265,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
-  const queryChatIdRef = useRef(chatId);
+  const allocatedNewChatIdRef = useRef<string | null>(null);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
   const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
@@ -283,7 +316,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         durationMs: message.durationMs,
         citations: message.citations,
         guestSources: message.guestSources,
+        originalSourceUrls: message.originalSourceUrls,
         answerKind: message.answerKind,
+        attachments: message.attachments,
       });
     }
     return [...byStorageId.values()].sort(
@@ -293,9 +328,31 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         a.storageId.localeCompare(b.storageId)
     );
   }, [messageResults]);
+  const savedAssistantClientIds = persistedMessages.filter(message => message.role === "assistant")
+    .map(message => message.clientId).filter((clientId): clientId is string => typeof clientId === "string");
+  const pendingAssistantId = backgroundRecovery?.assistantClientId
+    ?? localMessages.find(message => message.role === "assistant" && message.backgroundJobId === backgroundJobId)?.clientId;
+  const pendingAlreadySaved = Boolean(pendingAssistantId && savedAssistantClientIds.includes(pendingAssistantId));
+  const background = useChatBackgroundJob({ chatId, isAuthenticated,
+    pendingJobId: pendingAlreadySaved ? null : backgroundJobId,
+    recoverySubmission: pendingAlreadySaved ? null : backgroundRecovery,
+    savedAssistantClientIds });
+  const savedAnswerLookupKey = background.job?.status === "succeeded"
+    && background.awaitedAssistantClientId === background.job.assistantClientId
+    && !savedAssistantClientIds.includes(background.job.assistantClientId)
+    ? `${background.key}|${chatId}|${background.job.jobId}|${background.job.assistantClientId}` : null;
+  const savedAnswerUnavailable = Boolean(savedAnswerLookupKey && unavailableSavedAnswerKey === savedAnswerLookupKey);
+  const backgroundToRestore = background.job && (background.job.status !== "succeeded"
+    || background.awaitedAssistantClientId === background.job.assistantClientId) && !savedAnswerUnavailable ? background.job : null;
+  const waitingForSavedBackgroundAnswer = backgroundToRestore?.status === "succeeded"
+    && !persistedMessages.some(message => message.role === "assistant" && message.clientId === background.job?.assistantClientId);
+  const isLoading = requestLoading || isStartingNewChat || background.checking || background.isPending || waitingForSavedBackgroundAnswer;
   const displayMessages = useMemo(
-    () => reconcileChatMessages({ persisted: persistedMessages, local: localMessages }),
-    [localMessages, persistedMessages]
+    () => reconcileChatMessages({ persisted: persistedMessages,
+      local: backgroundToRestore ? restoreBackgroundMessages(backgroundToRestore, localMessages)
+        : savedAnswerUnavailable && background.job ? localMessages.filter(message =>
+          message.clientId !== background.job?.userClientId && message.clientId !== background.job?.assistantClientId) : localMessages }),
+    [background.job, backgroundToRestore, savedAnswerUnavailable, localMessages, persistedMessages]
   );
   const isChatLoading =
     authLoading ||
@@ -328,9 +385,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   // Navigation resets the view; requests and provisional messages stay with their chat.
   useEffect(() => {
     resetChatView();
+    allocatedNewChatIdRef.current = null;
     routeEnsureRef.current = null;
-    if (queryChatIdRef.current !== chatId) setQuery("");
-    queryChatIdRef.current = chatId;
     setSelectedResearchJurisdiction(null);
   }, [chatId, resetChatView]);
 
@@ -340,16 +396,101 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     if (!draft) return;
     setQuery((current) => current || draft);
     clearGuestResearchDraft(chatId);
-  }, [chatId, isAuthenticated, selectionReady, sessionData]);
+  }, [chatId, isAuthenticated, selectionReady, sessionData, setQuery]);
+
+  useEffect(() => {
+    if (!savedAnswerLookupKey || savedAnswerUnavailable) return;
+    // A reactive saved-message read may briefly lag the completed status read.
+    const timer = setTimeout(() => setUnavailableSavedAnswerKey(savedAnswerLookupKey), 30000);
+    return () => clearTimeout(timer);
+  }, [savedAnswerLookupKey, savedAnswerUnavailable]);
+
+  useEffect(() => {
+    if (!savedAnswerLookupKey || savedAnswerUnavailable) {
+      savedAnswerPagingRef.current = null;
+      return;
+    }
+    const paging = savedAnswerPagingRef.current?.key === savedAnswerLookupKey
+      ? savedAnswerPagingRef.current
+      : { key: savedAnswerLookupKey, pages: 0, lastRequestedCount: null };
+    savedAnswerPagingRef.current = paging;
+    if (messagesPaginationStatus === "Exhausted" && paging.pages > 0) {
+      setUnavailableSavedAnswerKey(savedAnswerLookupKey);
+      return;
+    }
+    if (messagesPaginationStatus !== "CanLoadMore" || paging.lastRequestedCount === messageResults.length) return;
+    if (paging.pages >= 5) {
+      setUnavailableSavedAnswerKey(savedAnswerLookupKey);
+      return;
+    }
+    paging.pages += 1;
+    paging.lastRequestedCount = messageResults.length;
+    loadMoreMessages(50);
+  }, [savedAnswerLookupKey, savedAnswerUnavailable, messagesPaginationStatus, messageResults.length, loadMoreMessages]);
+
+  useEffect(() => {
+    if (!chatId || !savedAnswerUnavailable || !background.job) return;
+    const request = requests.get(chatId);
+    if (!request || request.state.backgroundJobId !== background.job.jobId) return;
+    const job = background.job;
+    requests.update(chatId, request, { isLoading: false, backgroundJobId: null, backgroundRecovery: null,
+      messages: request.state.messages.filter(message => message.clientId !== job.userClientId && message.clientId !== job.assistantClientId) });
+  }, [background.job, savedAnswerUnavailable, chatId, requests]);
+
+  useEffect(() => {
+    if (!chatId || !backgroundRecovery || !background.recoveryOutcome) return;
+    const request = requests.get(chatId);
+    if (!request?.state.backgroundRecovery
+      || request.state.backgroundRecovery.userClientId !== backgroundRecovery.userClientId
+      || request.state.backgroundRecovery.assistantClientId !== backgroundRecovery.assistantClientId
+      || request.state.backgroundRecovery.startedAt !== backgroundRecovery.startedAt
+      || request.state.backgroundRecovery.startedMonotonic !== backgroundRecovery.startedMonotonic) return;
+    const content = background.recoveryOutcome === "expired"
+      ? "We could not confirm whether verification started. Reload this chat to check for a saved job before asking again."
+      : answerErrorMessage(new ChatSubmissionTransportError());
+    requests.update(chatId, request, { isLoading: false, backgroundJobId: null, backgroundRecovery: null,
+      messages: request.state.messages.map(message => message.clientId === backgroundRecovery.assistantClientId
+        ? { ...message, content, state: "error" }
+        : message.clientId === backgroundRecovery.userClientId ? { ...message, state: "error" } : message) });
+  }, [background.recoveryOutcome, backgroundRecovery, chatId, requests]);
+
+  useEffect(() => {
+    if (!chatId || !backgroundRecovery || !background.job
+      || background.job.userClientId !== backgroundRecovery.userClientId
+      || background.job.assistantClientId !== backgroundRecovery.assistantClientId) return;
+    const request = requests.get(chatId);
+    if (!request?.state.backgroundRecovery) return;
+    const job = background.job;
+    requests.update(chatId, request, { backgroundJobId: job.jobId, backgroundRecovery: null,
+      messages: request.state.messages.map(message => message.clientId === job.userClientId || message.clientId === job.assistantClientId
+        ? { ...message, backgroundJobId: job.jobId } : message) });
+  }, [background.job, backgroundRecovery, chatId, requests]);
+
+  useEffect(() => {
+    if (!chatId || !background.job || background.job.status === "queued" || background.job.status === "running") return;
+    const request = requests.get(chatId);
+    if (!request?.state.backgroundJobId || request.state.backgroundJobId !== background.job.jobId) return;
+    if (background.job.status === "succeeded") {
+      requests.update(chatId, request, { isLoading: false });
+      return;
+    }
+    requests.update(chatId, request, { isLoading: false, backgroundJobId: null, backgroundRecovery: null,
+      messages: restoreBackgroundMessages(background.job, request.state.messages) });
+  }, [background.job, chatId, requests]);
 
   useEffect(() => {
     const request = requests.get(chatId);
-    if (!chatId || !request || request.state.isLoading) return;
+    if (!chatId || !request) return;
     const savedIds = new Set(persistedMessages.map((message) => message.clientId));
+    const activeAssistant = request.state.backgroundRecovery?.assistantClientId
+      ?? request.state.messages.find(message => message.role === "assistant" && message.backgroundJobId === request.state.backgroundJobId)?.clientId;
+    const backgroundSaved = Boolean(activeAssistant && savedIds.has(activeAssistant));
+    if (request.state.isLoading && !backgroundSaved) return;
     const remaining = request.state.messages.filter((message) => !savedIds.has(message.clientId));
-    if (remaining.length === request.state.messages.length) return;
+    if (remaining.length === request.state.messages.length && !backgroundSaved) return;
     if (remaining.length === 0) requests.cancel(chatId);
-    else requests.update(chatId, request, { messages: remaining });
+    else requests.update(chatId, request, { messages: remaining,
+      ...(backgroundSaved ? { backgroundJobId: null, backgroundRecovery: null, isLoading: false } : {}) });
   }, [chatId, localMessages, persistedMessages, requestLoading, requests]);
 
   useEffect(() => {
@@ -478,17 +619,20 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
   const handleSearch = useCallback(
     async (searchQuery: string) => {
-      const trimmed = searchQuery.trim();
-      if (!trimmed || isLoading || !selectionReady) return;
+      const trimmed = searchQuery.trim() || (files.length ? "Summarize these files." : "");
+      if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
+      const submittedFiles = files;
 
-      const submissionChatId = chatId ?? crypto.randomUUID();
+      const submissionChatId = chatId ?? allocatedNewChatIdRef.current ?? crypto.randomUUID();
+      const request = requests.start(submissionChatId);
+      if (!request) return;
       if (!chatId) {
+        allocatedNewChatIdRef.current = submissionChatId;
         setIsStartingNewChat(true);
+        transferToChat(submissionChatId);
       }
 
       const requestGeneration = requestGenerationRef.current;
-      const request = requests.start(submissionChatId);
-      if (!request) return;
       const controller = request.controller;
       const setLocalMessages = (update: (previous: LocalChatMessage[]) => LocalChatMessage[]) =>
         requests.update(submissionChatId, request, { messages: update(request.state.messages) });
@@ -497,7 +641,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         return localSequenceRef.current;
       };
       // Failed local turns are never persisted and must not become research context.
-      const priorForApi = displayMessages.filter((message) => message.source !== "local" || message.state !== "error").slice(-10).map((message) => ({
+      const contextMessages = displayMessages.filter((message) => message.source !== "local"
+        || (message.state !== "error" && !message.backgroundJobId));
+      const historyComplete = contextMessages.length <= 20 && (chatId === null || messagesPaginationStatus === "Exhausted");
+      const priorForApi = contextMessages.slice(-20).map((message) => ({
         role: message.role,
         content: message.content,
       }));
@@ -560,8 +707,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest()) return;
       }
 
+      let uploadedAttachments: ChatAttachment[] = [];
+      if (submittedFiles.length) {
+        try {
+          uploadedAttachments = await uploadFiles(submissionChatId, submittedFiles, controller.signal);
+        } catch {
+          if (isCurrentRequest()) requests.update(submissionChatId, request, { isLoading: false });
+          return;
+        }
+        if (!isCurrentRequest()) return;
+        userMessage.attachments = uploadedAttachments;
+      }
+
       if (isVisibleRoute()) {
-        setQuery("");
         prependScrollIntentRef.current = null;
         composerScrollIntentRef.current = beginComposerBottomScroll({
           routeGeneration: requestGeneration,
@@ -586,13 +744,18 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         streamRenderFrame = undefined;
       };
 
+      const submissionStartedAt = Date.now();
+      const submissionStartedMonotonic = performance.now();
       try {
         const chatData = await postChat({
           query: trimmed,
           jurisdictionId: chatResearchJurisdiction!.id,
           messages: priorForApi,
+          historyComplete,
           externalId: submissionChatId,
           assistantClientId: assistantMessage.clientId,
+          userClientId: userMessage.clientId,
+          attachmentIds: uploadedAttachments.map((file) => file.id),
         }, (text) => {
           streamedAnswer += text;
           if (!isCurrentRequest() || streamRenderFrame !== undefined) return;
@@ -600,10 +763,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         }, controller.signal);
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
+        if ("type" in chatData) {
+          requests.update(submissionChatId, request, { backgroundJobId: chatData.jobId, backgroundRecovery: null,
+            messages: request.state.messages.map(message => message.clientId === userMessage.clientId || message.clientId === assistantMessage.clientId
+              ? { ...message, backgroundJobId: chatData.jobId } : message) });
+          clearSentDraft(submissionChatId, searchQuery, submittedFiles);
+          return;
+        }
         if (
           (chatData.answerKind === "policy"
             ? (chatData.citations.length !== 0 || !isChatPolicyResponse(chatData.result))
-            : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
+            : chatData.answerKind === "document"
+              ? chatData.citations.length !== 0
+              : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
           || !chatData.citationClaim
           || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
         ) {
@@ -625,7 +797,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
         const isFirstUserTurn = priorForApi.length === 0;
         try {
-          await runAfterRouteEnsure({
+          if (!chatData.persisted) await runAfterRouteEnsure({
             ensurePromise: persistenceEnsure,
             isCurrentRoute: isCurrentRequest,
             run: () => appendMessages({
@@ -643,6 +815,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   content: userMessage.content,
                   clientId: userMessage.clientId,
                   createdAt: userMessage.createdAt,
+                  ...(uploadedAttachments.length ? { attachmentIds: uploadedAttachments.map((file) => file.id as Id<"chatAttachments">) } : {}),
                 },
                 {
                   role: "assistant" as const,
@@ -659,6 +832,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               ],
             }),
           });
+          if (isCurrentRequest()) clearSentDraft(submissionChatId, searchQuery, submittedFiles);
         } catch (error) {
           if (!isCurrentRequest()) return;
           console.error("Failed to save chat:", error);
@@ -675,6 +849,26 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         if (!isCurrentRequest() || (error instanceof DOMException && error.name === "AbortError")) {
           return;
         }
+        if (error instanceof ChatSubmissionTransportError) {
+          const accepted = await findAcceptedChatBackgroundJob({ externalId: submissionChatId,
+            userClientId: userMessage.clientId, assistantClientId: assistantMessage.clientId, signal: controller.signal });
+          if (!isCurrentRequest()) return;
+          if (accepted) {
+            requests.update(submissionChatId, request, { backgroundJobId: accepted.jobId, backgroundRecovery: null,
+              messages: request.state.messages.map(message => message.clientId === userMessage.clientId || message.clientId === assistantMessage.clientId
+                ? { ...message, backgroundJobId: accepted.jobId } : message) });
+            clearSentDraft(submissionChatId, searchQuery, submittedFiles);
+            return;
+          }
+        }
+        if (error instanceof BackgroundAcknowledgementError) {
+          requests.update(submissionChatId, request, { backgroundRecovery: {
+            userClientId: userMessage.clientId, assistantClientId: assistantMessage.clientId,
+            requiresCapability: false,
+            startedAt: submissionStartedAt, startedMonotonic: submissionStartedMonotonic }, isLoading: true });
+          clearSentDraft(submissionChatId, searchQuery, submittedFiles);
+          return;
+        }
         console.error("Error:", error);
         const reason = error instanceof ApiError ? error.reason : undefined;
         requests.update(submissionChatId, request, { errorReason: reason ?? null });
@@ -689,7 +883,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         );
       } finally {
         cancelPendingStreamRender();
-        if (isCurrentRequest()) {
+        if (isCurrentRequest() && !request.state.backgroundJobId && !request.state.backgroundRecovery) {
           requests.update(submissionChatId, request, { isLoading: false });
         }
       }
@@ -699,17 +893,24 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       chatResearchJurisdiction,
       chatId,
       displayMessages,
+      messagesPaginationStatus,
       ensureSessionForNewSubmission,
       ensureSession,
       isLoading,
       router,
       selectionReady,
       requests,
+      files,
+      attachmentBlocked,
+      transferToChat,
+      uploadFiles,
+      clearSentDraft,
     ]
   );
 
   useEffect(() => {
     if (!initialQuery?.trim()) return;
+    if (background.checking || background.uncertain) return;
     if (!selectionReady) return;
     const q = initialQuery.trim();
     const key = `${chatId}|${q}`;
@@ -719,10 +920,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     processedBootstrap.current.add(key);
     router.replace(`/${chatId}`, { scroll: false });
 
-    if (sessionData && persistedMessages.length > 0) return;
+    if (background.job || (sessionData && persistedMessages.length > 0)) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [chatId, handleSearch, initialQuery, persistedMessages.length, router, selectionReady, sessionData]);
+  }, [background.checking, background.job, background.uncertain, chatId, handleSearch, initialQuery, persistedMessages.length, router, selectionReady, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -778,6 +979,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const jurisdictionLabel = chatResearchJurisdiction
     ? `${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`
     : "";
+  const attachmentTray = <DraftAttachmentTray files={files} error={attachments.error} disabled={isLoading}
+    onRemove={(file) => void removeFile(file)} onRetry={newUploadsEnabled ? (file) => void retryFile(file) : undefined} />;
+  const composerAttachments = newUploadsEnabled ? {
+    accept: CHAT_ATTACHMENT_ACCEPT,
+    hasFiles: files.length > 0,
+    onFiles: addFiles,
+    disabled: files.some((file) => file.state === "uploading" || file.state === "removing"),
+    tray: attachmentTray,
+  } : undefined;
+  const retainedAttachmentTray = newUploadsEnabled ? null : attachmentTray;
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -850,6 +1061,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   Ask a question. Understand the answer.<br />Explore the sources behind it.
                 </p>
                 <div className="mt-7">
+                  {retainedAttachmentTray}
                   <ChatInput
                     id="new-chat-question"
                     variant="editorial"
@@ -860,9 +1072,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     onSearch={() => void handleSearch(query)}
                     onKeyDown={handleKeyDown}
                     isLoading={isLoading}
-                    submitDisabled={!selectionReady}
+                    submitDisabled={!selectionReady || attachmentBlocked}
+                    attachments={composerAttachments}
+                    hasFiles={files.some((file) => Boolean(file.attachment))}
                     rows={2}
-                    placeholder="What would you like to understand?"
+                    placeholder={files.length ? "Send to summarize these files, or add a question." : "What would you like to understand?"}
                     footer={
                       <ResearchJurisdictionPicker
                         compact
@@ -943,13 +1157,18 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       <div className="whitespace-pre-wrap rounded-2xl rounded-br-md bg-secondary px-5 py-3 text-sm leading-relaxed text-secondary-foreground [overflow-wrap:anywhere]">
                         {message.content}
                       </div>
+                      <MessageAttachments attachments={message.attachments} />
                       {message.source === "local" && message.state === "error" ? (
                         <p className="text-xs font-medium text-destructive">Failed</p>
                       ) : null}
                     </div>
                   ) : message.source === "local" && message.state === "pending" && message.content === "..." ? (
                     <div className="flex items-center gap-3 py-2 text-sm text-muted-foreground" role="status" aria-label="Preparing answer">
-                      <Spinner className="size-4" />Preparing your answer…
+                      <Spinner className="size-4" />{message.backgroundJobId && background.job
+                        ? background.job.status === "succeeded" ? "Loading the saved answer."
+                          : ({ queued: "Verification is queued.", draft: "Preparing the answer for verification.", inventory: "Checking the source evidence.",
+                            consent: "Checking written consent.", overtime: "Checking overtime limits.", commit: "Saving the verified answer.", complete: "Loading the saved answer." })[background.job.progress]
+                        : "Preparing your answer…"}
                     </div>
                   ) : (
                     <div className="min-w-0 w-full text-sm leading-7">
@@ -960,17 +1179,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       <div className="markdown-content">
                         <AssistantMessage content={message.content} />
                       </div>
+                      {message.answerKind === "document" && <p className="mt-4 text-xs text-muted-foreground">Based on your files</p>}
                       {message.citations?.length ? (
                         <section aria-label="Sources" className="mt-6 border-t pt-4 text-xs leading-5 text-muted-foreground">
                           <h2 className="text-[11px] font-semibold uppercase tracking-wider">Sources · {message.citations.length}</h2>
                           <ol className="mt-3 space-y-2">
                             {message.citations.map((citation, citationIndex) => {
-                              const sourceUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl : null;
+                              const originalUrl = message.source === "persisted" ? message.originalSourceUrls?.[citationIndex] : null;
+                              const guestUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl : null;
+                              const sourceUrl = originalUrl && /^\/api\/chat\/sources\/[A-Za-z0-9_-]{1,128}\/[0-3]\?chat=[^#]+#page=(?:11|12|18|21)$/u.test(originalUrl)
+                                ? originalUrl : guestUrl && /^https?:\/\//i.test(guestUrl) ? guestUrl : null;
                               return (
                               <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`} className="chat-source">
                                 <span className="chat-source-number" aria-hidden="true">{citationIndex + 1}</span>
                                 <div className="min-w-0 [overflow-wrap:anywhere]">
-                                {sourceUrl && /^https?:\/\//i.test(sourceUrl)
+                                {sourceUrl
                                   ? <a href={sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={`${citation.label} (opens in a new tab)`} className="font-medium text-foreground underline underline-offset-4">{citation.label}</a>
                                   : <span className="font-medium text-foreground">{citation.label}</span>}
                                   <p>{citation.jurisdictionName} · {citation.jurisdictionKind === "organizational" ? "Organization" : "Geographic jurisdiction"} · {citation.relation === "selected" ? "Selected jurisdiction" : citation.relation === "geographic_ancestor" ? "Geographic ancestor" : "Organization geography"}</p>
@@ -1004,6 +1227,26 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
         <div className="shrink-0">
           <div className={`${THREAD_RAIL} pb-4 pt-2`}>
+            {savedAnswerUnavailable && (
+              <p role="status" className="mb-2 text-sm text-muted-foreground">
+                Verification finished, but we could not load its saved answer. Reload this chat or load older messages to find it.
+              </p>
+            )}
+            {background.uncertain && (
+              <p role="status" className="mb-2 text-sm text-muted-foreground">
+                We could not check verification progress. It may still be running. We will check again.
+              </p>
+            )}
+            {background.cancelError && <p role="alert" className="mb-2 text-sm text-destructive">{background.cancelError}</p>}
+            {(background.isPending || backgroundJobId || backgroundRecovery) && (background.job?.jobId || backgroundJobId || backgroundRecovery) && (
+              <div className="mb-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>Verification continues if you leave or reload this chat.</span>
+                <Button type="button" variant="ghost" size="sm" disabled={background.cancelling}
+                  onClick={() => void background.cancel()} aria-label="Stop verification">
+                  {background.cancelling ? background.job?.jobId || backgroundJobId ? "Stopping…" : "Confirming stop…" : "Stop verification"}
+                </Button>
+              </div>
+            )}
             {saveFailed && (
               <p role="alert" className="mb-2 text-sm text-muted-foreground">
                 The last answer is shown above but could not be saved to your account. It may be
@@ -1032,6 +1275,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   : "This answer took too long. You can ask a more focused question or try again later."}
               </p>
             )}
+            {retainedAttachmentTray}
             <ChatInput
               variant="editorial"
               ariaLabel="Follow-up question"
@@ -1041,6 +1285,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               onSearch={() => void handleSearch(query)}
               onKeyDown={handleKeyDown}
               isLoading={isLoading || !selectionReady}
+              submitDisabled={attachmentBlocked}
+              attachments={composerAttachments}
+              hasFiles={files.some((file) => Boolean(file.attachment))}
               rows={2}
               footer={chatResearchJurisdiction ? (
                 <span className="chat-scope-label" title={`${jurisdictionLabel} — fixed for this conversation`}>
@@ -1050,7 +1297,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                 </span>
               ) : undefined}
               placeholder={
-                displayMessages.length === 0
+                files.length
+                  ? "Send to summarize these files, or add a question."
+                  : displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
                   : "Ask a follow-up…"
               }

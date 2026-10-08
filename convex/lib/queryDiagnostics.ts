@@ -8,7 +8,7 @@ export const QUERY_DIAGNOSTIC_REASONS = [
   "status_update", "completion_state", "open_step", "step_index", "step_type", "duplicate_step",
   "file_search_call", "file_search_result", "step_stop", "event_type", "step_delta", "model_delta_type",
   "output_limit", "tool_delta_type", "incomplete_stream", "canonical_interaction", "canonical_text_mismatch",
-  "policy_with_citations", "request_invalid", "response_invalid", "in_progress", "completed",
+  "policy_with_citations", "document_with_citations", "request_invalid", "response_invalid", "in_progress", "completed",
   "no_canonical_annotations", "deadline_exceeded", "aborted", "provider_request_failed",
   "completion_invalid", "research_unavailable", "not_configured",
   "file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted",

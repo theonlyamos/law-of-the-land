@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
+import { attachmentKindValidator } from "./lib/chatAttachmentContracts";
 import {
   chatCitationValidator,
   geographicLevelValidator,
@@ -809,6 +810,28 @@ export default defineSchema({
     "environment",
     "migrationVersion",
   ]),
+  // Dedicated owner-bound research execution; never shared with publication jobs.
+  reviewedEmploymentJobs: defineTable({
+    ownerId: v.string(), nativeAuthSessionId: v.string(), sessionId: v.id("chatSessions"), externalId: v.string(),
+    jurisdictionId: v.id("jurisdictions"), submissionId: v.string(), userClientId: v.string(), assistantClientId: v.string(),
+    question: v.string(), submission: v.string(), submissionDigest: v.string(),
+    // Existing DEV jobs predate this immutable source-policy marker. Production
+    // execution never admits a row without its exact production policy marker.
+    policyId: v.optional(v.union(v.literal("act651-s55-dev-v1"), v.literal("act651-s55-prod-v1"))),
+    status: v.union(v.literal("queued"), v.literal("running"), v.literal("succeeded"), v.literal("blocked"), v.literal("cancelled"), v.literal("expired")),
+    progress: v.union(v.literal("queued"), v.literal("draft"), v.literal("inventory"), v.literal("consent"), v.literal("overtime"), v.literal("commit"), v.literal("complete")),
+    createdAt: v.number(), verificationDeadlineAt: v.number(), terminalDeadlineAt: v.number(), updatedAt: v.number(),
+    workerId: v.optional(v.string()), candidateSha256: v.optional(v.string()), sourceBinding: v.optional(v.string()),
+    errorReason: v.optional(v.union(v.literal("invalid_request"), v.literal("authority_unavailable"), v.literal("draft_blocked"),
+      v.literal("verification_blocked"), v.literal("commit_failed"), v.literal("deadline_exceeded"), v.literal("cancelled"), v.literal("internal"))),
+  }).index("by_ownerId_and_submissionId", ["ownerId", "submissionId"])
+    .index("by_ownerId_and_externalId", ["ownerId", "externalId"])
+    .index("by_sessionId_and_status", ["sessionId", "status"]),
+  reviewedEmploymentJobStages: defineTable({
+    jobId: v.id("reviewedEmploymentJobs"), stage: v.union(v.literal("draft"), v.literal("inventory"), v.literal("consent"), v.literal("overtime")),
+    requestSha256: v.string(), candidateSha256: v.union(v.string(), v.null()), sourceBinding: v.string(),
+    status: v.union(v.literal("reserved"), v.literal("passed")), reservedAt: v.number(), passedAt: v.optional(v.number()),
+  }).index("by_jobId_and_stage", ["jobId", "stage"]),
   chatSessions: defineTable({
     userId: v.string(),
     externalId: v.string(),
@@ -831,13 +854,25 @@ export default defineSchema({
     .index("by_userId_and_updatedAt", ["userId", "updatedAt"])
     .index("by_user_externalId", ["userId", "externalId"])
     .index("by_jurisdictionId", ["jurisdictionId"]),
+  chatAttachments: defineTable({
+    sessionId: v.id("chatSessions"), userId: v.string(), filename: v.string(), mimeType: v.string(), byteSize: v.number(),
+    kind: attachmentKindValidator, status: v.union(v.literal("pending"), v.literal("ready")),
+    storageId: v.optional(v.id("_storage")), extractedText: v.optional(v.string()), pageCount: v.optional(v.number()),
+    messageClientId: v.optional(v.string()), createdAt: v.number(), expiresAt: v.optional(v.number()),
+  }).index("by_sessionId", ["sessionId"])
+    .index("by_sessionId_and_messageClientId", ["sessionId", "messageClientId"])
+    .index("by_sessionId_and_expiresAt", ["sessionId", "expiresAt"])
+    .index("by_userId_and_expiresAt", ["userId", "expiresAt"])
+    .index("by_storageId", ["storageId"])
+    .index("by_expiresAt", ["expiresAt"]),
   chatCitationClaims: defineTable({
     tokenHash: v.string(),
     ownerBinding: v.string(),
     sessionBinding: v.string(),
     chatSessionId: v.id("chatSessions"),
     jurisdictionId: v.id("jurisdictions"),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
+    attachmentIds: v.optional(v.array(v.id("chatAttachments"))),
     assistantClientIdBinding: v.string(),
     assistantContentBinding: v.string(),
     orderedCitationBinding: v.string(),
@@ -891,7 +926,7 @@ export default defineSchema({
       v.literal("failure"),
       v.literal("aborted"),
     ),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
     failureCategory: v.optional(v.union(
       v.literal("authentication"),
       v.literal("configuration"),
@@ -954,7 +989,14 @@ export default defineSchema({
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
     guestSources: v.optional(v.array(guestSourceValidator)),
-    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))),
+    // Written only by the verified atomic reviewed completion, never by callers
+    // of appendMessages. Source URLs are resolved on access rather than stored.
+    reviewedOriginalSource: v.optional(v.object({
+      jurisdictionId: v.id("jurisdictions"), resourceId: v.id("legalResources"), versionId: v.id("documentVersions"),
+      expectedSha256: v.string(), expectedByteSize: v.number(), pageNumbers: v.array(v.number()),
+    })),
+    answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"), v.literal("document"))),
+    attachmentIds: v.optional(v.array(v.id("chatAttachments"))),
     createdAt: v.number(),
   })
     .index("by_session", ["sessionId"])

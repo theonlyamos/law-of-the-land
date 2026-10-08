@@ -714,9 +714,11 @@ describe("completeGovernedInteraction", () => {
     expect(state.runs[0]).toMatchObject({ outcome: "failure", diagnostics });
   });
 
-  it("persists a fixed policy reply only with its bound kind and claim", async () => {
+  it.each([
+    CHAT_POLICY_RESPONSES.out_of_scope,
+    "The reviewed material available here does not cover this question well enough to give a verified answer.",
+  ])("persists the fixed policy reply %s only with its bound kind and claim", async finalAnswer => {
     const { t, owner, base } = await fixture();
-    const finalAnswer = CHAT_POLICY_RESPONSES.out_of_scope;
     const input: CompletionInput = {
       ...base, finalAnswer, answerKind: "policy", citations: [], model: "app-policy-v1",
       authorizedScopeSize: 0, readyStoreCount: 0, partialCoverage: false,
@@ -738,12 +740,20 @@ describe("completeGovernedInteraction", () => {
     const page = await owner.client.query(api.chats.listMessages, {
       externalId: base.externalId, paginationOpts: { numItems: 10, cursor: null },
     });
-    expect(page.page[0]).toMatchObject({ answerKind: "policy", citations: [] });
+    expect(page.page[0]).toMatchObject({ content: finalAnswer, answerKind: "policy", citations: [] });
     expect((await terminalState(t)).runs[0]).toMatchObject({
       answerKind: "policy", model: "app-policy-v1", citationCount: 0,
       authorizedScopeSize: 1, readyStoreCount: 1,
       jurisdictionCoverage: [{ coverage: "not_searched" }],
     });
+  });
+
+  it("rejects arbitrary error text disguised as a saveable policy response", async () => {
+    const { owner, base } = await fixture();
+    await expect(complete(owner.client, {
+      ...base, finalAnswer: "PRIVATE provider error details", answerKind: "policy", citations: [], model: "app-policy-v1",
+      authorizedScopeSize: 0, readyStoreCount: 0, partialCoverage: false, jurisdictionCoverage: [],
+    })).rejects.toThrow("INVALID_GOVERNED_INTERACTION");
   });
 
   it("rejects a new assistant message without a completion claim", async () => {
