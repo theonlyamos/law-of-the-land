@@ -71,7 +71,7 @@ export function LandingShell({ guestResearchEnabled }: { guestResearchEnabled: b
       onSearch={() => goToChat(query)}
       onPickSuggested={goToChat}
       onKeyDown={handleKeyDown}
-      isLoading={researchUnavailable}
+      isLoading={authLoading}
       savedChats={savedChats}
       onResumeChat={resumeChat}
       isAuthenticated={isAuthenticated}

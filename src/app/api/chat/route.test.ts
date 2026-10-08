@@ -249,6 +249,32 @@ describe("POST /api/chat attachment integration", () => {
     expect(completion).toMatchObject({ answerKind: "document", attachmentIds: ["saved-file"], authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
   });
 
+  it("keeps a document follow-up when its anchor is outside the provider history window", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
+    const history = [
+      { role: "user", content: "Summarize this file" },
+      { role: "assistant", content: "The monthly rent is 900." },
+      ...Array.from({ length: 9 }, () => [
+        { role: "user", content: "Make it shorter" },
+        { role: "assistant", content: "Rent is 900." },
+      ]).flat(),
+    ];
+    const canonical = canonicalInteraction("Rent is 900.");
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.create.mockResolvedValue(successfulStream("Rent is 900."));
+    interactionMocks.get.mockResolvedValue(canonical);
+
+    const response = await POST(request({ query: "Make it more concise", messages: history, attachmentIds: [] }));
+
+    expect(response.status).toBe(200);
+    expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "document", result: "Rent is 900.", citations: [] });
+    expect(fetch).not.toHaveBeenCalled();
+    const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+    expect(completion).toMatchObject({ answerKind: "document", attachmentIds: ["saved-file"], authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
+    const providerInput = JSON.parse(interactionMocks.create.mock.calls[0][0].input.at(-1).text);
+    expect(providerInput.conversation).toEqual(history.slice(-10));
+  });
+
   it("resolves saved attachments on follow-up while keeping legal citations required", async () => {
     attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
     const response = await POST(request({ attachmentIds: [] }));

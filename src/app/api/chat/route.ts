@@ -930,7 +930,7 @@ export async function POST(request: Request): Promise<Response> {
     }
     const hasAttachments = Boolean(attachmentContext?.attachments.length);
     const legacyHistory = body.messages.slice(-10);
-    const answerMode = hasAttachments && isDocumentQuestion(body.query, legacyHistory) ? "document" : "legal";
+    const answerMode = hasAttachments && isDocumentQuestion(body.query, body.messages) ? "document" : "legal";
     let reviewed: { selection: ReviewedEmploymentSelection; token: string } | undefined;
     let coverageGap = false;
     if ((localReviewedScope || productionScope) && answerMode !== "document") {
