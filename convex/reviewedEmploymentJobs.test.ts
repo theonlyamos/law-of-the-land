@@ -10,6 +10,8 @@ import schema from "./schema";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import * as jobContracts from "../shared/reviewed-employment-jobs";
 import { createOpaqueTelemetryToken, createTelemetryServiceProof } from "./lib/telemetryProof";
+import { completeGovernedInteractionProofParts } from "./chats";
+import type { ReviewedEmploymentCommitInput } from "./reviewedEmploymentCompletion";
 
 const policy = vi.hoisted(() => ({ jurisdictionId: "", resourceId: "", versionId: "", expectedSha256: "", expectedByteSize: 0 }));
 vi.mock("../shared/reviewed-employment-policy", async importOriginal => {
@@ -309,6 +311,64 @@ describe("persisted reviewed employment jobs", () => {
     expect((await f.worker(job.jobId, "authority")).status).toBe("ok");
     await f.t.run(ctx => ctx.db.patch(f.ids.resourceId, { catalogPublished: false }));
     expect((await f.worker(job.jobId, "authority")).status).toBe("ignored");
+  });
+  it.each(["DEV", "production"] as const)("keeps an earlier background pair before a later tab turn and preserves the latest preview on %s", async environment => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const submittedAt = Date.UTC(2026, 9, 8, 12);
+    vi.setSystemTime(submittedAt);
+    if (environment === "production") productionEnvironment();
+    const f = await fixture(), job = await f.submit(), sourceBinding = f.sourceBinding;
+    expect(job.createdAt).toBe(submittedAt);
+    expect((await f.worker(job.jobId, "claim")).status).toBe("ok");
+    const answer = "This reviewed edition requires written consent before the arrangement.";
+    const answerSha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(answer))))
+      .map(byte => byte.toString(16).padStart(2, "0")).join("");
+    const input: ReviewedEmploymentCommitInput = {
+      completion: { routeNonce: f.payload.routeNonce, externalId: f.args.externalId, jurisdictionId: f.ids.jurisdictionId,
+        assistantClientId: f.args.assistantClientId, finalAnswer: answer, answerKind: "legal", outcome: "success",
+        citations: [{ jurisdictionId: f.ids.jurisdictionId, resourceId: f.ids.resourceId, versionId: f.ids.versionId,
+          providerStoreName: f.ids.storeName, pageNumber: environment === "production" ? 18 : 11 }],
+        model: "reviewed-background-fixture", elapsedMs: 1000, authorizedScopeSize: 1, readyStoreCount: 1, partialCoverage: false,
+        jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "evidence" }], attachmentIds: [] },
+      source: { jurisdictionId: f.ids.jurisdictionId, resourceId: f.ids.resourceId, versionId: f.ids.versionId,
+        expectedSha256: f.ids.expectedSha256, expectedByteSize: f.ids.expectedByteSize, asOfDate: new Date().toISOString().slice(0, 10) },
+      user: { clientId: f.args.userClientId, content: f.payload.query, attachmentIds: [] },
+    };
+    for (const stage of ["draft", "inventory", "consent", "overtime"]) {
+      const reservation = { stage, requestSha256, candidateSha256: stage === "draft" ? null : answerSha, sourceBinding };
+      expect((await f.worker(job.jobId, "reserve", reservation)).status).toBe("ok");
+      expect((await f.worker(job.jobId, "passed", { ...reservation, candidateSha256: answerSha })).status).toBe("ok");
+    }
+    // A second authenticated tab saves a complete ordinary turn while the
+    // earlier background request is still running. Neither append supplies time.
+    const laterTab = f.t.withIdentity(f.ids.identity), laterAt = submittedAt + 30_000;
+    vi.setSystemTime(laterAt);
+    const laterQuestion = "What should I ask my manager next?", laterAnswer = "Ask the manager to confirm the later arrangement in writing.";
+    const laterCompletion = { ...input.completion, routeNonce: createOpaqueTelemetryToken(),
+      assistantClientId: "later-answer", finalAnswer: laterAnswer };
+    const laterResult = await laterTab.mutation(api.chats.completeGovernedInteraction, { ...laterCompletion,
+      serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(laterCompletion)) });
+    if (laterResult.status !== "completed" || laterResult.outcome !== "success") throw new Error("Later ordinary turn did not complete");
+    await laterTab.mutation(api.chats.appendMessages, { externalId: f.args.externalId, jurisdictionId: f.ids.jurisdictionId,
+      lastMessage: laterAnswer, messages: [
+        { role: "user", clientId: "later-question", content: laterQuestion },
+        { role: "assistant", clientId: "later-answer", content: laterAnswer, answerKind: "legal",
+          citations: laterResult.citations, citationClaim: laterResult.citationClaim },
+      ] });
+    const completedAt = submittedAt + 90_000;
+    vi.setSystemTime(completedAt);
+    expect((await f.worker(job.jobId, "commit", input)).status).toBe("ok");
+    const history = await f.owner.query(api.chats.listMessages, { externalId: f.args.externalId,
+      paginationOpts: { numItems: 10, cursor: null } });
+    expect(history.isDone).toBe(true);
+    expect.soft(history.page.map(message => ({ role: message.role, content: message.content }))).toEqual([
+      { role: "user", content: f.payload.query }, { role: "assistant", content: answer },
+      { role: "user", content: laterQuestion }, { role: "assistant", content: laterAnswer },
+    ]);
+    expect.soft(history.page.map(message => message.createdAt)).toEqual([submittedAt, submittedAt, laterAt, laterAt]);
+    const session = await f.owner.query(api.chats.getByExternalId, { externalId: f.args.externalId });
+    expect.soft(session).toMatchObject({ lastMessage: laterAnswer, messageCount: 4, timestamp: completedAt });
+    expect(await f.worker(job.jobId, "commit", input)).toEqual({ status: "ignored", payload: null });
   });
   it.each(["DEV", "production"] as const)("commits only the passed candidate and persists both exact messages with consumed provenance claim on %s", async environment => {
     if (environment === "production") productionEnvironment();

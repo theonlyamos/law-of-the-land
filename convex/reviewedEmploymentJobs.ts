@@ -298,7 +298,7 @@ export const worker = mutation({
       const serviceProof = await createTelemetryServiceProof(await reviewedEmploymentCommitProofParts(input));
       // Let errors escape: failed atomic completion must roll back its telemetry,
       // claim, both messages and provenance, as well as the terminal job update.
-      const completion = await commitReviewedEmploymentForJobPrincipal(ctx, { ...input, serviceProof }, principal);
+      const completion = await commitReviewedEmploymentForJobPrincipal(ctx, { ...input, serviceProof }, principal, job._id);
       await ctx.db.patch(job._id, { status: "succeeded", progress: "complete", updatedAt: now });
       return ok(completion);
     }

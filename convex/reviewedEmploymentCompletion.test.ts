@@ -238,12 +238,16 @@ describe("reviewed employment atomic commit", () => {
   });
 
   it("completes and persists the exact answer for an ordinary owner in one transaction", async () => {
-    const f = await fixture(), result = await f.commit(), saved = await state(f.t);
+    const f = await fixture(), startedAt = Date.now(), result = await f.commit(), completedAt = Date.now(), saved = await state(f.t);
     expect(result).toMatchObject({ status: "completed", outcome: "success", answerKind: "legal", persisted: true,
       citations: [{ label: "Synthetic Employment Act, page 11", jurisdictionId: f.ids.jurisdictionId }] });
     expect(saved.claims).toEqual([]);
     expect(saved.runs).toHaveLength(1);
     expect(saved.messages).toHaveLength(2);
+    for (const message of saved.messages) {
+      expect(message.createdAt).toBeGreaterThanOrEqual(startedAt);
+      expect(message.createdAt).toBeLessThanOrEqual(completedAt);
+    }
     expect(saved.messages.map(message => ({ role: message.role, clientId: message.clientId, content: message.content })))
       .toEqual([{ role: "user", clientId: f.input.user.clientId, content: f.input.user.content },
         { role: "assistant", clientId: f.input.completion.assistantClientId, content: ANSWER }]);

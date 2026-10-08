@@ -1,6 +1,7 @@
 import { makeFunctionReference, type FunctionArgs, type FunctionReturnType } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import type { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { mutation, type MutationCtx } from "./_generated/server";
 import { completeGovernedInteractionProofParts, completeGovernedInteractionForJobPrincipal,
   appendMessagesForJobPrincipal, revalidateReviewedEmploymentJobPrincipal,
@@ -83,6 +84,7 @@ function validateBounds({ completion, source, user }: ReviewedEmploymentCommitIn
 async function commitHandler(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   jobPrincipal?: VerifiedReviewedEmploymentJobPrincipal,
+  jobCreatedAt?: number,
 ): Promise<ReviewedEmploymentCommitResult> {
 validateBounds(args);
 if (!(await verifyTelemetryServiceProof(args.serviceProof, await reviewedEmploymentCommitProofParts(args))))
@@ -117,11 +119,17 @@ const result = verified
   : await ctx.runMutation(completeRef, { ...completion, serviceProof: governedProof });
 if (result.status === "replayed") throw new ConvexError("REVIEWED_EMPLOYMENT_REPLAY_UNAVAILABLE");
 if (result.status !== "completed" || result.outcome !== "success" || result.answerKind !== "legal") invalid();
+// The durable submission time keeps a delayed background pair in its original
+// position. A newer turn still supplies the session preview; updatedAt continues
+// to record this completion through the ordinary append transaction.
+const submitted = jobCreatedAt === undefined ? {} : { createdAt: jobCreatedAt };
+const latest = verified && jobCreatedAt !== undefined ? await ctx.db.query("messages")
+  .withIndex("by_session_and_createdAt", q => q.eq("sessionId", session._id)).order("desc").first() : null;
 const appendInput: Parameters<typeof appendMessagesForJobPrincipal>[1] = { externalId: completion.externalId, jurisdictionId: source.jurisdictionId,
   ...(session.messageCount === 0 ? { title: user.content.slice(0, 30) + (user.content.length > 30 ? "..." : "") } : {}),
-  lastMessage: completion.finalAnswer, messages: [
-    { role: "user", clientId: user.clientId, content: user.content, attachmentIds: user.attachmentIds },
-    { role: "assistant", clientId: completion.assistantClientId, content: completion.finalAnswer,
+  lastMessage: jobCreatedAt !== undefined && latest && latest.createdAt > jobCreatedAt ? latest.content : completion.finalAnswer, messages: [
+    { role: "user", clientId: user.clientId, content: user.content, attachmentIds: user.attachmentIds, ...submitted },
+    { role: "assistant", clientId: completion.assistantClientId, content: completion.finalAnswer, ...submitted,
       answerKind: "legal", citations: result.citations, citationClaim: result.citationClaim },
   ] };
 const saved = verified ? await appendMessagesForJobPrincipal(ctx, appendInput, verified)
@@ -146,10 +154,23 @@ return { ...result, answerKind: "legal" as const, persisted: true as const };
 export async function commitReviewedEmploymentForJobPrincipal(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   principal: VerifiedReviewedEmploymentJobPrincipal,
+  jobId?: Id<"reviewedEmploymentJobs">,
 ): Promise<ReviewedEmploymentCommitResult> {
   const verified = await revalidateReviewedEmploymentJobPrincipal(ctx, principal,
     { externalId: args.completion.externalId, jurisdictionId: args.source.jurisdictionId });
-  return await commitHandler(ctx, args, verified);
+  // Only the worker supplies this private ID, from its proof-validated job row.
+  // Re-read it rather than accepting a timestamp from the request or worker body.
+  let jobCreatedAt: number | undefined;
+  if (jobId !== undefined) {
+    const job = await ctx.db.get("reviewedEmploymentJobs", jobId);
+    if (!job || job.ownerId !== verified.ownerId || job.nativeAuthSessionId !== verified.nativeAuthSessionId
+      || job.sessionId !== verified.sessionId || job.externalId !== verified.externalId
+      || job.jurisdictionId !== verified.jurisdictionId || job.userClientId !== args.user.clientId
+      || job.assistantClientId !== args.completion.assistantClientId || job.status !== "running"
+      || !Number.isSafeInteger(job.createdAt) || job.createdAt < 0 || job.createdAt > Date.now()) invalid();
+    jobCreatedAt = job.createdAt;
+  }
+  return await commitHandler(ctx, args, verified, jobCreatedAt);
 }
 
 export const commit = mutation({
