@@ -12,10 +12,14 @@ vi.mock("next/image", () => ({
   ),
 }));
 
+vi.mock("next/font/local", () => ({
+  default: ({ variable }: { variable: string }) => ({ variable }),
+}));
+
 vi.mock("@/components/jurisdictions/research-jurisdiction-picker", () => ({
-  ResearchJurisdictionPicker: ({ onChange }: { onChange: (value: unknown) => void }) => (
+  ResearchJurisdictionPicker: ({ onChange, compact }: { onChange: (value: unknown) => void; compact?: boolean }) => (
     <div>
-      <span>Research jurisdiction</span>
+      <span data-compact={compact}>Research jurisdiction</span>
       <button
         type="button"
         onClick={() => onChange({ id: "ghana-id", name: "Ghana", slug: "ghana", kind: "geographic", isDefault: true })}
@@ -58,8 +62,10 @@ describe("professional landing research shell", () => {
 
     expect(screen.getAllByRole("main")).toHaveLength(1);
     expect(screen.getByRole("heading", { level: 1, name: "Understand the law where you are." })).toBeVisible();
-    expect(screen.getByRole("form", { name: "Legal research" })).toBeVisible();
-    expect(screen.getByText("Research jurisdiction")).toBeVisible();
+    const researchForm = screen.getByRole("form", { name: "Legal research" });
+    expect(researchForm).toBeVisible();
+    expect(researchForm.closest(".chat-editorial")).not.toBeNull();
+    expect(screen.getByText("Research jurisdiction")).toHaveAttribute("data-compact", "true");
     expect(screen.getByRole("link", { name: "Jurisdictions" })).toHaveAttribute("href", "#jurisdictions");
     expect(screen.getByRole("link", { name: "Plans" })).toHaveAttribute("href", "#plans");
     expect(screen.getByRole("complementary", { name: "Legal information disclaimer" })).toHaveTextContent(
@@ -79,13 +85,17 @@ describe("professional landing research shell", () => {
       target: { value: "What are the notice rules?" },
     });
     expect(props.onQueryChange).toHaveBeenCalledWith("What are the notice rules?");
-    fireEvent.click(screen.getByRole("button", { name: "Research this question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
     expect(props.onSearch).toHaveBeenCalledOnce();
   });
 
-  it("requires a stable jurisdiction selection before research", () => {
-    render(<LandingPage {...landingProps({ researchJurisdiction: null })} />);
-    expect(screen.getByRole("button", { name: "Research this question" })).toBeDisabled();
+  it("allows drafting but requires a stable jurisdiction before sending or submitting the form", () => {
+    const props = landingProps({ researchJurisdiction: null });
+    render(<LandingPage {...props} />);
+    expect(screen.getByRole("textbox", { name: "Your legal question" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("form", { name: "Legal research" }));
+    expect(props.onSearch).not.toHaveBeenCalled();
   });
 
   it("explains the guest allowance before submission", () => {

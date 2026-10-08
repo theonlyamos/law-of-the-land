@@ -2,14 +2,13 @@
 
 import logo from "@/app/logo-transparent.png";
 import { UserNav } from "@/components/auth/user-nav";
+import { EditorialTheme } from "@/components/chat/editorial-theme";
 import { LandingSections } from "@/components/landing/landing-sections";
 import styles from "@/components/landing/landing-page.module.css";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { ChatInput } from "@/components/ui/chat-input";
 import type { ChatSession } from "@/lib/chat-sessions";
 import type { ResearchJurisdiction } from "@/lib/countries";
-import { ArrowRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -101,61 +100,57 @@ export function LandingPage({
             </ul>
           </div>
 
-          <form
-            id="research"
-            tabIndex={-1}
-            aria-label="Legal research"
-            className={styles.researchSheet}
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!researchDisabled) onSearch();
-            }}
-          >
-            <div className={styles.jurisdictionField}>
-              <ResearchJurisdictionPicker
-                value={researchJurisdiction}
-                onChange={onResearchJurisdictionChange}
-              />
-            </div>
-
-            <div className={styles.questionBody}>
-              <label htmlFor="landing-question" className={styles.questionLabel}>
-                Your legal question
-              </label>
-              <Textarea
+          <EditorialTheme className={styles.researchSheet}>
+            <form
+              id="research"
+              tabIndex={-1}
+              aria-label="Legal research"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!researchDisabled) onSearch();
+              }}
+            >
+              <p className="chat-eyebrow mb-4">Clarity starts here</p>
+              <h2 className="mb-5 font-[family-name:var(--font-chat-serif)] text-3xl leading-tight sm:text-4xl">
+                Start with a question.
+              </h2>
+              <ChatInput
                 id="landing-question"
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
+                variant="editorial"
+                ariaLabel="Your legal question"
+                query={query}
+                onQueryChange={onQueryChange}
+                onSearch={() => { if (!researchDisabled) onSearch(); }}
                 onKeyDown={onKeyDown}
-                disabled={isLoading}
-                rows={4}
-                placeholder="For example: What notice must a landlord give before ending a tenancy?"
-                aria-describedby="landing-question-help"
-                className={styles.questionField}
+                isLoading={isLoading}
+                submitDisabled={!selectorReady}
+                rows={3}
+                placeholder="What would you like to understand?"
+                describedBy="landing-question-help"
+                footer={
+                  <ResearchJurisdictionPicker
+                    compact
+                    disabled={isLoading}
+                    value={researchJurisdiction}
+                    onChange={onResearchJurisdictionChange}
+                  />
+                }
               />
-              <div className={styles.formFooter}>
-                <p id="landing-question-help" className={styles.formHint}>
-                  Available jurisdictions use reviewed, published legal libraries.
-                </p>
-                <Button
-                  type="submit"
-                  disabled={researchDisabled}
-                  className={styles.researchButton}
-                >
-                  Research this question
-                  <ArrowRight aria-hidden />
-                </Button>
-              </div>
-            </div>
-
-            {!isAuthenticated ? (
-              <p className={styles.signInNote}>
-                {guestResearchEnabled ? <>Try one question and one follow-up free. No account required.{" "}
-                  <Link href="/signin">Sign in</Link> to save your research.</>
-                  : <><Link href="/signin?mode=signup">Create a free account</Link> to research this question and save your work.</>}
+              <p id="landing-question-help" className="mt-3 text-xs leading-5 text-muted-foreground" aria-live="polite">
+                {researchJurisdiction
+                  ? `Answers will use sources relevant to ${researchJurisdiction.organization ? `${researchJurisdiction.organization.name} / ` : ""}${researchJurisdiction.name}.`
+                  : "Choose the jurisdiction your question relates to."}
               </p>
-            ) : null}
-          </form>
+
+              {!isAuthenticated ? (
+                <p className={styles.signInNote}>
+                  {guestResearchEnabled ? <>Try one question and one follow-up free. No account required.{" "}
+                    <Link href="/signin">Sign in</Link> to save your research.</>
+                    : <><Link href="/signin?mode=signup">Create a free account</Link> to research this question and save your work.</>}
+                </p>
+              ) : null}
+            </form>
+          </EditorialTheme>
         </div>
       </section>
 
