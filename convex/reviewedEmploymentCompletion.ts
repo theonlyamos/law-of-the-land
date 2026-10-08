@@ -30,6 +30,10 @@ const completionValidator = v.object({
 const userValidator = v.object({ clientId: v.string(), content: v.string(), attachmentIds: v.array(v.id("chatAttachments")) });
 export type ReviewedEmploymentCommitInput = { completion: Infer<typeof completionValidator>;
   source: Infer<typeof sourceValidator>; user: Infer<typeof userValidator> };
+type ReviewedEmploymentCommitResult = Extract<
+  Awaited<ReturnType<typeof completeGovernedInteractionForJobPrincipal>>,
+  { status: "completed"; outcome: "success" }
+> & { answerKind: "legal"; persisted: true };
 const authorizeRef = makeFunctionReference<"query", Infer<typeof sourceValidator> & { externalId: string },
   { status: "authorized" | "unavailable" }>("reviewedEmployment:authorizeSource");
 const completeRef = makeFunctionReference<"mutation", FunctionArgs<typeof api.chats.completeGovernedInteraction>,
@@ -79,7 +83,7 @@ function validateBounds({ completion, source, user }: ReviewedEmploymentCommitIn
 async function commitHandler(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   jobPrincipal?: VerifiedReviewedEmploymentJobPrincipal,
-) {
+): Promise<ReviewedEmploymentCommitResult> {
 validateBounds(args);
 if (!(await verifyTelemetryServiceProof(args.serviceProof, await reviewedEmploymentCommitProofParts(args))))
   throw new ConvexError("REVIEWED_EMPLOYMENT_SERVICE_PROOF_INVALID");
@@ -142,7 +146,7 @@ return { ...result, answerKind: "legal" as const, persisted: true as const };
 export async function commitReviewedEmploymentForJobPrincipal(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   principal: VerifiedReviewedEmploymentJobPrincipal,
-) {
+): Promise<ReviewedEmploymentCommitResult> {
   const verified = await revalidateReviewedEmploymentJobPrincipal(ctx, principal,
     { externalId: args.completion.externalId, jurisdictionId: args.source.jurisdictionId });
   return await commitHandler(ctx, args, verified);

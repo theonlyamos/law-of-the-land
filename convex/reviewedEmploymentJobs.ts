@@ -1,5 +1,5 @@
 import { makeFunctionReference } from "convex/server";
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { canAccessSession, requireReviewedEmploymentJobPrincipal } from "./chats";
@@ -212,7 +212,7 @@ export const worker = mutation({
   args: { jobId: v.id("reviewedEmploymentJobs"), workerId: v.string(), operation: v.union(v.literal("claim"), v.literal("state"), v.literal("authority"),
     v.literal("reserve"), v.literal("passed"), v.literal("fail"), v.literal("commit")), body: v.string(), issuedAt: v.number(), serviceProof: v.string() },
   returns: resultValidator,
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<Infer<typeof resultValidator>> => {
     const now = Date.now();
     if (!identifier(args.workerId) || !fresh(args.issuedAt, now) || new TextEncoder().encode(args.body).byteLength > MAX_BODY_BYTES) return ignored();
     try { if (!await verifyTelemetryServiceProof(args.serviceProof, await reviewedEmploymentJobProofParts(args))) return ignored(); } catch { return ignored(); }
