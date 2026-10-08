@@ -1,8 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
 import { makeFunctionReference } from "convex/server";
+import { after } from "next/server";
 
 import { api } from "../../../../convex/_generated/api";
+import type { Id } from "../../../../convex/_generated/dataModel";
 import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
+import { reviewedEmploymentCommitProofParts, type ReviewedEmploymentCommitInput } from "../../../../convex/reviewedEmploymentCompletion";
 import {
   createOpaqueTelemetryToken,
   createTelemetryServiceProof,
@@ -10,6 +13,7 @@ import {
 } from "../../../../convex/lib/telemetryProof";
 import {
   fetchAuthMutation,
+  fetchAuthQuery,
   getToken,
   isAuthenticated,
 } from "@/lib/auth-server";
@@ -21,14 +25,33 @@ import {
 } from "@/lib/gemini-file-search-chat";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
-import { isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
+import { CHAT_POLICY_RESPONSES, isChatPolicyResponse, type ChatAnswerKind } from "../../../../convex/lib/chatPolicy";
 import { emptyQueryDiagnosticExecution, validateQueryDiagnostics, type QueryDiagnostics } from "../../../../convex/lib/queryDiagnostics";
 import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from "@/lib/chat-intent-routing";
+import { isDocumentQuestion } from "@/lib/chat-document-intent";
+import { ChatAttachmentError, loadChatAttachmentContext, type ChatAttachmentContext } from "@/lib/chat-attachment-server";
+import { MAX_CHAT_FILES } from "../../../../shared/chat-attachments";
 import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
+import { PILOT_CATALOG, PILOT_IDENTITY } from "@/lib/source-verification/reviewed-source-cases";
+import { selectEmploymentEvidence, type EmploymentEvidenceSelection } from "@/lib/source-verification/employment-evidence";
+import { createEmploymentAuthority, employmentAuthorizationReference } from "@/lib/source-verification/employment-authority";
+import { createReviewedEmploymentChat, isLocalReviewedEmploymentRequest, projectReviewedEmploymentDiagnostics,
+  type ReviewedEmploymentDiagnostics, type ReviewedEmploymentSelection } from "@/lib/source-verification/reviewed-employment-chat";
+import { createReviewedPassageDraft } from "@/lib/source-verification/reviewed-passage-draft";
+import { createGeminiEvaluationVerifier } from "@/lib/source-verification/gemini-verifier";
+import { createReviewedSplitVerifier } from "@/lib/source-verification/reviewed-split-verifier";
+import { prepareSplitInput } from "@/lib/source-verification/split-verification/contracts";
+import { createStreamingStageExecutor } from "@/lib/source-verification/split-verification/streaming";
+import { createReviewedEmploymentBackgroundAdmission, isReviewedEmploymentBackgroundRequest } from "@/lib/source-verification/reviewed-employment-background-enabled";
+import { runReviewedEmploymentJob } from "@/lib/source-verification/reviewed-employment-job-worker";
+import { reviewedEmploymentNextEnvironment } from "@/lib/source-verification/reviewed-employment-next-environment";
+import { parseReviewedEmploymentJobProjection, reviewedEmploymentJobSubmitProofParts,
+  type ReviewedEmploymentJobProjection, type ReviewedEmploymentJobSubmitInput } from "../../../../shared/reviewed-employment-jobs";
+import { productionReviewedEmploymentEnabled, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY } from "../../../../shared/reviewed-employment-policy";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 type Message = { role: "user" | "assistant"; content: string };
 type ChatBody = {
@@ -37,6 +60,9 @@ type ChatBody = {
   messages: Message[];
   externalId: string;
   assistantClientId: string;
+  userClientId?: string;
+  historyComplete?: boolean;
+  attachmentIds?: string[];
 };
 type ResearchManifest = {
   authorizedScopeSize: number;
@@ -73,6 +99,7 @@ type CompletionInput = {
   readyStoreCount: number;
   partialCoverage: boolean;
   jurisdictionCoverage: Coverage[];
+  attachmentIds?: string[];
 };
 type PublicCitation = {
   label: string;
@@ -99,6 +126,7 @@ type StreamEvent =
     citations: PublicCitation[];
     citationClaim: string;
     partialCoverage: boolean;
+    persisted?: true;
   }
   | { type: "error"; error: string; reason?: ChatErrorReason };
 
@@ -119,6 +147,8 @@ const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const completeGovernedInteraction = makeFunctionReference<"mutation">(
   "chats:completeGovernedInteraction",
 );
+const commitReviewedEmployment = makeFunctionReference<"mutation">("reviewedEmploymentCompletion:commit");
+const submitReviewedEmploymentJob = makeFunctionReference<"mutation", ReviewedEmploymentJobSubmitInput & { serviceProof: string }, ReviewedEmploymentJobProjection>("reviewedEmploymentJobs:submit");
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
@@ -218,14 +248,23 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     "messages",
     "externalId",
     "assistantClientId",
+    ...(Object.hasOwn(value, "userClientId") ? ["userClientId"] : []),
+    ...(Object.hasOwn(value, "historyComplete") ? ["historyComplete"] : []),
+    ...(Object.hasOwn(value, "attachmentIds") ? ["attachmentIds"] : []),
   ])) return null;
+  if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds)
+    || value.attachmentIds.length > MAX_CHAT_FILES
+    || value.attachmentIds.some(id => !boundedIdentifier(id, 128))
+    || new Set(value.attachmentIds).size !== value.attachmentIds.length)) return null;
   if (
     typeof value.query !== "string"
-    || !value.query.trim()
+    || (!value.query.trim() && !(Array.isArray(value.attachmentIds) && value.attachmentIds.length > 0))
     || value.query.trim().length > MAX_QUERY_LENGTH
     || !boundedIdentifier(value.jurisdictionId)
     || !boundedIdentifier(value.externalId)
     || !boundedIdentifier(value.assistantClientId)
+    || (value.userClientId !== undefined && (!boundedIdentifier(value.userClientId) || value.userClientId === value.assistantClientId))
+    || (value.historyComplete !== undefined && typeof value.historyComplete !== "boolean")
     || !Array.isArray(value.messages)
     || value.messages.length > MAX_HISTORY_MESSAGES
   ) return null;
@@ -242,11 +281,14 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     messages.push({ role: message.role, content: message.content });
   }
   return {
-    query: value.query.trim(),
+    query: value.query.trim() || "Summarize these files.",
     jurisdictionId: value.jurisdictionId,
     messages,
     externalId: value.externalId,
     assistantClientId: value.assistantClientId,
+    ...(value.userClientId === undefined ? {} : { userClientId: value.userClientId as string }),
+    ...(value.historyComplete === undefined ? {} : { historyComplete: value.historyComplete as boolean }),
+    ...(value.attachmentIds === undefined ? {} : { attachmentIds: value.attachmentIds as string[] }),
   };
 }
 
@@ -375,6 +417,7 @@ function failureInput(
   requestStartedAt: number,
   outcome: "failure" | "aborted",
   failureCategory?: FailureCategory,
+  attachmentIds?: string[],
   diagnostics?: QueryDiagnostics,
 ): CompletionInput {
   return {
@@ -387,6 +430,7 @@ function failureInput(
     elapsedMs: Math.max(0, Math.round(Date.now() - requestStartedAt)),
     outcome,
     ...(failureCategory ? { failureCategory } : {}),
+    ...(attachmentIds?.length ? { attachmentIds } : {}),
     ...(diagnostics ? { diagnostics } : {}),
     authorizedScopeSize: manifest.authorizedScopeSize,
     readyStoreCount: manifest.stores.length,
@@ -461,8 +505,8 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
     || result.outcome !== "success"
     || result.answerKind !== answerKind
     || !Array.isArray(result.citations)
-    || (result.citations.length === 0 && !(answerKind === "policy" ? isChatPolicyResponse(answer) : answer === CHAT_NO_EVIDENCE))
-    || (answerKind === "policy" && result.citations.length !== 0)
+    || (result.citations.length === 0 && !(answerKind === "document" || (answerKind === "policy" ? isChatPolicyResponse(answer) : answer === CHAT_NO_EVIDENCE)))
+    || ((answerKind === "policy" || answerKind === "document") && result.citations.length !== 0)
     || result.citations.length > MAX_PUBLIC_CITATIONS
     || typeof result.partialCoverage !== "boolean"
     || typeof result.citationClaim !== "string"
@@ -484,6 +528,7 @@ function streamResponse(input: {
   model: string;
   routeNonce: string;
   requestStartedAt: number;
+  requestStartedMonotonic: number;
   modelDeadlineAt: number;
   terminalDeadlineAt: number;
   clientSignal: AbortSignal;
@@ -497,6 +542,10 @@ function streamResponse(input: {
   terminalTimer: ReturnType<typeof setTimeout>;
   request: Request;
   detachRequestAbort: () => void;
+  attachmentContext?: ChatAttachmentContext;
+  answerMode?: "legal" | "document";
+  reviewed?: { selection: ReviewedEmploymentSelection; token: string };
+  localDocumentSingleAttempt?: boolean;
 }) {
   const encoder = new TextEncoder();
   let cancelled = input.request.signal.aborted;
@@ -518,6 +567,7 @@ function streamResponse(input: {
       };
       void (async () => {
         let phase: QueryDiagnostics["phase"] = "generation";
+        let reviewedDiagnostics: ReviewedEmploymentDiagnostics | undefined;
         let diagnostics: QueryDiagnostics | undefined = input.reply === null ? {
           version: 1,
           phase: "generation",
@@ -543,29 +593,107 @@ function streamResponse(input: {
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
           if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          if (input.reviewed) {
+            completionModel = "gemini-3.8-flash/reviewed-employment-local";
+            // Admission is checked again immediately before constructing the provider client.
+            if (!isLocalReviewedEmploymentRequest(input.request, reviewedEmploymentNextEnvironment())
+              || process.env.LOCAL_REVIEWED_EMPLOYMENT_CALLS_APPROVED !== "1"
+              || !input.body.userClientId || !process.env.GOOGLE_AI_API_KEY) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            const credential = process.env.GOOGLE_AI_API_KEY;
+            const client = new GoogleGenAI({ apiKey: credential });
+            const token = input.reviewed.token;
+            const authority = createEmploymentAuthority({
+              authorizeSource: ({ signal, ...args }) => raceWithAbort(fetchAuthQuery(employmentAuthorizationReference, args), signal),
+              loadManifest: ({ jurisdictionId, signal }) => loadManifest(jurisdictionId, token, signal),
+            });
+            const verifier = process.env.LOCAL_REVIEWED_EMPLOYMENT_SPLIT_ENABLED === "1"
+              ? createReviewedSplitVerifier({ thinkingPolicy: "inventory_low", createExecutor: runInput => {
+                const prepared = prepareSplitInput(runInput);
+                if (!prepared) throw new Error("CHAT_REVIEWED_SPLIT_INPUT_INVALID");
+                return createStreamingStageExecutor({ prepared, credential, fetch: globalThis.fetch, thinkingPolicy: "inventory_low",
+                  entered: { wall: runInput.requestStartedAt, mono: runInput.requestStartedMonotonic } });
+              } })
+              : createGeminiEvaluationVerifier(client);
+            const reviewed = await createReviewedEmploymentChat({ authority,
+              draft: createReviewedPassageDraft(client), verifier,
+              commit: async ({ answer, citations, manifest, signal }) => {
+                // All model work has finished by its original cutoff. Retain the terminal reserve.
+                clearTimeout(input.modelTimer); phase = "completion";
+                const completion: ReviewedEmploymentCommitInput["completion"] = {
+                  routeNonce: input.routeNonce, externalId: input.body.externalId, jurisdictionId: input.body.jurisdictionId,
+                  assistantClientId: input.body.assistantClientId, finalAnswer: answer, answerKind: "legal", citations: [...citations],
+                  model: completionModel, elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)), outcome: "success",
+                  authorizedScopeSize: manifest.authorizedScopeSize, readyStoreCount: manifest.stores.length, partialCoverage: manifest.partialCoverage,
+                  jurisdictionCoverage: coverageFor(manifest, [...citations]),
+                  attachmentIds: (input.attachmentContext?.attachmentIds ?? []) as Id<"chatAttachments">[],
+                };
+                const commitInput: ReviewedEmploymentCommitInput = { completion,
+                  source: { jurisdictionId: PILOT_CATALOG.jurisdictionId as Id<"jurisdictions">, resourceId: PILOT_CATALOG.resourceId as Id<"legalResources">,
+                    versionId: PILOT_CATALOG.versionId as Id<"documentVersions">, expectedSha256: PILOT_IDENTITY.originalSha256,
+                    expectedByteSize: PILOT_IDENTITY.originalByteLength, asOfDate: new Date().toISOString().slice(0, 10) },
+                  // Prior files retain their earlier user bindings; completion binds every resolved attachment.
+                  user: { clientId: input.body.userClientId!, content: input.body.query, attachmentIds: (input.body.attachmentIds ?? []) as Id<"chatAttachments">[] },
+                };
+                const parts = await raceWithAbort(reviewedEmploymentCommitProofParts(commitInput), signal);
+                const serviceProof = await raceWithAbort(createTelemetryServiceProof(parts), signal);
+                signal.throwIfAborted();
+                if (Date.now() >= input.terminalDeadlineAt) throw new ChatTerminalDeadlineError();
+                const committed: unknown = await raceWithAbort(fetchAuthMutation(commitReviewedEmployment, { ...commitInput, serviceProof }), signal);
+                if (!committed || typeof committed !== "object" || Array.isArray(committed)
+                  || !("persisted" in committed) || committed.persisted !== true) throw new Error("CHAT_PERSISTENCE_INVALID");
+                const completionResult = { ...committed } as Record<string, unknown>;
+                delete completionResult.persisted;
+                const result = parseCompletionResult(completionResult, input.body.jurisdictionId, answer, "legal");
+                if (!result) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+                return { ...result, answerKind: "legal" as const, persisted: true as const };
+              },
+            }).run({ externalId: input.body.externalId, jurisdictionId: input.body.jurisdictionId, callsApproved: true,
+              selection: input.reviewed.selection, requestStartedAt: input.requestStartedAt,
+              requestStartedMonotonic: input.requestStartedMonotonic, signal: input.providerSignal });
+            // Preserve only closed, content-free stage results for either terminal outcome.
+            reviewedDiagnostics = projectReviewedEmploymentDiagnostics(reviewed.diagnostics);
+            if (reviewed.status !== "verified") throw new Error(reviewed.reason === "deadline_exceeded"
+              ? "CHAT_REVIEWED_DEADLINE_EXPIRED" : "GOVERNED_CHAT_REVIEWED_WITHHELD");
+            if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+            if (reviewedDiagnostics) console.info("chat_request_completed", JSON.stringify({ reviewed: reviewedDiagnostics }));
+            send({ type: "delta", text: reviewed.answer });
+            send({ type: "done", result: reviewed.answer, answerKind: "legal", citations: [...reviewed.completion.citations],
+              citationClaim: reviewed.completion.citationClaim, partialCoverage: reviewed.completion.partialCoverage, persisted: true });
+            return;
+          }
           let result: Pick<GovernedChatResult, "answer" | "citations">;
           if (input.reply !== null) {
             completionModel = "app-policy-v1";
             result = { answer: input.reply, citations: [] };
           } else {
             phase = "generation";
-            if (input.manifest.stores.length === 0) throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
+            if (input.localDocumentSingleAttempt && (!isLocalReviewedEmploymentRequest(input.request, reviewedEmploymentNextEnvironment())
+              || process.env.LOCAL_REVIEWED_EMPLOYMENT_CALLS_APPROVED !== "1")) throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
+            if (input.manifest.stores.length === 0 && input.answerMode !== "document") throw new Error("GOVERNED_CHAT_RESEARCH_UNAVAILABLE");
             const apiKey = process.env.GOOGLE_AI_API_KEY;
             if (!apiKey) {
               if (diagnostics) diagnostics = { ...diagnostics, reason: "not_configured" };
               throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
             }
             const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
+            // Release the waiter even if generation ignores cancellation. Stream
+            // completion clears its cutoff, preserving the canonical-read reserve.
             result = await raceWithAbort(chat.run({
               query: input.body.query,
               stores: input.manifest.stores,
               history: input.body.messages,
+              ...(input.attachmentContext?.attachments.length ? {
+                attachments: input.attachmentContext.attachments,
+                answerKind: input.answerMode ?? "legal",
+                selectedJurisdiction: input.attachmentContext.selectedJurisdiction,
+              } : {}),
             }, {
               signal: input.providerSignal,
               deadlineAt: input.terminalDeadlineAt,
               streamSignal: input.streamSignal,
               streamDeadlineAt: input.modelDeadlineAt,
               allowStreamFileCitations: true,
+              ...(input.localDocumentSingleAttempt ? { singleAttempt: true } : {}),
               // Text remains private until canonical checks and catalog authorization complete.
               onDelta: () => undefined,
               onDiagnostics: (snapshot) => {
@@ -576,12 +704,12 @@ function streamResponse(input: {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
               },
-            }), input.providerSignal);
+            }), input.streamSignal);
           }
           clearTimeout(input.modelTimer);
           if (cancelled || input.request.signal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
           phase = "completion";
-          const answerKind: ChatAnswerKind = isChatPolicyResponse(result.answer) ? "policy" : "legal";
+          const answerKind: ChatAnswerKind = input.answerMode === "document" ? "document" : isChatPolicyResponse(result.answer) ? "policy" : "legal";
           const terminalInput: CompletionInput = {
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
@@ -598,6 +726,7 @@ function streamResponse(input: {
             readyStoreCount: input.manifest.stores.length,
             partialCoverage: input.manifest.partialCoverage,
             jurisdictionCoverage: coverageFor(input.manifest, result.citations, completionModel === "app-policy-v1"),
+            ...(input.attachmentContext?.attachmentIds.length ? { attachmentIds: input.attachmentContext.attachmentIds } : {}),
           };
           const completed = parseCompletionResult(
             await completeWithinDeadline(
@@ -610,6 +739,7 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          // Completion rechecks current scope and file access before any answer leaves the server.
           send({ type: "delta", text: result.answer });
           send({
             type: "done",
@@ -642,6 +772,7 @@ function streamResponse(input: {
             phase, category, elapsedMs: Date.now() - input.requestStartedAt,
             reason: failureDiagnostics?.reason,
             execution: failureDiagnostics?.execution,
+            ...(reviewedDiagnostics ? { reviewed: reviewedDiagnostics } : {}),
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
           // Only closed, actionable failures reach the client before bounded persistence.
@@ -660,6 +791,7 @@ function streamResponse(input: {
                 input.requestStartedAt,
                 aborted ? "aborted" : "failure",
                 aborted ? undefined : category,
+                input.attachmentContext?.attachmentIds,
                 failureDiagnostics,
               ),
               input.terminalDeadlineAt,
@@ -670,7 +802,8 @@ function streamResponse(input: {
           } catch {
             // Failure persistence cannot replace or delay an actionable terminal error.
           }
-          if (!aborted && !publicReason) send({ type: "error", error: CHAT_FAILURE });
+          if (!aborted && !publicReason) send({ type: "error", error: input.reviewed
+            ? "We couldn't verify and save an answer to this question. Please try again." : CHAT_FAILURE });
         } finally {
           clearTimeout(input.modelTimer);
           clearTimeout(input.terminalTimer);
@@ -704,8 +837,17 @@ function jsonError(error: string, status: number, headers?: HeadersInit): Respon
   });
 }
 
+/** The release covers the fixed section 55 request only. Other employment
+ * topics and mixed questions retain the ordinary research path. */
+function isProductionSection55Selection(selection: EmploymentEvidenceSelection): selection is Extract<EmploymentEvidenceSelection, { status: "selected" }> {
+  return selection.status === "selected" && selection.topics.length === 1 && selection.topics[0] === "overtime"
+    && selection.requests.length === 1 && selection.requests[0].pdfOrdinal === 18
+    && selection.requests[0].reviewedSpanId === "p18-s55-1-2";
+}
+
 export async function POST(request: Request): Promise<Response> {
   const requestStartedAt = Date.now();
+  const requestStartedMonotonic = performance.now();
   const modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
   const terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
   const clientAbort = new AbortController();
@@ -758,17 +900,77 @@ export async function POST(request: Request): Promise<Response> {
         400,
       ));
     }
+    const localReviewedScope = process.env.NODE_ENV === "development" && process.env.LOCAL_REVIEWED_EMPLOYMENT_ENABLED === "1"
+      && body.jurisdictionId === PILOT_CATALOG.jurisdictionId;
+    const productionScope = productionReviewedEmploymentEnabled(reviewedEmploymentNextEnvironment())
+      && body.jurisdictionId === PRODUCTION_REVIEWED_EMPLOYMENT_POLICY.jurisdictionId;
+    // Avoid adding reviewed context requirements to unsupported Ghana questions.
+    // Attachment-bearing requests load their context through the existing path.
+    const preliminarySelection = productionScope ? selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: [] }) : undefined;
+    const productionCandidate = preliminarySelection !== undefined && isProductionSection55Selection(preliminarySelection);
+    const reviewedScope = localReviewedScope || productionCandidate;
+    if (localReviewedScope && !isLocalReviewedEmploymentRequest(request, reviewedEmploymentNextEnvironment())) {
+      return stopEarly(jsonError("This research option is not available here.", 403));
+    }
+    if (localReviewedScope && process.env.LOCAL_REVIEWED_EMPLOYMENT_CALLS_APPROVED !== "1") {
+      return stopEarly(jsonError("This research option is not enabled yet.", 403));
+    }
+    let attachmentContext: ChatAttachmentContext | undefined;
+    let attachmentToken: string | undefined;
+    if (body.attachmentIds !== undefined || reviewedScope) {
+      const token = await raceWithAbort(getToken(), streamSignal);
+      if (!token) return stopEarly(jsonError("Sign in to attach files.", 401));
+      attachmentToken = token;
+      try {
+        attachmentContext = await raceWithAbort(loadChatAttachmentContext(body.externalId, body.attachmentIds ?? [], token, streamSignal), streamSignal);
+        if (attachmentContext.selectedJurisdiction.id !== body.jurisdictionId) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
+      } catch (error) {
+        return stopEarly(jsonError(error instanceof ChatAttachmentError ? error.message : "The attachments could not be read. Please try again.", error instanceof ChatAttachmentError ? error.status : 400));
+      }
+    }
+    const hasAttachments = Boolean(attachmentContext?.attachments.length);
+    const legacyHistory = body.messages.slice(-10);
+    const answerMode = hasAttachments && isDocumentQuestion(body.query, legacyHistory) ? "document" : "legal";
+    let reviewed: { selection: ReviewedEmploymentSelection; token: string } | undefined;
+    let coverageGap = false;
+    if ((localReviewedScope || productionScope) && answerMode !== "document") {
+      const selection = selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: attachmentContext?.attachments ?? [] });
+      if (localReviewedScope || isProductionSection55Selection(selection)
+        || (productionCandidate && selection.status === "blocked")) {
+        if (productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
+          return stopEarly(jsonError("This research option is not available here.", 403));
+        }
+        if (!body.userClientId) return stopEarly(jsonError("Please refresh this chat and try your question again.", 400));
+        if (body.historyComplete !== true) return stopEarly(jsonError(body.historyComplete === false
+          ? "This conversation has more detail than this answer can safely review. Start a new chat with the relevant facts and files."
+          : "Please refresh this chat and try your question again.", 400));
+        if (selection.status === "blocked" && selection.reason === "no_reviewed_evidence") {
+          // This is a normal, fixed answer about coverage. Give it the same bound
+          // persistence claim as other policy replies, without model work or billing.
+          coverageGap = true;
+        } else if (selection.status !== "selected") {
+          const message = selection.reason === "attachment_text_unavailable"
+            ? "This legal question needs readable text from your files. Please upload a text version or paste the relevant text."
+            : selection.reason === "context_limit" ? "This conversation has more detail than this answer can safely review. Start a new chat with the relevant facts and files."
+            : "The reviewed material available here does not cover this question well enough to give a verified answer.";
+          return stopEarly(jsonError(message, 400));
+        } else {
+          reviewed = { selection, token: attachmentToken! };
+        }
+      }
+    }
     const mode = chatRoutingMode();
-    let reply: string | null = mode === "on" && exactFormality(body.query)
+    let reply: string | null = coverageGap ? CHAT_POLICY_RESPONSES.reviewed_coverage_gap
+      : !reviewed && !hasAttachments && mode === "on" && exactFormality(body.query)
       ? policyReply("courtesy") : null;
-    if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
-    if (mode === "shadow" || (mode === "on" && reply === null)) {
-      const choice = await classifyChatIntent(body.query, body.messages, providerSignal, mode);
+    if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: coverageGap ? "reviewed_coverage_gap" : "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
+    if (!coverageGap && !reviewed && !hasAttachments && (mode === "shadow" || (mode === "on" && reply === null))) {
+      const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode);
       if (mode === "on") reply = policyReply(choice);
     }
     let manifest: ResearchManifest = POLICY_MANIFEST;
-    if (reply === null) {
-      const token = await raceWithAbort(getToken(), streamSignal);
+    if (reply === null && answerMode !== "document") {
+      const token = attachmentToken ?? await raceWithAbort(getToken(), streamSignal);
       if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
       let loaded: ResearchManifest | null = null;
       try {
@@ -784,8 +986,60 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const routeNonce = createOpaqueTelemetryToken();
+    // An in-flight production rollback must never open the synchronous verifier.
+    if (reviewed && productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
+      return stopEarly(jsonError("This research option is not enabled yet.", 403));
+    }
+    if (reviewed && isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
+      const submission = JSON.stringify({ query: body.query, messages: body.messages, historyComplete: true,
+        selection: reviewed.selection, facts: reviewed.selection.facts,
+        attachmentIds: body.attachmentIds ?? [], contextAttachmentIds: attachmentContext?.attachmentIds ?? [], routeNonce });
+      if (new TextEncoder().encode(submission).byteLength > MAX_REQUEST_BODY_BYTES) {
+        return stopEarly(jsonError("This conversation has more detail than this answer can safely review. Start a new chat with the relevant facts and files.", 400));
+      }
+      const input: ReviewedEmploymentJobSubmitInput = { submissionId: body.assistantClientId, externalId: body.externalId,
+        jurisdictionId: body.jurisdictionId, userClientId: body.userClientId!, assistantClientId: body.assistantClientId,
+        submission, issuedAt: Date.now() };
+      // Once admission is complete, saving the job and scheduling its worker are
+      // one server-owned path. A browser disconnect must not orphan a queued job.
+      detachRequestAbort();
+      clearTimeout(modelTimer);
+      clearTimeout(terminalTimer);
+      const admission = createReviewedEmploymentBackgroundAdmission(requestStartedAt, requestStartedMonotonic);
+      let submissionAttempted = false;
+      try {
+        const proofParts = await admission.run(() => reviewedEmploymentJobSubmitProofParts(input));
+        const serviceProof = await admission.run(() => createTelemetryServiceProof(proofParts));
+        const job = parseReviewedEmploymentJobProjection(await admission.run(() => {
+          submissionAttempted = true;
+          return fetchAuthMutation(submitReviewedEmploymentJob, { ...input, serviceProof });
+        }));
+        if (!job || job.externalId !== body.externalId || job.userClientId !== body.userClientId
+          || job.assistantClientId !== body.assistantClientId || job.question !== body.query
+          || (job.status !== "queued" && job.status !== "running")) throw new Error("CHAT_BACKGROUND_JOB_RESULT_INVALID");
+        // The persisted job owns its deadlines and cancellation. Browser lifetime
+        // ends here; after() awaits the worker independently of request.signal.
+        admission.assertWithinDeadline();
+        after(() => runReviewedEmploymentJob(job.jobId));
+        return stopEarly(Response.json({ type: "background_job", jobId: job.jobId, status: job.status }, { status: 202,
+          headers: { "cache-control": "no-store, private" } }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message.includes("QUOTA_EXCEEDED")) return stopEarly(jsonError("You have reached your question limit for today. It resets tomorrow.", 402));
+        if (message.includes("REVIEWED_EMPLOYMENT_JOB_ACTIVE")) return stopEarly(jsonError("This chat is already verifying an answer. Wait for it to finish or cancel it first.", 409));
+        const rejected = ["REVIEWED_EMPLOYMENT_JOB_INVALID", "REVIEWED_EMPLOYMENT_JOB_SERVICE_PROOF_INVALID",
+          "REVIEWED_EMPLOYMENT_JOB_AUTHORITY_UNAVAILABLE", "REVIEWED_EMPLOYMENT_JOB_CONFLICT",
+          "REVIEWED_EMPLOYMENT_JOB_ADMISSION_UNAVAILABLE"].some(code => message.includes(code));
+        if (submissionAttempted && !rejected) return stopEarly(Response.json({ error: CHAT_FAILURE, type: "background_job_uncertain" }, {
+          status: 500, headers: { "cache-control": "no-store, private" },
+        }));
+        return stopEarly(jsonError(CHAT_FAILURE, 500));
+      } finally {
+        admission.dispose();
+      }
+    }
     try {
-      await raceWithAbort(
+      if (!coverageGap) await raceWithAbort(
         fetchAuthMutation(api.usage.recordQuestion, {}),
         streamSignal,
       );
@@ -800,12 +1054,13 @@ export async function POST(request: Request): Promise<Response> {
       return stopEarly(jsonError(CHAT_FAILURE, 500));
     }
     return streamResponse({
-      body,
+      body: reviewed ? body : { ...body, messages: legacyHistory },
       manifest,
       reply,
       model: safeModelName(),
       routeNonce,
       requestStartedAt,
+      requestStartedMonotonic,
       modelDeadlineAt,
       terminalDeadlineAt,
       clientSignal: clientAbort.signal,
@@ -819,6 +1074,10 @@ export async function POST(request: Request): Promise<Response> {
       terminalTimer,
       request,
       detachRequestAbort,
+      attachmentContext,
+      answerMode,
+      reviewed,
+      ...(localReviewedScope && answerMode === "document" ? { localDocumentSingleAttempt: true } : {}),
     });
   } catch {
     return stopEarly(jsonError(CHAT_FAILURE, 500));

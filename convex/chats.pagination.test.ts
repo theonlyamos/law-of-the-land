@@ -852,10 +852,10 @@ describe("chat pagination", () => {
       externalId: "snapshot-chat", paginationOpts: { numItems: 20, cursor: null },
     })).resolves.toMatchObject({ page: [] });
     await expect(client.mutation(api.chats.appendMessages, {
-      externalId: "snapshot-chat", jurisdictionId, lastMessage: "Denied", messages: [{ role: "assistant", content: "Denied" }],
+      externalId: "snapshot-chat", jurisdictionId, lastMessage: "Denied", messages: [{ role: "assistant", answerKind: "legal", content: "Denied" }],
     })).rejects.toThrow("That jurisdiction is not available");
     await expect(client.mutation(api.chats.remove, { externalId: "snapshot-chat" }))
-      .rejects.toThrow("That jurisdiction is not available");
+      .resolves.toEqual({ deleted: true });
   });
 
   it("completes against an accessible stored-ID selection", async () => {
@@ -975,10 +975,8 @@ describe("chat pagination", () => {
     })).resolves.toMatchObject({ page: [] });
     await expect(client.mutation(api.chats.appendMessages, {
       externalId: "private-chat", jurisdictionId, lastMessage: "Denied",
-      messages: [{ role: "assistant", content: "Denied" }],
+      messages: [{ role: "assistant", answerKind: "legal", content: "Denied" }],
     })).rejects.toThrow("That jurisdiction is not available");
-    await expect(client.mutation(api.chats.remove, { externalId: "private-chat" }))
-      .rejects.toThrow("That jurisdiction is not available");
     const stored = await t.run(async (ctx) => {
       const session = await ctx.db.query("chatSessions")
         .withIndex("by_user_externalId", (q) => q.eq("userId", owner.userId).eq("externalId", "private-chat"))
@@ -988,6 +986,8 @@ describe("chat pagination", () => {
         : [];
     });
     expect(stored.map((message) => message.content)).toEqual(["Saved"]);
+    await expect(client.mutation(api.chats.remove, { externalId: "private-chat" }))
+      .resolves.toEqual({ deleted: true });
   });
 
   it("normalizes every caller page size to a finite positive integer within the cap", () => {
