@@ -140,8 +140,12 @@ const MAX_STORES = 4;
 const MAX_PUBLIC_CITATIONS = 16;
 const MAX_PUBLIC_CITATION_LABEL = 200;
 const REQUESTS_PER_MINUTE = 15;
-const MODEL_WINDOW_MS = 90_000;
-const TERMINAL_WINDOW_MS = 110_000;
+// Ordinary research gets 180 seconds for generation, followed by the existing
+// 20-second canonical-read/completion reserve inside the 300-second host limit.
+const MODEL_WINDOW_MS = 180_000;
+const TERMINAL_WINDOW_MS = 200_000;
+const REVIEWED_MODEL_WINDOW_MS = 90_000;
+const REVIEWED_TERMINAL_WINDOW_MS = 110_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
 const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const completeGovernedInteraction = makeFunctionReference<"mutation">(
@@ -848,8 +852,8 @@ function isProductionSection55Selection(selection: EmploymentEvidenceSelection):
 export async function POST(request: Request): Promise<Response> {
   const requestStartedAt = Date.now();
   const requestStartedMonotonic = performance.now();
-  const modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
-  const terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
+  let modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
+  let terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
   const clientAbort = new AbortController();
   const streamCutoffAbort = new AbortController();
   const terminalAbort = new AbortController();
@@ -865,14 +869,44 @@ export async function POST(request: Request): Promise<Response> {
   const detachRequestAbort = () => request.signal.removeEventListener("abort", onRequestAbort);
   const providerSignal = AbortSignal.any([clientAbort.signal, terminalAbort.signal]);
   const streamSignal = AbortSignal.any([providerSignal, streamCutoffAbort.signal]);
-  const modelTimer = setTimeout(() => {
+  let modelTimer = setTimeout(() => {
     abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
   }, Math.max(0, modelDeadlineAt - Date.now()));
-  const terminalTimer = setTimeout(() => {
+  let terminalTimer = setTimeout(() => {
     if (!terminalAbort.signal.aborted) {
       terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
     }
   }, Math.max(0, terminalDeadlineAt - Date.now()));
+  let reviewedDeadlines = false;
+  const remaining = (deadlineAt: number, windowMs: number) => Math.min(
+    deadlineAt - Date.now(),
+    windowMs - (performance.now() - requestStartedMonotonic),
+  );
+  const setReviewedDeadlines = (enabled: boolean) => {
+    const expireModel = () => abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
+    const expireTerminal = () => {
+      if (!terminalAbort.signal.aborted) terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
+    };
+    // Observe exhausted preparation even when a timer callback has not run.
+    if (remaining(modelDeadlineAt, reviewedDeadlines ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS) <= 0) expireModel();
+    if (remaining(terminalDeadlineAt, reviewedDeadlines ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS) <= 0) expireTerminal();
+    // An ordinary fallback may regain its longer window, but cannot revive
+    // preparation that already exhausted the reviewed cutoff.
+    if (!enabled && streamSignal.aborted) throw abortReason(streamSignal);
+    if (enabled === reviewedDeadlines) return;
+    reviewedDeadlines = enabled;
+    modelDeadlineAt = requestStartedAt + (enabled ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS);
+    terminalDeadlineAt = requestStartedAt + (enabled ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS);
+    clearTimeout(modelTimer);
+    clearTimeout(terminalTimer);
+    // Both clocks stay anchored to request entry when the scope changes.
+    const modelRemaining = remaining(modelDeadlineAt, enabled ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS);
+    const terminalRemaining = remaining(terminalDeadlineAt, enabled ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS);
+    if (modelRemaining <= 0) expireModel();
+    else modelTimer = setTimeout(expireModel, modelRemaining);
+    if (terminalRemaining <= 0) expireTerminal();
+    else terminalTimer = setTimeout(expireTerminal, terminalRemaining);
+  };
   const stopEarly = (response: Response) => {
     clearTimeout(modelTimer);
     clearTimeout(terminalTimer);
@@ -909,6 +943,11 @@ export async function POST(request: Request): Promise<Response> {
     const preliminarySelection = productionScope ? selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: [] }) : undefined;
     const productionCandidate = preliminarySelection !== undefined && isProductionSection55Selection(preliminarySelection);
     const reviewedScope = localReviewedScope || productionCandidate;
+    if (reviewedScope) {
+      // Reviewed research retains its original route deadlines and separate
+      // stage budgets. Late scope discovery must never restart either clock.
+      setReviewedDeadlines(true);
+    }
     if (localReviewedScope && !isLocalReviewedEmploymentRequest(request, reviewedEmploymentNextEnvironment())) {
       return stopEarly(jsonError("This research option is not available here.", 403));
     }
@@ -937,6 +976,9 @@ export async function POST(request: Request): Promise<Response> {
       const selection = selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: attachmentContext?.attachments ?? [] });
       if (localReviewedScope || isProductionSection55Selection(selection)
         || (productionCandidate && selection.status === "blocked")) {
+        // Readable attachments can identify the reviewed scope only now.
+        setReviewedDeadlines(true);
+        if (streamSignal.aborted) throw abortReason(streamSignal);
         if (productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
           return stopEarly(jsonError("This research option is not available here.", 403));
         }
@@ -959,6 +1001,7 @@ export async function POST(request: Request): Promise<Response> {
         }
       }
     }
+    if (productionScope && !reviewed && !coverageGap) setReviewedDeadlines(false);
     const mode = chatRoutingMode();
     let reply: string | null = coverageGap ? CHAT_POLICY_RESPONSES.reviewed_coverage_gap
       : !reviewed && !hasAttachments && mode === "on" && exactFormality(body.query)

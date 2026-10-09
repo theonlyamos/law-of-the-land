@@ -76,6 +76,34 @@ describe("disabled development split-verifier integration", () => {
   const overtime = () => request({ query: "Can my employer require overtime while I am pregnant?" });
   const enable = () => vi.stubEnv("LOCAL_REVIEWED_EMPLOYMENT_SPLIT_ENABLED", "1");
 
+  it("keeps reviewed context preparation on the original 90-second cutoff", async () => {
+    vi.useFakeTimers();
+    mocks.loadChatAttachmentContext.mockReturnValue(new Promise(() => undefined));
+    let responseSettled = false;
+    const response = POST(overtime()).then(value => { responseSettled = true; return value; });
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(responseSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await response).status).toBe(400);
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.stage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not revive a reviewed request discovered after its original deadlines", async () => {
+    vi.useFakeTimers();
+    mocks.isAuthenticated.mockImplementationOnce(() => new Promise(resolve => {
+      setTimeout(() => resolve(true), 111_000);
+    }));
+    const response = POST(overtime());
+    await vi.advanceTimersByTimeAsync(111_000);
+    expect((await response).status).toBe(500);
+    expect(mocks.loadChatAttachmentContext).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.stage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([undefined, "0", "true"])("does not construct the split executor when the flag is %s", async flag => {
     vi.stubEnv("LOCAL_REVIEWED_EMPLOYMENT_SPLIT_ENABLED", flag);
     expect((await events(await POST(request()))).at(-1)).toMatchObject({ type: "done", persisted: true });
