@@ -109,6 +109,101 @@ describe("limited production section 55 admission", () => {
     expect(run.mock.calls[0][1]).not.toHaveProperty("singleAttempt");
     expect(names()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]); expect(mocks.after).not.toHaveBeenCalled();
   });
+  it.each([
+    { kind: "document", question: "Summarize this file.", history: [{ role: "user", content: query }], text: "My employer asks me to work overtime." },
+    { kind: "legal", question: "Can my employer require overtime under this agreement?", history: [], text: "My employer must give written notice." },
+  ])("gives an ordinary $kind answer its 180-second window after preliminary overtime selection", async ({ kind, question, history, text }) => {
+    vi.useFakeTimers();
+    let releaseAnswer!: () => void;
+    const answer = new Promise<void>(resolve => { releaseAnswer = resolve; });
+    const run = ordinaryAnswer();
+    run.mockImplementation(async () => {
+      await answer;
+      return { answer: CHAT_NO_EVIDENCE, citations: [] } as never;
+    });
+    mocks.loadChatAttachmentContext.mockResolvedValue({ attachments: [{ id: "letter", filename: "letter.txt", mimeType: "text/plain", kind: "text", text }], attachmentIds: ["letter"], selectedJurisdiction: { id: jurisdictionId, name: "Ghana", kind: "geographic" } });
+    const reader = (await POST(productionRequest({ query: question, messages: history, attachmentIds: ["letter"] }))).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(150_000);
+      expect(released).toBe(false);
+      releaseAnswer();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toEqual({ type: "delta", text: CHAT_NO_EVIDENCE });
+      expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toMatchObject({ type: "done", answerKind: kind });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      releaseAnswer();
+      await reader.cancel();
+    }
+  });
+  it("rejects late attachment-derived reviewed selection without restarting the original deadlines", async () => {
+    vi.useFakeTimers();
+    let contextSignal: AbortSignal | undefined;
+    mocks.loadChatAttachmentContext.mockImplementationOnce((_externalId, _ids, _token, signal: AbortSignal) => {
+      contextSignal = signal;
+      return new Promise(resolve => {
+        setTimeout(() => resolve({ attachments: [{ id: "letter", filename: "letter.txt", mimeType: "text/plain", kind: "text", text: "My employer asks me to work overtime." }], attachmentIds: ["letter"], selectedJurisdiction: { id: jurisdictionId, name: "Ghana", kind: "geographic" } }), 100_000);
+      });
+    });
+    const response = POST(productionRequest({ query: "Does my employer have to honour this agreement?", attachmentIds: ["letter"] }));
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect((await response).status).toBe(500);
+    expect(contextSignal?.aborted).toBe(true);
+    expect(names()).toEqual([]);
+    expect(mocks.after).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("does not revive expired reviewed preparation before its timer callback runs", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const run = ordinaryAnswer();
+    mocks.loadChatAttachmentContext.mockImplementationOnce(async () => {
+      vi.setSystemTime(startedAt + 100_000);
+      return { attachments: [{ id: "letter", filename: "letter.txt", mimeType: "text/plain", kind: "text", text: "My employer asks me to work overtime." }], attachmentIds: ["letter"], selectedJurisdiction: { id: jurisdictionId, name: "Ghana", kind: "geographic" } };
+    });
+    const response = await POST(productionRequest({ query: "Summarize this file.", messages: [{ role: "user", content: query }], attachmentIds: ["letter"] }));
+    expect(response.status).toBe(500);
+    expect(run).not.toHaveBeenCalled();
+    expect(names()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("keeps the ordinary fallback cutoff anchored to elapsed time after a wall-clock rollback", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    let monotonicTime = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonicTime);
+    const run = ordinaryAnswer();
+    run.mockImplementation(() => new Promise(() => undefined));
+    mocks.loadChatAttachmentContext.mockImplementationOnce(() => new Promise(resolve => {
+      setTimeout(() => {
+        monotonicTime = 80_000;
+        vi.setSystemTime(startedAt - 60_000);
+        resolve({ attachments: [{ id: "letter", filename: "letter.txt", mimeType: "text/plain", kind: "text", text: "My employer asks me to work overtime." }], attachmentIds: ["letter"], selectedJurisdiction: { id: jurisdictionId, name: "Ghana", kind: "geographic" } });
+      }, 80_000);
+    }));
+    const response = POST(productionRequest({ query: "Summarize this file.", messages: [{ role: "user", content: query }], attachmentIds: ["letter"] }));
+    await vi.advanceTimersByTimeAsync(80_000);
+    const reader = (await response).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      monotonicTime = 179_999;
+      await vi.advanceTimersByTimeAsync(99_999);
+      expect(released).toBe(false);
+      monotonicTime = 180_000;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(released).toBe(true);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toMatchObject({ type: "error", reason: "deadline_exceeded" });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await reader.cancel();
+    }
+  });
   it.each([{ historyComplete: false }, { userClientId: undefined }])("requires complete section 55 admission %o before saved work", async overrides => {
     expect((await POST(productionRequest(overrides))).status).toBe(400);
     expect(names()).toEqual([]); expect(mocks.after).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled();

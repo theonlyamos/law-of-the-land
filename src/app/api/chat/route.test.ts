@@ -747,7 +747,7 @@ describe("POST /api/chat request boundary", () => {
     }));
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -786,7 +786,7 @@ describe("POST /api/chat request boundary", () => {
     } as RequestInit & { duplex: "half" });
 
     const responsePromise = POST(stalledRequest);
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -1002,7 +1002,63 @@ describe("POST /api/chat streamed governed interaction", () => {
   });
 
   it("reserves hosting time beyond the application deadline", () => {
-    expect(maxDuration).toBeGreaterThan(110);
+    expect(maxDuration).toBeGreaterThan(200);
+  });
+
+  it("completes an ordinary answer after the previous 90-second cutoff", async () => {
+    vi.useFakeTimers();
+    let releaseGeneration!: () => void;
+    const generation = new Promise<void>(resolve => { releaseGeneration = resolve; });
+    interactionMocks.create.mockImplementation(async () => {
+      await generation;
+      return successfulStream();
+    });
+    const reader = (await POST(request())).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(150_000);
+      expect(released).toBe(false);
+      releaseGeneration();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toEqual({
+        type: "delta", text: "Employees are protected.",
+      });
+      expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toMatchObject({
+        type: "done", result: "Employees are protected.", citationClaim,
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseGeneration();
+      await reader.cancel();
+    }
+  });
+
+  it("retains the ordinary canonical-read reserve after 180 seconds", async () => {
+    vi.useFakeTimers();
+    let releaseCanonical!: (value: ReturnType<typeof canonicalInteraction>) => void;
+    interactionMocks.get.mockReturnValue(new Promise(resolve => { releaseCanonical = resolve; }));
+    const reader = (await POST(request())).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(190_000);
+      expect(released).toBe(false);
+      releaseCanonical(canonicalInteraction());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toEqual({
+        type: "delta", text: "Employees are protected.",
+      });
+      expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toMatchObject({
+        type: "done", result: "Employees are protected.", citationClaim,
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      releaseCanonical(canonicalInteraction());
+      await reader.cancel();
+    }
   });
 
   it("completes an uncited greeting as a claimed no-evidence answer", async () => {
@@ -1027,7 +1083,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     interactionMocks.get.mockImplementation(() => new Promise(() => undefined));
     const resultPromise = events(await POST(request()));
-    await vi.advanceTimersByTimeAsync(110_000);
+    await vi.advanceTimersByTimeAsync(200_000);
     expect((await resultPromise).at(-1)?.type).toBe("error");
     const summary = JSON.parse(errorLog.mock.calls.at(-1)![1]);
     expect(summary).toMatchObject({ phase: "canonical_read", category: "timeout", execution: {
@@ -1044,7 +1100,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     vi.spyOn(crypto.subtle, "sign").mockImplementationOnce(async (...args) => {
       const proof = await sign(...args);
       // A clock jump advances the deadline guard without dispatching timer callbacks.
-      vi.setSystemTime(startedAt + 110_000);
+      vi.setSystemTime(startedAt + 200_000);
       return proof;
     });
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1266,7 +1322,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it.each([8, 14, 16])("records the 90-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
+  it.each([8, 14, 16])("records the 180-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
@@ -1292,7 +1348,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     const streamEvents = await events(await responsePromise);
 
     expect(providerSignal?.aborted).toBe(true);
@@ -1306,7 +1362,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).toMatchObject({
       outcome: "failure",
       failureCategory: "timeout",
-      elapsedMs: 90_000,
+      elapsedMs: 180_000,
       diagnostics: {
         phase: "generation", reason: "deadline_exceeded",
         searchCallCount: searches, searchResultCount: searches,
@@ -1320,7 +1376,7 @@ describe("POST /api/chat streamed governed interaction", () => {
 
   it.each((["create", "iterator", "completion_eof", "resume"] as const).flatMap(
     boundary => (["resolve", "reject"] as const).map(lateOutcome => ({ boundary, lateOutcome })),
-  ))("releases the 90-second waiter when $boundary ignores abort, despite late $lateOutcome", async ({ boundary, lateOutcome }) => {
+  ))("releases the 180-second waiter when $boundary ignores abort, despite late $lateOutcome", async ({ boundary, lateOutcome }) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1357,7 +1413,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     let firstReadSettled = false;
     const firstRead = reader.read().then(value => { firstReadSettled = true; return value; });
     try {
-      await vi.advanceTimersByTimeAsync(89_999);
+      await vi.advanceTimersByTimeAsync(179_999);
       expect(firstReadSettled).toBe(false);
       expect(interactionMocks.create).toHaveBeenCalledTimes(1);
       expect(interactionMocks.get).toHaveBeenCalledTimes(boundary === "resume" ? 1 : 0);
@@ -1376,7 +1432,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       );
       expect(completedCalls).toHaveLength(1);
       expect(completedCalls[0][1]).toMatchObject({
-        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 180_000,
         diagnostics: { phase: "generation", reason: "deadline_exceeded", canonicalReadCompleted: false,
           execution: { modelDeadlineReached: true, terminalDeadlineReached: false,
             clientAbortObserved: false, streamAbortObserved: true, providerFailure: "none",
@@ -1403,7 +1459,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     }
   });
 
-  it("includes preparation time in the original 90-second generation waiter", async () => {
+  it("includes preparation time in the original 180-second generation waiter", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-09-04T00:00:00.000Z").getTime();
     vi.setSystemTime(startedAt);
@@ -1420,7 +1476,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     try {
       expect(Date.now() - startedAt).toBe(30_000);
       expect(interactionMocks.create).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(59_999);
+      await vi.advanceTimersByTimeAsync(149_999);
       expect(firstReadSettled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       expect(firstReadSettled).toBe(true);
@@ -1429,7 +1485,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       });
       await expect(reader.read()).resolves.toMatchObject({ done: true });
       expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
-        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 180_000,
         diagnostics: { execution: { modelDeadlineReached: true, terminalDeadlineReached: false } },
       });
       expect(interactionMocks.get).not.toHaveBeenCalled();
@@ -1439,7 +1495,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     }
   });
 
-  it("uses the terminal reserve for the canonical read after the stream completes near 90 seconds", async () => {
+  it("uses the terminal reserve for the canonical read after the stream completes near 180 seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let streamSignal: AbortSignal | undefined;
@@ -1447,7 +1503,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     interactionMocks.create.mockImplementation(async (_input, options) => {
       streamSignal = options.signal;
       return (async function* () {
-        await new Promise((resolve) => setTimeout(resolve, 89_900));
+        await new Promise((resolve) => setTimeout(resolve, 179_900));
         for await (const event of successfulStream()) yield event;
       })();
     });
@@ -1464,7 +1520,7 @@ describe("POST /api/chat streamed governed interaction", () => {
 
     const response = await POST(request());
     const streamEventsPromise = events(response);
-    await vi.advanceTimersByTimeAsync(91_000);
+    await vi.advanceTimersByTimeAsync(181_000);
     const streamEvents = await streamEventsPromise;
 
     expect(streamSignal?.aborted).toBe(false);
@@ -1473,7 +1529,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
-  it("emits no answer text when terminal validation exhausts the shared 110-second deadline", async () => {
+  it("emits no answer text when terminal validation exhausts the shared 200-second deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -1492,7 +1548,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
     expect(firstReadResolved).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(110_000);
+    await vi.advanceTimersByTimeAsync(200_000);
     const terminalEvent = JSON.parse(decoder.decode((await firstRead).value).trim());
 
     expect(terminalEvent).toEqual({
