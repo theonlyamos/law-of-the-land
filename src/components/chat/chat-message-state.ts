@@ -3,6 +3,7 @@ import type { ChatErrorReason } from "@/lib/chat-errors";
 import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
 import type { ChatAttachment } from "../../../shared/chat-attachments";
+import type { ReviewedEmploymentJobProjection } from "../../../shared/reviewed-employment-jobs";
 
 export type MessageRole = "user" | "assistant";
 
@@ -17,6 +18,7 @@ export interface PersistedChatMessage {
   durationMs?: number;
   citations?: ChatCitation[];
   guestSources?: NonNullable<GuestTurnView["result"]>["citations"];
+  originalSourceUrls?: string[];
   answerKind?: ChatAnswerKind;
   attachments?: ChatAttachment[];
 }
@@ -34,6 +36,29 @@ export interface LocalChatMessage {
   answerKind?: ChatAnswerKind;
   partialCoverage?: boolean;
   attachments?: ChatAttachment[];
+  backgroundJobId?: string;
+}
+
+export function backgroundJobMessage(job: ReviewedEmploymentJobProjection): string | null {
+  if (job.status === "cancelled") return "Verification was stopped. No answer was saved.";
+  if (job.status === "expired") return "Verification reached its time limit. No answer was saved.";
+  if (job.status !== "blocked") return null;
+  if (job.errorReason === "commit_failed") return "Verification finished, but the answer could not be saved. Please ask again.";
+  if (job.errorReason === "verification_blocked") return "The answer could not pass all verification checks. No answer was saved.";
+  return "The answer could not be verified. No answer was saved.";
+}
+
+export function restoreBackgroundMessages(job: ReviewedEmploymentJobProjection, local: LocalChatMessage[]): LocalChatMessage[] {
+  const terminalMessage = backgroundJobMessage(job);
+  const matchingUser = local.find(message => message.role === "user" && message.clientId === job.userClientId);
+  const retained = local.filter(message => message.clientId !== job.userClientId && message.clientId !== job.assistantClientId);
+  return [...retained,
+    { localId: `background:${job.jobId}:user`, clientId: job.userClientId, role: "user", content: job.question,
+      createdAt: job.createdAt, sequence: 0, state: terminalMessage ? "error" : "pending", backgroundJobId: job.jobId,
+      ...(matchingUser?.attachments ? { attachments: matchingUser.attachments } : {}) },
+    { localId: `background:${job.jobId}:assistant`, clientId: job.assistantClientId, role: "assistant", content: terminalMessage ?? "...",
+      createdAt: job.createdAt, sequence: 1, state: terminalMessage ? "error" : "pending", backgroundJobId: job.jobId },
+  ];
 }
 
 export type DisplayChatMessage =

@@ -1,0 +1,123 @@
+{
+  "identity": {
+    "derivativeRecipeSha256": "98de129debcbe9b998a19ceced22bab0d9dd1a58bf86b885c8797a2b951debd0",
+    "originalByteLength": 1913139,
+    "originalSha256": "125e8ce4d70beb6fbe6adc5f9cbaec27dc435c484a62b3eee38bf80cff466f5a",
+    "pdfPageCount": 60,
+    "sourceId": "local-act651-experimental",
+    "versionId": "sha256-125e8ce4d70beb6fbe6adc5f9cbaec27dc435c484a62b3eee38bf80cff466f5a"
+  },
+  "pages": [
+    {
+      "id": "act651-p11-selected-excerpts",
+      "pdfOrdinal": 11,
+      "text": "16. Types of contract of employment\nWhere by a contract of employment a worker is entitled to be paid,\n(a) remuneration at a monthly rate, the contract is a contract from month to\nmonth;\n(b) remuneration at a weekly rate, the contract is a contract from week to\nweek; or\n(c) remuneration at a rate other than a monthly or weekly rate, the contract is a\ncontract determinable at will.\n\n17. Notice of termination of employment\n(1) A contract of employment may be terminated at anytime by either party giving to\nthe other party,\n(a) in the case of a contract of three years or more, one month’s notice or one\nmonth’s pay in lieu of notice;\n(b) in the case of a contract of less than three years, two weeks’ notice or two\nweeks’ pay in lieu of notice; or\n(c) in the case of contract from week to week, seven days’ notice.\n(2) A contract of employment determinable at will by either party may be terminated\nat the close of any day without notice.\n(3) A notice required to be given under this section shall be in writing.\n(4) The day on which the notice is given shall be included in the period of the notice.",
+      "textSha256": "9c987a9c93432a62a03e8205a9eac5aac3988ed2f138ae3e36cd65ddfc20b564"
+    },
+    {
+      "id": "act651-p12-selected-excerpts",
+      "pdfOrdinal": 12,
+      "text": "(4) Despite section 17 (1), either party to a contract of employment may terminate the\ncontract without notice if that party pays to the other party a sum equal to the amount of\nremuneration which would have accrued to the worker during the period of the notice.\n\n19. Exception\nThe provisions of sections 15, 16, 17 and 18 are not applicable where in a collective\nagreement there are express provisions with respect to the terms and conditions for termina-\ntion of the contract of employment which are more beneficial to the worker.",
+      "textSha256": "da8bf0a3c60d96d8c1ffa85d7e48e315dc13431952b04fa3524c7ebb3593c8b2"
+    },
+    {
+      "id": "act651-p18-selected-excerpts",
+      "pdfOrdinal": 18,
+      "text": "55. Night work or overtime by pregnant women\n(1) Unless with her consent, an employer shall not\n(a) assign or employ a pregnant woman worker to do a night work between the\nhours of ten o’clock in the evening and seven o’clock in the morning;\n(b) engage for overtime a pregnant woman worker or a mother of a child of\nless than eight months old.\n(2) The pregnant woman worker or the mother may present a written complaint to the\nNational Labour Commission established under section 135 against an employer who\ncontravenes subsection (1).\n\n56. Prohibition of assignment of pregnant women\n(1) An employer shall not assign, whether permanently or temporarily, a pregnant\nwoman worker to a post outside her place of residence after the completion of the fourth\nmonth of pregnancy if the assignment, in the opinion of a medical practitioner or mid-\nwife, is detrimental to her health.",
+      "textSha256": "5e235e0dc0964fe86a26ef19c37cb138dc27c9ec12ea39523440821d2eb985ee"
+    },
+    {
+      "id": "act651-p21-selected-excerpts",
+      "pdfOrdinal": 21,
+      "text": "63. Unfair termination of employment\n(1) The employment of a worker shall not be unfairly terminated by the worker’s\nemployer.\n(2) A worker’s employment is terminated unfairly if the only reason for the termina-\ntion is\n(a) that the worker has joined, intends to join or has ceased to be a member of\na trade union or intends to take part in the activities of a trade union;\n(b) that the worker seeks office as, or is acting or has acted in the capacity of, a\nworkers’ representative;\n(c) that the worker has filed a complaint or participated in proceedings against\nthe employer involving alleged violation of this Act or any other enactment;\n(d) the worker’s gender, race, colour, ethnicity, origin, religion, creed, social,\npolitical or economic status;\n(e) in the case of a woman worker, due to the pregnancy of the worker or the\nabsence of the worker from work during maternity leave;\n(f) in the case of a worker with a disability, due to the worker’s disability;\n(g) that the worker is temporarily ill or injured and this is certified by a recog-\nnised medical practitioner;\n(h) that the worker does not possess the current level of qualification required\nin relation to the work for which the worker was employed which is differ-\nent from the level of qualification required at the commencement of the\nemployment; or\n(i) that the worker refused or indicated an intention to refuse to do a work nor-\nmally done by a worker who at the time was taking part in a lawful strike\nunless the work is necessary to prevent actual danger to life, personal\nsafety or health or the maintenance of plant and equipment.",
+      "textSha256": "92fb884f7b095614b4bc5030d16d22ffda4866cb35307c1409e4c7a31c0620f1"
+    }
+  ],
+  "purpose": "offline_evaluation",
+  "review": {
+    "checkedSpanIds": [
+      "p11-s16",
+      "p11-s17",
+      "p12-s18-4",
+      "p12-s19",
+      "p18-s55-1-2",
+      "p18-s56-1",
+      "p21-s63-1-2"
+    ],
+    "kind": "agent_reviewed_experimental",
+    "reviewReportSha256": "b0330a518a97aa377e878d9220af57596934100130284542f5fb860e2dc28216",
+    "reviewerAgent": "pilot_fixture_review"
+  },
+  "schemaVersion": 1,
+  "sourceKind": "authorized_local_original",
+  "spans": [
+    {
+      "endByte": 383,
+      "id": "p11-s16",
+      "pageId": "act651-p11-selected-excerpts",
+      "passageSha256": "db5bbed0054a230a1614954364cc1ba02409b29b6f3de6c17ba0b07f437acb1f",
+      "requiredContextSpanIds": [
+        "p12-s19"
+      ],
+      "startByte": 0
+    },
+    {
+      "endByte": 1113,
+      "id": "p11-s17",
+      "pageId": "act651-p11-selected-excerpts",
+      "passageSha256": "1a20249b481102e5c0d573d60692199b015fd59938b6d3ba25084765b0b95f8f",
+      "requiredContextSpanIds": [
+        "p11-s16",
+        "p12-s18-4"
+      ],
+      "startByte": 385
+    },
+    {
+      "endByte": 262,
+      "id": "p12-s18-4",
+      "pageId": "act651-p12-selected-excerpts",
+      "passageSha256": "4f5e1c2d604b15bc2a7949245ee1c6d737cef5edecf01e402e62d3bfbd7cc244",
+      "requiredContextSpanIds": [
+        "p11-s17",
+        "p12-s19"
+      ],
+      "startByte": 0
+    },
+    {
+      "endByte": 532,
+      "id": "p12-s19",
+      "pageId": "act651-p12-selected-excerpts",
+      "passageSha256": "877651f1f870c4ab7584f094ef33d406342c87bf4c218e1ca2a18564530f9897",
+      "requiredContextSpanIds": [],
+      "startByte": 264
+    },
+    {
+      "endByte": 539,
+      "id": "p18-s55-1-2",
+      "pageId": "act651-p18-selected-excerpts",
+      "passageSha256": "af284b06169460ee42198b82e199d1ee6dcf1ae7d6a5d7fc8f731e337889e80d",
+      "requiredContextSpanIds": [
+        "p18-s56-1"
+      ],
+      "startByte": 0
+    },
+    {
+      "endByte": 881,
+      "id": "p18-s56-1",
+      "pageId": "act651-p18-selected-excerpts",
+      "passageSha256": "e3847a3f1871d1420a5afcf42668a9621a1f01d3162db8bf777089c0b3ea6aa4",
+      "requiredContextSpanIds": [],
+      "startByte": 541
+    },
+    {
+      "endByte": 1619,
+      "id": "p21-s63-1-2",
+      "pageId": "act651-p21-selected-excerpts",
+      "passageSha256": "92fb884f7b095614b4bc5030d16d22ffda4866cb35307c1409e4c7a31c0620f1",
+      "requiredContextSpanIds": [
+        "p18-s55-1-2"
+      ],
+      "startByte": 0
+    }
+  ]
+}

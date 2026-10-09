@@ -5,7 +5,7 @@ import { internalMutation, internalQuery, mutation, type MutationCtx, type Query
 import { requireUserId } from "./lib/requireUser";
 import { canAccessSession } from "./chats";
 import { attachmentKindValidator, chatAttachmentMetadataValidator, ATTACHMENT_DRAFT_TTL_MS, MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENT_BYTES, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
-import { chatAttachmentFormat, validateChatAttachmentSelection, MAX_CHAT_CONTEXT_CHARACTERS, MAX_CHAT_DOCUMENT_PAGES, MAX_CHAT_TEXT_CHARACTERS } from "../shared/chat-attachments";
+import { chatAttachmentFormat, chatAttachmentBackendUploadsEnabled, validateChatAttachmentSelection, MAX_CHAT_CONTEXT_CHARACTERS, MAX_CHAT_DOCUMENT_PAGES, MAX_CHAT_TEXT_CHARACTERS } from "../shared/chat-attachments";
 import { consumeRateBucket } from "./lib/rateBuckets";
 
 type AttachmentCtx = QueryCtx | MutationCtx;
@@ -13,6 +13,9 @@ const expireDraftRef = makeFunctionReference<"mutation">("chatAttachments:expire
 const deleteBatchRef = makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch");
 
 function unavailable(): never { throw new ConvexError("CHAT_ATTACHMENT_UNAVAILABLE"); }
+function requireUploadsEnabled(): void {
+  if (!chatAttachmentBackendUploadsEnabled(process.env)) throw new ConvexError("CHAT_ATTACHMENT_UPLOADS_DISABLED");
+}
 
 export function attachmentMetadata(row: Doc<"chatAttachments">) {
   return { id: row._id, filename: row.filename, mimeType: row.mimeType, byteSize: row.byteSize, kind: row.kind };
@@ -56,6 +59,7 @@ export const prepareUpload = mutation({
   args: { externalId: v.string(), filename: v.string(), mimeType: v.string(), byteSize: v.number() },
   returns: v.object({ attachmentId: v.id("chatAttachments") }),
   handler: async (ctx, args) => {
+    requireUploadsEnabled();
     const session = await ownedAttachmentSession(ctx, args.externalId);
     const filename = args.filename.trim();
     const type = chatAttachmentFormat(filename, args.mimeType);
@@ -77,6 +81,9 @@ export const getUpload = internalMutation({
   args: { attachmentId: v.id("chatAttachments") },
   returns: v.object({ attachment: chatAttachmentMetadataValidator, ready: v.boolean() }),
   handler: async (ctx, { attachmentId }) => {
+    // Raw HTTP uploads invoke this before reading bytes or allocating storage.
+    // Saved-file reads and cleanup use separate owner-authorized boundaries.
+    requireUploadsEnabled();
     const row = await ownedAttachment(ctx, attachmentId);
     if (row.messageClientId !== undefined) unavailable();
     if (await consumeRateBucket(ctx, "chat-attachment-upload", row.userId, 120, 60 * 60_000)) throw new ConvexError("CHAT_ATTACHMENT_RATE_LIMITED");
@@ -88,6 +95,9 @@ export const finalizeUpload = internalMutation({
   args: { attachmentId: v.id("chatAttachments"), storageId: v.id("_storage"), mimeType: v.string(), kind: attachmentKindValidator, extractedText: v.optional(v.string()), pageCount: v.optional(v.number()) },
   returns: chatAttachmentMetadataValidator,
   handler: async (ctx, args) => {
+    // Recheck after bytes arrive so disabling the capability also closes an
+    // upload already in flight; the HTTP finally block discards unclaimed bytes.
+    requireUploadsEnabled();
     const row = await ownedAttachment(ctx, args.attachmentId);
     if (row.messageClientId !== undefined) unavailable();
     const stored = await ctx.db.system.get("_storage", args.storageId);

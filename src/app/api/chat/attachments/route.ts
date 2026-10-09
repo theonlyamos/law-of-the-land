@@ -2,7 +2,7 @@ import { makeFunctionReference } from "convex/server";
 import { fetchAuthMutation, getToken } from "@/lib/auth-server";
 import { applicationOrigin } from "@/lib/embed/server";
 import { ChatAttachmentError, readAttachmentBody } from "@/lib/chat-attachment-server";
-import { validateChatAttachmentSelection } from "../../../../../shared/chat-attachments";
+import { chatAttachmentUploadsEnabled, validateChatAttachmentSelection } from "../../../../../shared/chat-attachments";
 
 export const runtime = "nodejs";
 const prepareUpload = makeFunctionReference<"mutation", { externalId: string; filename: string; mimeType: string; byteSize: number }, { attachmentId: string }>("chatAttachments:prepareUpload");
@@ -13,6 +13,7 @@ export async function POST(request: Request): Promise<Response> {
     if (request.headers.get("origin") !== applicationOrigin(request)) return Response.json({ error: "Start uploads from your chat." }, { status: 403, headers });
     const token = await getToken();
     if (!token) return Response.json({ error: "Sign in to attach files." }, { status: 401, headers });
+    if (!chatAttachmentUploadsEnabled(process.env)) return Response.json({ error: "Attachments are unavailable right now." }, { status: 503, headers });
     const site = process.env.NEXT_PUBLIC_CONVEX_SITE_URL;
     if (!site) return Response.json({ error: "Attachments are unavailable right now." }, { status: 503, headers });
     const bytes = await readAttachmentBody(request, 4096, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]));
@@ -27,6 +28,9 @@ export async function POST(request: Request): Promise<Response> {
     const { attachmentId } = await fetchAuthMutation(prepareUpload, { externalId: value.externalId, filename: value.filename, mimeType: value.mimeType, byteSize: value.byteSize });
     return Response.json({ attachmentId, uploadUrl: new URL("/chat-attachments/upload", site).href, token }, { headers });
   } catch (error) {
+    if (error instanceof Error && error.message.includes("CHAT_ATTACHMENT_UPLOADS_DISABLED")) {
+      return Response.json({ error: "Attachments are unavailable right now." }, { status: 503, headers });
+    }
     if (error instanceof Error && error.message.includes("CHAT_ATTACHMENT_RATE_LIMITED")) {
       return Response.json({ error: "Too many uploads. Wait a while before trying again." }, { status: 429, headers });
     }

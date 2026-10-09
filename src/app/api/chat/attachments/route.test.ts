@@ -18,12 +18,48 @@ beforeEach(() => {
   vi.stubEnv("SITE_URL", "https://app.test");
   vi.stubEnv("NEXT_PUBLIC_CONVEX_SITE_URL", "https://test.convex.site");
   vi.stubEnv("NEXT_PUBLIC_CONVEX_URL", "https://test.convex.cloud");
+  vi.stubEnv("NODE_ENV", "test");
+  vi.stubEnv("NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED", undefined);
   auth.getToken.mockResolvedValue("test-jwt");
   auth.fetchAuthMutation.mockResolvedValue({ attachmentId: "file-one" });
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("chat attachment routes", () => {
+  it("defaults production uploads off before reading a body or allocating a backend upload", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const request = prepare();
+    const reader = vi.spyOn(request.body!, "getReader");
+    const response = await POST(request);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "Attachments are unavailable right now." });
+    expect(response.headers.get("cache-control")).toContain("private");
+    expect(reader).not.toHaveBeenCalled();
+    expect(auth.fetchAuthMutation).not.toHaveBeenCalled();
+  });
+  it("requires the explicit attachment capability to prepare a production upload", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED", "1");
+    expect((await POST(prepare())).status).toBe(200);
+    expect(auth.fetchAuthMutation).toHaveBeenCalledOnce();
+  });
+  it("reports a backend-disabled attachment capability without allocating an upload URL", async () => {
+    auth.fetchAuthMutation.mockRejectedValueOnce(new Error("CHAT_ATTACHMENT_UPLOADS_DISABLED"));
+    const response = await POST(prepare());
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "Attachments are unavailable right now." });
+  });
+  it("retains authorized original reads and draft removal while production uploads are disabled", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(file)).mockResolvedValueOnce(new Response("pdf", { headers: { "content-length": "3" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await GET(new Request("https://app.test/api/chat/attachments/file-one"), context)).status).toBe(200);
+    auth.fetchAuthMutation.mockResolvedValueOnce({ deleted: true });
+    const response = await DELETE(new Request("https://app.test/api/chat/attachments/file-one",
+      { method: "DELETE", headers: { origin: "https://app.test" } }), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: true });
+  });
   it("prepares a bounded same-origin upload with private response caching", async () => {
     const response = await POST(prepare());
     expect(response.status).toBe(200);

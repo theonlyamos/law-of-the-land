@@ -7,6 +7,23 @@ export const MAX_CHAT_TEXT_CHARACTERS = 100_000;
 export const MAX_CHAT_CONTEXT_CHARACTERS = 200_000;
 export const CHAT_ATTACHMENT_ACCEPT = ".pdf,.docx,.txt,.md,.csv,.png,.jpg,.jpeg,.webp";
 
+type AttachmentEnvironment = Readonly<Record<string, string | undefined>>;
+/** Attachment plumbing is a prerequisite of the reviewed runtime. New uploads
+ * are a separate capability and stay off in the limited production release. */
+export function chatAttachmentUploadsEnabled(env: AttachmentEnvironment): boolean {
+  return env.NODE_ENV !== "production" || env.NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED === "1";
+}
+/** Native storage allocation/finalization must enforce its own server flag.
+ * Owner reads and cleanup deliberately do not consult this admission switch. */
+export function chatAttachmentBackendUploadsEnabled(env: AttachmentEnvironment): boolean {
+  if (env.CONVEX_CLOUD_URL === "https://adventurous-hummingbird-244.eu-west-1.convex.cloud"
+    && env.CONVEX_SITE_URL === "https://adventurous-hummingbird-244.eu-west-1.convex.site") return true;
+  if (env.NODE_ENV === "test" && env.CONVEX_CLOUD_URL === undefined && env.CONVEX_SITE_URL === undefined) return true;
+  return env.CONVEX_CLOUD_URL === "https://loyal-koala-720.eu-west-1.convex.cloud"
+    && env.CONVEX_SITE_URL === "https://loyal-koala-720.eu-west-1.convex.site"
+    && env.CHAT_ATTACHMENTS_PRODUCTION_ENABLED === "1";
+}
+
 export type ChatAttachmentKind = "document" | "text" | "image";
 export type ChatAttachment = {
   id: string;

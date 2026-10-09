@@ -45,7 +45,7 @@ export function DraftAttachmentTray({ files, error, disabled, onRemove, onRetry 
   error: string | null;
   disabled: boolean;
   onRemove: (file: DraftAttachment) => void;
-  onRetry: (file: DraftAttachment) => void;
+  onRetry?: (file: DraftAttachment) => void;
 }) {
   if (!files.length && !error) return null;
   return (
@@ -74,9 +74,9 @@ export function DraftAttachmentTray({ files, error, disabled, onRemove, onRetry 
             </div>}
             {item.state === "error" && <div className="px-2 pb-2">
               <p role="alert" className="text-xs leading-5 text-red-700 dark:text-red-300">{item.error}</p>
-              <button type="button" disabled={disabled} onClick={() => onRetry(item)} aria-label={`Retry ${item.file.name}`} className="mt-1 inline-flex min-h-9 items-center gap-1.5 rounded text-xs font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">
+              {onRetry && <button type="button" disabled={disabled} onClick={() => onRetry?.(item)} aria-label={`Retry ${item.file.name}`} className="mt-1 inline-flex min-h-9 items-center gap-1.5 rounded text-xs font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40">
                 <RotateCcw className="size-3" aria-hidden="true" />Retry upload
-              </button>
+              </button>}
             </div>}
           </li>
         ))}

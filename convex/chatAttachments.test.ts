@@ -20,6 +20,8 @@ const finalize = makeFunctionReference<"mutation">("chatAttachments:finalizeUplo
 const remove = makeFunctionReference<"mutation">("chatAttachments:remove");
 const resolve = makeFunctionReference<"query">("chatAttachments:resolve");
 const getFile = makeFunctionReference<"query">("chatAttachments:getFile");
+const getUpload = makeFunctionReference<"mutation">("chatAttachments:getUpload");
+const discard = makeFunctionReference<"mutation">("chatAttachments:discardUnclaimedUpload");
 const expire = makeFunctionReference<"mutation">("chatAttachments:expireDraft");
 const cleanup = makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch");
 const complete = makeFunctionReference<"mutation">("chats:completeGovernedInteraction");
@@ -66,8 +68,17 @@ async function ready(t: Backend, client: Client, externalId: string, content = "
 function userMessage(attachmentId: Id<"chatAttachments">, clientId = "user-1") {
   return { role: "user" as const, content: "Summarize this file", clientId, createdAt: 100, attachmentIds: [attachmentId] };
 }
+function productionUploads(enabled = false) {
+  vi.stubEnv("CONVEX_CLOUD_URL", "https://loyal-koala-720.eu-west-1.convex.cloud");
+  vi.stubEnv("CONVEX_SITE_URL", "https://loyal-koala-720.eu-west-1.convex.site");
+  vi.stubEnv("CHAT_ATTACHMENTS_PRODUCTION_ENABLED", enabled ? "1" : undefined);
+}
 
 beforeEach(() => {
+  vi.stubEnv("NODE_ENV", "test");
+  vi.stubEnv("CONVEX_CLOUD_URL", undefined);
+  vi.stubEnv("CONVEX_SITE_URL", undefined);
+  vi.stubEnv("CHAT_ATTACHMENTS_PRODUCTION_ENABLED", undefined);
   process.env.TELEMETRY_INGEST_SECRET = "chat-attachment-test-secret-at-least-32-chars";
   process.env.SITE_URL = "https://app.example.com";
   process.env.ADMIN_ENVIRONMENT = "test";
@@ -77,9 +88,69 @@ afterEach(() => {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe("private chat attachments", () => {
+  it("defaults production preparation off without creating drafts or charging a rate bucket", async () => {
+    productionUploads();
+    const f = await fixture();
+    await expect(f.client.mutation(prepare, { externalId: f.externalId, filename: "notes.txt", mimeType: "text/plain", byteSize: 5 }))
+      .rejects.toThrow("CHAT_ATTACHMENT_UPLOADS_DISABLED");
+    expect(await f.t.run(ctx => ctx.db.query("chatAttachments").take(3))).toEqual([]);
+    expect(await f.t.run(ctx => ctx.db.query("widgetRateBuckets").take(3))).toEqual([]);
+  });
+  it("allows production upload preparation and completion only when its separate capability is enabled", async () => {
+    productionUploads(true);
+    const f = await fixture(), item = await ready(f.t, f.client, f.externalId);
+    expect(await f.client.query(getFile, { attachmentId: item.attachmentId })).toMatchObject({ id: item.attachmentId, filename: "notes.txt" });
+  });
+  it("closes prepared upload dispatch and finalization after production uploads are disabled, while cleanup remains available", async () => {
+    productionUploads(true);
+    const f = await fixture(), prepared = await f.client.mutation(prepare,
+      { externalId: f.externalId, filename: "notes.txt", mimeType: "text/plain", byteSize: 5 });
+    const storageId = await f.t.run(ctx => ctx.storage.store(new Blob(["hello"], { type: "text/plain" })));
+    productionUploads();
+    await expect(f.client.mutation(getUpload, prepared)).rejects.toThrow("CHAT_ATTACHMENT_UPLOADS_DISABLED");
+    await expect(f.client.mutation(finalize, { ...prepared, storageId, mimeType: "text/plain", kind: "text", extractedText: "hello" }))
+      .rejects.toThrow("CHAT_ATTACHMENT_UPLOADS_DISABLED");
+    expect(await f.t.run(ctx => ctx.db.get(prepared.attachmentId))).toMatchObject({ status: "pending" });
+    expect(await f.t.run(ctx => ctx.db.query("widgetRateBuckets").take(3))).toMatchObject([{ namespace: "chat-attachment-prepare" }]);
+    await f.t.mutation(discard, { storageId });
+    expect(await f.t.run(ctx => ctx.storage.get(storageId))).toBeNull();
+    expect(await f.client.mutation(remove, prepared)).toEqual({ deleted: true });
+  });
+  it("rejects raw production upload before reading or storing its body when the capability is disabled", async () => {
+    productionUploads(true);
+    const f = await fixture(), { attachmentId } = await f.client.mutation(prepare,
+      { externalId: f.externalId, filename: "notes.txt", mimeType: "text/plain", byteSize: 5 });
+    productionUploads();
+    const response = await f.client.fetch("/chat-attachments/upload", { method: "POST",
+      headers: { origin: "https://app.example.com", "x-attachment-id": attachmentId }, body: "hello" });
+    expect(response.status).toBe(400);
+    expect(await f.t.run(ctx => ctx.db.system.query("_storage").take(3))).toEqual([]);
+    expect(await f.t.run(ctx => ctx.db.get(attachmentId))).toMatchObject({ status: "pending" });
+  });
+  it("preserves owner saved-file context and chat cleanup after production uploads are disabled", async () => {
+    productionUploads(true);
+    const f = await fixture(), item = await ready(f.t, f.client, f.externalId);
+    await f.client.mutation(api.chats.appendMessages, { externalId: f.externalId, lastMessage: "", messages: [userMessage(item.attachmentId)] });
+    productionUploads();
+    expect(await f.client.query(getFile, { attachmentId: item.attachmentId })).toMatchObject({ id: item.attachmentId });
+    expect((await f.client.query(resolve, { externalId: f.externalId, attachmentIds: [] })).attachments).toMatchObject([{ id: item.attachmentId }]);
+    await f.client.mutation(api.chats.remove, { externalId: f.externalId });
+    await f.t.mutation(cleanup, { sessionId: f.sessionId });
+    expect(await f.t.run(ctx => ctx.storage.get(item.storageId))).toBeNull();
+    expect(await f.t.run(ctx => ctx.db.get(item.attachmentId))).toBeNull();
+  });
+  it("fails closed on an unknown hosted upload runtime even with its production flag enabled", async () => {
+    productionUploads(true);
+    vi.stubEnv("CONVEX_CLOUD_URL", "https://unknown.convex.cloud");
+    const f = await fixture();
+    await expect(f.client.mutation(prepare, { externalId: f.externalId, filename: "notes.txt", mimeType: "text/plain", byteSize: 5 }))
+      .rejects.toThrow("CHAT_ATTACHMENT_UPLOADS_DISABLED");
+    expect(await f.t.run(ctx => ctx.db.query("chatAttachments").take(3))).toEqual([]);
+  });
   it("bounds prepared files by type, individual size, count and combined size", async () => {
     const f = await fixture();
     await expect(f.client.mutation(prepare, { externalId: f.externalId, filename: "script.html", mimeType: "text/html", byteSize: 12 })).rejects.toThrow("CHAT_ATTACHMENT_INVALID");

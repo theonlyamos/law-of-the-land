@@ -5,6 +5,7 @@ import { authClient } from "@/lib/auth-client";
 import type { LocalChatMessage } from "./chat-message-state";
 import type { ChatErrorReason } from "@/lib/chat-errors";
 import type { ChatAttachment } from "../../../shared/chat-attachments";
+import type { BackgroundSubmissionRecovery } from "./use-chat-background-job";
 
 export type DraftAttachment = {
   localId: string;
@@ -27,10 +28,12 @@ type RequestState = {
   isDeleting: boolean;
   isDeleted: boolean;
   errorReason: ChatErrorReason | null;
+  backgroundJobId: string | null;
+  backgroundRecovery: BackgroundSubmissionRecovery | null;
 };
 const emptyState: RequestState = {
   messages: [], isLoading: false, saveFailed: false, ensureError: null,
-  deleteError: null, isDeleting: false, isDeleted: false, errorReason: null,
+  deleteError: null, isDeleting: false, isDeleted: false, errorReason: null, backgroundJobId: null, backgroundRecovery: null,
 };
 type ChatRequest = {
   controller: AbortController;

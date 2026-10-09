@@ -22,6 +22,7 @@ export interface ChatInputProps {
   footer?: React.ReactNode;
   submitDisabled?: boolean;
   ariaLabel?: string;
+  hasFiles?: boolean;
   attachments?: {
     accept: string;
     hasFiles: boolean;
@@ -45,6 +46,7 @@ export function ChatInput({
   footer,
   submitDisabled = false,
   ariaLabel,
+  hasFiles = false,
   attachments,
 }: ChatInputProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -56,7 +58,7 @@ export function ChatInput({
     <Button
       type="button"
       onClick={onSearch}
-      disabled={disabled || isLoading || submitDisabled || (!query.trim() && !attachments?.hasFiles)}
+      disabled={disabled || isLoading || submitDisabled || (!query.trim() && !hasFiles && !attachments?.hasFiles)}
       size="icon"
       className={`h-11 w-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${editorial ? "rounded-lg shadow-none" : "absolute right-2 top-1/2 -translate-y-1/2"}`}
     >

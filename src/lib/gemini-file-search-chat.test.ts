@@ -161,7 +161,7 @@ async function run(
   events = eventStream(),
   final = canonical(undefined, [citation()]),
   request = input(),
-  options: { allowStreamFileCitations?: boolean; onDiagnostics?: (snapshot: QueryDiagnostics) => void } = {},
+  options: { allowStreamFileCitations?: boolean; singleAttempt?: boolean; onDiagnostics?: (snapshot: QueryDiagnostics) => void } = {},
 ) {
   const client = new FakeInteractionsClient(events, final);
   const chat = new GeminiFileSearchChat(client, { GEMINI_AI_MODEL: "configured-model" });
@@ -194,11 +194,11 @@ describe("GeminiFileSearchChat", () => {
     return [eventStream(answer)[0], ...eventStream(answer).slice(10)];
   }
 
-  it("returns an uncited document summary without requiring a published source store", async () => {
+  it.each([undefined, false, true])("returns an uncited document summary without requiring a published source store with singleAttempt=%s", async singleAttempt => {
     const answer = "The uploaded agreement names Example Person and states an amount of 125.";
     const snapshots: QueryDiagnostics[] = [];
     const { result, client } = await run(documentEvents(answer), canonical(answer), documentInput(), {
-      allowStreamFileCitations: true, onDiagnostics: snapshot => snapshots.push(snapshot),
+      allowStreamFileCitations: true, singleAttempt, onDiagnostics: snapshot => snapshots.push(snapshot),
     });
     expect(result).toMatchObject({ answer, citations: [] });
     expect(client.getIds).toEqual(["interaction-1"]);
@@ -255,7 +255,7 @@ describe("GeminiFileSearchChat", () => {
     expect(snapshots.at(-1)).toMatchObject({ reason: "document_with_citations", canonicalReadCompleted: true });
   });
 
-  it("resumes a document summary once and still requires the canonical text to match", async () => {
+  it.each([undefined, false])("resumes a document summary once when singleAttempt=%s and still requires the canonical text to match", async singleAttempt => {
     const answer = "The uploaded file names Example Person.";
     const events = documentEvents(answer).map((event, index) => ({ ...event, event_id: `doc-event-${index}` }));
     const client = new FakeInteractionsClient(events.slice(0, 3), canonical(answer), events.slice(3));
@@ -264,12 +264,86 @@ describe("GeminiFileSearchChat", () => {
     const deadlineAt = Date.now() + 10_000;
     const result = await new GeminiFileSearchChat(client, {}).run(documentInput(), {
       signal, deadlineAt, streamSignal: signal, streamDeadlineAt: deadlineAt,
-      onDelta: () => undefined, allowStreamFileCitations: true,
+      onDelta: () => undefined, allowStreamFileCitations: true, singleAttempt,
       onDiagnostics: snapshot => snapshots.push(snapshot),
     });
     expect(result).toMatchObject({ answer, citations: [] });
+    expect(client.createOptions).toEqual([{ signal }]);
     expect(client.getParams).toEqual([{ stream: true, last_event_id: "doc-event-2" }, undefined]);
+    expect(client.getOptions).toEqual([{ signal, maxRetries: 0 }, { signal }]);
     expect(snapshots.at(-1)).toMatchObject({ reason: "completed", execution: { resumeAttempted: true, resumeOutcome: "completed" } });
+  });
+
+  it("disables SDK retries for the single create and canonical read while preserving their separate signals", async () => {
+    const answer = "The uploaded file names Example Person.";
+    const client = new FakeInteractionsClient(documentEvents(answer), canonical(answer));
+    const streamSignal = new AbortController().signal;
+    const signal = new AbortController().signal;
+    const deadlineAt = Date.now() + 10_000;
+    const result = await new GeminiFileSearchChat(client, {}).run(documentInput(), {
+      signal, deadlineAt, streamSignal, streamDeadlineAt: deadlineAt,
+      onDelta: () => undefined, singleAttempt: true,
+    });
+
+    expect(result).toMatchObject({ answer, citations: [] });
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]).not.toHaveProperty("singleAttempt");
+    expect(client.requests[0].tools).toBeUndefined();
+    expect(client.createOptions).toEqual([{ signal: streamSignal, maxRetries: 0 }]);
+    expect(client.getIds).toEqual(["interaction-1"]);
+    expect(client.getParams).toEqual([undefined]);
+    expect(client.getOptions).toEqual([{ signal, maxRetries: 0 }]);
+  });
+
+  it.each(["eof", "transport"] as const)("rejects an incomplete single-attempt document stream after %s without resume even with a valid cursor", async boundary => {
+    const answer = "The uploaded file names Example Person.";
+    const events = documentEvents(answer).map((event, index) => ({ ...event, event_id: `doc-event-${index}` }));
+    async function* interrupted() {
+      yield* events.slice(0, 3);
+      if (boundary === "transport") throw new Error("synthetic transport failure");
+    }
+    const client = new FakeInteractionsClient(interrupted(), canonical(answer), events.slice(3));
+    const snapshots: QueryDiagnostics[] = [];
+    const onStreamComplete = vi.fn();
+    const signal = new AbortController().signal;
+    const deadlineAt = Date.now() + 10_000;
+    const operation = new GeminiFileSearchChat(client, {}).run(documentInput(), {
+      signal, deadlineAt, streamSignal: signal, streamDeadlineAt: deadlineAt,
+      onDelta: () => undefined, onStreamComplete, singleAttempt: true,
+      onDiagnostics: snapshot => snapshots.push(snapshot),
+    });
+
+    await expect(operation).rejects.toThrow(boundary === "eof" ? "incomplete_stream" : "synthetic transport failure");
+    expect(client.requests).toHaveLength(1);
+    expect(client.createOptions).toEqual([{ signal, maxRetries: 0 }]);
+    expect(client.getIds).toEqual([]);
+    expect(onStreamComplete).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toMatchObject({
+      canonicalReadCompleted: false,
+      execution: { resumeAttempted: false, resumeOutcome: "not_attempted", completionEventAccepted: false },
+    });
+  });
+
+  it("does not replace a single-attempt interaction when its canonical read fails", async () => {
+    const answer = "The uploaded file names Example Person.";
+    const client = new FakeInteractionsClient(documentEvents(answer), canonical(answer));
+    const get = client.interactions.get;
+    const failure = new Error("synthetic canonical failure");
+    vi.spyOn(client.interactions, "get").mockImplementation(async (...args) => {
+      await get(...args);
+      throw failure;
+    });
+    const signal = new AbortController().signal;
+    const deadlineAt = Date.now() + 10_000;
+
+    await expect(new GeminiFileSearchChat(client, {}).run(documentInput(), {
+      signal, deadlineAt, streamSignal: signal, streamDeadlineAt: deadlineAt,
+      onDelta: () => undefined, singleAttempt: true,
+    })).rejects.toBe(failure);
+    expect(client.requests).toHaveLength(1);
+    expect(client.getParams).toEqual([undefined]);
+    expect(client.getOptions).toEqual([{ signal, maxRetries: 0 }]);
+    expect(client.createOptions).toEqual([{ signal, maxRetries: 0 }]);
   });
 
   it.each([

@@ -790,6 +790,7 @@ export class GeminiFileSearchChat {
       onStreamComplete?: () => void;
       onDiagnostics?: (snapshot: QueryDiagnostics) => void;
       allowStreamFileCitations?: boolean;
+      singleAttempt?: boolean;
     },
   ): Promise<GovernedChatResult> {
     const execution = emptyQueryDiagnosticExecution();
@@ -802,6 +803,7 @@ export class GeminiFileSearchChat {
     };
     const observer = new StructuralObserver(input.stores, () => { diagnostics.countsClamped = true; });
     const allowStreamFileCitations = options.allowStreamFileCitations === true;
+    const singleAttempt = options.singleAttempt === true;
     const streamEvidence = new StreamFileEvidence();
     const retainBatch = (value: unknown) => {
       try { streamEvidence.replace(value, annotation => observer.shape(annotation)); }
@@ -892,6 +894,7 @@ export class GeminiFileSearchChat {
       const request = requestFor(this.model, input);
       let stream = await providerOperation(() => this.client.interactions.create(request, {
         signal: options.streamSignal,
+        ...(singleAttempt ? { maxRetries: 0 } : {}),
       }), options.streamSignal, true);
       const stepsByInteraction = new Map<string, Map<number, StreamStep>>();
       const fileSearchCallIds = new Map<string, Set<string>>();
@@ -1044,7 +1047,7 @@ export class GeminiFileSearchChat {
         report();
         checkStream();
         if (completed) break;
-        if (resumed || !interactionId || !lastEventId) return invalidResponse("incomplete_stream");
+        if (singleAttempt || resumed || !interactionId || !lastEventId) return invalidResponse("incomplete_stream");
         resumed = true;
         execution.resumeAttempted = true;
         execution.resumeOutcome = "pending";
@@ -1061,7 +1064,10 @@ export class GeminiFileSearchChat {
       report({ phase: "canonical_read" });
       options.onStreamComplete?.();
       checkTerminal();
-      const interaction = await providerOperation(() => this.client.interactions.get(interactionId!, undefined, { signal: options.signal }), options.signal, false);
+      const interaction = await providerOperation(() => this.client.interactions.get(interactionId!, undefined, {
+        signal: options.signal,
+        ...(singleAttempt ? { maxRetries: 0 } : {}),
+      }), options.signal, false);
       if (isInteractionStream(interaction)) return invalidResponse("canonical_state");
       report({ canonicalReadCompleted: true });
       checkTerminal();

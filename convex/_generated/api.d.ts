@@ -82,6 +82,9 @@ import type * as organizationJurisdictions from "../organizationJurisdictions.js
 import type * as organizationMembers from "../organizationMembers.js";
 import type * as organizations from "../organizations.js";
 import type * as polar from "../polar.js";
+import type * as reviewedEmployment from "../reviewedEmployment.js";
+import type * as reviewedEmploymentCompletion from "../reviewedEmploymentCompletion.js";
+import type * as reviewedEmploymentJobs from "../reviewedEmploymentJobs.js";
 import type * as telemetry from "../telemetry.js";
 import type * as usage from "../usage.js";
 import type * as users from "../users.js";
@@ -169,6 +172,9 @@ declare const fullApi: ApiFromModules<{
   organizationMembers: typeof organizationMembers;
   organizations: typeof organizations;
   polar: typeof polar;
+  reviewedEmployment: typeof reviewedEmployment;
+  reviewedEmploymentCompletion: typeof reviewedEmploymentCompletion;
+  reviewedEmploymentJobs: typeof reviewedEmploymentJobs;
   telemetry: typeof telemetry;
   usage: typeof usage;
   users: typeof users;

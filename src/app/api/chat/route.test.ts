@@ -249,6 +249,32 @@ describe("POST /api/chat attachment integration", () => {
     expect(completion).toMatchObject({ answerKind: "document", attachmentIds: ["saved-file"], authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
   });
 
+  it("keeps a document follow-up when its anchor is outside the provider history window", async () => {
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
+    const history = [
+      { role: "user", content: "Summarize this file" },
+      { role: "assistant", content: "The monthly rent is 900." },
+      ...Array.from({ length: 9 }, () => [
+        { role: "user", content: "Make it shorter" },
+        { role: "assistant", content: "Rent is 900." },
+      ]).flat(),
+    ];
+    const canonical = canonicalInteraction("Rent is 900.");
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.create.mockResolvedValue(successfulStream("Rent is 900."));
+    interactionMocks.get.mockResolvedValue(canonical);
+
+    const response = await POST(request({ query: "Make it more concise", messages: history, attachmentIds: [] }));
+
+    expect(response.status).toBe(200);
+    expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "document", result: "Rent is 900.", citations: [] });
+    expect(fetch).not.toHaveBeenCalled();
+    const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+    expect(completion).toMatchObject({ answerKind: "document", attachmentIds: ["saved-file"], authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
+    const providerInput = JSON.parse(interactionMocks.create.mock.calls[0][0].input.at(-1).text);
+    expect(providerInput.conversation).toEqual(history.slice(-10));
+  });
+
   it("resolves saved attachments on follow-up while keeping legal citations required", async () => {
     attachmentMocks.loadChatAttachmentContext.mockResolvedValue(fileContext);
     const response = await POST(request({ attachmentIds: [] }));
@@ -1098,6 +1124,13 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(JSON.stringify(interactionMocks.create.mock.calls[0][0])).not.toContain("user-session-token");
   });
 
+  it("preserves the legacy ten-turn provider context when newer clients submit twenty turns", async () => {
+    const history = Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `Earlier turn ${index}` }));
+    await events(await POST(request({ messages: history, historyComplete: true })));
+    const providerInput = JSON.parse(interactionMocks.create.mock.calls[0][0].input.text);
+    expect(providerInput.conversation).toEqual(history.slice(-10));
+  });
+
   it("binds canonical citations and server-derived scope metadata in the terminal mutation", async () => {
     await events(await POST(request()));
 
@@ -1283,6 +1316,127 @@ describe("POST /api/chat streamed governed interaction", () => {
           completionEventAccepted: false, streamClosed: false, resumeAttempted: false },
       },
     });
+  });
+
+  it.each((["create", "iterator", "completion_eof", "resume"] as const).flatMap(
+    boundary => (["resolve", "reject"] as const).map(lateOutcome => ({ boundary, lateOutcome })),
+  ))("releases the 90-second waiter when $boundary ignores abort, despite late $lateOutcome", async ({ boundary, lateOutcome }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let resolveProvider!: (value: ReturnType<typeof successfulStream>) => void;
+    let rejectProvider!: (reason: Error) => void;
+    const pending = new Promise<ReturnType<typeof successfulStream>>((resolve, reject) => {
+      resolveProvider = resolve;
+      rejectProvider = reject;
+    });
+    let released = false;
+    if (boundary === "create") {
+      interactionMocks.create.mockReturnValue(pending);
+    } else if (boundary === "resume") {
+      interactionMocks.create.mockResolvedValue((async function* () {
+        yield { event_type: "interaction.created", event_id: "synthetic-resume-cursor",
+          interaction: { id: "interaction-1", status: "in_progress" } };
+      })());
+      interactionMocks.get.mockReturnValue(pending);
+    } else {
+      interactionMocks.create.mockResolvedValue((async function* () {
+        const stream = successfulStream();
+        if (boundary === "completion_eof") {
+          yield* stream;
+          await pending;
+        } else {
+          const first = await stream.next();
+          if (!first.done) yield first.value;
+          await pending;
+          yield* stream;
+        }
+      })());
+    }
+    const reader = (await POST(request())).body!.getReader();
+    let firstReadSettled = false;
+    const firstRead = reader.read().then(value => { firstReadSettled = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(89_999);
+      expect(firstReadSettled).toBe(false);
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).toHaveBeenCalledTimes(boundary === "resume" ? 1 : 0);
+      await vi.advanceTimersByTimeAsync(1);
+      // Check settlement before awaiting, so the regression fails at 90s rather
+      // than quietly advancing to the independent 110s terminal deadline.
+      expect(firstReadSettled).toBe(true);
+      const first = await firstRead;
+      expect(JSON.parse(new TextDecoder().decode(first.value).trim())).toEqual({
+        type: "error", reason: "deadline_exceeded",
+        error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      const completedCalls = authMocks.fetchAuthMutation.mock.calls.filter(
+        ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+      );
+      expect(completedCalls).toHaveLength(1);
+      expect(completedCalls[0][1]).toMatchObject({
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        diagnostics: { phase: "generation", reason: "deadline_exceeded", canonicalReadCompleted: false,
+          execution: { modelDeadlineReached: true, terminalDeadlineReached: false,
+            clientAbortObserved: false, streamAbortObserved: true, providerFailure: "none",
+            completionEventAccepted: boundary === "completion_eof", streamClosed: false,
+            resumeAttempted: boundary === "resume",
+            resumeOutcome: boundary === "resume" ? "pending" : "not_attempted" } },
+      });
+      const frozenFailure = JSON.stringify(completedCalls[0][1]);
+      released = true;
+      if (lateOutcome === "resolve") resolveProvider(successfulStream());
+      else rejectProvider(new Error("synthetic late provider rejection"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).toHaveBeenCalledTimes(boundary === "resume" ? 1 : 0);
+      expect(authMocks.fetchAuthMutation.mock.calls.filter(
+        ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+      )).toHaveLength(1);
+      expect(JSON.stringify(completedCalls[0][1])).toBe(frozenFailure);
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      if (!released) rejectProvider(new Error("synthetic regression cleanup"));
+      await vi.advanceTimersByTimeAsync(20_000);
+      await reader.cancel();
+    }
+  });
+
+  it("includes preparation time in the original 90-second generation waiter", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-09-04T00:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    authMocks.isAuthenticated.mockImplementationOnce(() => new Promise(resolve => {
+      setTimeout(() => resolve(true), 30_000);
+    }));
+    interactionMocks.create.mockImplementation(() => new Promise(() => undefined));
+    const response = POST(request());
+    await vi.advanceTimersByTimeAsync(30_000);
+    const reader = (await response).body!.getReader();
+    let firstReadSettled = false;
+    const firstRead = reader.read().then(value => { firstReadSettled = true; return value; });
+    try {
+      expect(Date.now() - startedAt).toBe(30_000);
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(firstReadSettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(firstReadSettled).toBe(true);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value).trim())).toMatchObject({
+        type: "error", reason: "deadline_exceeded",
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        diagnostics: { execution: { modelDeadlineReached: true, terminalDeadlineReached: false } },
+      });
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+    } finally {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await reader.cancel();
+    }
   });
 
   it("uses the terminal reserve for the canonical read after the stream completes near 90 seconds", async () => {
