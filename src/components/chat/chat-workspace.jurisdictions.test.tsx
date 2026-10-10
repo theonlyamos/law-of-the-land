@@ -94,6 +94,7 @@ import ChatPage from "@/app/(chat)/[chatId]/page";
 import NewChatPage from "@/app/(chat)/new/page";
 import { ChatRequestIdentity, ChatRequestsProvider } from "./chat-requests";
 import { CHAT_POLICY_RESPONSES } from "../../../convex/lib/chatPolicy";
+import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
 
 const render = (ui: React.ReactNode) => renderComponent(ui, {
   wrapper: ({ children }) => <ChatRequestsProvider><ChatRequestIdentity />{children}</ChatRequestsProvider>,
@@ -123,6 +124,259 @@ function ndjsonResponse(events: unknown[]): Response {
     headers: { "content-type": "application/x-ndjson" },
   });
 }
+
+describe("provisional ordinary streaming", () => {
+  function openStream() {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelled = false;
+    const cancel = vi.fn(() => { cancelled = true; });
+    const encoder = new TextEncoder();
+    vi.mocked(fetch).mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(value) { controller = value; }, cancel,
+    }), { headers: { "content-type": "application/x-ndjson" } }));
+    return { cancel, bytes: (value: Uint8Array) => controller.enqueue(value),
+      send: (event: unknown) => { if (!cancelled) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); },
+      close: () => controller.close(), fail: () => controller.error(new Error("Disconnected")) };
+  }
+  function submit() {
+    mocks.session = { title: "Streaming", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    const view = render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "What are my rights?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    return view;
+  }
+  const done = (result = "Checked final answer") => ({ type: "done", result, answerKind: "legal", citations: [citation], citationClaim, partialCoverage: false });
+
+  it("shows only plain draft text with a persistent unverified label before checking and canonical replacement", async () => {
+    const stream = openStream(); submit();
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string).streaming).toBe("provisional-v1");
+    await act(async () => stream.send({ type: "draft_delta", text: "**Draft** " }));
+    expect(await screen.findByText("Draft — not verified")).toBeVisible();
+    expect(screen.getByText("**Draft**")).toBeVisible();
+    await act(async () => stream.send({ type: "draft_delta", text: "[unsafe link](https://draft.test)" }));
+    await waitFor(() => expect(screen.getByText("**Draft** [unsafe link](https://draft.test)")).toBeVisible());
+    expect(screen.getByText("**Draft** [unsafe link](https://draft.test)")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "unsafe link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Sources" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy reply" })).not.toBeInTheDocument();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+    await act(async () => stream.send({ type: "verifying" }));
+    expect(await screen.findByText("Checking answer and sources")).toBeVisible();
+    expect(screen.getByText("Draft — not verified")).toBeVisible();
+    await act(async () => stream.send({ ...done(CHAT_NO_EVIDENCE), citations: [] }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("**Draft** [unsafe link](https://draft.test)")).not.toBeInTheDocument();
+    expect(screen.getByText(CHAT_NO_EVIDENCE)).toBeVisible();
+    expect(mocks.appendMessages.mock.calls[0][0].messages[1].content).toBe(CHAT_NO_EVIDENCE);
+    expect(stream.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes at validated done without waiting for EOF or consuming a later failure", async () => {
+    const stream = openStream(); submit();
+    await act(async () => { stream.send({ type: "draft_delta", text: "Unverified preview" }); stream.send({ type: "verifying" }); stream.send(done());
+      stream.send({ type: "error", error: "Late error" }); stream.send(done("Late replacement")); });
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Checked final answer")).toBeVisible();
+    expect(screen.queryByText("Late error")).not.toBeInTheDocument();
+    expect(screen.queryByText("Late replacement")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeDisabled(); // successful send clears the composer
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(stream.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["error", "EOF", "disconnect", "claim", "citations"] as const)("erases a draft after %s and retains the question", async failure => {
+    const stream = openStream(); submit();
+    await act(async () => stream.send({ type: "draft_delta", text: "Private draft preview" }));
+    expect(await screen.findByText("Private draft preview")).toBeVisible();
+    await act(async () => {
+      if (failure === "error") stream.send({ type: "error", error: "Could not verify this answer" });
+      else if (failure === "EOF") stream.close();
+      else if (failure === "disconnect") stream.fail();
+      else { stream.send({ type: "verifying" }); stream.send({ ...done(), ...(failure === "claim" ? { citationClaim: "invalid" } : { citations: [] }) }); }
+    });
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    expect(screen.queryByText("Private draft preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
+    expect(screen.getByRole("textbox")).toHaveValue("What are my rights?");
+    expect(mocks.appendMessages).not.toHaveBeenCalled(); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops immediately, preserves draft selections, and ignores late data and queued animation frames", async () => {
+    let frame!: FrameRequestCallback;
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => { frame = callback; return 1; }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const stream = openStream(); const view = submit();
+    await act(async () => stream.send({ type: "draft_delta", text: "Pending private preview" }));
+    await waitFor(() => expect(frame).toBeTypeOf("function"));
+    const signal = vi.mocked(fetch).mock.calls[0][1]!.signal as AbortSignal;
+    fireEvent.click(screen.getByRole("button", { name: "Stop answer" }));
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("textbox")).toHaveValue("What are my rights?");
+    await act(async () => { frame(performance.now()); stream.send({ type: "verifying" }); stream.send(done("Stopped late answer")); });
+    expect(screen.queryByText("Pending private preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stopped late answer")).not.toBeInTheDocument();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+    view.rerender(<div>Settings</div>); view.rerender(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
+    vi.mocked(fetch).mockResolvedValueOnce(ndjsonResponse([done("Next checked answer")]));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "A new question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[1][1]!.body as string).messages).toEqual([]);
+  });
+
+  it("stops a new chat during session creation and retains the transferred question before navigation", async () => {
+    let finishEnsure!: () => void;
+    mocks.ensureSession.mockReturnValue(new Promise<void>(resolve => { finishEnsure = resolve; }));
+    render(<ChatWorkspace chatId={null} initialQuery={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select test jurisdiction" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "A new chat question" } });
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["selected"], "selected.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(mocks.ensureSession).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Stop answer" }));
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("textbox")).toHaveValue("A new chat question");
+    expect(screen.getByRole("button", { name: "Remove selected.txt" })).toBeEnabled();
+    expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
+    await act(async () => finishEnsure());
+    expect(fetch).not.toHaveBeenCalled(); expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("does not automatically resubmit a stopped initial question when its workspace remounts", async () => {
+    const stream = openStream(); const view = submit();
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await act(async () => stream.send({ type: "draft_delta", text: "Preview before stopping" }));
+    expect(await screen.findByText("Preview before stopping")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Stop answer" }));
+    view.rerender(<ChatWorkspace key="remounted" chatId={chatId} initialQuery="What are my rights?" />);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
+    expect(stream.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer ordinary Stop while a reviewed job acknowledgement is pending", async () => {
+    let acknowledge!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValue(new Promise<Response>(resolve => { acknowledge = resolve; }));
+    submit();
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: "Stop answer" })).not.toBeInTheDocument();
+    await act(async () => acknowledge(Response.json({ type: "background_job", jobId: "accepted-job", status: "queued" }, { status: 202 })));
+    expect(await screen.findByRole("button", { name: "Stop verification" })).toBeVisible();
+    expect(screen.queryByText("Answer stopped. No answer was saved.")).not.toBeInTheDocument();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("enables ordinary Stop on draft_start before text without showing a draft answer", async () => {
+    const stream = openStream(); submit();
+    await act(async () => stream.send({ type: "draft_start" }));
+    expect(await screen.findByRole("button", { name: "Stop answer" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Preparing answer" })).toBeVisible();
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Sources" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop answer" }));
+    expect((vi.mocked(fetch).mock.calls[0][1]!.signal as AbortSignal).aborted).toBe(true);
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("textbox")).toHaveValue("What are my rights?");
+    await act(async () => { stream.send({ type: "draft_delta", text: "Stopped late preview" }); stream.send({ type: "verifying" }); stream.send(done("Stopped late final")); });
+    expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
+    expect(screen.queryByText("Stopped late preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stopped late final")).not.toBeInTheDocument();
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+    expect(stream.cancel).toHaveBeenCalledTimes(1); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["policy", CHAT_POLICY_RESPONSES.out_of_scope, "policy"],
+    ["no evidence", CHAT_NO_EVIDENCE, "legal"],
+  ] as const)("accepts draft_start followed by a checked fixed %s reply without a generated draft", async (_name, result, answerKind) => {
+    const stream = openStream(); submit();
+    await act(async () => { stream.send({ type: "draft_start" }); stream.send({ ...done(result), answerKind, citations: [] }); });
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(result)).toBeVisible();
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("Checking answer and sources")).not.toBeInTheDocument();
+    expect(screen.queryAllByText("Failed")).toHaveLength(0);
+    expect(mocks.appendMessages.mock.calls[0][0].messages[1]).toMatchObject({ content: result, answerKind, citations: [], citationClaim });
+    expect(stream.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Stop as soon as validated done starts saving and preserves a checked unsaved final", async () => {
+    let frame!: FrameRequestCallback;
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => { frame = callback; return 1; }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    let rejectSave!: (reason: Error) => void;
+    mocks.appendMessages.mockReturnValue(new Promise<void>((_resolve, reject) => { rejectSave = reject; }));
+    const stream = openStream(); submit();
+    await act(async () => { stream.send({ type: "draft_delta", text: "Ephemeral draft" }); stream.send({ type: "verifying" }); stream.send(done()); });
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Checked final answer")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Stop answer" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    await act(async () => frame(performance.now()));
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    expect(screen.getByText("Checked final answer")).toBeVisible();
+    await act(async () => rejectSave(new Error("Save unavailable")));
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByText(/could not be saved to your account/)).toBeVisible();
+    expect(screen.getByText("Checked final answer")).toBeVisible();
+    expect(screen.getByRole("textbox")).toHaveValue("What are my rights?");
+  });
+
+  it.each([
+    [{ type: "draft_delta", text: "Preview" }, done("Unchecked")],
+    [{ type: "verifying" }, { type: "draft_delta", text: "Too late" }],
+    [{ type: "verifying" }, { type: "verifying" }],
+    [{ type: "delta", text: "Buffered" }, { type: "draft_delta", text: "Mixed mode" }],
+    [{ type: "draft_delta", text: "Preview" }, { type: "delta", text: "Mixed mode" }],
+    [{ type: "draft_start" }, { type: "draft_start" }],
+    [{ type: "draft_delta", text: "Preview" }, { type: "draft_start" }],
+    [{ type: "verifying" }, { type: "draft_start" }],
+    [{ type: "delta", text: "Buffered" }, { type: "draft_start" }],
+    [{ type: "draft_delta", text: 1 }],
+    [null],
+    [{ type: "unknown" }],
+    [{ type: "draft_delta", text: "x".repeat(100_001) }],
+  ].map(events => [events]))("rejects malformed or out-of-order protocol events %#", async events => {
+    const stream = openStream(); submit();
+    await act(async () => { events.forEach(stream.send); stream.send(done()); });
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized unterminated NDJSON line and releases the composer", async () => {
+    const stream = openStream(); submit();
+    await act(async () => stream.bytes(new TextEncoder().encode(" ".repeat(700_001))));
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    expect(screen.getAllByText("Failed")).toHaveLength(2);
+    expect(stream.cancel).toHaveBeenCalledTimes(1);
+    expect(mocks.appendMessages).not.toHaveBeenCalled();
+  });
+
+  it("decodes fragmented UTF-8 and JSON progressively while leaving reviewed legacy deltas buffered", async () => {
+    const stream = openStream(); submit();
+    const bytes = new TextEncoder().encode(`${JSON.stringify({ type: "draft_delta", text: "Café 🧭" })}\n`);
+    await act(async () => { for (const byte of bytes) stream.bytes(new Uint8Array([byte])); });
+    expect(await screen.findByText("Café 🧭")).toBeVisible();
+    await act(async () => { stream.send({ type: "verifying" }); stream.send(done()); });
+    await waitFor(() => expect(mocks.appendMessages).toHaveBeenCalledTimes(1));
+    cleanup();
+    const legacy = openStream(); submit();
+    await act(async () => legacy.send({ type: "delta", text: "Reviewed buffered text" }));
+    expect(screen.queryByText("Reviewed buffered text")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
+    await act(async () => legacy.send({ ...done("Reviewed final answer"), persisted: true }));
+    expect(await screen.findByText("Reviewed final answer")).toBeVisible();
+    expect(mocks.appendMessages).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("server-persisted reviewed responses", () => {
   it("keeps a background acknowledgement pending without displaying or saving an answer", async () => {
@@ -686,8 +940,8 @@ describe("unified chat client", () => {
     await waitFor(() => expect(streams.has("chat-b")).toBe(true));
 
     await act(async () => {
-      send("chat-a", { type: "delta", text: "Answer A so far" });
-      send("chat-b", { type: "delta", text: "Answer B so far" });
+      send("chat-a", { type: "draft_delta", text: "Answer A so far" });
+      send("chat-b", { type: "draft_delta", text: "Answer B so far" });
     });
     expect(await screen.findByText("Answer B so far")).toBeVisible();
     expect(screen.queryByText("Answer A so far")).not.toBeInTheDocument();
@@ -698,6 +952,7 @@ describe("unified chat client", () => {
 
     await act(async () => {
       for (const id of ["chat-b", "chat-a"]) {
+        send(id, { type: "verifying" });
         send(id, { type: "done", result: `Finished ${id}`, citations: [citation], citationClaim, partialCoverage: false });
         streams.get(id)!.close();
       }
@@ -872,6 +1127,7 @@ describe("unified chat client", () => {
     const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
     expect(body).toEqual({
       query: "What is the policy?",
+      streaming: "provisional-v1",
       jurisdictionId: jurisdiction.id,
       messages: [],
       externalId: chatId,
@@ -907,9 +1163,10 @@ describe("unified chat client", () => {
     const encoder = new TextEncoder();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode('{"type":"delta","text":"The streamed "}\n'));
-        controller.enqueue(encoder.encode('{"type":"delta","text":"answer."}\n'));
+        controller.enqueue(encoder.encode('{"type":"draft_delta","text":"The streamed "}\n'));
+        controller.enqueue(encoder.encode('{"type":"draft_delta","text":"answer."}\n'));
         finishStream = () => {
+          controller.enqueue(encoder.encode('{"type":"verifying"}\n'));
           controller.enqueue(encoder.encode(`{"type":"done","result":"The streamed answer.","answerKind":"legal","citations":[${JSON.stringify(citation)}],"citationClaim":"${citationClaim}","partialCoverage":false}\n`));
           controller.close();
         };

@@ -30,7 +30,8 @@ export interface LocalChatMessage {
   content: string;
   createdAt: number;
   sequence: number;
-  state: "pending" | "error";
+  state: "pending" | "verified" | "error";
+  answerPhase?: "draft" | "checking";
   errorReason?: ChatErrorReason;
   citations?: ChatCitation[];
   answerKind?: ChatAnswerKind;

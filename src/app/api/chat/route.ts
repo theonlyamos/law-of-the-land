@@ -63,6 +63,7 @@ type ChatBody = {
   userClientId?: string;
   historyComplete?: boolean;
   attachmentIds?: string[];
+  streaming?: "provisional-v1";
 };
 type ResearchManifest = {
   authorizedScopeSize: number;
@@ -119,6 +120,9 @@ type CompletionResult = {
 };
 type StreamEvent =
   | { type: "delta"; text: string }
+  | { type: "draft_start" }
+  | { type: "draft_delta"; text: string }
+  | { type: "verifying" }
   | {
     type: "done";
     result: string;
@@ -255,7 +259,9 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(Object.hasOwn(value, "userClientId") ? ["userClientId"] : []),
     ...(Object.hasOwn(value, "historyComplete") ? ["historyComplete"] : []),
     ...(Object.hasOwn(value, "attachmentIds") ? ["attachmentIds"] : []),
+    ...(Object.hasOwn(value, "streaming") ? ["streaming"] : []),
   ])) return null;
+  if (Object.hasOwn(value, "streaming") && value.streaming !== "provisional-v1") return null;
   if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds)
     || value.attachmentIds.length > MAX_CHAT_FILES
     || value.attachmentIds.some(id => !boundedIdentifier(id, 128))
@@ -293,6 +299,7 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(value.userClientId === undefined ? {} : { userClientId: value.userClientId as string }),
     ...(value.historyComplete === undefined ? {} : { historyComplete: value.historyComplete as boolean }),
     ...(value.attachmentIds === undefined ? {} : { attachmentIds: value.attachmentIds as string[] }),
+    ...(value.streaming === undefined ? {} : { streaming: value.streaming as "provisional-v1" }),
   };
 }
 
@@ -550,6 +557,7 @@ function streamResponse(input: {
   answerMode?: "legal" | "document";
   reviewed?: { selection: ReviewedEmploymentSelection; token: string };
   localDocumentSingleAttempt?: boolean;
+  provisionalStreaming: boolean;
 }) {
   const encoder = new TextEncoder();
   let cancelled = input.request.signal.aborted;
@@ -597,6 +605,7 @@ function streamResponse(input: {
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
           if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          if (input.provisionalStreaming) send({ type: "draft_start" });
           if (input.reviewed) {
             completionModel = "gemini-3.8-flash/reviewed-employment-local";
             // Admission is checked again immediately before constructing the provider client.
@@ -698,8 +707,11 @@ function streamResponse(input: {
               streamDeadlineAt: input.modelDeadlineAt,
               allowStreamFileCitations: true,
               ...(input.localDocumentSingleAttempt ? { singleAttempt: true } : {}),
-              // Text remains private until canonical checks and catalog authorization complete.
-              onDelta: () => undefined,
+              // The adapter bounds and selects model text; opted-in ordinary
+              // clients display it as a draft until the terminal checks pass.
+              onDelta: (text) => {
+                if (input.provisionalStreaming && !input.streamSignal.aborted) send({ type: "draft_delta", text });
+              },
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
                 diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
@@ -707,6 +719,7 @@ function streamResponse(input: {
               onStreamComplete: () => {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
+                if (input.provisionalStreaming && !input.providerSignal.aborted) send({ type: "verifying" });
               },
             }), input.streamSignal);
           }
@@ -743,8 +756,9 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
-          // Completion rechecks current scope and file access before any answer leaves the server.
-          send({ type: "delta", text: result.answer });
+          // Completion rechecks current scope and file access before releasing
+          // the final answer and its authority. Legacy clients remain buffered.
+          if (!input.provisionalStreaming) send({ type: "delta", text: result.answer });
           send({
             type: "done",
             result: result.answer,
@@ -1120,6 +1134,7 @@ export async function POST(request: Request): Promise<Response> {
       attachmentContext,
       answerMode,
       reviewed,
+      provisionalStreaming: body.streaming === "provisional-v1" && !reviewed && !coverageGap && !localReviewedScope,
       ...(localReviewedScope && answerMode === "document" ? { localDocumentSingleAttempt: true } : {}),
     });
   } catch {
