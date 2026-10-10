@@ -132,8 +132,12 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
   } else if (blockedVersionIds.size !== 0) invalid();
   const candidates: Doc<"integrationJobs">[] = [];
   for (const status of ["queued", "running", "waiting_provider", "manual_review"] as const) {
-    const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_createdAt", q => q.eq("status", status)).take(MAX_UNRESOLVED_JOBS + 1 - candidates.length);
-    candidates.push(...rows); if (candidates.length > MAX_UNRESOLVED_JOBS) invalid();
+    // Legacy provider jobs cannot affect this store or consume its Gemini scan budget.
+    for (const type of ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"] as const) {
+      const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_type_and_createdAt", q =>
+        q.eq("status", status).eq("type", type)).take(MAX_UNRESOLVED_JOBS + 1 - candidates.length);
+      candidates.push(...rows); if (candidates.length > MAX_UNRESOLVED_JOBS) invalid();
+    }
   }
   let otherUnresolved = 0;
   for (const candidate of candidates) {

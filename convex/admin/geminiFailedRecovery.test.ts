@@ -113,6 +113,30 @@ describe("guarded failed document reconciliation", () => {
     const a = await attempt(f); await f.t.mutation(completeRef, { ...a.owned, ...a.proof });
     expect((await state(f)).jobs[0].status).toBe("failed");
   });
+  it.each([1, 129])("ignores %i unrelated pending legacy jobs when proving Gemini recovery eligibility", async count => {
+    const f = await fixture();
+    await f.t.run(async ctx => {
+      for (let index = 0; index < count; index++) await ctx.db.insert("integrationJobs", {
+        type: "ingest_remote", targetType: "legacyDocument", targetId: `legacy-unrelated-${index}`,
+        payload: "{}", actorId: f.userId, actorRoles: [], idempotencyKey: `legacy-pending-${index}`,
+        requestFingerprint: `legacy-pending-${index}`, correlationId: `legacy-pending-${index}`,
+        status: "queued", attemptCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+    });
+    const a = await attempt(f);
+    expect(await f.t.mutation(completeRef, { ...a.owned, ...a.proof })).toMatchObject({ status: "succeeded", jobId: f.targets[0].jobId });
+    const result = await f.t.run(async ctx => ({ target: await ctx.db.get(f.targets[0].jobId), jurisdiction: await ctx.db.get(f.jurisdictionId),
+      legacy: await ctx.db.query("integrationJobs").withIndex("by_status_and_type_and_createdAt", q => q.eq("status", "queued").eq("type", "ingest_remote")).take(130) }));
+    expect(result.target?.status).toBe("failed"); expect(result.jurisdiction?.providerSyncState).toBe("synced");
+    expect(result.legacy).toHaveLength(count); expect(result.legacy.every(job => job.status === "queued")).toBe(true);
+  });
+  it("denies a pending Gemini job whose jurisdiction cannot be determined", async () => {
+    const f = await fixture();
+    await f.t.run(ctx => ctx.db.insert("integrationJobs", { type: "gemini_index_document", targetType: "unknownGeminiScope", targetId: "unknown-scope",
+      payload: "{}", actorId: f.userId, actorRoles: [], idempotencyKey: "unknown-gemini-scope", requestFingerprint: "unknown-gemini-scope",
+      correlationId: "unknown-gemini-scope", status: "queued", attemptCount: 0, createdAt: Date.now(), updatedAt: Date.now() }));
+    const before = await state(f); await expect(attempt(f)).rejects.toThrow(); expect(await state(f)).toEqual(before);
+  });
   it("requires five minutes between observations even when two fresh scans agree", async () => {
     const f = await fixture();
     await f.t.run(async ctx => { const job = (await ctx.db.get(f.targets[0].jobId))!;
