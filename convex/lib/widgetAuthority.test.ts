@@ -25,3 +25,11 @@ it("rejects disabled, untyped, or misowned geographical libraries", async () => 
   });
   await expect(t.run(ctx => resolveWidgetAuthority(ctx, f.publicId, "https://greenfield.example"))).rejects.toThrow("WIDGET_UNAVAILABLE");
 });
+
+it("keeps embeds unavailable for a library that requires a publication allowlist", async () => {
+  const t = createWidgetBackend(), f = await seedGeographicWidget(t);
+  await t.run(ctx => ctx.db.patch(f.jurisdictionId, {
+    geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [f.versionId] },
+  }));
+  await expect(t.run(ctx => resolveWidgetAuthority(ctx, f.publicId, "https://greenfield.example"))).rejects.toThrow("WIDGET_UNAVAILABLE");
+});

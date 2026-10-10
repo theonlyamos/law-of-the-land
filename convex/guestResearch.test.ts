@@ -45,6 +45,35 @@ it("allows exactly two completed answers, replays requests, and excludes failed 
   expect(await t.mutation(beginRef, { ...input, requestId: crypto.randomUUID() })).toMatchObject({ kind: "denied", error: { code: "TRIAL_EXHAUSTED" } });
 });
 
+it("binds restricted guest sessions to the published allowlist and denies legacy admission and completion", async () => {
+  vi.stubEnv("ADMIN_ENVIRONMENT", "test");
+  const { t, f, input } = await fixture();
+  await t.run(async ctx => {
+    const original = (await ctx.db.get(f.versionId))!;
+    const { _id: _id, _creationTime: _creationTime, ...version } = original;
+    const failedId = await ctx.db.insert("documentVersions", { ...version, versionNumber: 2, status: "failed", geminiDocumentName: undefined });
+    await ctx.db.patch(f.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failedId] } });
+  });
+  expect(await t.mutation(beginRef, input)).toMatchObject({ kind: "denied", error: { code: "WIDGET_UNAVAILABLE" } });
+  const capable = { ...input, tokenHash: await hashOpaqueTelemetryValue(createOpaqueTelemetryToken()), publicationFilterProtocol: "published-v1" as const };
+  expect(await t.mutation(sessionRef, { tokenHash: capable.tokenHash, ipKey: capable.ipKey, jurisdictionId: f.jurisdictionId,
+    publicationFilterProtocol: capable.publicationFilterProtocol })).toMatchObject({ remaining: 2 });
+  const admitted = await begin(t, capable);
+  expect(admitted.manifest.stores[0].publicationFilter).toEqual({ protocol: "published-v1", environment: "test",
+    documents: [{ resourceId: f.resourceId, versionId: f.versionId, sha256: "0".repeat(64) }] });
+  expect(await t.mutation(readRef, { tokenHash: capable.tokenHash })).toMatchObject({ error: { code: "WIDGET_UNAVAILABLE" } });
+  const denied = await t.mutation(finishRef, { turnId: admitted.turnId, attemptNonce: admitted.attemptNonce,
+    outcome: "completed", answer: CHAT_NO_EVIDENCE, citations: [], providerFinished: true });
+  expect(denied).toMatchObject({ status: "failed" }); expect(denied.result).toBeUndefined();
+  const next = await begin(t, { ...capable, requestId: crypto.randomUUID() });
+  expect(await t.mutation(finishRef, { turnId: next.turnId, attemptNonce: next.attemptNonce,
+    outcome: "completed", answer: CHAT_NO_EVIDENCE, citations: [], providerFinished: true,
+    publicationFilterProtocol: capable.publicationFilterProtocol })).toMatchObject({ status: "completed" });
+  await t.run(ctx => ctx.db.patch(f.versionId, { sha256: "b".repeat(64) }));
+  expect(await t.mutation(readRef, { tokenHash: capable.tokenHash, publicationFilterProtocol: capable.publicationFilterProtocol }))
+    .toMatchObject({ error: { code: "LIBRARY_CHANGED" } });
+});
+
 it("uses public ancestors and refuses private jurisdictions even for signed-in members", async () => {
   const { t, f, input } = await fixture(), parent = await seedGeographicWidget(t);
   await t.run(async ctx => {

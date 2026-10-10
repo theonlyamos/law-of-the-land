@@ -18,6 +18,9 @@ import {
 } from "./lib/jurisdictionAccess";
 import { optionalUserId } from "./lib/requireUser";
 import { resolveResearchScopeForJurisdiction } from "./lib/researchScope";
+import { PUBLICATION_FILTER_PROTOCOL, MAX_PUBLISHED_FILTER_DOCUMENTS, parsePublicationFilter,
+  buildPublicationMetadataFilter, isPublicationEnvironment, type PublicationFilter } from "../shared/gemini-publication-filter";
+import { isGeminiDocumentName } from "./lib/geminiFileSearchNames";
 
 const accessibleJurisdictionValidator = v.object({
   _id: v.id("jurisdictions"),
@@ -52,6 +55,7 @@ type ResearchJurisdiction = {
   isDefault: boolean;
   organization?: { id: Id<"organizations">; name: string };
   visibility?: "public" | "members";
+  coverageWarning?: { excludedDocumentCount: number };
 };
 
 function invalidCursor(): never {
@@ -163,6 +167,9 @@ async function projectResearchJurisdiction(ctx: QueryCtx, row: Doc<"jurisdiction
     slug: row.slug,
     kind: row.kind as JurisdictionKind,
     isDefault: row.isDefault,
+    ...(row.geminiSearchRestriction ? {
+      coverageWarning: { excludedDocumentCount: new Set(row.geminiSearchRestriction.failedVersionIds).size },
+    } : {}),
     ...(organization ? { organization: { id: organization._id, name: organization.name }, visibility: row.visibility ?? "members" } : {}),
   };
 }
@@ -279,6 +286,7 @@ const researchJurisdictionValidator = v.union(
     isDefault: v.boolean(),
     organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
     visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
+    coverageWarning: v.optional(v.object({ excludedDocumentCount: v.number() })),
   }),
 );
 
@@ -376,6 +384,11 @@ export const searchAccessible = query({
   },
 });
 
+export const publicationFilterValidator = v.object({
+  protocol: v.literal(PUBLICATION_FILTER_PROTOCOL), environment: v.string(),
+  documents: v.array(v.object({ resourceId: v.string(), versionId: v.string(), sha256: v.string() })),
+});
+export const publicationFilterProtocolValidator = v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL));
 const chatResearchStoreValidator = v.object({
   jurisdictionId: v.id("jurisdictions"),
   name: v.string(),
@@ -386,6 +399,7 @@ const chatResearchStoreValidator = v.object({
     v.literal("organizational_geography"),
   ),
   storeName: v.string(),
+  publicationFilter: v.optional(publicationFilterValidator),
 });
 
 export const chatResearchStoresValidator = v.object({
@@ -394,14 +408,14 @@ export const chatResearchStoresValidator = v.object({
   partialCoverage: v.boolean(),
 });
 
-export type ChatResearchStore = ResearchScopeItem & { storeName: string };
+export type ChatResearchStore = ResearchScopeItem & { storeName: string; publicationFilter?: PublicationFilter };
 export type ChatResearchStores = {
   authorizedScopeSize: number;
   stores: ChatResearchStore[];
   partialCoverage: boolean;
 };
 
-export async function readyStoreName(
+async function uniquelyOwnedReadyStoreName(
   ctx: QueryCtx,
   jurisdictionId: Id<"jurisdictions">,
 ): Promise<string | null> {
@@ -421,19 +435,62 @@ export async function readyStoreName(
   return owners.length === 1 && owners[0]._id === row._id ? storeName : null;
 }
 
+/** Legacy/manual-store consumers cannot silently bypass a required filter. */
+export async function readyStoreName(ctx: QueryCtx, jurisdictionId: Id<"jurisdictions">): Promise<string | null> {
+  const row = await ctx.db.get("jurisdictions", jurisdictionId);
+  if (row?.geminiSearchRestriction !== undefined) return null;
+  return await uniquelyOwnedReadyStoreName(ctx, jurisdictionId);
+}
+
+async function readyResearchStore(
+  ctx: QueryCtx, item: ResearchScopeItem, protocol?: typeof PUBLICATION_FILTER_PROTOCOL,
+): Promise<ChatResearchStore | null> {
+  const row = await ctx.db.get("jurisdictions", item.jurisdictionId);
+  const storeName = await uniquelyOwnedReadyStoreName(ctx, item.jurisdictionId);
+  if (!row || !storeName) return null;
+  const restriction = row.geminiSearchRestriction;
+  if (restriction === undefined) return { ...item, storeName };
+  const environment = process.env.ADMIN_ENVIRONMENT;
+  if (protocol !== PUBLICATION_FILTER_PROTOCOL || !isPublicationEnvironment(environment)
+    || !restriction.failedVersionIds.length || restriction.failedVersionIds.length > MAX_PUBLISHED_FILTER_DOCUMENTS
+    || new Set(restriction.failedVersionIds).size !== restriction.failedVersionIds.length) return null;
+  // Read the complete bounded published catalogue, not a truncated allowlist.
+  const resources = await ctx.db.query("legalResources")
+    .withIndex("by_jurisdictionId_and_status_and_catalogPublished", q =>
+      q.eq("jurisdictionId", row._id).eq("status", "active").eq("catalogPublished", true))
+    .take(MAX_PUBLISHED_FILTER_DOCUMENTS + 1);
+  if (!resources.length || resources.length > MAX_PUBLISHED_FILTER_DOCUMENTS) return null;
+  const documents = [];
+  const failedVersions = new Set(restriction.failedVersionIds);
+  for (const resource of resources) {
+    const version = resource.activeVersionId ? await ctx.db.get(resource.activeVersionId) : null;
+    if (!version || version.status !== "published" || version.resourceId !== resource._id
+      || failedVersions.has(version._id) || !version.geminiDocumentName
+      || !isGeminiDocumentName(version.geminiDocumentName) || !version.geminiDocumentName.startsWith(`${storeName}/documents/`)) return null;
+    const locks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", q => q.eq("resourceId", resource._id)).take(1);
+    if (locks.length) return null;
+    documents.push({ resourceId: resource._id, versionId: version._id, sha256: version.sha256 });
+  }
+  const publicationFilter = parsePublicationFilter({ protocol, environment, documents });
+  if (!publicationFilter) return null;
+  const store = { ...item, storeName, publicationFilter };
+  try { buildPublicationMetadataFilter([store]); } catch { return null; }
+  return store;
+}
+
 export async function resolveChatResearchStoresForJurisdiction(
   ctx: QueryCtx,
   jurisdictionId: Id<"jurisdictions">,
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL,
 ): Promise<ChatResearchStores> {
   const scope = await resolveResearchScopeForJurisdiction(ctx, jurisdictionId);
-  const storeNames = await Promise.all(
-    scope.items.map(async (item) => await readyStoreName(ctx, item.jurisdictionId)),
+  const readyStores = await Promise.all(
+    scope.items.map(async (item) => await readyResearchStore(ctx, item, publicationFilterProtocol)),
   );
-  if (!storeNames[0]) throw new ConvexError("CHAT_RESEARCH_STORE_NOT_READY");
-  const stores = scope.items.flatMap((item, index) => {
-    const storeName = storeNames[index];
-    return storeName ? [{ ...item, storeName }] : [];
-  });
+  if (!readyStores[0]) throw new ConvexError("CHAT_RESEARCH_STORE_NOT_READY");
+  const stores = readyStores.filter((store): store is ChatResearchStore => store !== null);
+  try { buildPublicationMetadataFilter(stores); }
+  catch { throw new ConvexError("CHAT_RESEARCH_STORE_NOT_READY"); }
   return {
     authorizedScopeSize: scope.items.length,
     stores,
@@ -443,11 +500,11 @@ export async function resolveChatResearchStoresForJurisdiction(
 
 /** Private selected-first store resolution for the authenticated Next server route. */
 export const resolveChatResearchStores = internalQuery({
-  args: { jurisdictionId: v.string() },
+  args: { jurisdictionId: v.string(), publicationFilterProtocol: publicationFilterProtocolValidator },
   returns: chatResearchStoresValidator,
   handler: async (ctx, args): Promise<ChatResearchStores> => {
     const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
     if (!jurisdictionId) throw new ConvexError("JURISDICTION_ACCESS_DENIED");
-    return await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
+    return await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, args.publicationFilterProtocol);
   },
 });

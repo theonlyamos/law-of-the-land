@@ -1,5 +1,6 @@
 /** Shared closed contract for persisted local reviewed verification. It contains
  * no provider credentials, browser tokens, source text or private candidates. */
+import { PUBLICATION_FILTER_PROTOCOL } from "./gemini-publication-filter";
 export const REVIEWED_EMPLOYMENT_JOB_STATUSES = ["queued", "running", "succeeded", "blocked", "cancelled", "expired"] as const;
 export const REVIEWED_EMPLOYMENT_JOB_PROGRESS = ["queued", "draft", "inventory", "consent", "overtime", "commit", "complete"] as const;
 export const REVIEWED_EMPLOYMENT_JOB_ERRORS = ["invalid_request", "authority_unavailable", "draft_blocked", "verification_blocked", "commit_failed", "deadline_exceeded", "cancelled", "internal"] as const;
@@ -15,9 +16,11 @@ export type ReviewedEmploymentJobProjection = Readonly<{
 }>;
 export type ReviewedEmploymentJobOperation = "claim" | "state" | "authority" | "reserve" | "passed" | "fail" | "commit";
 export type ReviewedEmploymentJobWorkerInput = Readonly<{
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
   jobId: string; workerId: string; operation: ReviewedEmploymentJobOperation; body: string; issuedAt: number;
 }>;
 export type ReviewedEmploymentJobSubmitInput = Readonly<{
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
   submissionId: string; externalId: string; jurisdictionId: string; userClientId: string; assistantClientId: string;
   submission: string; issuedAt: number;
 }>;
@@ -33,11 +36,13 @@ export const REVIEWED_EMPLOYMENT_VERIFICATION_WINDOW_MS = 240_000;
 export const REVIEWED_EMPLOYMENT_TERMINAL_WINDOW_MS = 270_000;
 export const REVIEWED_EMPLOYMENT_JOB_PROOF_WINDOW_MS = 60_000;
 export async function reviewedEmploymentJobProofParts(input: ReviewedEmploymentJobWorkerInput): Promise<readonly (string | number)[]> {
-  return ["reviewed-employment-background-worker-v1", input.jobId, input.workerId, input.operation, input.body, input.issuedAt];
+  return ["reviewed-employment-background-worker-v1", input.jobId, input.workerId, input.operation, input.body, input.issuedAt,
+    ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol])];
 }
 export async function reviewedEmploymentJobSubmitProofParts(input: ReviewedEmploymentJobSubmitInput): Promise<readonly (string | number)[]> {
   return ["reviewed-employment-background-submit-v1", input.submissionId, input.externalId, input.jurisdictionId,
-    input.userClientId, input.assistantClientId, input.submission, input.issuedAt];
+    input.userClientId, input.assistantClientId, input.submission, input.issuedAt,
+    ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol])];
 }
 /** Strict transport projection shared by the route and UI. Extra keys close the
  * response so raw submission, candidate or worker authority can never leak. */

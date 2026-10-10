@@ -48,6 +48,7 @@ import { reviewedEmploymentNextEnvironment } from "@/lib/source-verification/rev
 import { parseReviewedEmploymentJobProjection, reviewedEmploymentJobSubmitProofParts,
   type ReviewedEmploymentJobProjection, type ReviewedEmploymentJobSubmitInput } from "../../../../shared/reviewed-employment-jobs";
 import { productionReviewedEmploymentEnabled, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY } from "../../../../shared/reviewed-employment-policy";
+import { createPublicationFilterBinding, parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL } from "../../../../shared/gemini-publication-filter";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -84,6 +85,8 @@ type Coverage = {
 };
 const POLICY_MANIFEST: ResearchManifest = { authorizedScopeSize: 0, stores: [], partialCoverage: false };
 type CompletionInput = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
+  publicationFilterBinding?: string;
   routeNonce: string;
   externalId: string;
   jurisdictionId: string;
@@ -330,7 +333,7 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const store = entry as Record<string, unknown>;
     if (
-      !exactKeys(store, ["jurisdictionId", "name", "kind", "relation", "storeName"])
+      !exactKeys(store, ["jurisdictionId", "name", "kind", "relation", "storeName", ...(Object.hasOwn(store, "publicationFilter") ? ["publicationFilter"] : [])])
       || !boundedIdentifier(store.jurisdictionId)
       || !boundedIdentifier(store.name)
       || !boundedIdentifier(store.storeName)
@@ -344,6 +347,8 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
       || jurisdictionIds.has(store.jurisdictionId)
       || storeNames.has(store.storeName)
     ) return null;
+    const publicationFilter = Object.hasOwn(store, "publicationFilter") ? parsePublicationFilter(store.publicationFilter) : undefined;
+    if (publicationFilter === null) return null;
     jurisdictionIds.add(store.jurisdictionId);
     storeNames.add(store.storeName);
     stores.push({
@@ -352,6 +357,7 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
       kind: store.kind,
       relation: store.relation,
       storeName: store.storeName,
+      ...(publicationFilter ? { publicationFilter } : {}),
     });
   }
   return {
@@ -375,7 +381,7 @@ async function loadManifest(
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ jurisdictionId }),
+      body: JSON.stringify({ jurisdictionId, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }),
       cache: "no-store",
       signal,
     }),
@@ -430,8 +436,11 @@ function failureInput(
   failureCategory?: FailureCategory,
   attachmentIds?: string[],
   diagnostics?: QueryDiagnostics,
+  publicationFilterBinding?: string,
 ): CompletionInput {
   return {
+    publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+    ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
     routeNonce,
     externalId: body.externalId,
     jurisdictionId: body.jurisdictionId,
@@ -535,6 +544,7 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
 function streamResponse(input: {
   body: ChatBody;
   manifest: ResearchManifest;
+  publicationFilterBinding?: string;
   reply: string | null;
   model: string;
   routeNonce: string;
@@ -632,7 +642,12 @@ function streamResponse(input: {
               commit: async ({ answer, citations, manifest, signal }) => {
                 // All model work has finished by its original cutoff. Retain the terminal reserve.
                 clearTimeout(input.modelTimer); phase = "completion";
+                // The reviewed flow retains this authority snapshot from
+                // before drafting and checks it throughout verification.
+                const publicationFilterBinding = await raceWithAbort(createPublicationFilterBinding(manifest.stores), signal);
                 const completion: ReviewedEmploymentCommitInput["completion"] = {
+                  publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+                  ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
                   routeNonce: input.routeNonce, externalId: input.body.externalId, jurisdictionId: input.body.jurisdictionId,
                   assistantClientId: input.body.assistantClientId, finalAnswer: answer, answerKind: "legal", citations: [...citations],
                   model: completionModel, elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)), outcome: "success",
@@ -728,6 +743,8 @@ function streamResponse(input: {
           phase = "completion";
           const answerKind: ChatAnswerKind = input.answerMode === "document" ? "document" : isChatPolicyResponse(result.answer) ? "policy" : "legal";
           const terminalInput: CompletionInput = {
+            publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+            ...(input.publicationFilterBinding === undefined ? {} : { publicationFilterBinding: input.publicationFilterBinding }),
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
             jurisdictionId: input.body.jurisdictionId,
@@ -811,6 +828,7 @@ function streamResponse(input: {
                 aborted ? undefined : category,
                 input.attachmentContext?.attachmentIds,
                 failureDiagnostics,
+                input.publicationFilterBinding,
               ),
               input.terminalDeadlineAt,
               // A client may stop reading after the terminal error. Keep that confirmed
@@ -1042,6 +1060,11 @@ export async function POST(request: Request): Promise<Response> {
       manifest = loaded;
     }
 
+    // Capture the actual admitted allowlist before any governed provider work.
+    // Final completion compares this original snapshot with the current backend
+    // catalogue, including changes to uncited documents and ancestor stores.
+    const publicationFilterBinding = await raceWithAbort(createPublicationFilterBinding(manifest.stores), streamSignal);
+
     const routeNonce = createOpaqueTelemetryToken();
     // An in-flight production rollback must never open the synchronous verifier.
     if (reviewed && productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
@@ -1055,6 +1078,7 @@ export async function POST(request: Request): Promise<Response> {
         return stopEarly(jsonError("This conversation has more detail than this answer can safely review. Start a new chat with the relevant facts and files.", 400));
       }
       const input: ReviewedEmploymentJobSubmitInput = { submissionId: body.assistantClientId, externalId: body.externalId,
+        publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
         jurisdictionId: body.jurisdictionId, userClientId: body.userClientId!, assistantClientId: body.assistantClientId,
         submission, issuedAt: Date.now() };
       // Once admission is complete, saving the job and scheduling its worker are
@@ -1113,6 +1137,7 @@ export async function POST(request: Request): Promise<Response> {
     return streamResponse({
       body: reviewed ? body : { ...body, messages: legacyHistory },
       manifest,
+      ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
       reply,
       model: safeModelName(),
       routeNonce,

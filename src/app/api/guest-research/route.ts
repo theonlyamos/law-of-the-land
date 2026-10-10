@@ -7,6 +7,7 @@ import {
 import { createOpaqueTelemetryToken, hashOpaqueTelemetryValue } from "@/convex/lib/telemetryProof";
 import { validWidgetRequestId } from "@/convex/lib/widgetContracts";
 import { isChatPolicyResponse } from "@/convex/lib/chatPolicy";
+import { PUBLICATION_FILTER_PROTOCOL } from "../../../../shared/gemini-publication-filter";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
     assertResearchRequest(request);
     const tokenHash = await guestSessionHash(request);
     if (!tokenHash) return guestJson(null);
-    const result = await callGuestBridge("read", { tokenHash });
+    const result = await callGuestBridge("read", { tokenHash, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
     return "error" in result ? guestError(result.error) : guestJson(result);
   } catch (caught) { return guestFailure(caught); }
 }
@@ -28,12 +29,12 @@ export async function PUT(request: Request) {
     if (!jurisdictionId || jurisdictionId.length > 128 || jurisdictionId !== jurisdictionId.trim()) throw new Error("INVALID_REQUEST");
     const existing = await guestSessionHash(request);
     if (existing) {
-      const result = await callGuestBridge("read", { tokenHash: existing });
+      const result = await callGuestBridge("read", { tokenHash: existing, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
       if (!("error" in result)) return guestJson(result);
       if (!["SESSION_EXPIRED", "SESSION_INVALID", "LIBRARY_CHANGED"].includes(result.error.code)) return guestError(result.error);
     }
     const token = createOpaqueTelemetryToken(), tokenHash = await hashOpaqueTelemetryValue(token);
-    const result = await callGuestBridge("session", { jurisdictionId, tokenHash, ipKey: researchIp(request) });
+    const result = await callGuestBridge("session", { jurisdictionId, tokenHash, ipKey: researchIp(request), publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
     return "error" in result ? guestError(result.error) : guestJson(result, 200, token);
   } catch (caught) { return guestFailure(caught); }
 }
@@ -55,14 +56,14 @@ export async function POST(request: Request) {
     if (!input.jurisdictionId || input.jurisdictionId.length > 128 || !validWidgetRequestId(input.requestId) || !input.query.trim() || input.query.length > 4000) throw new Error("INVALID_REQUEST");
     const tokenHash = await guestSessionHash(request);
     if (!tokenHash) throw new Error("SESSION_INVALID");
-    const current = await callGuestBridge("read", { tokenHash });
+    const current = await callGuestBridge("read", { tokenHash, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
     if ("error" in current) return guestError(current.error);
     if (current.jurisdictionId !== input.jurisdictionId) return guestError({ code: "REQUEST_CONFLICT", message: "This guest conversation uses a different jurisdiction. Sign in to start another research thread." });
     if (!process.env.GOOGLE_AI_API_KEY) throw new Error("WIDGET_UNAVAILABLE");
-    const admitted = await callGuestBridge("begin", { tokenHash, requestId: input.requestId, query: input.query.trim(), ipKey: researchIp(request) });
+    const admitted = await callGuestBridge("begin", { tokenHash, requestId: input.requestId, query: input.query.trim(), ipKey: researchIp(request), publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
     if (admitted.kind === "denied") return guestError(admitted.error);
     if (admitted.kind === "existing") {
-      const result = await callGuestBridge("read", { tokenHash });
+      const result = await callGuestBridge("read", { tokenHash, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
       return "error" in result ? guestError(result.error) : guestJson(result, admitted.turn.status === "pending" ? 202 : 200);
     }
     const timeout = AbortSignal.timeout(90_000);
@@ -79,18 +80,20 @@ export async function POST(request: Request) {
       }), providerSignal);
       providerFinished = true;
       const turn = await callGuestBridge("finish", {
+        publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
         turnId: admitted.turnId, attemptNonce: admitted.attemptNonce, outcome: "completed",
         answer: result.answer, answerKind: isChatPolicyResponse(result.answer) ? "policy" : "legal",
         citations: result.citations, providerFinished,
       }, { signal: terminalSignal });
       if (turn.status !== "completed") return guestError(turn.error ?? { code: "ANSWER_UNAVAILABLE", message: "We couldn't validate this answer. Please try again." });
-      const view = await callGuestBridge("read", { tokenHash }, { signal: terminalSignal });
+      const view = await callGuestBridge("read", { tokenHash, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }, { signal: terminalSignal });
       return "error" in view ? guestError(view.error) : guestJson(view);
     } catch {
       const error = { code: timeout.aborted ? "GENERATION_TIMEOUT" as const : "ANSWER_UNAVAILABLE" as const,
         message: "We couldn't finish this answer. Check the conversation before trying again; failed answers don't use your trial." };
       try {
         await callGuestBridge("finish", {
+          publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
           turnId: admitted.turnId, attemptNonce: admitted.attemptNonce,
           outcome: request.signal.aborted ? "aborted" : "failed", citations: [], error, providerFinished,
         }, { signal: terminalSignal });

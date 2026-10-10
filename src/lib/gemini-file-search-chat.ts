@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { GoogleGenAI, Interactions } from "@google/genai";
+import { buildPublicationMetadataFilter, type PublicationFilter } from "../../shared/gemini-publication-filter";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
 import { CHAT_POLICY_RESPONSES, isChatPolicyResponse } from "../../convex/lib/chatPolicy";
 import {
@@ -137,6 +138,7 @@ export type ChatStore = {
   kind: "geographic" | "organizational";
   relation: "selected" | "geographic_ancestor" | "organizational_geography";
   storeName: string;
+  publicationFilter?: PublicationFilter;
 };
 
 export type ValidatedCitation = {
@@ -434,6 +436,8 @@ function validateInput(input: GovernedChatInput): void {
       throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
     }
   }
+  try { buildPublicationMetadataFilter(input.stores); }
+  catch { throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid"); }
 }
 
 function validateAttachments(attachments: readonly ChatModelAttachment[]): void {
@@ -496,6 +500,7 @@ function requestFor(
   model: string,
   input: GovernedChatInput,
 ): Interactions.CreateModelInteractionParamsStreaming {
+  const metadataFilter = buildPublicationMetadataFilter(input.stores);
   const question: Interactions.TextContent = {
     type: "text",
     text: JSON.stringify({ untrustedQuestion: input.query, conversation: boundedHistory(input.history) }),
@@ -518,6 +523,7 @@ function requestFor(
     ...(documentMode ? {} : { tools: [{
       type: "file_search" as const,
       file_search_store_names: input.stores.map((store) => store.storeName),
+      ...(metadataFilter === undefined ? {} : { metadata_filter: metadataFilter }),
     }] }),
     generation_config: {
       max_output_tokens: input.maxOutputTokens ?? 8_192,
@@ -721,6 +727,8 @@ function citationsFor(
       || !isIdentifier(versionId)
       || !store
       || providerStoreName !== store.storeName
+      || (store.publicationFilter !== undefined && !store.publicationFilter.documents.some(document =>
+        document.resourceId === resourceId && document.versionId === versionId))
     ) {
       return reject("citation_identity");
     }

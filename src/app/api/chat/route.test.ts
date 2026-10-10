@@ -33,6 +33,7 @@ import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { ChatAttachmentError } from "@/lib/chat-attachment-server";
 import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
 import { verifyTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
+import { createPublicationFilterBinding } from "../../../../shared/gemini-publication-filter";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -226,6 +227,77 @@ afterEach(() => {
   delete process.env.TELEMETRY_INGEST_SECRET;
   delete process.env.CHAT_INTENT_ROUTING_MODE;
   delete process.env.TYPESAFE_API_KEY;
+});
+
+it("opts into published-document filtering and preserves the backend allowlist through provider and completion", async () => {
+  const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+  ] };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  const response = await POST(request());
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+  const manifestRequest = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+  expect(manifestRequest).toEqual({ jurisdictionId: selectedJurisdictionId, publicationFilterProtocol: "published-v1" });
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).toContain(`version_id="${selectedVersionId}"`);
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion.publicationFilterProtocol).toBe("published-v1");
+  expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
+});
+
+it("retains the original restricted allowlist binding on provider failure", async () => {
+  const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+  ] };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  interactionMocks.create.mockRejectedValueOnce(new Error("provider unavailable"));
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const response = await POST(request());
+  expect((await events(response)).at(-1)).toMatchObject({ type: "error" });
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion).toMatchObject({ outcome: "failure", publicationFilterProtocol: "published-v1" });
+  expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
+});
+
+it("withholds an answer when an uncited allowlisted document changes during provider work", async () => {
+  const cited = { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "c".repeat(64) };
+  const originalStores = [{ ...manifest.stores[0], publicationFilter: { protocol: "published-v1" as const,
+    environment: "production", documents: [cited, { resourceId: "resource-A", versionId: "version-A", sha256: "a".repeat(64) }] } }];
+  const changedStores = [{ ...manifest.stores[0], publicationFilter: { protocol: "published-v1" as const,
+    environment: "production", documents: [cited, { resourceId: "resource-B", versionId: "version-B", sha256: "b".repeat(64) }] } }];
+  const originalBinding = await createPublicationFilterBinding(originalStores);
+  const changedBinding = await createPublicationFilterBinding(changedStores);
+  let currentBinding = originalBinding;
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest, stores: originalStores })));
+  interactionMocks.create.mockImplementationOnce(async () => { currentBinding = changedBinding; return successfulStream(); });
+  const originalMutation = authMocks.fetchAuthMutation.getMockImplementation()!;
+  authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+    if (getFunctionName(reference) === "chats:completeGovernedInteraction" && args.outcome === "success"
+      && args.publicationFilterBinding !== currentBinding) throw new Error("INVALID_GOVERNED_INTERACTION");
+    return originalMutation(reference, args);
+  });
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const response = await POST(request());
+  const result = await events(response);
+  expect(result.at(-1)).toMatchObject({ type: "error" });
+  expect(result.some(event => event.type === "done")).toBe(false);
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference, args]) =>
+    getFunctionName(reference) === "chats:completeGovernedInteraction" && args.outcome === "success")?.[1];
+  expect(completion.publicationFilterBinding).toBe(originalBinding);
+  expect(completion.publicationFilterBinding).not.toBe(changedBinding);
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).toContain('version_id="version-A"');
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).not.toContain('version_id="version-B"');
+});
+
+it.each([null, { protocol: "published-v1", environment: "production", documents: [] },
+  { protocol: "published-v1", environment: "production", documents: [{ resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "invalid" }] },
+])("rejects malformed backend publication filters before consuming quota %j", async publicationFilter => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  expect((await POST(request())).status).toBe(400);
+  expect(mutationNames()).not.toContain("usage:recordQuestion");
+  expect(interactionMocks.create).not.toHaveBeenCalled();
 });
 
 describe("POST /api/chat attachment integration", () => {
@@ -900,7 +972,7 @@ describe("POST /api/chat request boundary", () => {
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ authorization: "Bearer user-session-token" }),
-        body: JSON.stringify({ jurisdictionId: selectedJurisdictionId }),
+        body: JSON.stringify({ jurisdictionId: selectedJurisdictionId, publicationFilterProtocol: "published-v1" }),
         cache: "no-store",
         signal: expect.any(AbortSignal),
       }),

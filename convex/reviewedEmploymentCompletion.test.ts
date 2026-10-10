@@ -11,6 +11,8 @@ import * as reviewedCompletion from "./reviewedEmploymentCompletion";
 import * as reviewedSource from "./reviewedEmployment";
 import { createOpaqueTelemetryToken, createTelemetryServiceProof } from "./lib/telemetryProof";
 import { reviewedEmploymentCommitProofParts, type ReviewedEmploymentCommitInput } from "./reviewedEmploymentCompletion";
+import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { createPublicationFilterBinding } from "../shared/gemini-publication-filter";
 
 // Only the deployment-specific fixed catalog is replaced with synthetic fixture
 // IDs/bytes. Authentication, authorization, completion and persistence are real.
@@ -230,6 +232,21 @@ describe("reviewed employment trusted job principal", () => {
 });
 
 describe("reviewed employment atomic commit", () => {
+  it("requires the signed original allowlist binding to commit reviewed research in a restricted store", async () => {
+    const f = await fixture();
+    await f.t.run(async ctx => {
+      const { _id: _id, _creationTime: _creationTime, ...version } = (await ctx.db.get(f.ids.versionId))!;
+      const failedId = await ctx.db.insert("documentVersions", { ...version, versionNumber: 2, status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(f.ids.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failedId] } });
+    });
+    f.input.completion.publicationFilterProtocol = "published-v1";
+    await expect(f.commit()).rejects.toThrow("GOVERNED_INTERACTION_SCOPE_CHANGED");
+    expect(await state(f.t)).toEqual({ claims: [], runs: [], messages: [] });
+    const manifest = await f.t.run(ctx => resolveChatResearchStoresForJurisdiction(ctx, f.ids.jurisdictionId, "published-v1"));
+    f.input.completion.publicationFilterBinding = await createPublicationFilterBinding(manifest.stores);
+    expect(await f.commit()).toMatchObject({ status: "completed", persisted: true });
+    expect((await state(f.t)).messages).toHaveLength(2);
+  });
   it("pins the real server policy to the exact reviewed ACT 651 edition", async () => {
     const actual = await vi.importActual<typeof import("../shared/reviewed-employment-policy")>("../shared/reviewed-employment-policy");
     expect(actual.REVIEWED_EMPLOYMENT_POLICY).toEqual({ jurisdictionId: "md744z756x2etfcscnx9ayys8n8dp2mc",

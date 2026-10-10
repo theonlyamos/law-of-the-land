@@ -8,13 +8,15 @@ import { consumeRateBucket } from "./lib/rateBuckets";
 import { optionalUserId } from "./lib/requireUser";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { isChatPolicyResponse } from "./lib/chatPolicy";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 import { validWidgetRequestId, widgetCitationIdentityValidator, type CitationIdentity } from "./lib/widgetContracts";
 import {
   GUEST_RESEARCH_LIMIT, GUEST_RESEARCH_LIFETIME_MS, guestErrorValidator, guestSessionResponseValidator,
   guestTurnValidator, type GuestError, type GuestSessionView, type GuestTurnView,
 } from "./lib/guestResearchContracts";
 
-const sessionArgs = { tokenHash: v.string() };
+const capabilityArgs = { publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)) };
+const sessionArgs = { tokenHash: v.string(), ...capabilityArgs };
 const LEASE_MS = 120_000;
 const MAX_ATTEMPTS = 20;
 const failureValidator = v.object({ error: guestErrorValidator });
@@ -56,11 +58,11 @@ function enabled() { if (process.env.GUEST_RESEARCH_ENABLED !== "true") fail("WI
 function validToken(tokenHash: string) { if (!/^[A-Za-z0-9_-]{43}$/.test(tokenHash)) fail("SESSION_INVALID"); }
 function validIp(ipKey: string) { if (!/^[A-Za-z0-9_-]{1,128}$/.test(ipKey)) fail("INVALID_REQUEST"); }
 
-async function publicScope(ctx: MutationCtx, jurisdictionId: Id<"jurisdictions">) {
+async function publicScope(ctx: MutationCtx, jurisdictionId: Id<"jurisdictions">, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL) {
   const selected = await ctx.db.get(jurisdictionId);
   // Explicit even with an authenticated adoption request: guest authority never includes membership.
   if (!selected || selected.visibility !== "public") fail("WIDGET_UNAVAILABLE");
-  const manifest = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
+  const manifest = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, publicationFilterProtocol);
   const revisions = [];
   const legacyLocks = await ctx.db.query("documentLifecycleLocks").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", undefined)).take(1);
   if (legacyLocks.length) fail("WIDGET_UNAVAILABLE");
@@ -77,12 +79,12 @@ async function publicScope(ctx: MutationCtx, jurisdictionId: Id<"jurisdictions">
   }
   return { manifest, binding: JSON.stringify([manifest, revisions]) };
 }
-async function sessionFor(ctx: MutationCtx, tokenHash: string) {
+async function sessionFor(ctx: MutationCtx, tokenHash: string, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL) {
   enabled(); validToken(tokenHash);
   const session = await ctx.db.query("guestResearchSessions").withIndex("by_tokenHash", q => q.eq("tokenHash", tokenHash)).unique();
   if (!session) fail("SESSION_INVALID");
   if (session.expiresAt <= Date.now()) fail("SESSION_EXPIRED");
-  const scope = await publicScope(ctx, session.jurisdictionId);
+  const scope = await publicScope(ctx, session.jurisdictionId, publicationFilterProtocol);
   if (scope.binding !== session.scopeBinding) fail("LIBRARY_CHANGED");
   return { session, manifest: scope.manifest };
 }
@@ -101,8 +103,8 @@ async function sessionTurns(ctx: MutationCtx, session: Doc<"guestResearchSession
   }
   return turns;
 }
-async function view(ctx: MutationCtx, tokenHash: string): Promise<GuestSessionView> {
-  const { session, manifest } = await sessionFor(ctx, tokenHash);
+async function view(ctx: MutationCtx, tokenHash: string, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL): Promise<GuestSessionView> {
+  const { session, manifest } = await sessionFor(ctx, tokenHash, publicationFilterProtocol);
   const turns = await sessionTurns(ctx, session);
   for (const turn of turns) if (turn.status === "completed") await validateGovernedCitations(ctx, manifest.stores, turn.citations ?? []);
   const selected = manifest.stores[0];
@@ -119,21 +121,21 @@ export const createSession = internalMutation({
     try {
       enabled(); validToken(args.tokenHash); validIp(args.ipKey);
       const old = await ctx.db.query("guestResearchSessions").withIndex("by_tokenHash", q => q.eq("tokenHash", args.tokenHash)).unique();
-      if (old) { if (old.jurisdictionId !== args.jurisdictionId) fail("SESSION_INVALID"); return await view(ctx, args.tokenHash); }
+      if (old) { if (old.jurisdictionId !== args.jurisdictionId) fail("SESSION_INVALID"); return await view(ctx, args.tokenHash, args.publicationFilterProtocol); }
       const jurisdictionId = ctx.db.normalizeId("jurisdictions", args.jurisdictionId);
       if (!jurisdictionId) fail("INVALID_REQUEST");
-      const scope = await publicScope(ctx, jurisdictionId);
+      const scope = await publicScope(ctx, jurisdictionId, args.publicationFilterProtocol);
       const retry = await consumeRateBucket(ctx, "guest-sessions", args.ipKey, 5, 60 * 60_000);
       if (retry) return { error: error("RATE_LIMITED", retry) };
       const now = Date.now();
       await ctx.db.insert("guestResearchSessions", { tokenHash: args.tokenHash, jurisdictionId, scopeBinding: scope.binding, createdAt: now, expiresAt: now + GUEST_RESEARCH_LIFETIME_MS, attempts: 0 });
-      return await view(ctx, args.tokenHash);
+      return await view(ctx, args.tokenHash, args.publicationFilterProtocol);
     } catch (caught) { return failure(caught); }
   },
 });
 export const readSession = internalMutation({
   args: sessionArgs, returns: guestSessionResponseValidator,
-  handler: async (ctx, args) => { try { return await view(ctx, args.tokenHash); } catch (caught) { return failure(caught); } },
+  handler: async (ctx, args) => { try { return await view(ctx, args.tokenHash, args.publicationFilterProtocol); } catch (caught) { return failure(caught); } },
 });
 export const beginTurn = internalMutation({
   args: { ...sessionArgs, requestId: v.string(), query: v.string(), ipKey: v.string() }, returns: admissionValidator,
@@ -141,7 +143,7 @@ export const beginTurn = internalMutation({
     try {
       validIp(args.ipKey);
       if (!validWidgetRequestId(args.requestId) || !args.query.trim() || args.query.length > 4000) fail("INVALID_REQUEST");
-      const { session, manifest } = await sessionFor(ctx, args.tokenHash);
+      const { session, manifest } = await sessionFor(ctx, args.tokenHash, args.publicationFilterProtocol);
       if (session.adoptedBy) fail("TRIAL_EXHAUSTED");
       const turns = await sessionTurns(ctx, session);
       const old = turns.find(turn => turn.requestId === args.requestId);
@@ -176,6 +178,7 @@ export const beginTurn = internalMutation({
 
 export const finishTurn = internalMutation({
   args: {
+    ...capabilityArgs,
     turnId: v.id("guestResearchTurns"), attemptNonce: v.string(), outcome: v.union(v.literal("completed"), v.literal("failed"), v.literal("aborted")),
     answer: v.optional(v.string()), answerKind: v.optional(v.union(v.literal("legal"), v.literal("policy"))), citations: v.array(widgetCitationIdentityValidator),
     error: v.optional(guestErrorValidator), providerFinished: v.boolean(),
@@ -192,7 +195,7 @@ export const finishTurn = internalMutation({
     try {
       const session = await ctx.db.get(turn.sessionId);
       if (!session) fail("SESSION_INVALID");
-      const { manifest } = await sessionFor(ctx, session.tokenHash);
+      const { manifest } = await sessionFor(ctx, session.tokenHash, args.publicationFilterProtocol);
       if (session.adoptedBy) fail("SESSION_INVALID");
       if (turn.leaseExpiresAt <= Date.now()) fail("GENERATION_TIMEOUT");
       if (args.outcome === "completed") {
@@ -230,7 +233,7 @@ export const adoptSession = internalMutation({
     try {
       const userId = await optionalUserId(ctx);
       if (!userId) fail("AUTH_REQUIRED");
-      const { session, manifest } = await sessionFor(ctx, args.tokenHash);
+      const { session, manifest } = await sessionFor(ctx, args.tokenHash, args.publicationFilterProtocol);
       if (session.adoptedBy) {
         if (session.adoptedBy !== userId || !session.chatId) fail("SESSION_INVALID");
         return { chatId: session.chatId };

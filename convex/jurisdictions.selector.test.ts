@@ -103,6 +103,40 @@ async function insertGeographic(
 }
 
 describe("server-authorized research selection", () => {
+  it("projects the excluded-document count without exposing provider evidence", async () => {
+    const t = createBackend();
+    const id = await insertGeographic(t, { name: "OHADA" });
+    await t.run(async (ctx) => {
+      const versionId = await ctx.db.insert("documentVersions", {
+        resourceId: await ctx.db.insert("legalResources", {
+          jurisdictionId: id, title: "Excluded original", status: "active",
+          type: "act", catalogPublished: false, issuer: "OHADA",
+          officialCitation: "Excluded original", officialCitationKey: "excluded-original",
+          sourceUrl: "https://example.com/original.pdf", topics: [],
+          createdBy: "SECRET_ACTOR", updatedBy: "SECRET_ACTOR",
+          createdAt: Date.now(), updatedAt: Date.now(),
+        }),
+        versionNumber: 1, status: "failed", filename: "SECRET_ORIGINAL.pdf",
+        originalStorageId: await ctx.storage.store(new Blob(["original"])),
+        mimeType: "application/pdf", byteSize: 1, sha256: "a".repeat(64),
+        sourceUrl: "https://example.com/original.pdf", submittedBy: "SECRET_ACTOR",
+        createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      await ctx.db.patch(id, {
+        geminiSearchRestriction: {
+          kind: "published_only", establishedAt: Date.now(), failedVersionIds: [versionId, versionId],
+        },
+      });
+    });
+
+    const selection = await t.query(resolveResearchSelection, { jurisdictionId: id });
+    expect(selection).toMatchObject({ coverageWarning: { excludedDocumentCount: 1 } });
+    expect(JSON.stringify(selection)).not.toMatch(/SECRET_|failedVersionIds|establishedAt|gemini/);
+
+    const search = await t.query(searchAccessible, { kind: "geographic", query: "", cursor: null });
+    expect(search.page[0]).toMatchObject({ coverageWarning: { excludedDocumentCount: 1 } });
+  });
+
   it("resolves only a stable ID without returning legacy selector fields", async () => {
     const t = createBackend();
     const id = await insertGeographic(t, { name: "Ghana", legacyCountryCode: "GH" });

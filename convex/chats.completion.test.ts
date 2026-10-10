@@ -15,6 +15,8 @@ import schema from "./schema";
 import { CHAT_POLICY_RESPONSES } from "./lib/chatPolicy";
 import { emptyQueryDiagnosticStructure, queryDiagnosticsProofParts, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 import { completeGovernedInteractionProofParts } from "./chats";
+import { createPublicationFilterBinding } from "../shared/gemini-publication-filter";
+import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 
 const modules = import.meta.glob("./**/*.ts");
 const authModules = Object.fromEntries(
@@ -390,6 +392,63 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("binds the publication-filter capability into the signed completion proof", async () => {
+    const { base } = await fixture();
+    const tagged = { ...base, publicationFilterProtocol: "published-v1" as const };
+    expect(await completeGovernedInteractionProofParts(tagged)).toEqual([
+      ...await proofParts(base), "publication-filter-protocol", "published-v1",
+    ]);
+  });
+
+  it("allows filter-aware completion of verified published coverage and denies legacy completion", async () => {
+    const { t, owner, selection, document, base } = await fixture();
+    const failed = await publishedDocument(t, selection.jurisdictionId, selection.storeName, "Failed upload");
+    await t.run(async ctx => {
+      await ctx.db.patch(document.resourceId, { catalogPublished: true });
+      await ctx.db.patch(failed.versionId, { status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(failed.resourceId, { activeVersionId: undefined, catalogPublished: false });
+      await ctx.db.patch(selection.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failed.versionId] } });
+    });
+    await expect(complete(owner.client, base)).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+    const manifest = await owner.client.query(makeFunctionReference<"query">("jurisdictions:resolveChatResearchStores"), {
+      jurisdictionId: selection.jurisdictionId, publicationFilterProtocol: "published-v1",
+    });
+    const tagged = { ...base, publicationFilterProtocol: "published-v1" as const,
+      publicationFilterBinding: await createPublicationFilterBinding(manifest.stores) };
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...tagged,
+      serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(tagged)),
+    })).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("rejects a same-count published allowlist change before releasing an answer with unchanged cited sources", async () => {
+    const { t, owner, selection, document, base } = await fixture();
+    const changing = await publishedDocument(t, selection.jurisdictionId, selection.storeName, "Other published law");
+    const failed = await publishedDocument(t, selection.jurisdictionId, selection.storeName, "Failed upload");
+    await t.run(async ctx => {
+      await ctx.db.patch(document.resourceId, { catalogPublished: true });
+      await ctx.db.patch(changing.resourceId, { catalogPublished: true });
+      await ctx.db.patch(failed.versionId, { status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(failed.resourceId, { catalogPublished: false, activeVersionId: undefined });
+      await ctx.db.patch(selection.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failed.versionId] } });
+    });
+    const original = await owner.client.run(ctx => resolveChatResearchStoresForJurisdiction(ctx, selection.jurisdictionId, "published-v1"));
+    const tagged = { ...base, publicationFilterProtocol: "published-v1" as const,
+      publicationFilterBinding: await createPublicationFilterBinding(original.stores) };
+    const serviceProof = await createTelemetryServiceProof(await completeGovernedInteractionProofParts(tagged));
+    // The cited Constitution C remains valid; only the uncited tuple A changes.
+    await t.run(async ctx => {
+      const version = (await ctx.db.get(changing.versionId))!;
+      const { _id, _creationTime, ...fields } = version;
+      const replacement = await ctx.db.insert("documentVersions", { ...fields, versionNumber: 2, sha256: "b".repeat(64),
+        geminiDocumentName: `${selection.storeName}/documents/replacement` });
+      await ctx.db.patch(changing.resourceId, { activeVersionId: replacement });
+      await ctx.db.patch(changing.versionId, { status: "unpublished" });
+    });
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...tagged, serviceProof })).rejects.toThrow("GOVERNED_INTERACTION_SCOPE_CHANGED");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
   it.each([false, true])("persists private execution diagnostics and replays without writes (structure: %s)", async includeStructure => {
     const { t, owner, base } = await fixture();
     const diagnostics = executionDiagnostics(includeStructure);

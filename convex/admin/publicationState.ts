@@ -221,7 +221,8 @@ async function clearResolvedJurisdictionDrift(
   completedJobId: Id<"integrationJobs">,
   now: number,
 ) {
-  if (jurisdiction.providerSyncState !== "drifted") return;
+  // Only a fresh complete coverage proof may restore a restricted jurisdiction.
+  if (jurisdiction.providerSyncState !== "drifted" || jurisdiction.geminiSearchRestriction !== undefined) return;
   const unresolved: Doc<"integrationJobs">[] = [];
   for (const status of UNRESOLVED_PROVIDER_JOB_STATUSES) {
     for (const type of GEMINI_PROVIDER_JOB_TYPES) {
