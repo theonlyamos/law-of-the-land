@@ -96,6 +96,11 @@ export const jurisdictionDocumentValidator = v.object({
   geminiFileSearchStoreName: v.optional(v.string()),
   geminiEmbeddingModel: v.optional(v.string()),
   providerSyncState: providerSyncStateValidator,
+  geminiSearchRestriction: v.optional(v.object({
+    kind: v.literal("published_only"),
+    establishedAt: v.number(),
+    failedVersionIds: v.array(v.id("documentVersions")),
+  })),
   kind: v.optional(jurisdictionKindValidator),
   visibility: v.optional(jurisdictionVisibilityValidator),
   organizationId: v.optional(v.id("organizations")),
@@ -117,6 +122,7 @@ export const jurisdictionSearchPageValidator = v.object({
       isDefault: v.boolean(),
       organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
       visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
+      coverageWarning: v.optional(v.object({ excludedDocumentCount: v.number() })),
     }),
   ),
   group: v.union(

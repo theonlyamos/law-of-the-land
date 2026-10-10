@@ -75,6 +75,24 @@ afterEach(() => {
 });
 
 describe("ResearchJurisdictionPicker", () => {
+  it("keeps the excluded-document coverage notice visible after selection", () => {
+    const restricted: ResearchJurisdiction & { coverageWarning: { excludedDocumentCount: number } } = {
+      ...ghana,
+      coverageWarning: { excludedDocumentCount: 2 },
+    };
+    render(<ControlledPicker initialValue={restricted} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Search excludes 2 documents whose indexing failed.",
+    );
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Ghana");
+  });
+
+  it("omits the coverage notice for an unrestricted selection", () => {
+    render(<ControlledPicker initialValue={ghana} />);
+    expect(screen.queryByText(/documents? whose indexing failed/)).not.toBeInTheDocument();
+  });
+
   it("allows drafting before a compact jurisdiction selection and enables sending only after selection", async () => {
     mocks.query.mockResolvedValue({
       page: [ghana], group: "geographic", isDone: true, continueCursor: null,

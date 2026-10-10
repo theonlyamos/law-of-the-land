@@ -87,6 +87,18 @@ const knownStoreResultValidator = v.union(
   }),
   v.object({ kind: v.literal("store_deleted"), storeName: v.string() }),
 );
+const failedDocumentObservationValidator = v.object({
+  documentReference: v.string(), operationReference: v.string(), observedAt: v.number(),
+});
+const failedDocumentEvidenceValidator = v.object({
+  documentReference: v.string(), operationReference: v.string(), firstObservedAt: v.number(), confirmedAt: v.number(),
+  priorErrorKind: v.optional(v.string()), priorProviderPollCount: v.number(),
+  observedOperationDone: v.literal(false), observedDocumentState: v.literal("STATE_FAILED"),
+  coverageVerifiedAt: v.optional(v.number()), publishedCount: v.optional(v.number()),
+});
+const failedDocumentMetadataValidator = v.object({
+  environment: v.string(), jurisdiction_id: v.string(), resource_id: v.string(), version_id: v.string(), version_number: v.string(), sha256: v.string(),
+});
 const jobDocumentValidator = v.object({
   _id: v.id("integrationJobs"), organizationId: v.optional(v.id("organizations")), organizationRole: v.optional(v.union(v.literal("member"), v.literal("manager"), v.literal("reviewer"))),
   _creationTime: v.number(),
@@ -102,6 +114,8 @@ const jobDocumentValidator = v.object({
   providerOperationName: v.optional(v.string()),
   providerPollCount: v.optional(v.number()),
   providerPollingStartedAt: v.optional(v.number()),
+  failedDocumentObservation: v.optional(failedDocumentObservationValidator),
+  failedDocumentEvidence: v.optional(failedDocumentEvidenceValidator),
   knownStoreResult: v.optional(knownStoreResultValidator),
   recoveryKind: v.optional(v.union(
     v.literal("poll_operation"),
@@ -120,6 +134,7 @@ const jobDocumentValidator = v.object({
   lastProviderRawResponse: v.optional(v.string()),
   providerDiagnosticExpiresAt: v.optional(v.number()),
   retentionRedactedAt: v.optional(v.number()),
+  retentionPending: v.optional(v.boolean()),
   createdAt: v.number(),
   updatedAt: v.number(),
 });
@@ -799,7 +814,9 @@ export const getGeminiJobTarget = internalQuery({
 const geminiProviderResultValidator = v.union(
   v.object({ kind: v.literal("store_created"), storeName: v.string(), embeddingModel: v.string() }),
   v.object({ kind: v.literal("index_accepted"), operationName: v.string() }),
-  v.object({ kind: v.literal("index_pending") }),
+  v.object({ kind: v.literal("index_pending"), failedDocument: v.optional(v.object({
+    documentReference: v.string(), operationReference: v.string(), observedAt: v.number(), metadata: failedDocumentMetadataValidator,
+  })) }),
   v.object({ kind: v.literal("index_completed"), documentName: v.string() }),
   v.object({ kind: v.literal("index_failed"), errorKind: providerErrorKindValidator }),
   v.object({ kind: v.literal("document_deleted") }),
@@ -858,6 +875,7 @@ export async function succeedGeminiJob(
     lastProviderStatus: undefined,
     lastProviderRawResponse: undefined,
     providerDiagnosticExpiresAt: undefined,
+    failedDocumentObservation: undefined,
     recoveryKind: undefined,
     knownStoreResult: undefined,
     updatedAt: now,
@@ -950,6 +968,7 @@ export const applyGeminiProviderResult = internalMutation({
         providerOperationName: args.result.operationName,
         providerPollCount: 0,
         providerPollingStartedAt: now,
+        failedDocumentObservation: undefined,
         recoveryKind: "poll_operation",
         status: "waiting_provider",
         leaseToken: undefined,
@@ -968,6 +987,58 @@ export const applyGeminiProviderResult = internalMutation({
       const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active", permitDrift: true }, now);
       if (workflow.kind !== "index") throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       const pollingElapsedMs = now - (job.providerPollingStartedAt ?? job.createdAt);
+      const pollCount = job.providerPollCount ?? 0;
+      const observation = args.result.failedDocument;
+      const previousObservation = job.failedDocumentObservation;
+      if (observation !== undefined) {
+        const expectedMetadata = {
+          environment: process.env.ADMIN_ENVIRONMENT?.trim(), jurisdiction_id: workflow.jurisdiction._id,
+          resource_id: workflow.resource._id, version_id: workflow.version._id,
+          version_number: String(workflow.version.versionNumber), sha256: workflow.version.sha256,
+        };
+        if (!/^sha256:[a-f0-9]{64}$/.test(observation.documentReference) ||
+            observation.operationReference !== `sha256:${await hashJobValue(job.providerOperationName)}` ||
+            !Number.isFinite(observation.observedAt) || observation.observedAt > now || now - observation.observedAt > 60_000 ||
+            !Object.entries(expectedMetadata).every(([key, value]) => observation.metadata[key as keyof typeof observation.metadata] === value)) {
+          throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
+        }
+        const firstObservationElapsed = previousObservation
+          ? previousObservation.observedAt - (job.providerPollingStartedAt ?? job.createdAt)
+          : 0;
+        const requiredInterval = firstObservationElapsed >= GEMINI_INDEX_SLOW_POLL_AFTER_MS
+          ? GEMINI_INDEX_SLOW_POLL_DELAY_MS
+          : GEMINI_POLL_DELAYS_MS[Math.min(Math.max(pollCount, 1), GEMINI_POLL_DELAYS_MS.length - 1)];
+        const confirmed = previousObservation !== undefined &&
+          previousObservation.documentReference === observation.documentReference &&
+          previousObservation.operationReference === observation.operationReference &&
+          observation.observedAt - previousObservation.observedAt >= requiredInterval;
+        if (confirmed) {
+          await ctx.db.patch(job._id, {
+            status: "manual_review", leaseToken: undefined, leaseExpiresAt: undefined, nextAttemptAt: undefined,
+            providerPollCount: pollCount + 1, lastErrorKind: "provider", failedDocumentObservation: undefined,
+            failedDocumentEvidence: {
+              documentReference: observation.documentReference, operationReference: observation.operationReference,
+              firstObservedAt: previousObservation.observedAt, confirmedAt: observation.observedAt,
+              priorErrorKind: job.lastErrorKind, priorProviderPollCount: pollCount,
+              observedOperationDone: false, observedDocumentState: "STATE_FAILED",
+            },
+            updatedAt: now,
+          });
+          await markGeminiJurisdictionDrifted(ctx, job, false);
+          await ctx.db.patch(workflow.version._id, {
+            failureSummary: "Gemini reports STATE_FAILED for the exactly matched document while its upload operation remains pending. The cause may be the Google service or the document; it is not yet known. Publication is held for coverage reconciliation and review.",
+            updatedAt: now,
+          });
+          await releaseGeminiExecutionPermit(ctx, job, executionJurisdiction, now);
+          await auditJob(ctx, job, "failure", "integration.job_failed_document_confirmed");
+          return null;
+        }
+      }
+      const retainedObservation = observation === undefined ? undefined :
+        previousObservation?.documentReference === observation.documentReference &&
+        previousObservation.operationReference === observation.operationReference
+          ? previousObservation
+          : { documentReference: observation.documentReference, operationReference: observation.operationReference, observedAt: observation.observedAt };
       if (pollingElapsedMs >= GEMINI_INDEX_REVIEW_AFTER_MS) {
         await ctx.db.patch(job._id, {
           status: "manual_review",
@@ -975,6 +1046,7 @@ export const applyGeminiProviderResult = internalMutation({
           leaseExpiresAt: undefined,
           nextAttemptAt: undefined,
           lastErrorKind: "timeout",
+          failedDocumentObservation: retainedObservation,
           updatedAt: now,
         });
         await markGeminiJurisdictionDrifted(ctx, job, true);
@@ -982,12 +1054,12 @@ export const applyGeminiProviderResult = internalMutation({
         await auditJob(ctx, job, "failure", "integration.job_manual_review");
         return null;
       }
-      const pollCount = job.providerPollCount ?? 0;
       const delay = pollingElapsedMs >= GEMINI_INDEX_SLOW_POLL_AFTER_MS
         ? GEMINI_INDEX_SLOW_POLL_DELAY_MS
         : GEMINI_POLL_DELAYS_MS[Math.min(pollCount + 1, GEMINI_POLL_DELAYS_MS.length - 1)];
       await ctx.db.patch(job._id, {
         providerPollCount: pollCount + 1,
+        failedDocumentObservation: retainedObservation,
         status: "waiting_provider",
         leaseToken: undefined,
         leaseExpiresAt: undefined,
@@ -1009,6 +1081,7 @@ export const applyGeminiProviderResult = internalMutation({
         leaseExpiresAt: undefined,
         nextAttemptAt: undefined,
         lastErrorKind: args.result.errorKind,
+        failedDocumentObservation: undefined,
         recoveryKind: undefined,
         updatedAt: now,
         retentionPending: true,
@@ -1110,7 +1183,7 @@ export async function claimJobDocument(
   allowStaleRunning = false,
   allowUncertainManualReview = false,
 ) {
-  if (!isGeminiJobDocument(job)) return null;
+  if (!isGeminiJobDocument(job) || job.failedDocumentEvidence !== undefined) return null;
   if (
       job.status !== "queued" &&
       job.status !== "waiting_provider" &&
@@ -1208,6 +1281,7 @@ export const reconcileManualReviewJob = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const job = await ctx.db.get(args.jobId);
+    if (job?.failedDocumentEvidence !== undefined) return null;
     let geminiRecovery = job?.recoveryKind === "apply_store_result" &&
       job.knownStoreResult !== undefined &&
       knownStoreResultMatchesJob(job, job.knownStoreResult);
@@ -1363,6 +1437,7 @@ export const recordProviderFailure = internalMutation({
         leaseToken: undefined,
         leaseExpiresAt: undefined,
         lastErrorKind: args.kind,
+        failedDocumentObservation: undefined,
         ...providerDiagnostic,
         updatedAt: now,
       });
@@ -1379,6 +1454,7 @@ export const recordProviderFailure = internalMutation({
       leaseToken: undefined,
       leaseExpiresAt: undefined,
       lastErrorKind: args.kind,
+      failedDocumentObservation: undefined,
       ...providerDiagnostic,
       recoveryKind: status === "failed" ? undefined : replacementDeleteWorkflow ? "delete_document" : job.recoveryKind,
       knownStoreResult: status === "failed" ? undefined : job.knownStoreResult,
@@ -1591,6 +1667,7 @@ export async function retryJobForActor(ctx: MutationCtx, args: { jobId: Id<"inte
     if (replay) return replay;
     let job = await ctx.db.get(args.jobId);
     if (!job || !isGeminiJobDocument(job)) throw new ConvexError("Integration job was not found");
+    if (job.failedDocumentEvidence !== undefined) throw new ConvexError("GEMINI_FAILED_DOCUMENT_RECONCILIATION_REQUIRED");
 
     if (actor.organizationId) {
       const jurisdiction = await geminiJobJurisdiction(ctx, job);
@@ -1622,7 +1699,7 @@ export async function retryJobForActor(ctx: MutationCtx, args: { jobId: Id<"inte
       const claim = await claimJobDocument(ctx, job, false, true);
       if (!claim) throw new ConvexError("Integration job is not retryable");
       if (job.type === "gemini_index_document" && job.recoveryKind === "poll_operation") {
-        await ctx.db.patch(job._id, { providerPollingStartedAt: now });
+        await ctx.db.patch(job._id, { providerPollingStartedAt: now, failedDocumentObservation: undefined });
       }
       await ctx.scheduler.runAfter(0, jobRunner(job.type), { jobId: job._id, leaseToken: claim.leaseToken });
       status = "running";

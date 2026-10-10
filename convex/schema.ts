@@ -71,6 +71,11 @@ export default defineSchema({
     productionBucketId: v.optional(v.string()),
     geminiFileSearchStoreName: v.optional(v.string()),
     geminiEmbeddingModel: v.optional(v.string()),
+    // Failed provider documents can later change state; retrieval remains published-only.
+    geminiSearchRestriction: v.optional(v.object({
+      kind: v.literal("published_only"), establishedAt: v.number(),
+      failedVersionIds: v.array(v.id("documentVersions")),
+    })),
     // Server-only provider serialization. Client projections deliberately omit it.
     geminiExecutionPermit: v.optional(v.object({
       jobId: v.id("integrationJobs"),
@@ -229,6 +234,11 @@ export default defineSchema({
       v.literal("archived"),
     ),
     activeVersionId: v.optional(v.id("documentVersions")),
+    // Durable resource-level guard: uploading another version cannot replay a pending operation.
+    geminiPublicationBlock: v.optional(v.object({
+      jobId: v.id("integrationJobs"), versionId: v.id("documentVersions"),
+      storeName: v.string(), sha256: v.string(), recordedAt: v.number(),
+    })),
     catalogPublished: v.optional(v.boolean()),
     createdBy: v.string(),
     updatedBy: v.string(),
@@ -538,6 +548,17 @@ export default defineSchema({
     providerOperationName: v.optional(v.string()),
     providerPollCount: v.optional(v.number()),
     providerPollingStartedAt: v.optional(v.number()),
+    failedDocumentObservation: v.optional(v.object({
+      documentReference: v.string(), operationReference: v.string(), observedAt: v.number(),
+    })),
+    // Preserve this bounded tombstone through ordinary diagnostic retention.
+    failedDocumentEvidence: v.optional(v.object({
+      documentReference: v.string(), operationReference: v.string(),
+      firstObservedAt: v.number(), confirmedAt: v.number(), priorErrorKind: v.optional(v.string()),
+      priorProviderPollCount: v.number(), observedOperationDone: v.literal(false),
+      observedDocumentState: v.literal("STATE_FAILED"),
+      coverageVerifiedAt: v.optional(v.number()), publishedCount: v.optional(v.number()),
+    })),
     knownStoreResult: v.optional(v.union(
       v.object({
         kind: v.literal("store_created"),

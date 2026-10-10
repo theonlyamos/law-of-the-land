@@ -6,6 +6,12 @@ import type { Doc } from "../_generated/dataModel";
 import { internalAction } from "../_generated/server";
 import { GEMINI_DOCUMENT_TYPES } from "../../shared/gemini-file-types";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
+import type { DiagnosticTarget } from "./integrations/geminiDiagnostic";
+import {
+  observeFailedGeminiDocument,
+  verifyCompletedGeminiDocument,
+  type FailedDocumentObservation,
+} from "./integrations/geminiFailedDocumentObservation";
 import {
   GeminiFileSearchAdapter,
   ProviderError,
@@ -56,7 +62,7 @@ export type GeminiExecutionTarget =
 export type GeminiExecutionResult =
   | { kind: "store_created"; storeName: string; embeddingModel: string }
   | { kind: "index_accepted"; operationName: string }
-  | { kind: "index_pending" }
+  | { kind: "index_pending"; failedDocument?: FailedDocumentObservation & { metadata: DiagnosticTarget["metadata"] } }
   | { kind: "index_completed"; documentName: string }
   | { kind: "index_failed"; errorKind: ProviderErrorKind }
   | { kind: "document_deleted" }
@@ -113,6 +119,21 @@ function documentTooLarge(): ProviderError {
   return new ProviderError("validation", false, null, "DOCUMENT_TOO_LARGE");
 }
 
+type IndexDocumentProof = {
+  observeFailed(target: DiagnosticTarget): Promise<FailedDocumentObservation | null>;
+  verifyCompleted(target: DiagnosticTarget, documentName: string): Promise<void>;
+};
+
+function diagnosticTargetForIndex(target: Extract<GeminiExecutionTarget, { kind: "index_document" }>, operationName: string): DiagnosticTarget {
+  const keys = ["environment", "jurisdiction_id", "resource_id", "version_id", "version_number", "sha256"] as const;
+  if (target.customMetadata.length !== keys.length ||
+      keys.some(key => target.customMetadata.filter(entry => entry.key === key && typeof entry.stringValue === "string").length !== 1)) throw invalidExecution();
+  return {
+    storeName: target.storeName, operationName,
+    metadata: Object.fromEntries(target.customMetadata.map(entry => [entry.key, entry.stringValue])) as DiagnosticTarget["metadata"],
+  };
+}
+
 export function truncateProviderRawResponse(rawResponse: string): string {
   const encoder = new TextEncoder();
   const encoded = encoder.encode(rawResponse);
@@ -133,6 +154,7 @@ export async function executeGeminiJob(
   options: {
     fetcher?: typeof fetch;
     maxDocumentBytes?: number;
+    indexProof?: IndexDocumentProof;
   },
 ): Promise<GeminiExecutionResult> {
   if (job.type === "gemini_create_store" && target.kind === "create_store") {
@@ -168,9 +190,21 @@ export async function executeGeminiJob(
   if (job.providerOperationName) {
     if (!isGeminiUploadOperationForStore(job.providerOperationName, target.storeName)) throw invalidExecution();
     const operation = await adapter.getIndexOperation(job.providerOperationName);
-    if (!operation.done) return { kind: "index_pending" };
+    if (!operation.done) {
+      if (!options.indexProof) return { kind: "index_pending" };
+      const diagnosticTarget = diagnosticTargetForIndex(target, job.providerOperationName);
+      const observation = await options.indexProof.observeFailed(diagnosticTarget);
+      return { kind: "index_pending", ...(observation === null ? {} : { failedDocument: { ...observation, metadata: diagnosticTarget.metadata } }) };
+    }
     if ("error" in operation) {
       return { kind: "index_failed", errorKind: operation.error.kind };
+    }
+    if (options.indexProof) {
+      try {
+        await options.indexProof.verifyCompleted(diagnosticTargetForIndex(target, job.providerOperationName), operation.documentName);
+      } catch {
+        throw new ProviderError("invalid_response", false, null, "Gemini completed document could not be verified");
+      }
     }
     return { kind: "index_completed", documentName: operation.documentName };
   }
@@ -359,7 +393,13 @@ export const runGeminiJob = internalAction({
         new GeminiFileSearchAdapter({ apiKey }),
         executionJob,
         target,
-        executionOptionsForJob(executionJob),
+        {
+          ...executionOptionsForJob(executionJob),
+          indexProof: {
+            observeFailed: async diagnosticTarget => await observeFailedGeminiDocument(diagnosticTarget, apiKey),
+            verifyCompleted: async (diagnosticTarget, documentName) => await verifyCompletedGeminiDocument(diagnosticTarget, documentName, apiKey),
+          },
+        },
       );
     } catch (error) {
       const kind: ProviderErrorKind = error instanceof ProviderError

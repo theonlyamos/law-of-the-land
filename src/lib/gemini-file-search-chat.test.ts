@@ -13,6 +13,7 @@ import {
 } from "./gemini-file-search-chat";
 import { CHAT_POLICY_RESPONSES } from "../../convex/lib/chatPolicy";
 import type { QueryDiagnostics } from "../../convex/lib/queryDiagnostics";
+import type { PublicationFilter } from "../../shared/gemini-publication-filter";
 
 const stores = [
   {
@@ -180,6 +181,38 @@ async function run(
 }
 
 describe("GeminiFileSearchChat", () => {
+  it("restricts a recovered store to exact published tuples while scoping healthy stores separately", async () => {
+    const publicationFilter = { protocol: "published-v1" as const, environment: "production",
+      documents: [{ resourceId: "resource1", versionId: "version1", sha256: "a".repeat(64) }] };
+    const request = input({ stores: [{ ...stores[0], publicationFilter }, stores[1]] });
+    const { client } = await run(undefined, canonical(undefined, [citation({ custom_metadata: {
+      jurisdiction_id: "ghana", resource_id: "resource1", version_id: "version1",
+    } })]), request);
+    expect(client.requests[0].tools).toEqual([{ type: "file_search", file_search_store_names: stores.map(store => store.storeName),
+      metadata_filter: `((jurisdiction_id="ghana" AND environment="production" AND ((resource_id="resource1" AND version_id="version1" AND sha256="${"a".repeat(64)}"))) OR (jurisdiction_id="accra"))` }]);
+  });
+
+  it("rejects a citation outside the publication allowlist even if the provider returns it", async () => {
+    const publicationFilter = { protocol: "published-v1" as const, environment: "production",
+      documents: [{ resourceId: "resource1", versionId: "version1", sha256: "a".repeat(64) }] };
+    await expect(run(undefined, undefined, input({ stores: [{ ...stores[0], publicationFilter }] })))
+      .rejects.toThrow("citation_identity");
+  });
+
+  it.each([
+    { protocol: "published-v1", environment: "production", documents: [] },
+    { protocol: "unknown", environment: "production", documents: [{ resourceId: "resource1", versionId: "version1", sha256: "a".repeat(64) }] },
+    { protocol: "published-v1", environment: 'production" OR true', documents: [{ resourceId: "resource1", versionId: "version1", sha256: "a".repeat(64) }] },
+    { protocol: "published-v1", environment: "production", documents: [{ resourceId: 'resource" OR true', versionId: "version1", sha256: "a".repeat(64) }] },
+    { protocol: "published-v1", environment: "production", documents: [{ resourceId: "resource1", versionId: "version1", sha256: "invalid" }] },
+  ])("rejects an invalid publication allowlist without falling back to the whole store: %j", async publicationFilter => {
+    const client = new FakeInteractionsClient(eventStream(), canonical(undefined, [citation()]));
+    const signal = new AbortController().signal, deadlineAt = Date.now() + 10_000;
+    await expect(new GeminiFileSearchChat(client, {}).run(input({ stores: [{ ...stores[0], publicationFilter: publicationFilter as unknown as PublicationFilter }] }),
+      { signal, deadlineAt, streamSignal: signal, streamDeadlineAt: deadlineAt, onDelta: () => {} })).rejects.toThrow("GOVERNED_CHAT_REQUEST_INVALID");
+    expect(client.requests).toHaveLength(0);
+  });
+
   const textAttachment: ChatModelAttachment = {
     id: "attachment-1", filename: "agreement.txt", mimeType: "text/plain", kind: "text",
     text: "The uploaded agreement names Example Person and states an amount of 125.",

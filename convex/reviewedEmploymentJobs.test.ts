@@ -117,6 +117,30 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 describe("persisted reviewed employment jobs", () => {
+  it("binds worker capability into its proof and rejects legacy claims after a store becomes restricted", async () => {
+    const f = await fixture(), job = await f.submit();
+    await f.t.run(async ctx => {
+      const { _id: _id, _creationTime: _creationTime, ...version } = (await ctx.db.get(f.ids.versionId))!;
+      const failedId = await ctx.db.insert("documentVersions", { ...version, versionNumber: 2, status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(f.ids.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failedId] } });
+    });
+    expect(await f.worker(job.jobId, "claim")).toEqual({ status: "ignored", payload: null });
+    const legacy = { jobId: job.jobId, workerId: "capable-worker", operation: "claim" as const, body: "{}", issuedAt: Date.now() };
+    const forged = { ...legacy, publicationFilterProtocol: "published-v1" as const,
+      serviceProof: await createTelemetryServiceProof(await jobContracts.reviewedEmploymentJobProofParts(legacy)) };
+    expect(await f.t.mutation(workerRef, forged)).toEqual({ status: "ignored", payload: null });
+    const capable = { ...legacy, publicationFilterProtocol: "published-v1" as const };
+    expect((await f.t.mutation(workerRef, { ...capable,
+      serviceProof: await createTelemetryServiceProof(await jobContracts.reviewedEmploymentJobProofParts(capable)) })).status).toBe("ok");
+    const authority = { ...capable, operation: "authority" as const };
+    const reply = await f.t.mutation(workerRef, { ...authority,
+      serviceProof: await createTelemetryServiceProof(await jobContracts.reviewedEmploymentJobProofParts(authority)) });
+    expect(JSON.parse(reply.payload).manifest.stores[0].publicationFilter.documents).toEqual([
+      { resourceId: f.ids.resourceId, versionId: f.ids.versionId, sha256: f.ids.expectedSha256 },
+    ]);
+    await expect(f.submit({ submissionId: "legacy-answer-2", assistantClientId: "legacy-answer-2", userClientId: "legacy-question-2" }))
+      .rejects.toThrow("REVIEWED_EMPLOYMENT_JOB_ACTIVE");
+  });
   it("defaults production admission off before storing a job or charging quota", async () => {
     productionEnvironment(false, false);
     const f = await fixture();

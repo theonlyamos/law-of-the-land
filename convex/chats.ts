@@ -32,7 +32,8 @@ import {
   isGeminiDocumentName,
   isGeminiFileSearchStoreName,
 } from "./lib/geminiFileSearchNames";
-import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { resolveChatResearchStoresForJurisdiction, publicationFilterProtocolValidator } from "./jurisdictions";
+import { PUBLICATION_FILTER_PROTOCOL, createPublicationFilterBinding } from "../shared/gemini-publication-filter";
 import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
@@ -158,6 +159,8 @@ type GovernedJurisdictionCoverage = {
   coverage: "evidence" | "no_evidence" | "unavailable" | "not_searched";
 };
 type GovernedCompletionProofInput = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
+  publicationFilterBinding?: string;
   diagnostics?: QueryDiagnostics;
   routeNonce: string;
   externalId: string;
@@ -283,6 +286,8 @@ export async function completeGovernedInteractionProofParts(
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
     ...(input.attachmentIds?.length ? ["attachment-context-v1", input.attachmentIds.length, ...input.attachmentIds] : []),
+    ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol]),
+    ...(input.publicationFilterBinding === undefined ? [] : ["publication-filter-binding-v1", input.publicationFilterBinding]),
   ];
 }
 
@@ -311,6 +316,8 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
     ...(input.attachmentIds?.length ? [input.attachmentIds] : []),
+    ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol]),
+    ...(input.publicationFilterBinding === undefined ? [] : ["publication-filter-binding-v1", input.publicationFilterBinding]),
   ]));
   return {
     assistantClientIdBinding: claimBindings.assistantClientIdBinding,
@@ -325,6 +332,8 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
   const withoutResearch = attachmentContext && (input.answerKind === "document" || input.outcome !== "success");
   if (
     !isOpaqueTelemetryToken(input.routeNonce)
+    || (input.publicationFilterProtocol !== undefined && input.publicationFilterProtocol !== PUBLICATION_FILTER_PROTOCOL)
+    || (input.publicationFilterBinding !== undefined && !/^[a-f0-9]{64}$/u.test(input.publicationFilterBinding))
     || !boundedIdentifier(input.externalId, MAX_CHAT_EXTERNAL_ID_LENGTH)
     || !boundedIdentifier(input.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
     || !boundedIdentifier(input.assistantClientId, MAX_ASSISTANT_CLIENT_ID_LENGTH)
@@ -768,6 +777,8 @@ export async function validateGovernedCitations(ctx: QueryCtx, storeList: readon
       || !version
       || version.resourceId !== resourceId
       || version.status !== "published"
+      || (store.publicationFilter !== undefined && !store.publicationFilter.documents.some(document =>
+        document.resourceId === resourceId && document.versionId === versionId && document.sha256 === version.sha256))
       || !documentName
       || !isGeminiDocumentName(documentName)
       || (citation.providerDocumentName !== undefined && (!isGeminiDocumentName(citation.providerDocumentName)
@@ -795,8 +806,13 @@ async function resolveGovernedCompletionAuthority(
   jurisdictionId: Id<"jurisdictions">,
   citations: readonly GovernedCitationIdentity[],
   notSearched = false,
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL,
+  publicationFilterBinding?: string,
 ): Promise<GovernedCompletionAuthority> {
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId);
+  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, publicationFilterProtocol);
+  if (!notSearched && publicationFilterBinding !== await createPublicationFilterBinding(resolution.stores)) {
+    throw new ConvexError("GOVERNED_INTERACTION_SCOPE_CHANGED");
+  }
   const publicCitations = await validateGovernedCitations(ctx, resolution.stores, citations);
   if (citations.length > 0) {
     if (!publicCitations.some((citation) => citation.jurisdictionId === jurisdictionId)) {
@@ -941,6 +957,8 @@ if (args.outcome === "success") {
     jurisdictionId,
     args.citations,
     args.answerKind === "policy" && args.model === "app-policy-v1",
+    args.publicationFilterProtocol,
+    args.publicationFilterBinding,
   );
   if (!(args.answerKind === "policy" && args.model === "app-policy-v1")
     && !matchesCurrentScope(input, authority)) {
@@ -1030,6 +1048,8 @@ export async function completeGovernedInteractionForJobPrincipal(
 
 export const completeGovernedInteraction = mutation({
   args: {
+    publicationFilterProtocol: publicationFilterProtocolValidator,
+    publicationFilterBinding: v.optional(v.string()),
     diagnostics: v.optional(queryDiagnosticsValidator),
     routeNonce: v.string(),
     externalId: v.string(),

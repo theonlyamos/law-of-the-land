@@ -6,6 +6,7 @@ import { canAccessSession, requireReviewedEmploymentJobPrincipal } from "./chats
 import { authorizeSourceForJobPrincipal } from "./reviewedEmployment";
 import { commitReviewedEmploymentForJobPrincipal, reviewedEmploymentCommitProofParts, type ReviewedEmploymentCommitInput } from "./reviewedEmploymentCompletion";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 import { optionalUserId, requireUserId } from "./lib/requireUser";
 import { createTelemetryServiceProof, isOpaqueTelemetryToken, verifyTelemetryServiceProof } from "./lib/telemetryProof";
 import { MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
@@ -87,10 +88,11 @@ function project(job: Doc<"reviewedEmploymentJobs">): ReviewedEmploymentJobProje
     verificationDeadlineAt: job.verificationDeadlineAt, terminalDeadlineAt: job.terminalDeadlineAt,
     errorReason: expired ? "deadline_exceeded" : job.errorReason ?? null };
 }
-function sourceArgs(job: { externalId: string }) {
+function sourceArgs(job: { externalId: string }, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL) {
   const policy = reviewedEmploymentBackendPolicy(process.env);
   if (!policy) throw new ConvexError("REVIEWED_EMPLOYMENT_JOB_AUTHORITY_UNAVAILABLE");
   return { externalId: job.externalId, jurisdictionId: policy.jurisdictionId as Id<"jurisdictions">,
+    ...(publicationFilterProtocol ? { publicationFilterProtocol } : {}),
     resourceId: policy.resourceId as Id<"legalResources">, versionId: policy.versionId as Id<"documentVersions">,
     expectedSha256: policy.expectedSha256, expectedByteSize: policy.expectedByteSize,
     asOfDate: new Date(Date.now()).toISOString().slice(0, 10) };
@@ -104,14 +106,14 @@ async function currentPrincipal(ctx: MutationCtx, job: Doc<"reviewedEmploymentJo
   return await requireReviewedEmploymentJobPrincipal(ctx, { ownerId: job.ownerId, nativeAuthSessionId: job.nativeAuthSessionId,
     sessionId: job.sessionId, externalId: job.externalId, jurisdictionId: job.jurisdictionId });
 }
-async function sourceAuthority(ctx: MutationCtx, job: Doc<"reviewedEmploymentJobs">) {
+async function sourceAuthority(ctx: MutationCtx, job: Doc<"reviewedEmploymentJobs">, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL) {
   const policy = reviewedEmploymentBackendPolicy(process.env);
   if (!policy || !reviewedEmploymentBackendJobPolicyMatches(process.env, job.policyId)
     || job.jurisdictionId !== policy.jurisdictionId) return null;
   const principal = await currentPrincipal(ctx, job);
-  const source = await authorizeSourceForJobPrincipal(ctx, sourceArgs(job), principal);
+  const source = await authorizeSourceForJobPrincipal(ctx, sourceArgs(job, publicationFilterProtocol), principal);
   if (source.status !== "authorized") return null;
-  const manifest = await resolveChatResearchStoresForJurisdiction(ctx, job.jurisdictionId);
+  const manifest = await resolveChatResearchStoresForJurisdiction(ctx, job.jurisdictionId, publicationFilterProtocol);
   return { principal, source, manifest };
 }
 
@@ -119,6 +121,7 @@ async function sourceAuthority(ctx: MutationCtx, job: Doc<"reviewedEmploymentJob
  * proof is separate from worker authority and includes the complete submission. */
 export const submit = mutation({
   args: { submissionId: v.string(), externalId: v.string(), jurisdictionId: v.id("jurisdictions"), userClientId: v.string(), assistantClientId: v.string(),
+    publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)),
     submission: v.string(), issuedAt: v.number(), serviceProof: v.string() },
   returns: projectionValidator,
   handler: async (ctx, args) => {
@@ -154,7 +157,7 @@ export const submit = mutation({
         await ctx.db.patch(row._id, { status: "expired", errorReason: "deadline_exceeded", updatedAt: now });
       }
     }
-    const source: { status: string } = await ctx.runQuery(sourceRef, sourceArgs(args));
+    const source: { status: string } = await ctx.runQuery(sourceRef, sourceArgs(args, args.publicationFilterProtocol));
     if (source.status !== "authorized") throw new ConvexError("REVIEWED_EMPLOYMENT_JOB_AUTHORITY_UNAVAILABLE");
     await ctx.runMutation(usageRef, {});
     const jobId = await ctx.db.insert("reviewedEmploymentJobs", { ownerId, nativeAuthSessionId: identity.sessionId,
@@ -210,7 +213,8 @@ function reservationFrom(value: unknown): ReviewedEmploymentJobReservation | nul
  * A claimed stage is never retried or taken over, including uncertain failures. */
 export const worker = mutation({
   args: { jobId: v.id("reviewedEmploymentJobs"), workerId: v.string(), operation: v.union(v.literal("claim"), v.literal("state"), v.literal("authority"),
-    v.literal("reserve"), v.literal("passed"), v.literal("fail"), v.literal("commit")), body: v.string(), issuedAt: v.number(), serviceProof: v.string() },
+    v.literal("reserve"), v.literal("passed"), v.literal("fail"), v.literal("commit")), body: v.string(), issuedAt: v.number(), serviceProof: v.string(),
+    publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)) },
   returns: resultValidator,
   handler: async (ctx, args): Promise<Infer<typeof resultValidator>> => {
     const now = Date.now();
@@ -228,7 +232,7 @@ export const worker = mutation({
       || !reviewedEmploymentBackendJobPolicyMatches(process.env, job.policyId))) return ignored();
     if (args.operation === "claim") {
       if (!object(body) || !exact(body, []) || job.workerId !== undefined || job.status !== "queued" || now >= job.verificationDeadlineAt) return ignored();
-      try { if (!await sourceAuthority(ctx, job)) return ignored(); } catch { return ignored(); }
+      try { if (!await sourceAuthority(ctx, job, args.publicationFilterProtocol)) return ignored(); } catch { return ignored(); }
       await ctx.db.patch(job._id, { status: "running", progress: "draft", workerId: args.workerId, updatedAt: now });
       return ok({ jobId: job._id, submission: job.submission, createdAt: job.createdAt, verificationDeadlineAt: job.verificationDeadlineAt,
         terminalDeadlineAt: job.terminalDeadlineAt, externalId: job.externalId, jurisdictionId: job.jurisdictionId,
@@ -249,12 +253,12 @@ export const worker = mutation({
     }
     if (args.operation === "authority") {
       if (!object(body) || !exact(body, [])) return ignored();
-      try { const authority = await sourceAuthority(ctx, job); return authority ? ok({ source: authority.source, manifest: authority.manifest }) : ignored(); } catch { return ignored(); }
+      try { const authority = await sourceAuthority(ctx, job, args.publicationFilterProtocol); return authority ? ok({ source: authority.source, manifest: authority.manifest }) : ignored(); } catch { return ignored(); }
     }
     if (args.operation === "reserve" || args.operation === "passed") {
       if (now >= job.verificationDeadlineAt) return ignored();
       const input = reservationFrom(body); if (!input) return ignored();
-      try { if (!await sourceAuthority(ctx, job)) return ignored(); } catch { return ignored(); }
+      try { if (!await sourceAuthority(ctx, job, args.publicationFilterProtocol)) return ignored(); } catch { return ignored(); }
       const ordinal = REVIEWED_EMPLOYMENT_JOB_STAGES.indexOf(input.stage);
       const predecessor = ordinal >= 2 ? "inventory" : "draft";
       const prior = ordinal > 0 ? await ctx.db.query("reviewedEmploymentJobStages").withIndex("by_jobId_and_stage", q => q.eq("jobId", job._id).eq("stage", predecessor)).unique() : null;
@@ -292,7 +296,7 @@ export const worker = mutation({
         .withIndex("by_jobId_and_stage", q => q.eq("jobId", job._id).eq("stage", stage)).unique()));
       if (stages.some(stage => !stage || stage.status !== "passed" || stage.candidateSha256 !== job.candidateSha256 || stage.sourceBinding !== job.sourceBinding)) return ignored();
       let authority: Awaited<ReturnType<typeof sourceAuthority>>;
-      try { authority = await sourceAuthority(ctx, job); } catch { return ignored(); }
+      try { authority = await sourceAuthority(ctx, job, args.publicationFilterProtocol); } catch { return ignored(); }
       if (!authority || await sha256(reviewedEmploymentSourceBundleCanonicalJson({ source: authority.source, manifest: authority.manifest })) !== job.sourceBinding) return ignored();
       const principal = authority.principal;
       const serviceProof = await createTelemetryServiceProof(await reviewedEmploymentCommitProofParts(input));

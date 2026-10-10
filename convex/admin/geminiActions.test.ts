@@ -21,6 +21,26 @@ function adapter() {
 }
 
 describe("Gemini durable job executor", () => {
+  const proofTarget = {
+    kind: "index_document" as const, byteSize: 3, storeName: "fileSearchStores/ghana-test", mimeType: "application/pdf", displayName: "Act 1.pdf",
+    customMetadata: Object.entries({ environment: "test", jurisdiction_id: "jurisdiction-1", resource_id: "resource-1", version_id: "version-1", version_number: "1", sha256: "a".repeat(64) }).map(([key, stringValue]) => ({ key, stringValue })),
+  };
+  it("observes exact failed-document proof for pending uploads without reuploading", async () => {
+    const provider = adapter();
+    const observation = { documentReference: `sha256:${"b".repeat(64)}`, operationReference: `sha256:${"c".repeat(64)}`, observedAt: Date.now() };
+    const indexProof = { observeFailed: vi.fn(async () => observation), verifyCompleted: vi.fn(async () => undefined) };
+    const result = await executeGeminiJob(provider, { type: "gemini_index_document", providerOperationName: "fileSearchStores/ghana-test/upload/operations/index-1" }, proofTarget, { indexProof });
+    expect(result).toMatchObject({ kind: "index_pending", failedDocument: { ...observation, metadata: { version_id: "version-1", sha256: "a".repeat(64) } } });
+    expect(provider.uploadDocument).not.toHaveBeenCalled();
+    expect(indexProof.observeFailed).toHaveBeenCalledWith({ storeName: proofTarget.storeName, operationName: "fileSearchStores/ghana-test/upload/operations/index-1", metadata: Object.fromEntries(proofTarget.customMetadata.map(entry => [entry.key, entry.stringValue])) });
+  });
+
+  it("requires active exact document proof before returning terminal completion", async () => {
+    const provider = { ...adapter(), getIndexOperation: vi.fn(async () => ({ done: true as const, documentName: "fileSearchStores/ghana-test/documents/completed-1" })) };
+    const indexProof = { observeFailed: vi.fn(async () => null), verifyCompleted: vi.fn(async () => { throw new Error("synthetic secret"); }) };
+    await expect(executeGeminiJob(provider, { type: "gemini_index_document", providerOperationName: "fileSearchStores/ghana-test/upload/operations/index-1" }, proofTarget, { indexProof })).rejects.toMatchObject({ kind: "invalid_response", retryable: false, message: "Gemini completed document could not be verified", status: null });
+  });
+
   it("bounds provider diagnostics by UTF-8 bytes without corrupting text", () => {
     const shortResponse = '{"error":"permission denied"}';
     expect(truncateProviderRawResponse(shortResponse)).toBe(shortResponse);

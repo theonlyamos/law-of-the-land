@@ -9,6 +9,7 @@ export interface ResearchJurisdiction {
   isDefault: boolean;
   organization?: { id: string; name: string };
   visibility?: "public" | "members";
+  coverageWarning?: { excludedDocumentCount: number };
 }
 
 export interface ChatCitation {

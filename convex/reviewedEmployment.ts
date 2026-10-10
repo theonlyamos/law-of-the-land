@@ -7,6 +7,7 @@ import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { requireUserId } from "./lib/requireUser";
 import { authComponent } from "./auth";
 import { reviewedEmploymentBackendPolicy, reviewedEmploymentBackendPolicyId } from "../shared/reviewed-employment-policy";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 
 const unavailable = () => ({ status: "unavailable" as const });
 
@@ -33,6 +34,7 @@ function storageHashMatches(base64: string, expected: string): boolean {
  * The existing atomic completion and citation-claim consumption remain mandatory.
  */
 export type ReviewedEmploymentSourceAuthorizationInput = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
   externalId: string; jurisdictionId: Id<"jurisdictions">; resourceId: Id<"legalResources">;
   versionId: Id<"documentVersions">; expectedSha256: string; expectedByteSize: number; asOfDate: string;
 };
@@ -49,7 +51,7 @@ try {
   const session = verified?.session ?? await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>
     q.eq("userId", userId).eq("externalId", args.externalId)).unique();
   if (!session || session.jurisdictionId !== args.jurisdictionId || !(await canAccessSession(ctx, session))) return unavailable();
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId);
+  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId, args.publicationFilterProtocol);
   const selected = resolution.stores[0];
   if (!selected || selected.jurisdictionId !== args.jurisdictionId || selected.relation !== "selected"
     || selected.kind !== "geographic") return unavailable();
@@ -87,6 +89,7 @@ export async function authorizeSourceForJobPrincipal(
 
 export const authorizeSource = query({
   args: {
+    publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)),
     externalId: v.string(), jurisdictionId: v.id("jurisdictions"), resourceId: v.id("legalResources"),
     versionId: v.id("documentVersions"), expectedSha256: v.string(), expectedByteSize: v.number(), asOfDate: v.string(),
   },
@@ -147,7 +150,7 @@ export const resolveCitationFileAtDate = internalQuery({
         || !Object.entries(policy).every(([key, value]) => source[key as keyof typeof policy] === value)) return null;
       const { pageNumbers: _pages, ...identity } = source;
       const grant: { status: "authorized" | "unavailable" } = await ctx.runQuery(authorizeSourceRef,
-        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate });
+        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
       if (grant.status !== "authorized") return null;
       const version = await ctx.db.get(source.versionId);
       if (!version || version.mimeType !== "application/pdf") return null;

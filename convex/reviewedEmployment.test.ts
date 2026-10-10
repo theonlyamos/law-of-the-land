@@ -72,6 +72,16 @@ beforeEach(() => vi.stubEnv("ADMIN_ENVIRONMENT", "test"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("ordinary research source authorization", () => {
+  it("requires filter capability for a restricted store while retaining exact reviewed-source authorization", async () => {
+    const { t, ids, owner, args } = await fixture();
+    await t.run(async ctx => {
+      const { _id: _id, _creationTime: _creationTime, ...version } = (await ctx.db.get(ids.versionId))!;
+      const failedId = await ctx.db.insert("documentVersions", { ...version, versionNumber: 2, status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(ids.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failedId] } });
+    });
+    expect(await owner.query(authorizeSource, args)).toEqual({ status: "unavailable" });
+    expect(await owner.query(authorizeSource, { ...args, publicationFilterProtocol: "published-v1" })).toMatchObject({ status: "authorized" });
+  });
   it("authorizes a regular owner with only closed edition metadata", async () => {
     const { ids, args, authorize } = await fixture();
     const result = await authorize();

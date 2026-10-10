@@ -62,6 +62,7 @@ it("uses only the server manifest/history and returns the persisted canonical an
   expect((await response.json()).turns[0]).toEqual(turn);
   expect(mocks.run.mock.calls[0][0]).toEqual({ query: "Tenancy?", stores: admission.manifest.stores, history: [], maxOutputTokens: 4096 });
   expect(mocks.bridge).toHaveBeenCalledWith("finish", expect.objectContaining({ outcome: "completed", answer: "Verified answer" }), expect.anything());
+  for (const [, input] of mocks.bridge.mock.calls) expect(input.publicationFilterProtocol).toBe("published-v1");
 });
 
 it("replays an existing request without another provider call and keeps pending requests recoverable", async () => {
@@ -86,7 +87,7 @@ it("requires account authentication and guest possession before forwarding an ad
   expect(mocks.bridge).not.toHaveBeenCalled();
   mocks.bridge.mockResolvedValue({ chatId: "saved-chat" });
   expect(await (await claim(request("POST"))).json()).toEqual({ chatId: "saved-chat" });
-  expect(mocks.bridge).toHaveBeenCalledWith("adopt", { tokenHash: expect.any(String) }, { authToken: "account-jwt" });
+  expect(mocks.bridge).toHaveBeenCalledWith("adopt", { tokenHash: expect.any(String), publicationFilterProtocol: "published-v1" }, { authToken: "account-jwt" });
 });
 
 it("clears unusable sessions so returning to the homepage can start research again", async () => {
