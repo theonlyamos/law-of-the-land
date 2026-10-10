@@ -30,10 +30,13 @@ type RequestState = {
   errorReason: ChatErrorReason | null;
   backgroundJobId: string | null;
   backgroundRecovery: BackgroundSubmissionRecovery | null;
+  canStop: boolean;
+  activeTurn: { userClientId: string; assistantClientId: string } | null;
 };
 const emptyState: RequestState = {
   messages: [], isLoading: false, saveFailed: false, ensureError: null,
   deleteError: null, isDeleting: false, isDeleted: false, errorReason: null, backgroundJobId: null, backgroundRecovery: null,
+  canStop: false, activeTurn: null,
 };
 type ChatRequest = {
   controller: AbortController;
@@ -108,7 +111,7 @@ function createRequestStore() {
       const request: ChatRequest = {
         controller: new AbortController(),
         ensurePromise: null,
-        state: { ...emptyState, messages: previous?.state.messages ?? [], isLoading: true },
+        state: { ...emptyState, messages: previous?.state.messages ?? [], isLoading: true, canStop: true },
       };
       requests.set(id, request);
       notify();
@@ -121,6 +124,29 @@ function createRequestStore() {
         cancelAttachments(id);
         drafts.delete(id);
       }
+      notify();
+    },
+    stop(id: string) {
+      const request = requests.get(id);
+      if (!request?.state.isLoading || !request.state.canStop
+        || request.state.backgroundJobId || request.state.backgroundRecovery) return;
+      request.controller.abort();
+      cancelAttachments(id);
+      const draft = drafts.get(id);
+      if (draft) drafts.set(id, { ...draft, files: draft.files.map(file => file.state === "uploading"
+        ? { ...file, state: "error", progress: 0, error: "Upload cancelled. Try again." } : file) });
+      const activeTurn = request.state.activeTurn;
+      const stoppedMessage = "Answer stopped. No answer was saved.";
+      // Replace the request identity so late fetch, RAF, and upload callbacks
+      // cannot update this retained unsuccessful turn or a subsequent request.
+      requests.set(id, { controller: new AbortController(), ensurePromise: request.ensurePromise,
+        state: { ...request.state, isLoading: false, canStop: false, activeTurn: null,
+          ...(!activeTurn ? { ensureError: stoppedMessage } : {}),
+          messages: request.state.messages.map(message => message.clientId === activeTurn?.assistantClientId
+            ? { ...message, content: stoppedMessage, state: "error", answerPhase: undefined,
+              citations: undefined, answerKind: undefined, partialCoverage: undefined, errorReason: undefined }
+            : message.clientId === activeTurn?.userClientId ? { ...message, state: "error" } : message),
+        } });
       notify();
     },
     beginDelete(id: string) {

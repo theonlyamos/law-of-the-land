@@ -71,8 +71,11 @@ describe("limited production section 55 admission", () => {
     return run;
   };
 
-  it("admits Ghana overtime as a saved background job without depending on local paid-test flags", async () => {
-    expect((await POST(productionRequest())).status).toBe(202);
+  it.each([undefined, "provisional-v1"])("admits Ghana overtime as a saved background job with streaming %s", async streaming => {
+    const response = await POST(productionRequest(streaming ? { streaming } : {}));
+    expect(response.status).toBe(202);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({ type: "background_job", jobId: projection.jobId, status: "queued" });
     expect(names()).toEqual(["reviewedEmploymentJobs:submit"]);
     expect(mocks.fetchAuthMutation.mock.calls[0][1].jurisdictionId).toBe(jurisdictionId);
     const selection = JSON.parse(mocks.fetchAuthMutation.mock.calls[0][1].submission).selection;

@@ -1,9 +1,8 @@
 "use client";
 
-import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
-import { isChatPolicyResponse, type ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
+import { ApiError, BackgroundAcknowledgementError, ChatSubmissionTransportError, postChat } from "./chat-stream-client";
 import { findAcceptedChatBackgroundJob, useChatBackgroundJob } from "./use-chat-background-job";
 import { useChatAttachments } from "./use-chat-attachments";
 import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
@@ -21,13 +20,10 @@ import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
-import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
+import { publicChatErrorMessage } from "@/lib/chat-errors";
 import { clearGuestResearchDraft, readGuestResearchDraft } from "@/lib/guest-research-draft";
 import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-jurisdiction-picker";
-import {
-  type ChatCitation,
-  type ResearchJurisdiction,
-} from "@/lib/countries";
+import type { ResearchJurisdiction } from "@/lib/countries";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
@@ -57,134 +53,6 @@ const SUGGESTED_QUESTIONS = [
   { label: "Housing & tenancy", icon: House, question: "What should I look for in a tenancy agreement?" },
   { label: "Business", icon: Store, question: "What laws apply when starting a business?" },
 ];
-
-type ChatResponse = {
-  result: string;
-  answerKind: ChatAnswerKind;
-  citations: ChatCitation[];
-  citationClaim?: string;
-  partialCoverage: boolean;
-  persisted?: true;
-};
-
-type BackgroundChatResponse = { type: "background_job"; jobId: string; status: "queued" | "running" };
-class ChatSubmissionTransportError extends Error {}
-class BackgroundAcknowledgementError extends Error {}
-
-function isChatCitation(value: unknown): value is ChatCitation {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const citation = value as Record<string, unknown>;
-  return typeof citation.label === "string"
-    && typeof citation.jurisdictionId === "string"
-    && typeof citation.jurisdictionName === "string"
-    && (citation.jurisdictionKind === "geographic" || citation.jurisdictionKind === "organizational")
-    && (
-      citation.relation === "selected"
-      || citation.relation === "geographic_ancestor"
-      || citation.relation === "organizational_geography"
-    );
-}
-
-async function postChat(
-  body: unknown,
-  onDelta: (text: string) => void,
-  signal?: AbortSignal,
-): Promise<ChatResponse | BackgroundChatResponse> {
-  let response: Response;
-  try { response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
-    body: JSON.stringify(body),
-    signal,
-  }); } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ChatSubmissionTransportError("The submission response could not be read.");
-  }
-  if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown; type?: unknown } | null;
-    if (response.status === 500 && data?.type === "background_job_uncertain") {
-      throw new BackgroundAcknowledgementError("The job acknowledgement could not be confirmed.");
-    }
-    throw new ApiError(response.status, typeof data?.error === "string" ? data.error : undefined,
-      publicChatErrorReason(data?.reason) ?? undefined);
-  }
-  if (response.status === 202) {
-    const data = await response.json().catch(() => null) as Record<string, unknown> | null;
-    if (data?.type !== "background_job" || typeof data.jobId !== "string" || !data.jobId
-      || (data.status !== "queued" && data.status !== "running")) throw new BackgroundAcknowledgementError("The job acknowledgement could not be read.");
-    return { type: "background_job", jobId: data.jobId, status: data.status };
-  }
-  if (!response.headers.get("content-type")?.includes("application/x-ndjson")) throw new ApiError(500);
-  if (!response.body) throw new ApiError(500);
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let completed: ChatResponse | null = null;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      let lineEnd = buffer.indexOf("\n");
-      while (lineEnd >= 0) {
-        const line = buffer.slice(0, lineEnd);
-        buffer = buffer.slice(lineEnd + 1);
-        lineEnd = buffer.indexOf("\n");
-        if (!line) continue;
-        let event: Record<string, unknown>;
-        try {
-          event = JSON.parse(line) as Record<string, unknown>;
-        } catch {
-          throw new ApiError(500);
-        }
-        if (event.type === "delta" && typeof event.text === "string") {
-          onDelta(event.text);
-        } else if (
-          event.type === "done"
-          && typeof event.result === "string"
-          && (event.answerKind === "legal" || event.answerKind === "policy" || event.answerKind === "document")
-          && Array.isArray(event.citations)
-          && event.citations.every(isChatCitation)
-          && typeof event.partialCoverage === "boolean"
-          && (event.persisted === undefined || event.persisted === true)
-        ) {
-          completed = {
-            result: event.result,
-            answerKind: event.answerKind,
-            citations: event.citations,
-            ...(typeof event.citationClaim === "string" ? { citationClaim: event.citationClaim } : {}),
-            partialCoverage: event.partialCoverage,
-            ...(event.persisted === true ? { persisted: true as const } : {}),
-          };
-        } else if (event.type === "error" && typeof event.error === "string") {
-          throw new ApiError(500, event.error, publicChatErrorReason(event.reason) ?? undefined);
-        } else {
-          throw new ApiError(500);
-        }
-      }
-      if (done) break;
-    }
-    if (!completed) throw new ApiError(500);
-    return completed;
-  } finally {
-    // A terminal error must release the composer without waiting for EOF or telemetry.
-    void reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-}
-
-class ApiError extends Error {
-  status: number;
-  serverMessage?: string;
-  reason?: ChatErrorReason;
-
-  constructor(status: number, serverMessage?: string, reason?: ChatErrorReason) {
-    super(serverMessage ?? `Request failed with status ${status}`);
-    this.status = status;
-    this.serverMessage = serverMessage;
-    this.reason = reason;
-  }
-}
 
 function answerErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -239,7 +107,9 @@ interface ChatWorkspaceProps {
 export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: ChatWorkspaceProps) {
   const router = useRouter();
   const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
-  const attachments = useChatAttachments(chatId);
+  const allocatedNewChatIdRef = useRef<string | null>(null);
+  const requestChatId = chatId ?? allocatedNewChatIdRef.current;
+  const attachments = useChatAttachments(requestChatId);
   const { query, setQuery, files, addFiles, removeFile, retryFile, uploadFiles, transferToChat, clearSentDraft } = attachments;
   const newUploadsEnabled = chatAttachmentUploadsEnabled({
     NODE_ENV: process.env.NODE_ENV,
@@ -251,8 +121,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const {
     store: requests, messages: localMessages, isLoading: requestLoading,
     saveFailed, ensureError, deleteError, errorReason,
-    isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted, backgroundJobId, backgroundRecovery,
-  } = useChatRequests(chatId);
+    isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted, backgroundJobId, backgroundRecovery, canStop,
+  } = useChatRequests(requestChatId);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -265,7 +135,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const observedSessionIdsRef = useRef<Set<string>>(new Set());
   const requestGenerationRef = useRef(0);
   const activeChatIdRef = useRef(chatId);
-  const allocatedNewChatIdRef = useRef<string | null>(null);
   const localSequenceRef = useRef(0);
   const prependScrollIntentRef = useRef<PrependScrollIntent | null>(null);
   const composerScrollIntentRef = useRef<ComposerBottomScrollIntent | null>(null);
@@ -642,7 +511,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       };
       // Failed local turns are never persisted and must not become research context.
       const contextMessages = displayMessages.filter((message) => message.source !== "local"
-        || (message.state !== "error" && !message.backgroundJobId));
+        || (message.state === "verified" && !message.backgroundJobId));
       const historyComplete = contextMessages.length <= 20 && (chatId === null || messagesPaginationStatus === "Exhausted");
       const priorForApi = contextMessages.slice(-20).map((message) => ({
         role: message.role,
@@ -725,16 +594,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           routeGeneration: requestGeneration,
         });
       }
-      setLocalMessages((previous) => [...previous, userMessage, assistantMessage]);
+      requests.update(submissionChatId, request, { activeTurn: {
+        userClientId: userMessage.clientId, assistantClientId: assistantMessage.clientId,
+      }, messages: [...request.state.messages, userMessage, assistantMessage] });
 
       let streamedAnswer = "";
+      let streamPhase: "draft" | "checking" | "closed" = "draft";
       let streamRenderFrame: number | undefined;
       const renderStreamedAnswer = () => {
         streamRenderFrame = undefined;
-        if (!isCurrentRequest()) return;
+        if (!isCurrentRequest() || streamPhase !== "draft") return;
         setLocalMessages((previous) => previous.map((message) =>
           message.localId === assistantMessage.localId
-            ? { ...message, content: streamedAnswer || "..." }
+            ? { ...message, content: streamedAnswer, answerPhase: "draft" }
             : message,
         ));
       };
@@ -747,8 +619,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       const submissionStartedAt = Date.now();
       const submissionStartedMonotonic = performance.now();
       try {
+        // The server may hand this submission to durable reviewed verification.
+        // Its provisional acknowledgement/events identify an ordinary request.
+        requests.update(submissionChatId, request, { canStop: false });
         const chatData = await postChat({
           query: trimmed,
+          streaming: "provisional-v1",
           jurisdictionId: chatResearchJurisdiction!.id,
           messages: priorForApi,
           historyComplete,
@@ -757,43 +633,42 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           userClientId: userMessage.clientId,
           attachmentIds: uploadedAttachments.map((file) => file.id),
         }, (text) => {
+          if (!isCurrentRequest()) return;
+          if (!request.state.canStop) requests.update(submissionChatId, request, { canStop: true });
           streamedAnswer += text;
           if (!isCurrentRequest() || streamRenderFrame !== undefined) return;
           streamRenderFrame = window.requestAnimationFrame(renderStreamedAnswer);
-        }, controller.signal);
+        }, controller.signal, () => {
+          streamPhase = "checking";
+          cancelPendingStreamRender();
+          if (!isCurrentRequest()) return;
+          requests.update(submissionChatId, request, { canStop: true,
+            messages: request.state.messages.map(message => message.localId === assistantMessage.localId
+              ? { ...message, content: streamedAnswer, answerPhase: "checking" } : message) });
+        }, () => {
+          if (isCurrentRequest()) requests.update(submissionChatId, request, { canStop: true });
+        });
+        streamPhase = "closed";
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
         if ("type" in chatData) {
-          requests.update(submissionChatId, request, { backgroundJobId: chatData.jobId, backgroundRecovery: null,
+          requests.update(submissionChatId, request, { canStop: false, backgroundJobId: chatData.jobId, backgroundRecovery: null,
             messages: request.state.messages.map(message => message.clientId === userMessage.clientId || message.clientId === assistantMessage.clientId
               ? { ...message, backgroundJobId: chatData.jobId } : message) });
           clearSentDraft(submissionChatId, searchQuery, submittedFiles);
           return;
         }
-        if (
-          (chatData.answerKind === "policy"
-            ? (chatData.citations.length !== 0 || !isChatPolicyResponse(chatData.result))
-            : chatData.answerKind === "document"
-              ? chatData.citations.length !== 0
-              : (chatData.citations.length === 0 && chatData.result !== CHAT_NO_EVIDENCE))
-          || !chatData.citationClaim
-          || !/^[A-Za-z0-9_-]{43}$/u.test(chatData.citationClaim)
-        ) {
-          throw new ApiError(500, "The answer could not be verified. Please try again.");
-        }
-
         const completedAssistant = {
           ...assistantMessage,
+          state: "verified" as const,
           content: chatData.result,
           citations: chatData.citations,
           answerKind: chatData.answerKind,
           ...(chatData.partialCoverage ? { partialCoverage: true } : {}),
         };
-        setLocalMessages((previous) =>
-          previous.map((message) =>
-            message.localId === assistantMessage.localId ? completedAssistant : message
-          )
-        );
+        requests.update(submissionChatId, request, { canStop: false, activeTurn: null,
+          messages: request.state.messages.map(message => message.localId === assistantMessage.localId
+            ? completedAssistant : message.localId === userMessage.localId ? { ...message, state: "verified" } : message) });
 
         const isFirstUserTurn = priorForApi.length === 0;
         try {
@@ -846,6 +721,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           );
         }
       } catch (error) {
+        streamPhase = "closed";
         if (!isCurrentRequest() || (error instanceof DOMException && error.name === "AbortError")) {
           return;
         }
@@ -854,7 +730,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             userClientId: userMessage.clientId, assistantClientId: assistantMessage.clientId, signal: controller.signal });
           if (!isCurrentRequest()) return;
           if (accepted) {
-            requests.update(submissionChatId, request, { backgroundJobId: accepted.jobId, backgroundRecovery: null,
+            requests.update(submissionChatId, request, { canStop: false, backgroundJobId: accepted.jobId, backgroundRecovery: null,
               messages: request.state.messages.map(message => message.clientId === userMessage.clientId || message.clientId === assistantMessage.clientId
                 ? { ...message, backgroundJobId: accepted.jobId } : message) });
             clearSentDraft(submissionChatId, searchQuery, submittedFiles);
@@ -862,7 +738,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           }
         }
         if (error instanceof BackgroundAcknowledgementError) {
-          requests.update(submissionChatId, request, { backgroundRecovery: {
+          requests.update(submissionChatId, request, { canStop: false, backgroundRecovery: {
             userClientId: userMessage.clientId, assistantClientId: assistantMessage.clientId,
             requiresCapability: false,
             startedAt: submissionStartedAt, startedMonotonic: submissionStartedMonotonic }, isLoading: true });
@@ -875,16 +751,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         setLocalMessages((previous) =>
           previous.map((message) => {
             if (message.localId === assistantMessage.localId) {
-              return { ...message, content: answerErrorMessage(error), state: "error", errorReason: reason };
+              return { ...message, content: answerErrorMessage(error), state: "error", answerPhase: undefined, errorReason: reason };
             }
             if (message.localId === userMessage.localId) return { ...message, state: "error", errorReason: reason };
             return message;
           })
         );
       } finally {
+        streamPhase = "closed";
         cancelPendingStreamRender();
         if (isCurrentRequest() && !request.state.backgroundJobId && !request.state.backgroundRecovery) {
-          requests.update(submissionChatId, request, { isLoading: false });
+          requests.update(submissionChatId, request, { isLoading: false, canStop: false, activeTurn: null });
         }
       }
     },
@@ -920,10 +797,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     processedBootstrap.current.add(key);
     router.replace(`/${chatId}`, { scroll: false });
 
-    if (background.job || (sessionData && persistedMessages.length > 0)) return;
+    // A retained request also records a failed/stopped attempt across remounts.
+    // Only a new explicit composer action may submit that question again.
+    if (background.job || requests.get(chatId) || (sessionData && persistedMessages.length > 0)) return;
 
     window.setTimeout(() => void handleSearch(q), 0);
-  }, [background.checking, background.job, background.uncertain, chatId, handleSearch, initialQuery, persistedMessages.length, router, selectionReady, sessionData]);
+  }, [background.checking, background.job, background.uncertain, chatId, handleSearch, initialQuery, persistedMessages.length, requests, router, selectionReady, sessionData]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -989,6 +868,15 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     tray: attachmentTray,
   } : undefined;
   const retainedAttachmentTray = newUploadsEnabled ? null : attachmentTray;
+  const stopAnswer = () => {
+    if (requestChatId) requests.stop(requestChatId);
+    setIsStartingNewChat(false);
+  };
+  const stopAnswerControl = requestLoading && canStop && !backgroundJobId && !backgroundRecovery ? (
+    <div className="mb-3 flex justify-end">
+      <Button type="button" variant="ghost" size="sm" onClick={stopAnswer} aria-label="Stop answer">Stop answer</Button>
+    </div>
+  ) : null;
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -1061,6 +949,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   Ask a question. Understand the answer.<br />Explore the sources behind it.
                 </p>
                 <div className="mt-7">
+                  {stopAnswerControl}
+                  {ensureError && <p role="alert" className="mb-2 text-sm text-destructive">{ensureError}</p>}
                   {retainedAttachmentTray}
                   <ChatInput
                     id="new-chat-question"
@@ -1162,6 +1052,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                         <p className="text-xs font-medium text-destructive">Failed</p>
                       ) : null}
                     </div>
+                  ) : message.source === "local" && message.state === "pending" && message.answerPhase ? (
+                    <div className="min-w-0 w-full border-l-2 border-amber-700 pl-4 text-sm leading-7 text-muted-foreground">
+                      <p className="mb-2 text-xs font-semibold" role="status">Draft — not verified</p>
+                      {message.answerPhase === "checking" && <p className="mb-2 text-xs" role="status">Checking answer and sources</p>}
+                      <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</div>
+                    </div>
                   ) : message.source === "local" && message.state === "pending" && message.content === "..." ? (
                     <div className="flex items-center gap-3 py-2 text-sm text-muted-foreground" role="status" aria-label="Preparing answer">
                       <Spinner className="size-4" />{message.backgroundJobId && background.job
@@ -1227,6 +1123,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
         <div className="shrink-0">
           <div className={`${THREAD_RAIL} pb-4 pt-2`}>
+            {stopAnswerControl}
             {savedAnswerUnavailable && (
               <p role="status" className="mb-2 text-sm text-muted-foreground">
                 Verification finished, but we could not load its saved answer. Reload this chat or load older messages to find it.
