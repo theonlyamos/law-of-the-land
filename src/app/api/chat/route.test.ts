@@ -245,6 +245,48 @@ it("opts into published-document filtering and preserves the backend allowlist t
   expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
 });
 
+it.each([true, false])("decodes a 101-document manifest above 16 KiB with declared length %s", async declaredLength => {
+  const publicationFilter = { protocol: "published-v1" as const, environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+    ...Array.from({ length: 100 }, (_, index) => ({ resourceId: `resource-${String(index).padStart(55, "0")}`,
+      versionId: `version-${String(index).padStart(56, "0")}`, sha256: "b".repeat(64) })),
+  ] };
+  const stores = [{ ...manifest.stores[0], publicationFilter }];
+  const bytes = new TextEncoder().encode(JSON.stringify({ ...manifest, stores }));
+  expect(bytes.byteLength).toBeGreaterThan(16 * 1024);
+  const headers = new Headers({ "content-type": "application/json" });
+  if (declaredLength) headers.set("content-length", String(bytes.byteLength));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes.slice(0, 12 * 1024));
+      controller.enqueue(bytes.slice(12 * 1024));
+      controller.close();
+    },
+  }), { headers })));
+  const response = await POST(request());
+  expect(response.status).toBe(200);
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal", citations: [publicCitation] });
+  const filter = interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter as string;
+  expect(filter.match(/resource_id=/gu)).toHaveLength(101);
+  for (const document of publicationFilter.documents) {
+    expect(filter).toContain(`(resource_id="${document.resourceId}" AND version_id="${document.versionId}" AND sha256="${document.sha256}")`);
+  }
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion.publicationFilterBinding).toBe(await createPublicationFilterBinding(stores));
+});
+
+it.each([true, false])("rejects a manifest above 512 KiB before quota or provider work with declared length %s", async declaredLength => {
+  const json = JSON.stringify(manifest);
+  const bytes = new TextEncoder().encode(json + " ".repeat(512 * 1024 + 1 - new TextEncoder().encode(json).byteLength));
+  expect(bytes.byteLength).toBe(512 * 1024 + 1);
+  const headers = new Headers({ "content-type": "application/json" });
+  if (declaredLength) headers.set("content-length", String(bytes.byteLength));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(bytes, { headers })));
+  expect((await POST(request())).status).toBe(400);
+  expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+  expect(interactionMocks.create).not.toHaveBeenCalled();
+});
+
 it("retains the original restricted allowlist binding on provider failure", async () => {
   const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
     { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },

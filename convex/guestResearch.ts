@@ -63,6 +63,20 @@ async function publicScope(ctx: MutationCtx, jurisdictionId: Id<"jurisdictions">
   // Explicit even with an authenticated adoption request: guest authority never includes membership.
   if (!selected || selected.visibility !== "public") fail("WIDGET_UNAVAILABLE");
   const manifest = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, publicationFilterProtocol);
+  if (publicationFilterProtocol === PUBLICATION_FILTER_PROTOCOL) {
+    const authorities = [];
+    for (const store of manifest.stores) {
+      const row = await ctx.db.get(store.jurisdictionId);
+      if (!row || row.visibility !== "public" || !store.publicationFilter) fail("WIDGET_UNAVAILABLE");
+      // Bind the published set and access, excluding unrelated content revisions
+      // and document-warning counts. Every capable retrieval uses this exact set.
+      const documents = [...store.publicationFilter.documents].sort((a, b) => a.resourceId < b.resourceId ? -1 : a.resourceId > b.resourceId ? 1 : 0);
+      const { publicationFilter: _filter, ...scope } = store;
+      if (!_filter) fail("WIDGET_UNAVAILABLE");
+      authorities.push([scope, _filter.protocol, _filter.environment, documents, row.kind, row.organizationId ?? null, row.visibility]);
+    }
+    return { manifest, binding: JSON.stringify(["published-guest-authority-v1", manifest.authorizedScopeSize, manifest.partialCoverage, authorities]) };
+  }
   const revisions = [];
   const legacyLocks = await ctx.db.query("documentLifecycleLocks").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", undefined)).take(1);
   if (legacyLocks.length) fail("WIDGET_UNAVAILABLE");

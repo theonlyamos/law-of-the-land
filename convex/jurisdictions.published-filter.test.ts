@@ -54,13 +54,13 @@ it.each(["empty", "invalid sha", "foreign store", "failed marked published", "un
   await expect(user.client.query(resolve, { jurisdictionId: f.jurisdictionId, publicationFilterProtocol: "published-v1" })).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
 });
 
-it("rejects a truncated catalogue rather than searching only the first 64 documents", async () => {
+it("rejects a catalogue beyond the complete resource scan bound instead of truncating it", async () => {
   const { t, f, user } = await fixture();
   await t.run(async ctx => {
     const resource = (await ctx.db.get(f.resourceId))!, version = (await ctx.db.get(f.versionId))!;
     const { _id: resourceId, _creationTime: resourceTime, ...resourceFields } = resource;
     const { _id: versionId, _creationTime: versionTime, ...versionFields } = version;
-    for (let index = 1; index <= 64; index++) {
+    for (let index = 1; index <= 399; index++) {
       const nextResourceId = await ctx.db.insert("legalResources", { ...resourceFields, title: `Published ${index}`, activeVersionId: undefined });
       const nextVersionId = await ctx.db.insert("documentVersions", { ...versionFields, resourceId: nextResourceId, geminiDocumentName: `${f.storeName}/documents/law${index}` });
       await ctx.db.patch(nextResourceId, { activeVersionId: nextVersionId });

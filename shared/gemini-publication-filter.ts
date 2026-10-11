@@ -1,7 +1,7 @@
 /** Server-derived published-source restriction, never a browser-supplied filter. */
 export const PUBLICATION_FILTER_PROTOCOL = "published-v1" as const;
-export const MAX_PUBLISHED_FILTER_DOCUMENTS = 64;
-export const MAX_PUBLICATION_FILTER_BYTES = 16 * 1024;
+export const MAX_PUBLISHED_FILTER_DOCUMENTS = 1024;
+export const MAX_PUBLICATION_FILTER_BYTES = 256 * 1024;
 
 export type PublishedDocumentIdentity = { resourceId: string; versionId: string; sha256: string };
 export type PublicationFilter = {
