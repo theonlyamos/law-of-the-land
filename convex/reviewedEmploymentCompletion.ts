@@ -8,6 +8,7 @@ import { completeGovernedInteractionProofParts, completeGovernedInteractionForJo
   type VerifiedReviewedEmploymentJobPrincipal } from "./chats";
 import { authorizeSourceForJobPrincipal } from "./reviewedEmployment";
 import { MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
+import { citationPassageValidator } from "./lib/citationProvenance";
 import { chatCitationValidator } from "./lib/jurisdictionDomain";
 import { queryDiagnosticsValidator, validateQueryDiagnostics } from "./lib/queryDiagnostics";
 import { requireUserId } from "./lib/requireUser";
@@ -24,7 +25,8 @@ const completionValidator = v.object({
   diagnostics: v.optional(queryDiagnosticsValidator), routeNonce: v.string(), externalId: v.string(), jurisdictionId: v.string(),
   assistantClientId: v.string(), finalAnswer: v.string(), answerKind: v.literal("legal"), outcome: v.literal("success"),
   citations: v.array(v.object({ jurisdictionId: v.string(), resourceId: v.string(), versionId: v.string(),
-    providerStoreName: v.string(), providerDocumentName: v.optional(v.string()), pageNumber: v.optional(v.number()) })),
+    providerStoreName: v.string(), providerDocumentName: v.optional(v.string()), pageNumber: v.optional(v.number()),
+    passages: v.optional(v.array(citationPassageValidator)) })),
   model: v.string(), elapsedMs: v.number(), authorizedScopeSize: v.number(), readyStoreCount: v.number(), partialCoverage: v.boolean(),
   jurisdictionCoverage: v.array(v.object({ ordinal: v.number(),
     relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),

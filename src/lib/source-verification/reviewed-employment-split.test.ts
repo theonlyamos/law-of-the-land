@@ -131,7 +131,9 @@ describe("reviewed employment chat with the actual split verifier", () => {
     expect(f.commit).toHaveBeenCalledTimes(1);
     expect(f.commit.mock.calls[0][0]).toMatchObject({ answer: f.candidate, manifest: f.grant.manifest });
     const pages = [...new Set(f.source.evidence.passages.map(passage => passage.pdfOrdinal))].sort((a, b) => a - b);
-    expect(f.commit.mock.calls[0][0].citations).toEqual(pages.map(pageNumber => ({ ...f.grant.citationIdentity, pageNumber })));
+    expect(f.commit.mock.calls[0][0].citations).toEqual(pages.map(pageNumber => ({ ...f.grant.citationIdentity, pageNumber,
+      passages: f.source.evidence.passages.filter(passage => passage.pdfOrdinal === pageNumber)
+        .map(passage => ({ pageNumber, quote: passage.text })) })));
     expect(Object.isFrozen(result.diagnostics)).toBe(true);
     expect(JSON.stringify(result.diagnostics)).not.toContain(f.candidate);
     expect(JSON.stringify(result.diagnostics)).not.toMatch(/fileSearchStores|sourceId|question|facts/);

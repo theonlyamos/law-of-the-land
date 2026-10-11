@@ -1,4 +1,5 @@
 import { defineSchema, defineTable } from "convex/server";
+import { citationProvenanceValidator } from "./lib/citationProvenance";
 import { v } from "convex/values";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
@@ -897,6 +898,7 @@ export default defineSchema({
     assistantClientIdBinding: v.string(),
     assistantContentBinding: v.string(),
     orderedCitationBinding: v.string(),
+    citationProvenance: v.optional(v.array(citationProvenanceValidator)),
     expiresAt: v.number(),
   })
     .index("by_tokenHash", ["tokenHash"])
@@ -1010,6 +1012,7 @@ export default defineSchema({
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
     guestSources: v.optional(v.array(guestSourceValidator)),
+    citationProvenance: v.optional(v.array(citationProvenanceValidator)),
     // Written only by the verified atomic reviewed completion, never by callers
     // of appendMessages. Source URLs are resolved on access rather than stored.
     reviewedOriginalSource: v.optional(v.object({

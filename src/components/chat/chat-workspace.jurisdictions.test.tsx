@@ -460,8 +460,7 @@ describe("server-persisted reviewed responses", () => {
     expect(screen.getAllByText(question)).toHaveLength(1);
     expect(screen.getAllByText(answer)).toHaveLength(1);
     expect(screen.getByRole("region", { name: "Sources" })).toHaveTextContent(reviewedCitation.label);
-    expect(screen.getByRole("link", { name: `${reviewedCitation.label} (opens in a new tab)` }))
-      .toHaveAttribute("href", `/api/chat/sources/saved-reviewed-assistant/0?chat=${chatId}#page=11`);
+    expect(screen.getByRole("button", { name: `Preview source: ${reviewedCitation.label}` })).toBeVisible();
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
     expect(mocks.appendMessages).not.toHaveBeenCalled();
@@ -771,7 +770,11 @@ describe("unified chat client", () => {
         issuer: "Authority", officialCitation: "Act 1", effectiveDate: null, sourceUrl: "https://example.org/act.pdf" }],
     }];
     render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
-    expect(screen.getByRole("link", { name: `${citation.label} (opens in a new tab)` })).toHaveAttribute("href", "https://example.org/act.pdf");
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
+    HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+    fireEvent.click(screen.getByRole("button", { name: `Preview source: ${citation.label}` }));
+    expect(screen.getByRole("dialog", { name: citation.label })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open source website (opens in a new tab)" })).toHaveAttribute("href", "https://example.org/act.pdf");
   });
 
   it("restores a failed guest question into a fresh chat once its jurisdiction is ready, without sending", () => {

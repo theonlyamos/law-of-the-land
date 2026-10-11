@@ -43,6 +43,7 @@ type CitationIdentity = {
   providerStoreName: string;
   providerDocumentName?: string;
   pageNumber?: number;
+  passages?: Array<{ pageNumber: number; quote: string }>;
 };
 type Coverage = {
   ordinal: number;
@@ -394,6 +395,110 @@ afterEach(() => {
 });
 
 describe("completeGovernedInteraction", () => {
+  it("retains authoritative document provenance through the single-use claim without accepting it from append callers", async () => {
+    const { t, owner, document, base } = await fixture();
+    const original = new TextEncoder().encode("synthetic PDF");
+    const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", original)), value => value.toString(16).padStart(2, "0")).join("");
+    await t.run(async ctx => { const originalStorageId = await ctx.storage.store(new Blob([original], { type: "application/pdf" }));
+      await ctx.db.patch(document.versionId, { originalStorageId, byteSize: original.length, sha256 }); });
+    const result = await complete(owner.client, base);
+    const claims = (await terminalState(t)).claims;
+    expect(claims[0]).toHaveProperty("citationProvenance", [{
+      jurisdictionId: base.jurisdictionId, resourceId: document.resourceId, versionId: document.versionId,
+      providerStoreName: base.citations[0].providerStoreName, providerDocumentName: document.providerDocumentName,
+      expectedSha256: sha256, expectedByteSize: original.length, pageNumber: 4,
+    }]);
+    await owner.client.mutation(api.chats.appendMessages, {
+      externalId: base.externalId, lastMessage: base.finalAnswer!,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: base.finalAnswer!,
+        answerKind: "legal", citations: result.citations, citationClaim: result.citationClaim }],
+    });
+    const saved = await t.run(ctx => ctx.db.query("messages").take(2));
+    expect(saved[0]).toHaveProperty("citationProvenance", claims[0].citationProvenance);
+    expect((await terminalState(t)).claims).toHaveLength(0);
+    const page = await owner.client.query(api.chats.listMessages, {
+      externalId: base.externalId, paginationOpts: { numItems: 10, cursor: null },
+    });
+    expect(page.page[0]).toMatchObject({ citationPreviews: [{ pageNumber: 4 }], originalSourceUrls: [
+      `/api/chat/sources/${saved[0]._id}/0?chat=governed-chat#page=4`,
+    ] });
+    for (const secret of [document.resourceId, document.versionId, document.providerDocumentName, "citationProvenance"])
+      expect(JSON.stringify(page)).not.toContain(secret);
+  });
+
+  it("binds exact source quotes into completion signatures without changing quote-free proof bytes", async () => {
+    const { base } = await fixture();
+    const input = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "An exact source passage." }] }] };
+    const proof = await completeGovernedInteractionProofParts(input);
+    expect(proof).not.toEqual(await completeGovernedInteractionProofParts(base));
+    expect(proof).not.toEqual(await completeGovernedInteractionProofParts({
+      ...input, citations: [{ ...input.citations[0], passages: [{ pageNumber: 4, quote: "A different source passage." }] }],
+    }));
+  });
+
+  it("distinguishes lone surrogates from replacement characters in signed source passage text", async () => {
+    const { base } = await fixture();
+    const signed = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "Exact \uD800 source." }] }] };
+    const changed = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "Exact \uFFFD source." }] }] };
+    expect(await createTelemetryServiceProof(await completeGovernedInteractionProofParts(signed)))
+      .not.toEqual(await createTelemetryServiceProof(await completeGovernedInteractionProofParts(changed)));
+  });
+
+  it("preserves signed exact passages in claim state and rejects browser-supplied provenance", async () => {
+    const { t, owner, base } = await fixture();
+    const input = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "Exact source text.\nWith original whitespace." }] }] };
+    const result = await owner.client.mutation(completeGovernedInteraction, {
+      ...input, serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(input)),
+    });
+    expect((await terminalState(t)).claims[0].citationProvenance?.[0].passages).toEqual(input.citations[0].passages);
+    await expect(owner.client.mutation(api.chats.appendMessages, { externalId: base.externalId, lastMessage: base.finalAnswer!,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: base.finalAnswer!, answerKind: "legal",
+        citations: result.citations, citationClaim: result.citationClaim,
+        citationProvenance: [{ resourceId: "spoofed" }] } as never] })).rejects.toThrow(/Validator error/);
+    expect((await terminalState(t)).claims).toHaveLength(1);
+    await owner.client.mutation(api.chats.appendMessages, { externalId: base.externalId, lastMessage: base.finalAnswer!,
+      messages: [{ role: "assistant", clientId: base.assistantClientId, content: base.finalAnswer!, answerKind: "legal",
+        citations: result.citations, citationClaim: result.citationClaim }] });
+    expect((await t.run(ctx => ctx.db.query("messages").take(1)))[0].citationProvenance?.[0].passages).toEqual(input.citations[0].passages);
+  });
+
+  it.each(["add", "change", "remove"] as const)("rejects a source passage %s without the matching signature", async change => {
+    const { t, owner, base } = await fixture();
+    const withQuote = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "Exact source text." }] }] };
+    const signed = change === "add" ? base : withQuote;
+    const sent = change === "remove" ? base : change === "add" ? withQuote : {
+      ...withQuote, citations: [{ ...withQuote.citations[0], passages: [{ pageNumber: 4, quote: "Tampered source text." }] }],
+    };
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...sent,
+      serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(signed)),
+    })).rejects.toThrow("GOVERNED_INTERACTION_SERVICE_PROOF_INVALID");
+    expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+  });
+
+  it.each([false, true])("rejects source-passage replay drift (new nonce: %s)", async newNonce => {
+    const { owner, base } = await fixture();
+    const input = { ...base, citations: [{ ...base.citations[0], passages: [{ pageNumber: 4, quote: "Exact source text." }] }] };
+    await owner.client.mutation(completeGovernedInteraction, { ...input,
+      serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(input)) });
+    const changed = { ...input, routeNonce: newNonce ? createOpaqueTelemetryToken() : input.routeNonce,
+      citations: [{ ...input.citations[0], passages: [{ pageNumber: 4, quote: "Changed source text." }] }] };
+    await expect(owner.client.mutation(completeGovernedInteraction, { ...changed,
+      serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(changed)),
+    })).rejects.toThrow(newNonce ? "CHAT_CLIENT_ID_CONFLICT" : "GOVERNED_INTERACTION_REPLAY_INVALID");
+  });
+
+  it.each([[], [{ pageNumber: 4, quote: " " }], [{ pageNumber: 5, quote: "Wrong page." }],
+    [{ pageNumber: 4, quote: "x".repeat(32 * 1024 + 1) }], Array.from({ length: 25 }, () => ({ pageNumber: 4, quote: "Text." }))].map(passages => ({ passages })))(
+    "rejects malformed or over-budget source passages", async ({ passages }) => {
+      const { t, owner, base } = await fixture();
+      const input = { ...base, citations: [{ ...base.citations[0], passages }] };
+      await expect(owner.client.mutation(completeGovernedInteraction, { ...input,
+        serviceProof: await createTelemetryServiceProof(await completeGovernedInteractionProofParts(input)),
+      })).rejects.toThrow("INVALID_GOVERNED_INTERACTION");
+      expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
+    },
+  );
+
   it("binds the publication-filter capability into the signed completion proof", async () => {
     const { base } = await fixture();
     const tagged = { ...base, publicationFilterProtocol: "published-v1" as const };
@@ -537,7 +642,7 @@ describe("completeGovernedInteraction", () => {
     const result = await complete(owner.client, { ...base, citations });
     expect(result).toMatchObject({ status: "completed", outcome: "success" });
     expect(JSON.stringify(result)).not.toContain(document.providerDocumentName);
-    expect(JSON.stringify(await terminalState(t))).not.toContain(document.providerDocumentName);
+    expect(JSON.stringify((await terminalState(t)).runs)).not.toContain(document.providerDocumentName);
   });
 
   it("preserves legacy proof bytes and appends a positional document-name suffix only when present", async () => {
@@ -887,7 +992,8 @@ describe("completeGovernedInteraction", () => {
       citationCount: 1,
       partialCoverage: false,
     });
-    const serialized = JSON.stringify(state);
+    // Source identity is private claim state; telemetry remains identifier-free.
+    const serialized = JSON.stringify(state.runs);
     expect(serialized).not.toContain(base.finalAnswer);
     expect(serialized).not.toContain("fileSearchStores/");
     expect(serialized).not.toContain(String(base.citations[0].resourceId));

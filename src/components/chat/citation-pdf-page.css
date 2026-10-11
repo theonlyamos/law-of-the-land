@@ -1,0 +1,96 @@
+.citation-pdf-scroll {
+  max-height: min(65dvh, 900px);
+  overscroll-behavior: contain;
+}
+
+.citation-pdf-page {
+  width: max-content;
+  min-width: 100%;
+}
+
+.citation-pdf-surface {
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  position: relative;
+  margin-inline: auto;
+  background: white;
+  color-scheme: only light;
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.12);
+}
+
+.citation-pdf-surface canvas {
+  display: block;
+  max-width: none;
+}
+
+/* PDF.js 6 text-layer geometry. The page canvas remains the visual source. */
+.citation-pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.citation-pdf-text-layer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.citation-pdf-text-layer > :not(.markedContent),
+.citation-pdf-text-layer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.citation-pdf-text-layer .markedContent {
+  display: contents;
+}
+
+.citation-pdf-text-layer[data-main-rotation="90"] {
+  transform: rotate(90deg) translateY(-100%);
+}
+
+.citation-pdf-text-layer[data-main-rotation="180"] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+
+.citation-pdf-text-layer[data-main-rotation="270"] {
+  transform: rotate(270deg) translateX(-100%);
+}
+
+.citation-pdf-text-layer .citation-pdf-highlight {
+  color: transparent;
+  background: rgb(250 204 21 / 0.4);
+  border-radius: 1px;
+  padding: 0;
+  box-shadow: 0 1px 0 rgb(161 98 7 / 0.7);
+}
+
+.citation-pdf-text-layer ::selection {
+  color: transparent;
+  background: rgb(59 130 246 / 0.3);
+}
+
+@media (forced-colors: active) {
+  .citation-pdf-text-layer .citation-pdf-highlight {
+    outline: 1px solid Highlight;
+  }
+}

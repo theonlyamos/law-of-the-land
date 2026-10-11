@@ -1,11 +1,14 @@
 import { makeFunctionReference } from "convex/server";
 import type { Id } from "@/convex/_generated/dataModel";
 import { fetchAuthAction, getToken } from "@/lib/auth-server";
+import { createTelemetryServiceProof } from "@/convex/lib/telemetryProof";
+import { citationFileProofParts } from "../../../../../../../shared/citation-source-preview";
 
 export const runtime = "nodejs";
 const privateHeaders = { "cache-control": "no-store, private", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" };
 type SourceFile = { url: string; filename: string; mimeType: "application/pdf"; byteSize: number };
-const resolveCitationFile = makeFunctionReference<"action", { externalId: string; messageId: Id<"messages">; citationIndex: number }, SourceFile | null>("reviewedEmployment:resolveCitationFile");
+const resolveReviewedCitationFile = makeFunctionReference<"action", { externalId: string; messageId: Id<"messages">; citationIndex: number; expiresAt: number; serviceProof: string }, SourceFile | null>("reviewedEmployment:resolveCitationFile");
+const resolveCitationFile = makeFunctionReference<"action", { externalId: string; messageId: Id<"messages">; citationIndex: number; expiresAt: number; serviceProof: string }, SourceFile | null>("chatSources:resolveCitationFile");
 type Context = { params: Promise<{ messageId: string; citationIndex: string }> };
 
 export async function GET(request: Request, { params }: Context): Promise<Response> {
@@ -13,11 +16,14 @@ export async function GET(request: Request, { params }: Context): Promise<Respon
     const { messageId, citationIndex } = await params;
     const search = new URL(request.url).searchParams;
     const externalId = search.get("chat");
-    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(messageId) || !/^[0-3]$/u.test(citationIndex)
+    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(messageId) || !/^(?:[0-9]|1[0-5])$/u.test(citationIndex)
       || [...search.keys()].length !== 1 || !externalId?.trim() || externalId !== externalId.trim() || externalId.length > 200)
       return new Response("File not found.", { status: 404, headers: privateHeaders });
     if (!await getToken()) return new Response("Sign in to view this file.", { status: 401, headers: privateHeaders });
-    const file = await fetchAuthAction(resolveCitationFile, { externalId, messageId: messageId as Id<"messages">, citationIndex: Number(citationIndex) });
+    const selector = { externalId, messageId: messageId as Id<"messages">, citationIndex: Number(citationIndex), expiresAt: Date.now() + 60_000 };
+    const signedSelector = { ...selector, serviceProof: await createTelemetryServiceProof(citationFileProofParts(selector)) };
+    const file = await fetchAuthAction(resolveCitationFile, signedSelector)
+      ?? (selector.citationIndex <= 3 ? await fetchAuthAction(resolveReviewedCitationFile, signedSelector) : null);
     if (!file) return new Response("File not found.", { status: 404, headers: privateHeaders });
     const url = new URL(file.url);
     const allowedOrigins = [process.env.NEXT_PUBLIC_CONVEX_URL, process.env.NEXT_PUBLIC_CONVEX_SITE_URL]

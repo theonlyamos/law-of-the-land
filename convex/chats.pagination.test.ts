@@ -621,6 +621,7 @@ describe("chat pagination", () => {
         "assistantClientIdBinding",
         "assistantContentBinding",
         "chatSessionId",
+        "citationProvenance",
         "expiresAt",
         "jurisdictionId",
         "orderedCitationBinding",
