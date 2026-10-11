@@ -310,6 +310,25 @@ describe("reviewed employment atomic commit", () => {
     })).toEqual({ page: [], isDone: true, continueCursor: "" });
   });
 
+  it.each([false, true])("withholds denied reviewed original URLs (legacy provenance only: %s)", async legacyOnly => {
+    const f = await fixture(); await f.commit();
+    const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
+    if (legacyOnly) await f.t.run(ctx => ctx.db.patch(assistant._id, { citationProvenance: undefined }));
+    const list = () => f.owner.query(api.chats.listMessages, {
+      externalId: f.input.completion.externalId, paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect((await list()).page[1].originalSourceUrls).toEqual([
+      `/api/chat/sources/${assistant._id}/0?chat=${f.input.completion.externalId}#page=11`,
+    ]);
+    await f.t.run(ctx => ctx.db.patch(f.ids.resourceId, { catalogPublished: false }));
+    const denied = (await list()).page[1];
+    expect(denied.originalSourceUrls).toEqual([""]);
+    if (denied.citationPreviews) expect(denied.citationPreviews).toEqual([{}]);
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({
+      externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0,
+    }))).toBeNull();
+  });
+
   it("opens only the exact committed original for the current ordinary owner", async () => {
     const f = await fixture(); await f.commit();
     const saved = await state(f.t), assistant = saved.messages.find(message => message.role === "assistant")!;

@@ -14,6 +14,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("accepts only the private same-origin citation proxy and bounded pages", () => {
+  expect(privateCitationSourceUrl("")).toBeNull();
   expect(privateCitationSourceUrl(url)).toEqual({ url: url.split("#")[0], pageNumber: 11 });
   expect(privateCitationSourceUrl("/api/chat/sources/saved_answer/15?chat=owned-chat")).toEqual({ url: "/api/chat/sources/saved_answer/15?chat=owned-chat" });
   for (const input of ["https://external.invalid/a.pdf", "//external.invalid/a.pdf", "/api/storage/secret", "/api/chat/sources/saved_answer/16?chat=owned-chat", `${url}&extra=1`, "/api/chat/sources/saved_answer/0?chat=a&chat=b", "/api/chat/sources/saved_answer/0?chat=a#page=0", "/api/chat/sources/saved_answer/0?chat=a#page=10001"]) {
@@ -26,6 +27,38 @@ it("opens an accessible preview, fetches privately and jumps to the source page"
   await screen.findByText("Original PDF page 11");
   expect(fetch).toHaveBeenCalledWith(url.split("#")[0], expect.objectContaining({ cache: "no-store", credentials: "same-origin", redirect: "error" }));
   expect(screen.getByRole("link", { name: "Open full document (opens in a new tab)" })).toHaveAttribute("href", url.split("#")[0]);
+});
+it("keeps a valid page-less source available for preview and full-document browsing", async () => {
+  const pageLessUrl = url.split("#")[0];
+  render(<CitationSourcePreview source={{ label: "Page-less source", originalUrl: pageLessUrl }} onClose={vi.fn()} />);
+  await screen.findByText("Original PDF page 1");
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(fetch).toHaveBeenCalledWith(pageLessUrl, expect.objectContaining({ cache: "no-store", credentials: "same-origin", redirect: "error" }));
+  expect(screen.getByText("No page or exact supporting passage was saved. You can browse the original document.")).toBeVisible();
+  expect(screen.getByRole("link", { name: "Open full document (opens in a new tab)" })).toHaveAttribute("href", pageLessUrl);
+});
+it.each([
+  { label: "Denied source", originalUrl: "" },
+  { label: "Denied source with old metadata", originalUrl: "", pageNumber: 11, passages: [{ pageNumber: 11, quote: "Previously saved source passage." }] },
+])("shows unavailable without fetching or linking a denied source: $label", source => {
+  render(<CitationSourcePreview source={source} onClose={vi.fn()} />);
+  expect(screen.getByRole("dialog", { name: source.label })).toBeVisible();
+  expect(screen.getByText("An original document preview is not available for this citation.")).toBeVisible();
+  expect(fetch).not.toHaveBeenCalled();
+  expect(screen.queryByRole("link", { name: "Open full document (opens in a new tab)" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Original PDF page/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+});
+it("removes an already-loaded original preview and its full-document link when access is denied", async () => {
+  const onClose = vi.fn();
+  const view = render(<CitationSourcePreview source={{ label: "Act", originalUrl: url }} onClose={onClose} />);
+  await screen.findByText("Original PDF page 11");
+  expect(fetch).toHaveBeenCalledOnce();
+  view.rerender(<CitationSourcePreview source={{ label: "Act", originalUrl: "" }} onClose={onClose} />);
+  expect(screen.getByText("An original document preview is not available for this citation.")).toBeVisible();
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(screen.queryByText(/Original PDF page/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open full document (opens in a new tab)" })).not.toBeInTheDocument();
 });
 it("does not claim passage highlighting for legacy page-only citations", async () => {
   render(<CitationSourcePreview source={{ label: "Legacy source", originalUrl: url }} onClose={vi.fn()} />);

@@ -3,7 +3,7 @@ import { ConvexError, v, type Infer } from "convex/values";
 import { authComponent } from "./auth";
 import { citationSourceUserId } from "./lib/citationSourceAccess";
 import { citationPassageValidator, citationPreviewValidator } from "./lib/citationProvenance";
-import { citationPassageProofParts, validCitationPassages, type CitationPassage } from "../shared/citation-source-preview";
+import { citationPassageProofParts, validCitationPassages, type CitationPassage, type CitationPreview } from "../shared/citation-source-preview";
 import type { Doc, Id } from "./_generated/dataModel";
 import { components, internal } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
@@ -1290,9 +1290,7 @@ export const listMessages = query({
     const previewGrants = new Map<string, Promise<boolean>>();
     let sourceReader: Promise<boolean> | undefined;
     const previewAllowed = (message: Doc<"messages">, index: number): Promise<boolean> => {
-      const source = message.citationProvenance![index];
-      const key = JSON.stringify([message._id, source.jurisdictionId, source.resourceId, source.versionId,
-        source.providerStoreName, source.providerDocumentName, source.expectedSha256, source.expectedByteSize, source.pageNumber]);
+      const key = `${message._id}:${index}`;
       const existing = previewGrants.get(key);
       if (existing) return existing;
       sourceReader ??= citationSourceUserId(ctx).then(id => id === session.userId);
@@ -1321,11 +1319,18 @@ export const listMessages = query({
         }
         const provenance = message.role === "assistant" && message.answerKind === "legal"
           && message.citationProvenance?.length === message.citations?.length ? message.citationProvenance : undefined;
-        const previews = provenance?.length ? await Promise.all(provenance.map(async (source, index) =>
-          await previewAllowed(message, index) ? {
-            ...(source.pageNumber === undefined ? {} : { pageNumber: source.pageNumber }),
-            ...(source.passages === undefined ? {} : { passages: source.passages }),
-          } : {})) : undefined;
+        const sources: readonly CitationPreview[] | undefined = provenance ?? (
+          message.role === "assistant" && message.reviewedOriginalSource
+            && message.reviewedOriginalSource.pageNumbers.length === message.citations?.length
+            ? message.reviewedOriginalSource.pageNumbers.map(pageNumber => ({ pageNumber })) : undefined);
+        const grants = sources?.length
+          ? await Promise.all(sources.map((_source, index) => previewAllowed(message, index))) : undefined;
+        // Metadata may legitimately be empty for an authorized page-less source.
+        // Preserve citation indices and use the same explicit grant for each URL.
+        const previews = grants ? sources!.map((source, index) => grants[index] ? {
+          ...(source.pageNumber === undefined ? {} : { pageNumber: source.pageNumber }),
+          ...(source.passages === undefined ? {} : { passages: source.passages }),
+        } : {}) : undefined;
         return {
           storageId: message._id,
           clientId: message.clientId ?? null,
@@ -1335,14 +1340,10 @@ export const listMessages = query({
           creationTime: message._creationTime,
           citations: message.citations,
           guestSources: message.guestSources,
-          ...(message.role === "assistant" && message.reviewedOriginalSource
-            && message.reviewedOriginalSource.pageNumbers.length === message.citations?.length ? {
-              originalSourceUrls: message.reviewedOriginalSource.pageNumbers.map((page, index) =>
-                `/api/chat/sources/${message._id}/${index}?chat=${encodeURIComponent(session.externalId)}#page=${page}`),
-            } : {}),
-          ...(previews ? { citationPreviews: previews,
-            originalSourceUrls: provenance!.map((source, index) =>
-              `/api/chat/sources/${message._id}/${index}?chat=${encodeURIComponent(session.externalId)}${source.pageNumber === undefined ? "" : `#page=${source.pageNumber}`}`),
+          ...(grants ? { citationPreviews: previews,
+            originalSourceUrls: sources!.map((source, index) => grants[index]
+              ? `/api/chat/sources/${message._id}/${index}?chat=${encodeURIComponent(session.externalId)}${source.pageNumber === undefined ? "" : `#page=${source.pageNumber}`}`
+              : ""),
           } : {}),
           answerKind: message.answerKind,
           ...(message.attachmentIds?.length ? { attachments: await Promise.all(message.attachmentIds.map(async id => {
