@@ -53,7 +53,7 @@ type ResearchJurisdiction = {
   isDefault: boolean;
   organization?: { id: Id<"organizations">; name: string };
   visibility?: "public" | "members";
-  coverageWarning?: { excludedDocumentCount: number };
+  coverageWarning?: { excludedDocumentCount: number | null };
 };
 
 function invalidCursor(): never {
@@ -166,7 +166,7 @@ async function projectResearchJurisdiction(ctx: QueryCtx, row: Doc<"jurisdiction
     slug: row.slug,
     kind: row.kind as JurisdictionKind,
     isDefault: row.isDefault,
-    ...(excludedDocumentCount ? {
+    ...(excludedDocumentCount === null || excludedDocumentCount > 0 ? {
       coverageWarning: { excludedDocumentCount },
     } : {}),
     ...(organization ? { organization: { id: organization._id, name: organization.name }, visibility: row.visibility ?? "members" } : {}),
@@ -285,7 +285,7 @@ const researchJurisdictionValidator = v.union(
     isDefault: v.boolean(),
     organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
     visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
-    coverageWarning: v.optional(v.object({ excludedDocumentCount: v.number() })),
+    coverageWarning: v.optional(v.object({ excludedDocumentCount: v.union(v.number(), v.null()) })),
   }),
 );
 

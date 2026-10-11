@@ -2,6 +2,9 @@ import {afterEach,expect,it,vi} from "vitest";
 import {makeFunctionReference} from "convex/server";
 import {createWidgetBackend,seedGeographicWidget,addAssuredOrganizationUser} from "./widgetTestHelpers.fixture";
 import {readyStoreName} from "./jurisdictions";
+import { unpublishedDocumentCount } from "./lib/publishedResearchReadiness";
+import { MAX_SELECTOR_PAGE_SIZE } from "./lib/jurisdictionDomain";
+import type { Id } from "./_generated/dataModel";
 const resolve=makeFunctionReference<"query">("jurisdictions:resolveChatResearchStores");
 afterEach(()=>vi.unstubAllEnvs());
 async function fixture(){vi.stubEnv("ADMIN_ENVIRONMENT","production");const t=createWidgetBackend(),f=await seedGeographicWidget(t),user=await addAssuredOrganizationUser(t);return {t,f,user};}
@@ -129,4 +132,58 @@ it("projects current unpublished document counts separately from source authorit
   const result = await manifest(input);
   expect(result.partialCoverage).toBe(false);
   expect(result.stores[0]).not.toHaveProperty("coverageWarning");
+});
+
+async function displayCountBudget(input: Awaited<ReturnType<typeof fixture>>) {
+  return await input.t.run(async ctx => {
+    const row = (await ctx.db.get(input.f.jurisdictionId))!;
+    const query = vi.spyOn(ctx.db, "query"), get = vi.spyOn(ctx.db, "get");
+    try {
+      const count = await unpublishedDocumentCount(ctx, row);
+      return { count, readCalls: query.mock.calls.length + get.mock.calls.length };
+    } finally {
+      query.mockRestore(); get.mockRestore();
+    }
+  });
+}
+
+it("keeps a full picker page's display reads below its transaction budget at both count boundaries", async () => {
+  const input = await fixture(), failedVersionIds: Id<"documentVersions">[] = [];
+  for (let index = 0; index < 32; index++) failedVersionIds.push((await addition(input, "failed")).versionId);
+  await input.t.run(ctx => ctx.db.patch(input.f.jurisdictionId, {
+    geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds },
+  }));
+  const budget = await displayCountBudget(input);
+  expect(budget.count).toBe(32);
+  expect(budget.readCalls).toBeLessThanOrEqual(97);
+  // Leave more than half of Convex's 4,096 index-range limit for selector access checks.
+  expect(budget.readCalls * MAX_SELECTOR_PAGE_SIZE).toBeLessThanOrEqual(1_940);
+  const selection = await input.user.client.query(makeFunctionReference<"query">("jurisdictions:resolveResearchSelection"), { jurisdictionId: input.f.jurisdictionId });
+  expect(selection.coverageWarning).toEqual({ excludedDocumentCount: 32 });
+  expect((await manifest(input)).stores[0].publicationFilter.documents).toHaveLength(1);
+});
+
+it("returns an unknown display count cheaply above the resource budget while published search remains available", async () => {
+  const input = await fixture();
+  for (let index = 0; index < 33; index++) await addition(input, "draft");
+  expect(await displayCountBudget(input)).toEqual({ count: null, readCalls: 1 });
+  const selection = await input.user.client.query(makeFunctionReference<"query">("jurisdictions:resolveResearchSelection"), { jurisdictionId: input.f.jurisdictionId });
+  expect(selection.coverageWarning).toEqual({ excludedDocumentCount: null });
+  const page = await input.user.client.query(makeFunctionReference<"query">("jurisdictions:searchAccessible"), { kind: "geographic", query: "", cursor: null });
+  expect(page.page.find((row: { id: string }) => row.id === input.f.jurisdictionId)?.coverageWarning).toEqual({ excludedDocumentCount: null });
+  expect((await manifest(input)).stores[0].publicationFilter.documents).toHaveLength(1);
+});
+
+it("bounds restriction display lookups independently without changing authoritative published filtering", async () => {
+  const input = await fixture(), candidate = await addition(input, "failed");
+  await input.t.run(async ctx => {
+    const { _id: _v, _creationTime: _vc, ...version } = (await ctx.db.get(candidate.versionId))!;
+    const failedVersionIds = [candidate.versionId];
+    for (let index = 1; index <= 32; index++) failedVersionIds.push(await ctx.db.insert("documentVersions", { ...version, versionNumber: index + 1 }));
+    await ctx.db.patch(input.f.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds } });
+  });
+  expect(await displayCountBudget(input)).toEqual({ count: null, readCalls: 0 });
+  const selection = await input.user.client.query(makeFunctionReference<"query">("jurisdictions:resolveResearchSelection"), { jurisdictionId: input.f.jurisdictionId });
+  expect(selection.coverageWarning).toEqual({ excludedDocumentCount: null });
+  expect((await manifest(input)).stores[0].publicationFilter.documents).toHaveLength(1);
 });

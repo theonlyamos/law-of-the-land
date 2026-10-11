@@ -5,6 +5,9 @@ import { PUBLICATION_FILTER_PROTOCOL, MAX_PUBLISHED_FILTER_DOCUMENTS, parsePubli
   buildPublicationMetadataFilter, isPublicationEnvironment, isPublicationMetadataId, type PublicationFilter } from "../../shared/gemini-publication-filter";
 
 const MAX_RESOURCES = 400;
+// Picker display counts have a separate budget from authoritative readiness.
+const MAX_DISPLAY_RESOURCES = 32;
+const MAX_DISPLAY_FAILED_VERSIONS = 32;
 const MAX_CURRENT_JOBS = 128;
 const CURRENT_STATUSES = ["queued", "running", "waiting_provider", "manual_review", "waiting_callback"] as const;
 const GEMINI_JOB_TYPES = ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"] as const;
@@ -41,16 +44,18 @@ function payloadOf(job: Doc<"integrationJobs">): Record<string, unknown> | null 
 
 /** Display metadata only: changes to unpublished documents are not source authority changes. */
 export async function unpublishedDocumentCount(ctx: ReadContext, row: Doc<"jurisdictions">): Promise<number | null> {
+  const failedVersions = [...new Set(row.geminiSearchRestriction?.failedVersionIds ?? [])];
+  if (failedVersions.length > MAX_DISPLAY_FAILED_VERSIONS) return null;
   const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_activeVersionId", q =>
-    q.eq("jurisdictionId", row._id).eq("activeVersionId", undefined)).take(MAX_RESOURCES + 1);
-  if (resources.length > MAX_RESOURCES) return null;
+    q.eq("jurisdictionId", row._id).eq("activeVersionId", undefined)).take(MAX_DISPLAY_RESOURCES + 1);
+  if (resources.length > MAX_DISPLAY_RESOURCES) return null;
   const excluded = new Set<string>();
   for (const resource of resources) {
     if (resource.status !== "active" || resource.catalogPublished === true) continue;
     const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", q => q.eq("resourceId", resource._id)).take(1);
     if (versions.length) excluded.add(resource._id);
   }
-  for (const versionId of row.geminiSearchRestriction?.failedVersionIds ?? []) {
+  for (const versionId of failedVersions) {
     const version = await ctx.db.get(versionId);
     if (!version) return null;
     const resource = await ctx.db.get(version.resourceId);

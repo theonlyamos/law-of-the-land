@@ -122,7 +122,7 @@ export const jurisdictionSearchPageValidator = v.object({
       isDefault: v.boolean(),
       organization: v.optional(v.object({ id: v.id("organizations"), name: v.string() })),
       visibility: v.optional(v.union(v.literal("public"), v.literal("members"))),
-      coverageWarning: v.optional(v.object({ excludedDocumentCount: v.number() })),
+      coverageWarning: v.optional(v.object({ excludedDocumentCount: v.union(v.number(), v.null()) })),
     }),
   ),
   group: v.union(

@@ -40,6 +40,7 @@ function normalizeQuery(value: string) {
 
 function coverageNotice(row: ResearchJurisdiction): string | null {
   const count = row.coverageWarning?.excludedDocumentCount;
+  if (count === null) return "Some documents may be excluded until publication completes.";
   if (!Number.isSafeInteger(count) || !count || count < 1) return null;
   return `Search currently excludes ${count} unpublished ${count === 1 ? "document" : "documents"}.`;
 }
