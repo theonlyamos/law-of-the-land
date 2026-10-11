@@ -11,6 +11,7 @@ const fileUrl = "https://backend.convex.cloud/api/storage/original";
 beforeEach(() => {
   mocks.getToken.mockReset().mockResolvedValue("synthetic-session-token");
   mocks.fetchAuthAction.mockReset().mockResolvedValue({ url: fileUrl, filename: "labour act.pdf", mimeType: "application/pdf", byteSize: 3 });
+  vi.stubEnv("TELEMETRY_INGEST_SECRET", "citation-preview-test-secret-0123456789");
   vi.stubEnv("NEXT_PUBLIC_CONVEX_URL", "https://backend.convex.cloud");
   vi.stubEnv("NEXT_PUBLIC_CONVEX_SITE_URL", "https://backend.convex.site");
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("pdf", { headers: { "content-length": "3" } })));
@@ -26,8 +27,8 @@ it("reauthorizes each click and streams the original privately without exposing 
   expect(response.headers.get("cache-control")).toBe("no-store, private");
   expect(response.headers.get("location")).toBeNull();
   expect(JSON.stringify([...response.headers])).not.toContain(fileUrl);
-  expect(mocks.fetchAuthAction).toHaveBeenCalledWith(expect.anything(), { externalId: "owned-chat", messageId: "saved_answer", citationIndex: 0 });
-  mocks.fetchAuthAction.mockResolvedValueOnce(null);
+  expect(mocks.fetchAuthAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ externalId: "owned-chat", messageId: "saved_answer", citationIndex: 0 }));
+  mocks.fetchAuthAction.mockResolvedValue(null);
   expect((await GET(request(), context)).status).toBe(404);
   expect(mocks.getToken).toHaveBeenCalledTimes(2);
   expect(fetch).toHaveBeenCalledTimes(1);
@@ -37,7 +38,7 @@ it("denies anonymous and invalid selectors before fetching original bytes", asyn
   mocks.getToken.mockResolvedValueOnce(null);
   expect((await GET(request(), context)).status).toBe(401);
   expect(mocks.fetchAuthAction).not.toHaveBeenCalled();
-  for (const citationIndex of ["-1", "1.5", "4", "00"])
+  for (const citationIndex of ["-1", "1.5", "16", "00"])
     expect((await GET(request(), { params: Promise.resolve({ messageId: "saved_answer", citationIndex }) })).status).toBe(404);
   expect((await GET(new Request("http://localhost/api/chat/sources/saved_answer/0?chat=owned-chat&other=1"), context)).status).toBe(404);
   expect(fetch).not.toHaveBeenCalled();
@@ -63,4 +64,37 @@ it("preserves range and unsatisfiable-range responses for the PDF viewer", async
   expect(unsatisfiable.status).toBe(416);
   expect(unsatisfiable.headers.get("content-range")).toBe("bytes */3");
   expect(unsatisfiable.headers.get("content-length")).toBeNull();
+});
+
+it("resolves general verified sources through index 15 before the legacy resolver", async () => {
+  const response = await GET(request(), { params: Promise.resolve({ messageId: "saved_answer", citationIndex: "15" }) });
+  expect(response.status).toBe(200);
+  expect(mocks.fetchAuthAction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ externalId: "owned-chat", messageId: "saved_answer", citationIndex: 15 }));
+});
+
+it("falls back to reviewed originals only for a legacy citation index", async () => {
+  mocks.fetchAuthAction.mockResolvedValueOnce(null);
+  expect((await GET(request(), context)).status).toBe(200);
+  expect(mocks.fetchAuthAction).toHaveBeenCalledTimes(2);
+  mocks.fetchAuthAction.mockClear().mockResolvedValue(null);
+  expect((await GET(request(), { params: Promise.resolve({ messageId: "saved_answer", citationIndex: "4" }) })).status).toBe(404);
+  expect(mocks.fetchAuthAction).toHaveBeenCalledTimes(1);
+});
+
+it("adds a short-lived server proof that never reaches the browser response", async () => {
+  const before = Date.now();
+  const response = await GET(request(), context);
+  const args = mocks.fetchAuthAction.mock.calls[0][1];
+  expect(args.serviceProof).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  expect(args.expiresAt).toBeGreaterThanOrEqual(before + 59_000);
+  expect(args.expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
+  expect(await response.text()).not.toContain(args.serviceProof);
+  expect(JSON.stringify([...response.headers])).not.toContain(args.serviceProof);
+});
+
+it("fails closed when the server proof secret is unavailable", async () => {
+  vi.stubEnv("TELEMETRY_INGEST_SECRET", "");
+  expect((await GET(request(), context)).status).toBe(503);
+  expect(mocks.fetchAuthAction).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
 });

@@ -19,6 +19,7 @@ export interface PersistedChatMessage {
   citations?: ChatCitation[];
   guestSources?: NonNullable<GuestTurnView["result"]>["citations"];
   originalSourceUrls?: string[];
+  citationPreviews?: import("../../../shared/citation-source-preview").CitationPreview[];
   answerKind?: ChatAnswerKind;
   attachments?: ChatAttachment[];
 }

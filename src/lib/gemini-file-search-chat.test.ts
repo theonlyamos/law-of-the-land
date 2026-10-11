@@ -1211,6 +1211,18 @@ describe("bounded recovery of a clean premature stream EOF", () => {
   });
 });
 
+describe("source preview quote provenance", () => {
+  it("never treats provider source labels or answer attribution offsets as original quotations", async () => {
+    const answer = "The Constitution applies.";
+    const { result } = await run(eventStream(answer), canonical(answer, [citation({
+      source: "Synthetic Act source label", start_index: 0, end_index: 16, page_number: 7,
+    })]));
+    expect(result.citations[0]).toMatchObject({ pageNumber: 7 });
+    expect(result.citations[0]).not.toHaveProperty("passages");
+    expect(JSON.stringify(result.citations)).not.toContain("Synthetic Act source label");
+  });
+});
+
 describe("verified stream file citations", () => {
   const documentName = "fileSearchStores/ghana-law/documents/document-1";
   const url = { type: "url_citation", url: "https://private.example/marker", start_index: 0, end_index: 3 } as const;

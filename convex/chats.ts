@@ -1,6 +1,9 @@
 import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import { authComponent } from "./auth";
+import { citationSourceUserId } from "./lib/citationSourceAccess";
+import { citationPassageValidator, citationPreviewValidator } from "./lib/citationProvenance";
+import { citationPassageProofParts, validCitationPassages, type CitationPassage } from "../shared/citation-source-preview";
 import type { Doc, Id } from "./_generated/dataModel";
 import { components, internal } from "./_generated/api";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
@@ -152,6 +155,7 @@ type GovernedCitationIdentity = {
   providerStoreName: string;
   providerDocumentName?: string;
   pageNumber?: number;
+  passages?: CitationPassage[];
 };
 type GovernedJurisdictionCoverage = {
   ordinal: number;
@@ -217,6 +221,7 @@ const governedCitationIdentityValidator = v.object({
   providerStoreName: v.string(),
   providerDocumentName: v.optional(v.string()),
   pageNumber: v.optional(v.number()),
+  passages: v.optional(v.array(citationPassageValidator)),
 });
 const governedJurisdictionCoverageValidator = v.object({
   ordinal: v.number(),
@@ -285,6 +290,7 @@ export async function completeGovernedInteractionProofParts(
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
+    ...citationPassageProofParts(input.citations),
     ...(input.attachmentIds?.length ? ["attachment-context-v1", input.attachmentIds.length, ...input.attachmentIds] : []),
     ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol]),
     ...(input.publicationFilterBinding === undefined ? [] : ["publication-filter-binding-v1", input.publicationFilterBinding]),
@@ -315,6 +321,7 @@ async function governedCompletionBindings(input: GovernedCompletionProofInput) {
     ]),
     ...queryDiagnosticsProofParts(input.diagnostics),
     ...citationDocumentProofParts(input.citations),
+    ...citationPassageProofParts(input.citations),
     ...(input.attachmentIds?.length ? [input.attachmentIds] : []),
     ...(input.publicationFilterProtocol === undefined ? [] : ["publication-filter-protocol", input.publicationFilterProtocol]),
     ...(input.publicationFilterBinding === undefined ? [] : ["publication-filter-binding-v1", input.publicationFilterBinding]),
@@ -353,6 +360,7 @@ function validateGovernedCompletionInput(input: GovernedCompletionProofInput): v
       item.ordinal !== index
       || (index === 0 && item.relation !== "selected")
       || (index > 0 && item.relation === "selected"))
+    || !validCitationPassages(input.citations)
     || input.citations.length > MAX_CITATIONS
     || input.citations.some((citation) =>
       !boundedIdentifier(citation.jurisdictionId, MAX_CHAT_EXTERNAL_ID_LENGTH)
@@ -727,6 +735,7 @@ const chatMessageValidator = v.object({
   citations: v.optional(v.array(chatCitationValidator)),
   guestSources: v.optional(v.array(guestSourceValidator)),
   originalSourceUrls: v.optional(v.array(v.string())),
+  citationPreviews: v.optional(v.array(citationPreviewValidator)),
   answerKind: v.optional(answerKindValidator),
   completedAt: v.optional(v.number()),
   durationMs: v.optional(v.number()),
@@ -798,6 +807,51 @@ export async function validateGovernedCitations(ctx: QueryCtx, storeList: readon
     });
   }
   return publicCitations;
+}
+
+/** Current grant for one saved, server-owned source snapshot. This never accepts
+ * resource IDs from a public source-opening request. */
+export async function authorizeCitationProvenance(
+  ctx: QueryCtx, session: Doc<"chatSessions">, message: Doc<"messages">, citationIndex: number,
+  stores?: readonly import("./jurisdictions").ChatResearchStore[],
+): Promise<{ url: string; filename: string; mimeType: "application/pdf"; byteSize: number } | null> {
+  try {
+    const source = message.citationProvenance?.[citationIndex], citation = message.citations?.[citationIndex];
+    if (!session.jurisdictionId || message.sessionId !== session._id || message.role !== "assistant" || message.answerKind !== "legal"
+      || !source || !citation || message.citationProvenance?.length !== message.citations?.length
+      || source.jurisdictionId !== citation.jurisdictionId || !validCitationPassages([source])
+      || (source.pageNumber !== undefined && (!Number.isSafeInteger(source.pageNumber) || source.pageNumber < 1 || source.pageNumber > MAX_PAGE_NUMBER))
+      || !/^[a-f0-9]{64}$/u.test(source.expectedSha256) || !Number.isSafeInteger(source.expectedByteSize)
+      || source.expectedByteSize < 1 || source.expectedByteSize > 32 * 1024 * 1024) return null;
+    const resolution = stores ?? (await resolveChatResearchStoresForJurisdiction(ctx, session.jurisdictionId, PUBLICATION_FILTER_PROTOCOL)).stores;
+    const current = (await validateGovernedCitations(ctx, resolution, [source]))[0];
+    if (current.jurisdictionId !== citation.jurisdictionId || current.jurisdictionKind !== citation.jurisdictionKind
+      || current.relation !== citation.relation) return null;
+    const [resource, version] = await Promise.all([ctx.db.get(source.resourceId), ctx.db.get(source.versionId)]);
+    if (!resource || resource.catalogPublished !== true || !version || version.mimeType !== "application/pdf"
+      || version.sha256 !== source.expectedSha256 || version.byteSize !== source.expectedByteSize) return null;
+    const storage = await ctx.db.system.get("_storage", version.originalStorageId);
+    if (!storage || (storage.contentType !== undefined && storage.contentType !== "application/pdf") || storage.size !== source.expectedByteSize) return null;
+    const digest = atob(storage.sha256);
+    if (digest.length !== 32 || Array.from(digest, byte => byte.charCodeAt(0).toString(16).padStart(2, "0")).join("") !== source.expectedSha256) return null;
+    const url = await ctx.storage.getUrl(version.originalStorageId);
+    return url ? { url, filename: version.filename, mimeType: "application/pdf", byteSize: version.byteSize } : null;
+  } catch { return null; }
+}
+
+async function snapshotCitationProvenance(ctx: MutationCtx, citations: readonly GovernedCitationIdentity[]) {
+  return await Promise.all(citations.map(async citation => {
+    const jurisdictionId = ctx.db.normalizeId("jurisdictions", citation.jurisdictionId);
+    const resourceId = ctx.db.normalizeId("legalResources", citation.resourceId);
+    const versionId = ctx.db.normalizeId("documentVersions", citation.versionId);
+    if (!jurisdictionId || !resourceId || !versionId) invalidCitationClaim();
+    const version = await ctx.db.get(versionId);
+    if (!version?.geminiDocumentName) invalidCitationClaim();
+    return { jurisdictionId, resourceId, versionId, providerStoreName: citation.providerStoreName,
+      providerDocumentName: version.geminiDocumentName, expectedSha256: version.sha256, expectedByteSize: version.byteSize,
+      ...(citation.pageNumber === undefined ? {} : { pageNumber: citation.pageNumber }),
+      ...(citation.passages === undefined ? {} : { passages: citation.passages }) };
+  }));
 }
 
 async function resolveGovernedCompletionAuthority(
@@ -996,6 +1050,7 @@ if (args.outcome === "success") {
     jurisdictionId,
     answerKind: args.answerKind!,
     ...claimBindings,
+    ...(args.citations.length ? { citationProvenance: await snapshotCitationProvenance(ctx, args.citations) } : {}),
     expiresAt,
     ...(attachmentContext.length ? { attachmentIds: attachmentContext.map(row => row._id) } : {}),
   });
@@ -1106,6 +1161,7 @@ async function consumeCitationClaim(
   await checkedAttachments(ctx, session, row.attachmentIds ?? []);
   if (message.answerKind === "document" && !row.attachmentIds?.length) invalidCitationClaim();
   await ctx.db.delete(row._id);
+  return row.citationProvenance;
 }
 
 export const expireCitationClaim = internalMutation({
@@ -1226,6 +1282,28 @@ export const listMessages = query({
         numItems: normalizePageSize(args.paginationOpts.numItems, MAX_MESSAGE_PAGE_SIZE),
       });
 
+    let sourceStores: Promise<readonly import("./jurisdictions").ChatResearchStore[]> | undefined;
+    const currentStores = () => sourceStores ??= session.jurisdictionId
+      ? resolveChatResearchStoresForJurisdiction(ctx, session.jurisdictionId, PUBLICATION_FILTER_PROTOCOL)
+        .then(resolution => resolution.stores).catch(() => [])
+      : Promise.resolve([]);
+    const previewGrants = new Map<string, Promise<boolean>>();
+    let sourceReader: Promise<boolean> | undefined;
+    const previewAllowed = (message: Doc<"messages">, index: number): Promise<boolean> => {
+      const source = message.citationProvenance![index];
+      const key = JSON.stringify([message._id, source.jurisdictionId, source.resourceId, source.versionId,
+        source.providerStoreName, source.providerDocumentName, source.expectedSha256, source.expectedByteSize, source.pageNumber]);
+      const existing = previewGrants.get(key);
+      if (existing) return existing;
+      sourceReader ??= citationSourceUserId(ctx).then(id => id === session.userId);
+      const grant = sourceReader.then(allowed => !allowed ? false : message.reviewedOriginalSource
+        ? ctx.runQuery(makeFunctionReference<"query">("reviewedEmployment:resolveCitationFileAtDate"), {
+          externalId: session.externalId, messageId: message._id, citationIndex: index, asOfDate: new Date().toISOString().slice(0, 10),
+        }).then(Boolean).catch(() => false)
+        : currentStores().then(stores => authorizeCitationProvenance(ctx, session, message, index, stores)).then(Boolean));
+      previewGrants.set(key, grant);
+      return grant;
+    };
     return {
       // The database query reads newest-first so the cursor continues into
       // older history; each page itself remains chronological for consumers.
@@ -1241,6 +1319,13 @@ export const listMessages = query({
             timing = { completedAt: run.completedAt, durationMs: run.totalLatencyMs };
           }
         }
+        const provenance = message.role === "assistant" && message.answerKind === "legal"
+          && message.citationProvenance?.length === message.citations?.length ? message.citationProvenance : undefined;
+        const previews = provenance?.length ? await Promise.all(provenance.map(async (source, index) =>
+          await previewAllowed(message, index) ? {
+            ...(source.pageNumber === undefined ? {} : { pageNumber: source.pageNumber }),
+            ...(source.passages === undefined ? {} : { passages: source.passages }),
+          } : {})) : undefined;
         return {
           storageId: message._id,
           clientId: message.clientId ?? null,
@@ -1255,6 +1340,10 @@ export const listMessages = query({
               originalSourceUrls: message.reviewedOriginalSource.pageNumbers.map((page, index) =>
                 `/api/chat/sources/${message._id}/${index}?chat=${encodeURIComponent(session.externalId)}#page=${page}`),
             } : {}),
+          ...(previews ? { citationPreviews: previews,
+            originalSourceUrls: provenance!.map((source, index) =>
+              `/api/chat/sources/${message._id}/${index}?chat=${encodeURIComponent(session.externalId)}${source.pageNumber === undefined ? "" : `#page=${source.pageNumber}`}`),
+          } : {}),
           answerKind: message.answerKind,
           ...(message.attachmentIds?.length ? { attachments: await Promise.all(message.attachmentIds.map(async id => {
             const row = await ctx.db.get("chatAttachments", id);
@@ -1398,9 +1487,10 @@ for (const message of unsavedMessages) {
       await ctx.db.patch(attachment._id, { messageClientId: message.clientId, expiresAt: undefined });
     }
   }
+  let citationProvenance: Doc<"messages">["citationProvenance"];
   if (message.role === "assistant") {
     if (!message.answerKind || message.citations === undefined) invalidCitationClaim();
-    await consumeCitationClaim(ctx, session, {
+    citationProvenance = await consumeCitationClaim(ctx, session, {
       clientId: message.clientId,
       content: message.content,
       citations: message.citations,
@@ -1415,6 +1505,7 @@ for (const message of unsavedMessages) {
     content: message.content,
     clientId: message.clientId,
     citations: message.role === "assistant" ? message.citations : undefined,
+    ...(citationProvenance?.length ? { citationProvenance } : {}),
     answerKind: message.role === "assistant" ? message.answerKind : undefined,
     createdAt: message.createdAt ?? Date.now(),
     attachmentIds: message.role === "user" ? message.attachmentIds : undefined,

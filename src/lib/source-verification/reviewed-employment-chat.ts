@@ -271,7 +271,9 @@ export function createReviewedEmploymentChat(deps: ReviewedEmploymentDependencie
       }
       if (verified.candidateSha256 !== createHash("sha256").update(candidate, "utf8").digest("hex")) return blocked("verification_blocked", "candidate_mismatch");
       const citations = freeze([...new Set(resolved.evidence.passages.map(passage => passage.pdfOrdinal))].sort((a, b) => a - b)
-        .map(pageNumber => ({ ...authority.citationIdentity, pageNumber })));
+        .map(pageNumber => ({ ...authority.citationIdentity, pageNumber,
+          passages: resolved.evidence.passages.filter(passage => passage.pdfOrdinal === pageNumber)
+            .map(passage => ({ pageNumber, quote: passage.text })) })));
       failure = "commit_failed";
       enter("commit");
       const completion = await wait(() => deps.commit({ answer: candidate, citations, manifest: authority.manifest, signal: controller.signal }), terminalDeadline);

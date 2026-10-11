@@ -1,5 +1,6 @@
 "use client";
 
+import { CitationSourcePreview, type CitationPreviewSource } from "./citation-source-preview";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
 import { ApiError, BackgroundAcknowledgementError, ChatSubmissionTransportError, postChat } from "./chat-stream-client";
@@ -123,6 +124,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     saveFailed, ensureError, deleteError, errorReason,
     isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted, backgroundJobId, backgroundRecovery, canStop,
   } = useChatRequests(requestChatId);
+  const [sourcePreview, setSourcePreview] = useState<{ source: CitationPreviewSource; chatId: string | null } | null>(null);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -186,6 +188,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         citations: message.citations,
         guestSources: message.guestSources,
         originalSourceUrls: message.originalSourceUrls,
+        citationPreviews: message.citationPreviews,
         answerKind: message.answerKind,
         attachments: message.attachments,
       });
@@ -1081,17 +1084,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                           <h2 className="text-[11px] font-semibold uppercase tracking-wider">Sources · {message.citations.length}</h2>
                           <ol className="mt-3 space-y-2">
                             {message.citations.map((citation, citationIndex) => {
-                              const originalUrl = message.source === "persisted" ? message.originalSourceUrls?.[citationIndex] : null;
-                              const guestUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl : null;
-                              const sourceUrl = originalUrl && /^\/api\/chat\/sources\/[A-Za-z0-9_-]{1,128}\/[0-3]\?chat=[^#]+#page=(?:11|12|18|21)$/u.test(originalUrl)
-                                ? originalUrl : guestUrl && /^https?:\/\//i.test(guestUrl) ? guestUrl : null;
+                              const originalUrl = message.source === "persisted" ? message.originalSourceUrls?.[citationIndex] : undefined;
+                              const externalUrl = message.source === "persisted" ? message.guestSources?.[citationIndex]?.sourceUrl ?? undefined : undefined;
+                              const previewMetadata = message.source === "persisted" ? message.citationPreviews?.[citationIndex] : undefined;
                               return (
                               <li key={`${citation.jurisdictionId}-${citation.relation}-${citationIndex}`} className="chat-source">
                                 <span className="chat-source-number" aria-hidden="true">{citationIndex + 1}</span>
                                 <div className="min-w-0 [overflow-wrap:anywhere]">
-                                {sourceUrl
-                                  ? <a href={sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={`${citation.label} (opens in a new tab)`} className="font-medium text-foreground underline underline-offset-4">{citation.label}</a>
-                                  : <span className="font-medium text-foreground">{citation.label}</span>}
+                                <button type="button" aria-label={`Preview source: ${citation.label}`}
+                                  onClick={() => setSourcePreview({ chatId, source: { label: citation.label, originalUrl, externalUrl, ...previewMetadata } })}
+                                  className="rounded-sm text-left font-medium text-foreground underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{citation.label}</button>
                                   <p>{citation.jurisdictionName} · {citation.jurisdictionKind === "organizational" ? "Organization" : "Geographic jurisdiction"} · {citation.relation === "selected" ? "Selected jurisdiction" : citation.relation === "geographic_ancestor" ? "Geographic ancestor" : "Organization geography"}</p>
                                 </div>
                               </li>
@@ -1209,6 +1211,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           </>
         )}
       </div>
+      {sourcePreview && sourcePreview.chatId === chatId && isAuthenticated && !isCurrentChatDeleted && (
+        <CitationSourcePreview key={`${chatId}:${sourcePreview.source.label}:${sourcePreview.source.originalUrl}`} source={sourcePreview.source} onClose={() => setSourcePreview(null)} />
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { CitationPassage } from "../../shared/citation-source-preview";
 import type { GoogleGenAI, Interactions } from "@google/genai";
 import { buildPublicationMetadataFilter, type PublicationFilter } from "../../shared/gemini-publication-filter";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
@@ -148,6 +149,8 @@ export type ValidatedCitation = {
   providerStoreName: string;
   providerDocumentName?: string;
   pageNumber?: number;
+  /** Only verified original excerpts; FileCitation.source is not a quote field. */
+  passages?: CitationPassage[];
 };
 
 export type GovernedChatResult = {
