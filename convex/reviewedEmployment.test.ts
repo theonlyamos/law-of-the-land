@@ -187,6 +187,51 @@ async function savedGeneralCitation() {
 }
 
 describe("general saved citation originals", () => {
+  it("preserves citation indices while withholding a denied original URL", async () => {
+    const f = await savedGeneralCitation();
+    await f.t.run(async ctx => {
+      const message = (await ctx.db.get(f.messageId))!;
+      const { _id: _resourceId, _creationTime: _resourceTime, ...resource } = (await ctx.db.get(f.ids.resourceId))!;
+      const { _id: _versionId, _creationTime: _versionTime, ...version } = (await ctx.db.get(f.ids.versionId))!;
+      const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined,
+        title: "Available Act", officialCitation: "Available Act", officialCitationKey: "available act" });
+      const providerDocumentName = `${f.ids.storeName}/documents/available`;
+      const versionId = await ctx.db.insert("documentVersions", { ...version, resourceId, geminiDocumentName: providerDocumentName });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      await ctx.db.patch(f.messageId, {
+        citations: [...message.citations!, { ...message.citations![0], label: "Available Act, page 8" }],
+        citationProvenance: [...message.citationProvenance!, { ...message.citationProvenance![0],
+          resourceId, versionId, providerDocumentName, pageNumber: 8, passages: [{ pageNumber: 8, quote: "Available excerpt." }] }],
+      });
+      await ctx.db.patch(f.ids.versionId, { sha256: "a".repeat(64) });
+    });
+    const messages = await f.owner.query(api.chats.listMessages, {
+      externalId: f.args.externalId, paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(messages.page[0].citationPreviews).toEqual([{}, { pageNumber: 8, passages: [{ pageNumber: 8, quote: "Available excerpt." }] }]);
+    expect(messages.page[0].originalSourceUrls).toEqual(["",
+      `/api/chat/sources/${f.messageId}/1?chat=${f.args.externalId}#page=8`,
+    ]);
+    expect(await f.owner.action(resolveGeneralCitationFile, f.sourceArgs)).toBeNull();
+    expect(await f.owner.action(resolveGeneralCitationFile, await signGeneralSourceArgs({ ...f.sourceArgs, citationIndex: 1 }))).not.toBeNull();
+  });
+
+  it("keeps an authorized page-less original available when its preview metadata is empty", async () => {
+    const f = await savedGeneralCitation();
+    await f.t.run(async ctx => {
+      const message = (await ctx.db.get(f.messageId))!;
+      const { pageNumber: _page, passages: _passages, ...source } = message.citationProvenance![0];
+      await ctx.db.patch(f.messageId, { citationProvenance: [source],
+        citations: [{ ...message.citations![0], label: "Synthetic Act" }] });
+    });
+    const messages = await f.owner.query(api.chats.listMessages, {
+      externalId: f.args.externalId, paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(messages.page[0].citationPreviews).toEqual([{}]);
+    expect(messages.page[0].originalSourceUrls).toEqual([`/api/chat/sources/${f.messageId}/0?chat=${f.args.externalId}`]);
+    expect(await f.owner.action(resolveGeneralCitationFile, f.sourceArgs)).not.toBeNull();
+  });
+
   it("rechecks account eligibility inside the atomic general-source query", async () => {
     const f = await savedGeneralCitation();
     await f.t.run(ctx => ctx.runMutation(components.betterAuth.adapter.updateOne, { input: { model: "user",
@@ -335,6 +380,7 @@ describe("general saved citation originals", () => {
       expect(await f.owner.action(resolveGeneralCitationFile, f.sourceArgs)).toBeNull();
       const messages = await f.owner.query(api.chats.listMessages, { externalId: f.args.externalId, paginationOpts: { cursor: null, numItems: 10 } });
       expect(JSON.stringify(messages)).not.toContain("Verified original excerpt.");
+      expect(messages.page.every(message => message.originalSourceUrls?.every(url => url === "") ?? true)).toBe(true);
     },
   );
 });
