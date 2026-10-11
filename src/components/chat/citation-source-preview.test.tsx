@@ -70,3 +70,15 @@ it("keeps a full-document fallback if the PDF renderer fails", async () => {
     expect(screen.getByRole("link", { name: "Open full document (opens in a new tab)" })).toBeVisible();
   } finally { error.mockRestore(); }
 });
+
+it("wraps Tab and Shift+Tab within the preview controls", async () => {
+  render(<CitationSourcePreview source={{ label: "Act", originalUrl: url }} onClose={vi.fn()} />);
+  await screen.findByText("Original PDF page 11");
+  const close = screen.getByRole("button", { name: "Close source preview" });
+  const full = screen.getByRole("link", { name: "Open full document (opens in a new tab)" });
+  close.focus();
+  fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+  expect(document.activeElement).toBe(full);
+  fireEvent.keyDown(full, { key: "Tab" });
+  expect(document.activeElement).toBe(close);
+});

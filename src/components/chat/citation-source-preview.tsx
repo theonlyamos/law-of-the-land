@@ -100,7 +100,20 @@ export function CitationSourcePreview({ source, onClose }: { source: CitationPre
     })();
     return () => { active = false; controller.abort(); };
   }, [url, attempt]);
-  return <dialog ref={dialogRef} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); closeRef.current(); }}
+  return <dialog ref={dialogRef} aria-labelledby={titleId} onKeyDown={event => {
+    if (event.key !== "Tab") return;
+    // Native modal dialogs make the background inert, but some browsers allow
+    // Tab at either edge to leave document focus for browser chrome.
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex], summary',
+    )].filter(element => element.tabIndex >= 0 && !element.closest("[hidden], [inert]"));
+    const first = controls[0], last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first && last) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last && first) {
+      event.preventDefault(); first.focus();
+    }
+  }} onCancel={event => { event.preventDefault(); closeRef.current(); }}
     className="fixed inset-0 m-auto h-[100dvh] max-h-[100dvh] w-screen max-w-none overflow-hidden border bg-background p-0 text-foreground shadow-xl backdrop:bg-black/50 sm:h-[92dvh] sm:max-w-6xl sm:rounded-xl">
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3 sm:px-6">

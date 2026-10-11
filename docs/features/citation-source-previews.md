@@ -38,9 +38,11 @@ The change is prepared locally; it does not publish, deploy, or backfill existin
 
 ## Local verification record (2026-10-11)
 
-- Complete Vitest suite: 190 files, 3,416 tests passed.
+- Complete Vitest suite: 190 files, 3,417 tests passed.
 - TypeScript no-emit check and Next production build: passed.
 - Configured ESLint command: passed, with the TypeScript coverage caveat above. Generated third-party PDF assets and fixture bundles are excluded.
-- Isolated Vite fixture production build: passed. Its 12 Playwright browser cases are discoverable.
+- Isolated Vite fixture production build: passed. All 12 Playwright browser cases passed in cloud Chromium, including focus containment/restoration, page and passage navigation, zoom, mobile layout, scans, ambiguity, authorization failures, and rotated-page geometry.
+- Desktop, mobile, and rotated-page screenshots were visually inspected; highlights align with the original fixture text.
 - Independent code/security review: no remaining blocking findings after correcting raw-storage capability exposure and rotated text-layer geometry.
-- Actual browser rendering, screenshots, and authenticated full-stack runtime QA remain unverified: this cloud executor could not launch Chromium (socket EPERM), and its separate supported cloud browser could not reach the executor-local fixture server. No live Convex deployment or provider invocation was used to work around this limit.
+- The command executor initially could not launch Chromium (socket EPERM), including an approved escalation. Browser QA subsequently ran successfully from the same cloud computer’s supported desktop terminal, without changing security/network settings, exposing a tunnel, or using the user’s computer.
+- Authenticated full-stack runtime QA remains unverified: no live Convex deployment or provider invocation was used.

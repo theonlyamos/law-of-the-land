@@ -99,9 +99,9 @@ test("moves between passages and zooms the real page without leaving stale highl
   await page.getByRole("button", { name: "Next passage", exact: true }).click();
   await expect(page.getByText("Page 3 of 3", { exact: true })).toBeVisible();
   await expect(page.locator("mark")).toHaveText(NEXT_QUOTE);
-  const initialWidth = await page.locator("canvas").evaluate((canvas) => (canvas as HTMLCanvasElement).width);
+  const initialWidth = await page.locator(".citation-pdf-surface > canvas").evaluate((canvas) => (canvas as HTMLCanvasElement).width);
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
-  await expect.poll(async () => page.locator("canvas").evaluate((canvas) => (canvas as HTMLCanvasElement).width)).toBeGreaterThan(initialWidth);
+  await expect.poll(async () => page.locator(".citation-pdf-surface > canvas").evaluate((canvas) => (canvas as HTMLCanvasElement).width)).toBeGreaterThan(initialWidth);
   await expect(page.locator("mark")).toHaveText(NEXT_QUOTE);
   await page.getByRole("button", { name: "Previous page", exact: true }).click();
   await expect(page.getByText("Page 2 of 3", { exact: true })).toBeVisible();
@@ -169,7 +169,7 @@ test("rotated original page keeps its exact highlight inside the matching canvas
   await expect(page.getByText(/Exact passage highlighted/i)).toBeVisible();
   await expect(page.locator("mark")).toHaveText(EXACT_QUOTE);
   await expectPaintedCanvas(page, 2);
-  const canvas = await page.locator("canvas").boundingBox();
+  const canvas = await page.locator(".citation-pdf-surface > canvas").boundingBox();
   const highlight = await page.locator("mark").boundingBox();
   expect(highlight!.x).toBeGreaterThanOrEqual(canvas!.x);
   expect(highlight!.y).toBeGreaterThanOrEqual(canvas!.y);
