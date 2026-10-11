@@ -83,14 +83,14 @@ describe("ResearchJurisdictionPicker", () => {
     render(<ControlledPicker initialValue={restricted} />);
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Search excludes 2 documents whose indexing failed.",
+      "Search currently excludes 2 unpublished documents.",
     );
     expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Ghana");
   });
 
   it("omits the coverage notice for an unrestricted selection", () => {
     render(<ControlledPicker initialValue={ghana} />);
-    expect(screen.queryByText(/documents? whose indexing failed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Search currently excludes \d+ unpublished documents?/)).not.toBeInTheDocument();
   });
 
   it("allows drafting before a compact jurisdiction selection and enables sending only after selection", async () => {

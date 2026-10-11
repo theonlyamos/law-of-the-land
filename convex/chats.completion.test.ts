@@ -197,6 +197,7 @@ async function attachReadyParent(
   selectedJurisdictionId: Id<"jurisdictions">,
 ) {
   const parent = await geographicJurisdiction(t, "West Africa");
+  await publishedDocument(t, parent.jurisdictionId, parent.storeName, "Regional law");
   await t.run(async (ctx) => {
     const selectedProfiles = await ctx.db
       .query("geographicJurisdictions")
@@ -222,6 +223,7 @@ async function publishedDocument(
   return await t.run(async (ctx) => {
     const now = Date.now();
     const originalStorageId = await ctx.storage.store(new Blob(["law"]));
+    const providerDocumentName = `${storeName}/documents/law${crypto.randomUUID().slice(0, 8)}`;
     const resourceId = await ctx.db.insert("legalResources", {
       jurisdictionId,
       type: "constitution",
@@ -248,17 +250,17 @@ async function publishedDocument(
       sha256: "a".repeat(64),
       sourceUrl: "https://official.example/law",
       status: "published",
-      geminiDocumentName: `${storeName}/documents/constitution`,
+      geminiDocumentName: providerDocumentName,
       submittedBy: "fixture",
       publishedAt: now,
       createdAt: now,
       updatedAt: now,
     });
-    await ctx.db.patch(resourceId, { activeVersionId: versionId });
+    await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
     return {
       resourceId,
       versionId,
-      providerDocumentName: `${storeName}/documents/constitution`,
+      providerDocumentName,
     };
   });
 }
@@ -1082,7 +1084,7 @@ describe("completeGovernedInteraction", () => {
 
       await expect(complete(owner.client, { ...base, citations: base.citations.map(citation => ({ ...citation,
         ...(exactDocument ? { providerDocumentName: document.providerDocumentName } : {}),
-      })) })).rejects.toThrow("INVALID_CHAT_CITATIONS");
+      })) })).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
       expect(await terminalState(t)).toEqual({ claims: [], runs: [] });
     },
   );

@@ -41,7 +41,7 @@ function normalizeQuery(value: string) {
 function coverageNotice(row: ResearchJurisdiction): string | null {
   const count = row.coverageWarning?.excludedDocumentCount;
   if (!Number.isSafeInteger(count) || !count || count < 1) return null;
-  return `Search excludes ${count} ${count === 1 ? "document" : "documents"} whose indexing failed.`;
+  return `Search currently excludes ${count} unpublished ${count === 1 ? "document" : "documents"}.`;
 }
 
 function appendPage(

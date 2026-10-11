@@ -4,6 +4,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { describe, expect, it } from "vitest";
 import { components } from "../_generated/api";
+import type { Id } from "../_generated/dataModel";
 import authSchema from "../betterAuth/schema";
 import schema from "../schema";
 
@@ -24,6 +25,47 @@ type Backend = TestConvex<typeof schema>;
 const resolveResearchScope = makeFunctionReference<"query">(
   "jurisdictions:resolveChatResearchStores",
 );
+
+async function insertPublishedDocument(
+  ctx: Pick<Parameters<Parameters<Backend["run"]>[0]>[0], "db" | "storage">,
+  jurisdictionId: Id<"jurisdictions">,
+  storeName: string,
+) {
+  const now = Date.now();
+  const resourceId = await ctx.db.insert("legalResources", {
+    jurisdictionId,
+    type: "act",
+    title: "Fixture act",
+    issuer: "Fixture",
+    officialCitation: "Fixture Act",
+    officialCitationKey: "fixture act",
+    sourceUrl: "https://official.example/fixture-law",
+    topics: [],
+    status: "active",
+    createdBy: "fixture",
+    updatedBy: "fixture",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const originalStorageId = await ctx.storage.store(new Blob(["law"]));
+  const versionId = await ctx.db.insert("documentVersions", {
+    resourceId,
+    versionNumber: 1,
+    originalStorageId,
+    filename: "law.pdf",
+    mimeType: "application/pdf",
+    byteSize: 3,
+    sha256: "a".repeat(64),
+    sourceUrl: "https://official.example/fixture-law",
+    status: "published",
+    geminiDocumentName: `${storeName}/documents/law${crypto.randomUUID().slice(0, 8)}`,
+    submittedBy: "fixture",
+    publishedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
+}
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -91,12 +133,13 @@ async function insertGeographic(
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
+    const storeName = `fileSearchStores/${crypto.randomUUID()}`;
     const jurisdictionId = await ctx.db.insert("jurisdictions", {
       name: input.name,
       slug: `${input.name.toLowerCase().replaceAll(" ", "-")}-${crypto.randomUUID()}`,
       status: input.status ?? "enabled",
       isDefault: false,
-      geminiFileSearchStoreName: `fileSearchStores/${crypto.randomUUID()}`,
+      geminiFileSearchStoreName: storeName,
       providerSyncState: "synced",
       kind: "geographic",
       visibility: "public",
@@ -116,6 +159,7 @@ async function insertGeographic(
       createdAt: now,
       updatedAt: now,
     });
+    await insertPublishedDocument(ctx, jurisdictionId, storeName);
     return { jurisdictionId, profileId };
   });
 }
@@ -129,6 +173,7 @@ async function insertOrganization(
 ) {
   return await t.run(async (ctx) => {
     const now = Date.now();
+    const storeName = `fileSearchStores/${crypto.randomUUID()}`;
     const organizationId = await ctx.db.insert("organizations", {
       name: "Fixture organization",
       slug: `fixture-${crypto.randomUUID()}`,
@@ -144,7 +189,7 @@ async function insertOrganization(
       slug: `fixture-authority-${crypto.randomUUID()}`,
       status: "enabled",
       isDefault: false,
-      geminiFileSearchStoreName: `fileSearchStores/${crypto.randomUUID()}`,
+      geminiFileSearchStoreName: storeName,
       providerSyncState: "synced",
       kind: "organizational",
       visibility: input.visibility,
@@ -160,6 +205,7 @@ async function insertOrganization(
       createdAt: now,
       updatedAt: now,
     });
+    await insertPublishedDocument(ctx, jurisdictionId, storeName);
     return { organizationId, jurisdictionId, profileId };
   });
 }
