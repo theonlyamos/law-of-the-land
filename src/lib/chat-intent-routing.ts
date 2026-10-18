@@ -67,8 +67,9 @@ export async function classifyChatIntent(
     return choice;
   };
   // The remote model has marked these as unclear; answering about the
-  // selected jurisdiction is the right outcome, so skip the call.
-  if (isOpenLegalFollowUp(query)) {
+  // selected jurisdiction is the right outcome, so skip the call. Shadow mode
+  // still asks Jev so rollout telemetry shows how it handles them.
+  if (mode === "on" && isOpenLegalFollowUp(query)) {
     console.info("chat_intent_route", JSON.stringify({ mode, branch: "legal", model: "app-follow-up-v1", elapsedMs: 0 }));
     return "legal";
   }

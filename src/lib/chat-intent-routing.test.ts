@@ -70,6 +70,16 @@ describe("legal chat intent routing", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("still asks Jev about open follow-ups in shadow mode", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      model: "jev-1.13.0",
+      answers: { route: { type: "choice", choice: "legal", probabilities: { legal: 1, courtesy: 0, unclear: 0, out_of_scope: 0 } } },
+    }))));
+    await expect(classifyChatIntent("Tell me more about this", [], new AbortController().signal, "shadow")).resolves.toBe("legal");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("tells Jev that a jurisdiction is selected and vague requests are legal", async () => {
     process.env.TYPESAFE_API_KEY = "test-key";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
