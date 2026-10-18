@@ -31,6 +31,7 @@ import { chatRoutingMode, classifyChatIntent, exactFormality, policyReply } from
 import { isDocumentQuestion } from "@/lib/chat-document-intent";
 import { ChatAttachmentError, loadChatAttachmentContext, type ChatAttachmentContext } from "@/lib/chat-attachment-server";
 import { MAX_CHAT_FILES } from "../../../../shared/chat-attachments";
+import { CHAT_PROGRESS_HEADER, type ChatProgressStage } from "../../../../shared/chat-progress";
 import { publicChatErrorMessage, publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
 import { PILOT_CATALOG, PILOT_IDENTITY } from "@/lib/source-verification/reviewed-source-cases";
 import { selectEmploymentEvidence, type EmploymentEvidenceSelection } from "@/lib/source-verification/employment-evidence";
@@ -123,6 +124,7 @@ type CompletionResult = {
 };
 type StreamEvent =
   | { type: "delta"; text: string }
+  | { type: "status"; stage: ChatProgressStage; searches: number }
   | { type: "draft_start" }
   | { type: "draft_delta"; text: string }
   | { type: "verifying" }
@@ -567,6 +569,7 @@ function streamResponse(input: {
   answerMode?: "legal" | "document";
   reviewed?: { selection: ReviewedEmploymentSelection; token: string };
   localDocumentSingleAttempt?: boolean;
+  progress?: boolean;
   provisionalStreaming: boolean;
 }) {
   const encoder = new TextEncoder();
@@ -586,6 +589,16 @@ function streamResponse(input: {
           cancelled = true;
           input.abortClient(new Error("CHAT_STREAM_CANCELLED"));
         }
+      };
+      // Progress events carry a stage and a search count only, never model text.
+      let lastProgress = "";
+      let searches = 0;
+      const progress = (stage: ChatProgressStage) => {
+        if (!input.progress) return;
+        const key = `${stage}:${searches}`;
+        if (key === lastProgress) return;
+        lastProgress = key;
+        send({ type: "status", stage, searches });
       };
       void (async () => {
         let phase: QueryDiagnostics["phase"] = "generation";
@@ -704,6 +717,7 @@ function streamResponse(input: {
               throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
             }
             const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
+            if (input.answerMode !== "document") progress("searching");
             // Release the waiter even if generation ignores cancellation. Stream
             // completion clears its cutoff, preserving the canonical-read reserve.
             result = await raceWithAbort(chat.run({
@@ -724,16 +738,23 @@ function streamResponse(input: {
               ...(input.localDocumentSingleAttempt ? { singleAttempt: true } : {}),
               // The adapter bounds and selects model text; opted-in ordinary
               // clients display it as a draft until the terminal checks pass.
+              // Progress-only clients learn just that writing has started.
               onDelta: (text) => {
+                progress("writing");
                 if (input.provisionalStreaming && !input.streamSignal.aborted) send({ type: "draft_delta", text });
               },
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
                 diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
+                if (snapshot.searchCallCount > searches) {
+                  searches = snapshot.searchCallCount;
+                  progress("searching");
+                }
               },
               onStreamComplete: () => {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
+                progress("checking");
                 if (input.provisionalStreaming && !input.providerSignal.aborted) send({ type: "verifying" });
               },
             }), input.streamSignal);
@@ -1039,25 +1060,35 @@ export async function POST(request: Request): Promise<Response> {
       : !reviewed && !hasAttachments && mode === "on" && exactFormality(body.query)
       ? policyReply("courtesy") : null;
     if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: coverageGap ? "reviewed_coverage_gap" : "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
+    // Resolve research stores while the intent classifier runs. The lookup is a
+    // read, and its result is ignored when the classifier picks a fixed reply.
+    const researchAbort = new AbortController();
+    const researchSignal = AbortSignal.any([streamSignal, researchAbort.signal]);
+    const researchStores = reply === null && answerMode !== "document"
+      ? (async (): Promise<{ token: string | null; manifest: ResearchManifest | null }> => {
+        const token = attachmentToken ?? await raceWithAbort(getToken(), researchSignal);
+        if (!token) return { token: null, manifest: null };
+        try {
+          return { token, manifest: await raceWithAbort(loadManifest(body.jurisdictionId, token, researchSignal), researchSignal) };
+        } catch {
+          return { token, manifest: null };
+        }
+      })()
+      : null;
+    // A token failure is reported when the stores are awaited; it is moot for fixed replies.
+    researchStores?.catch(() => undefined);
     if (!coverageGap && !reviewed && !hasAttachments && (mode === "shadow" || (mode === "on" && reply === null))) {
       const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode);
       if (mode === "on") reply = policyReply(choice);
     }
+    // A fixed reply does not need the stores; stop the lookup instead of leaving it running.
+    if (reply !== null) researchAbort.abort(new Error("CHAT_RESEARCH_LOOKUP_UNUSED"));
     let manifest: ResearchManifest = POLICY_MANIFEST;
-    if (reply === null && answerMode !== "document") {
-      const token = attachmentToken ?? await raceWithAbort(getToken(), streamSignal);
-      if (!token) return stopEarly(jsonError("Sign in to ask questions.", 401));
-      let loaded: ResearchManifest | null = null;
-      try {
-        loaded = await raceWithAbort(
-          loadManifest(body.jurisdictionId, token, streamSignal),
-          streamSignal,
-        );
-      } catch {
-        loaded = null;
-      }
-      if (!loaded) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
-      manifest = loaded;
+    if (reply === null && researchStores) {
+      const resolved = await researchStores;
+      if (!resolved.token) return stopEarly(jsonError("Sign in to ask questions.", 401));
+      if (!resolved.manifest) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
+      manifest = resolved.manifest;
     }
 
     // Capture the actual admitted allowlist before any governed provider work.
@@ -1161,6 +1192,7 @@ export async function POST(request: Request): Promise<Response> {
       reviewed,
       provisionalStreaming: body.streaming === "provisional-v1" && !reviewed && !coverageGap && !localReviewedScope,
       ...(localReviewedScope && answerMode === "document" ? { localDocumentSingleAttempt: true } : {}),
+      progress: request.headers.get(CHAT_PROGRESS_HEADER) === "1",
     });
   } catch {
     return stopEarly(jsonError(CHAT_FAILURE, 500));

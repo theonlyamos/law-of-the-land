@@ -2,6 +2,7 @@ import { CHAT_NO_EVIDENCE } from "../../../convex/lib/chatNoEvidence";
 import { isChatPolicyResponse, type ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { ChatCitation } from "@/lib/countries";
 import { publicChatErrorReason, type ChatErrorReason } from "@/lib/chat-errors";
+import { CHAT_PROGRESS_HEADER, parseChatProgress, type ChatProgress } from "../../../shared/chat-progress";
 
 type ChatResponse = {
   result: string;
@@ -62,11 +63,12 @@ export async function postChat(
   signal?: AbortSignal,
   onVerifying: () => void = () => {},
   onStart: () => void = () => {},
+  onProgress: (progress: ChatProgress) => void = () => {},
 ): Promise<ChatResponse | BackgroundChatResponse> {
   let response: Response;
   try {
     response = await fetch("/api/chat", { method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson", [CHAT_PROGRESS_HEADER]: "1" },
       body: JSON.stringify(body), signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
@@ -110,6 +112,12 @@ export async function postChat(
     try { value = JSON.parse(line); } catch { throw new ApiError(500); }
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError(500);
     const event = value as Record<string, unknown>;
+    if (event.type === "status") {
+      // Progress is informational; a malformed update is skipped rather than failing the answer.
+      const progress = parseChatProgress(event);
+      if (progress) onProgress(progress);
+      return null;
+    }
     if (event.type === "draft_start") {
       if (mode !== "none") throw new ApiError(500);
       mode = "provisional";

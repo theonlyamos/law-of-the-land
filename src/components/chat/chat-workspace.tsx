@@ -8,6 +8,7 @@ import { findAcceptedChatBackgroundJob, useChatBackgroundJob } from "./use-chat-
 import { useChatAttachments } from "./use-chat-attachments";
 import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentUploadsEnabled, type ChatAttachment } from "../../../shared/chat-attachments";
+import { chatProgressLabel } from "../../../shared/chat-progress";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
@@ -650,6 +651,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               ? { ...message, content: streamedAnswer, answerPhase: "checking" } : message) });
         }, () => {
           if (isCurrentRequest()) requests.update(submissionChatId, request, { canStop: true });
+        }, (progress) => {
+          if (!isCurrentRequest()) return;
+          setLocalMessages((previous) => previous.map((message) =>
+            message.localId === assistantMessage.localId ? { ...message, progress } : message,
+          ));
         });
         streamPhase = "closed";
         if (!isCurrentRequest()) return;
@@ -1067,7 +1073,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                         ? background.job.status === "succeeded" ? "Loading the saved answer."
                           : ({ queued: "Verification is queued.", draft: "Preparing the answer for verification.", inventory: "Checking the source evidence.",
                             consent: "Checking written consent.", overtime: "Checking overtime limits.", commit: "Saving the verified answer.", complete: "Loading the saved answer." })[background.job.progress]
-                        : "Preparing your answer…"}
+                        : chatProgressLabel(message.progress)}
                     </div>
                   ) : (
                     <div className="min-w-0 w-full text-sm leading-7">
