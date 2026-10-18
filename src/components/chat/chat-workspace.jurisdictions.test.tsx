@@ -141,6 +141,30 @@ describe("server-persisted reviewed responses", () => {
     expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/chat")).toHaveLength(1);
   });
 
+  it("shows research progress while the answer is prepared and asks the server for it", async () => {
+    const encoder = new TextEncoder();
+    let push!: (event: unknown) => void;
+    vi.mocked(fetch).mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      start(controller) { push = (event) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); },
+    }), { headers: { "content-type": "application/x-ndjson" } }));
+    mocks.session = { title: "Saved", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
+    render(<ChatWorkspace chatId={chatId} initialQuery={null} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Do I need written notice?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send question" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/chat", expect.anything()));
+    const init = vi.mocked(fetch).mock.calls.find(([url]) => url === "/api/chat")![1]!;
+    expect(new Headers(init.headers).get("x-chat-progress")).toBe("1");
+    expect(await screen.findByRole("status", { name: "Preparing answer" })).toHaveTextContent("Reading your question…");
+    await act(async () => { push({ type: "status", stage: "searching", searches: 2 }); });
+    await waitFor(() => expect(screen.getByRole("status", { name: "Preparing answer" }))
+      .toHaveTextContent("Searching the law library (2 searches so far)…"));
+    await act(async () => { push({ type: "status", stage: "unknown", searches: 2 }); });
+    await act(async () => { push({ type: "status", stage: "checking", searches: 2 }); });
+    await waitFor(() => expect(screen.getByRole("status", { name: "Preparing answer" }))
+      .toHaveTextContent("Checking the answer against its sources…"));
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+  });
+
   it.each([12, 22])("sends up to twenty turns and explicitly marks completeness for a %i-turn history", async count => {
     mocks.session = { title: "History", jurisdictionId: jurisdiction.id, jurisdictionName: jurisdiction.name };
     mocks.messages = Array.from({ length: count }, (_, index) => ({ storageId: `history-${index}`, clientId: `client-${index}`,

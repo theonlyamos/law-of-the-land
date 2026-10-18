@@ -69,7 +69,7 @@ const publicCitation: PublicCitation = {
 
 function request(
   overrides: Record<string, unknown> = {},
-  options: { signal?: AbortSignal; body?: string; contentLength?: string } = {},
+  options: { signal?: AbortSignal; body?: string; contentLength?: string; progress?: boolean } = {},
 ) {
   const body = options.body ?? JSON.stringify({
     query: "What protection applies?",
@@ -85,6 +85,7 @@ function request(
     "x-forwarded-for": crypto.randomUUID(),
   });
   if (options.contentLength !== undefined) headers.set("content-length", options.contentLength);
+  if (options.progress) headers.set("x-chat-progress", "1");
   return new Request("http://localhost/api/chat", {
     method: "POST",
     headers,
@@ -953,9 +954,11 @@ describe("POST /api/chat streamed governed interaction", () => {
       type: "done", result: CHAT_POLICY_RESPONSES.out_of_scope, answerKind: "policy", citations: [],
     });
     expect(interactionMocks.create).not.toHaveBeenCalled();
-    expect(authMocks.getToken).not.toHaveBeenCalled();
-    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(mutationNames()).toEqual(["usage:recordQuestion", "chats:completeGovernedInteraction"]);
+    // The research stores load alongside Jev, but a fixed reply ignores them.
+    expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
+      model: "app-policy-v1", authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [],
+    });
   });
 
   it("uses a high-probability Jev clarification without Gemini", async () => {
@@ -972,7 +975,77 @@ describe("POST /api/chat streamed governed interaction", () => {
       type: "done", result: CHAT_POLICY_RESPONSES.unclear, answerKind: "policy", citations: [],
     });
     expect(interactionMocks.create).not.toHaveBeenCalled();
-    expect(authMocks.getToken).not.toHaveBeenCalled();
+  });
+
+  it("keeps a Jev fixed reply when the research stores are unavailable", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("typesafe.ai")
+      ? Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "out_of_scope", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.997 },
+      } } })
+      : new Response(null, { status: 503 }));
+    const response = await POST(request({ query: "Tell me a joke" }));
+    expect(response.status).toBe(200);
+    expect((await events(response)).at(-1)).toMatchObject({
+      type: "done", result: CHAT_POLICY_RESPONSES.out_of_scope, answerKind: "policy",
+    });
+  });
+
+  it("stops the research store lookup once Jev picks a fixed reply", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    let manifestSignal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).includes("typesafe.ai")) return Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "out_of_scope", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.997 },
+      } } });
+      manifestSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
+    const result = await events(await POST(request({ query: "Tell me a joke" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", answerKind: "policy" });
+    expect(manifestSignal?.aborted).toBe(true);
+  });
+
+  it("loads the research stores while Jev is still deciding", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    let releaseJev!: () => void;
+    const jevHeld = new Promise<void>((resolve) => { releaseJev = resolve; });
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (!String(input).includes("typesafe.ai")) {
+        releaseJev();
+        return Response.json(manifest);
+      }
+      await jevHeld;
+      return Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "legal", confidence: 0.99,
+        probabilities: { legal: 0.997, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.001 },
+      } } });
+    });
+    const result = await events(await POST(request({ query: "Can my landlord evict me?" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends content-free progress before the verified answer when the client asks", async () => {
+    const result = await events(await POST(request({}, { progress: true })));
+    expect(result).toEqual([
+      { type: "status", stage: "searching", searches: 0 },
+      { type: "status", stage: "searching", searches: 1 },
+      { type: "status", stage: "writing", searches: 1 },
+      { type: "status", stage: "checking", searches: 1 },
+      { type: "delta", text: "Employees are protected." },
+      expect.objectContaining({ type: "done", answerKind: "legal" }),
+    ]);
+  });
+
+  it("sends no progress to clients that do not ask for it", async () => {
+    const result = await events(await POST(request()));
+    expect(result.map((event) => event.type)).toEqual(["delta", "done"]);
   });
 
   it("falls back to legal File Search for a malformed Jev response", async () => {
