@@ -986,12 +986,14 @@ export async function POST(request: Request): Promise<Response> {
     if (reply !== null) console.info("chat_intent_route", JSON.stringify({ mode, branch: coverageGap ? "reviewed_coverage_gap" : "courtesy", model: "app-policy-v1", elapsedMs: 0 }));
     // Resolve research stores while the intent classifier runs. The lookup is a
     // read, and its result is ignored when the classifier picks a fixed reply.
+    const researchAbort = new AbortController();
+    const researchSignal = AbortSignal.any([streamSignal, researchAbort.signal]);
     const researchStores = reply === null && answerMode !== "document"
       ? (async (): Promise<{ token: string | null; manifest: ResearchManifest | null }> => {
-        const token = attachmentToken ?? await raceWithAbort(getToken(), streamSignal);
+        const token = attachmentToken ?? await raceWithAbort(getToken(), researchSignal);
         if (!token) return { token: null, manifest: null };
         try {
-          return { token, manifest: await raceWithAbort(loadManifest(body.jurisdictionId, token, streamSignal), streamSignal) };
+          return { token, manifest: await raceWithAbort(loadManifest(body.jurisdictionId, token, researchSignal), researchSignal) };
         } catch {
           return { token, manifest: null };
         }
@@ -1003,6 +1005,8 @@ export async function POST(request: Request): Promise<Response> {
       const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode);
       if (mode === "on") reply = policyReply(choice);
     }
+    // A fixed reply does not need the stores; stop the lookup instead of leaving it running.
+    if (reply !== null) researchAbort.abort(new Error("CHAT_RESEARCH_LOOKUP_UNUSED"));
     let manifest: ResearchManifest = POLICY_MANIFEST;
     if (reply === null && researchStores) {
       const resolved = await researchStores;

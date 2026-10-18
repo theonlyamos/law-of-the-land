@@ -993,6 +993,23 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
+  it("stops the research store lookup once Jev picks a fixed reply", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    process.env.TYPESAFE_API_KEY = "test-typesafe-key";
+    let manifestSignal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).includes("typesafe.ai")) return Response.json({ model: "jev-1.13.0", answers: { route: {
+        type: "choice", choice: "out_of_scope", confidence: 0.99,
+        probabilities: { legal: 0.001, courtesy: 0.001, unclear: 0.001, out_of_scope: 0.997 },
+      } } });
+      manifestSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
+    const result = await events(await POST(request({ query: "Tell me a joke" })));
+    expect(result.at(-1)).toMatchObject({ type: "done", answerKind: "policy" });
+    expect(manifestSignal?.aborted).toBe(true);
+  });
+
   it("loads the research stores while Jev is still deciding", async () => {
     process.env.CHAT_INTENT_ROUTING_MODE = "on";
     process.env.TYPESAFE_API_KEY = "test-typesafe-key";
