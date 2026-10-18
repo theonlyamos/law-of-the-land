@@ -4,6 +4,7 @@ import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
 import type { ChatAttachment } from "../../../shared/chat-attachments";
 import type { ReviewedEmploymentJobProjection } from "../../../shared/reviewed-employment-jobs";
+import type { ChatProgress } from "../../../shared/chat-progress";
 
 export type MessageRole = "user" | "assistant";
 
@@ -37,6 +38,7 @@ export interface LocalChatMessage {
   partialCoverage?: boolean;
   attachments?: ChatAttachment[];
   backgroundJobId?: string;
+  progress?: ChatProgress;
 }
 
 export function backgroundJobMessage(job: ReviewedEmploymentJobProjection): string | null {

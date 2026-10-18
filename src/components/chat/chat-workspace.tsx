@@ -8,6 +8,7 @@ import { findAcceptedChatBackgroundJob, useChatBackgroundJob } from "./use-chat-
 import { useChatAttachments } from "./use-chat-attachments";
 import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentUploadsEnabled, type ChatAttachment } from "../../../shared/chat-attachments";
+import { CHAT_PROGRESS_HEADER, chatProgressLabel, parseChatProgress, type ChatProgress } from "../../../shared/chat-progress";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
@@ -89,11 +90,12 @@ async function postChat(
   body: unknown,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  onProgress?: (progress: ChatProgress) => void,
 ): Promise<ChatResponse | BackgroundChatResponse> {
   let response: Response;
   try { response = await fetch("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+    headers: { "Content-Type": "application/json", Accept: "application/x-ndjson", [CHAT_PROGRESS_HEADER]: "1" },
     body: JSON.stringify(body),
     signal,
   }); } catch (error) {
@@ -139,6 +141,10 @@ async function postChat(
         }
         if (event.type === "delta" && typeof event.text === "string") {
           onDelta(event.text);
+        } else if (event.type === "status") {
+          // Progress is informational; a malformed update is skipped rather than failing the answer.
+          const progress = parseChatProgress(event);
+          if (progress) onProgress?.(progress);
         } else if (
           event.type === "done"
           && typeof event.result === "string"
@@ -760,7 +766,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           streamedAnswer += text;
           if (!isCurrentRequest() || streamRenderFrame !== undefined) return;
           streamRenderFrame = window.requestAnimationFrame(renderStreamedAnswer);
-        }, controller.signal);
+        }, controller.signal, (progress) => {
+          if (!isCurrentRequest()) return;
+          setLocalMessages((previous) => previous.map((message) =>
+            message.localId === assistantMessage.localId ? { ...message, progress } : message,
+          ));
+        });
         if (!isCurrentRequest()) return;
         cancelPendingStreamRender();
         if ("type" in chatData) {
@@ -1168,7 +1179,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                         ? background.job.status === "succeeded" ? "Loading the saved answer."
                           : ({ queued: "Verification is queued.", draft: "Preparing the answer for verification.", inventory: "Checking the source evidence.",
                             consent: "Checking written consent.", overtime: "Checking overtime limits.", commit: "Saving the verified answer.", complete: "Loading the saved answer." })[background.job.progress]
-                        : "Preparing your answer…"}
+                        : chatProgressLabel(message.progress)}
                     </div>
                   ) : (
                     <div className="min-w-0 w-full text-sm leading-7">
