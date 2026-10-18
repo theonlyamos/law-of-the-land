@@ -6,6 +6,7 @@ import { authComponent, createAuth } from "./auth";
 import { authorizeFixtureRequest } from "./admin/e2eFixtures";
 import { polar } from "./polar";
 import type { ChatResearchStores } from "./jurisdictions";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 import { verifyWidgetServiceProof } from "./lib/widgetProof";
 import { verifyAdminFileProof } from "./lib/adminFileProof";
 import { attachmentUploadOptions, uploadAttachment, resolveAttachments } from "./chatAttachmentHttp";
@@ -92,7 +93,7 @@ http.route({
   }),
 });
 
-function readChatResearchManifestRequest(bytes: Uint8Array): { jurisdictionId: string } | null {
+function readChatResearchManifestRequest(bytes: Uint8Array): { jurisdictionId: string; publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL } | null {
   if (bytes.byteLength === 0) return null;
   let parsed: unknown;
   try {
@@ -103,13 +104,14 @@ function readChatResearchManifestRequest(bytes: Uint8Array): { jurisdictionId: s
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
   if (
-    Object.keys(record).length !== 1
+    Object.keys(record).some(key => key !== "jurisdictionId" && key !== "publicationFilterProtocol")
+    || (record.publicationFilterProtocol !== undefined && record.publicationFilterProtocol !== PUBLICATION_FILTER_PROTOCOL)
     || typeof record.jurisdictionId !== "string"
     || record.jurisdictionId.length === 0
     || record.jurisdictionId.length > MAX_JURISDICTION_ID_LENGTH
     || record.jurisdictionId !== record.jurisdictionId.trim()
   ) return null;
-  return { jurisdictionId: record.jurisdictionId };
+  return { jurisdictionId: record.jurisdictionId, ...(record.publicationFilterProtocol === undefined ? {} : { publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }) };
 }
 
 http.route({

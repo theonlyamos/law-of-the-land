@@ -4,6 +4,7 @@ import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { describe, expect, it } from "vitest";
 import { components } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
 
@@ -15,6 +16,47 @@ const authModules = Object.fromEntries(
   ]),
 );
 type Backend = TestConvex<typeof schema>;
+
+async function insertPublishedDocument(
+  ctx: Pick<Parameters<Parameters<Backend["run"]>[0]>[0], "db" | "storage">,
+  jurisdictionId: Id<"jurisdictions">,
+  storeName: string,
+) {
+  const now = Date.now();
+  const resourceId = await ctx.db.insert("legalResources", {
+    jurisdictionId,
+    type: "act",
+    title: "Fixture act",
+    issuer: "Fixture",
+    officialCitation: "Fixture Act",
+    officialCitationKey: "fixture act",
+    sourceUrl: "https://official.example/fixture-law",
+    topics: [],
+    status: "active",
+    createdBy: "fixture",
+    updatedBy: "fixture",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const originalStorageId = await ctx.storage.store(new Blob(["law"]));
+  const versionId = await ctx.db.insert("documentVersions", {
+    resourceId,
+    versionNumber: 1,
+    originalStorageId,
+    filename: "law.pdf",
+    mimeType: "application/pdf",
+    byteSize: 3,
+    sha256: "a".repeat(64),
+    sourceUrl: "https://official.example/fixture-law",
+    status: "published",
+    geminiDocumentName: `${storeName}/documents/law${crypto.randomUUID().slice(0, 8)}`,
+    submittedBy: "fixture",
+    publishedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
+}
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -101,6 +143,7 @@ async function insertGeographic(
       createdAt: now,
       updatedAt: now,
     });
+    if (storeName) await insertPublishedDocument(ctx, jurisdictionId, storeName);
     return { jurisdictionId, profileId, storeName };
   });
 }
@@ -218,7 +261,7 @@ describe("authenticated private chat research manifest", () => {
         createdAt: now,
         updatedAt: now,
       });
-      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
     });
 
     const response = await post(user.client, JSON.stringify({ jurisdictionId: city.jurisdictionId }));

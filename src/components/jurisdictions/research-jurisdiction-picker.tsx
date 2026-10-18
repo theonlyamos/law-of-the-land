@@ -38,6 +38,13 @@ function normalizeQuery(value: string) {
   return value.normalize("NFKC").trim().replace(/\s+/g, " ");
 }
 
+function coverageNotice(row: ResearchJurisdiction): string | null {
+  const count = row.coverageWarning?.excludedDocumentCount;
+  if (count === null) return "Some documents may be excluded until publication completes.";
+  if (!Number.isSafeInteger(count) || !count || count < 1) return null;
+  return `Search currently excludes ${count} unpublished ${count === 1 ? "document" : "documents"}.`;
+}
+
 function appendPage(
   sections: readonly ResultSection[],
   group: SearchGroup,
@@ -268,6 +275,12 @@ export function ResearchJurisdictionPicker({
           </span>
         </button>
 
+        {value && coverageNotice(value) && (
+          <p role="status" className="mt-2 text-xs text-muted-foreground">
+            {coverageNotice(value)}
+          </p>
+        )}
+
         {expanded && (
           <div
             id={`${listboxId}-panel`}
@@ -340,6 +353,7 @@ export function ResearchJurisdictionPicker({
                         {organization && section.rows.length === 1 && <span className="block text-xs text-muted-foreground">{organization}</span>}
                         {row.visibility === "members" && <span className="block text-xs text-muted-foreground">Private · Your organization</span>}
                         {duplicateName && <span className="block break-all text-xs text-muted-foreground">{row.slug}</span>}
+                        {coverageNotice(row) && <span className="block text-xs text-muted-foreground">{coverageNotice(row)}</span>}
                       </div>
                     );
                   })}

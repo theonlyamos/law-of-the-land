@@ -75,6 +75,37 @@ afterEach(() => {
 });
 
 describe("ResearchJurisdictionPicker", () => {
+  it("keeps the excluded-document coverage notice visible after selection", () => {
+    const restricted: ResearchJurisdiction & { coverageWarning: { excludedDocumentCount: number } } = {
+      ...ghana,
+      coverageWarning: { excludedDocumentCount: 2 },
+    };
+    render(<ControlledPicker initialValue={restricted} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Search currently excludes 2 unpublished documents.",
+    );
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toHaveTextContent("Ghana");
+  });
+
+  it("keeps an unknown-count notice in results and after choosing a jurisdiction", async () => {
+    const restricted: ResearchJurisdiction = { ...ghana, coverageWarning: { excludedDocumentCount: null } };
+    mocks.query.mockResolvedValue({ page: [restricted], group: "geographic", isDone: true, continueCursor: null } satisfies SearchPage);
+    render(<ControlledPicker />);
+    fireEvent.click(screen.getByRole("radio", { name: "Geographic" }));
+    await act(async () => { vi.advanceTimersByTime(300); });
+    const notice = "Some documents may be excluded until publication completes.";
+    expect(within(screen.getByRole("dialog", { name: "Choose jurisdiction" })).getByText(notice)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Ghana, Geographic" }));
+    expect(screen.getByRole("status")).toHaveTextContent(notice);
+    expect(screen.getByRole("button", { name: "Change jurisdiction" })).toBeEnabled();
+  });
+
+  it("omits the coverage notice for an unrestricted selection", () => {
+    render(<ControlledPicker initialValue={ghana} />);
+    expect(screen.queryByText(/Search currently excludes \d+ unpublished documents?/)).not.toBeInTheDocument();
+  });
+
   it("allows drafting before a compact jurisdiction selection and enables sending only after selection", async () => {
     mocks.query.mockResolvedValue({
       page: [ghana], group: "geographic", isDone: true, continueCursor: null,

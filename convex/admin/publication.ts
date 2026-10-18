@@ -147,6 +147,9 @@ export async function queuePublication(ctx: MutationCtx, actor: Actor, args: { v
   if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
   const resource = await ctx.db.get(version.resourceId);
   if (!resource || resource.status !== "active") throw new ConvexError("RESOURCE_NOT_ACTIVE");
+  if (operation !== "unpublish" && resource.geminiPublicationBlock !== undefined) {
+    throw new ConvexError("GEMINI_RESOURCE_PUBLICATION_BLOCKED");
+  }
   const jurisdiction = await ctx.db.get(resource.jurisdictionId);
   const storeName = jurisdiction?.geminiFileSearchStoreName;
   if (!jurisdiction || jurisdiction.status !== "enabled") throw new ConvexError("JURISDICTION_NOT_ENABLED");

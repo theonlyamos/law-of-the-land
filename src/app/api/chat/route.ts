@@ -49,6 +49,7 @@ import { reviewedEmploymentNextEnvironment } from "@/lib/source-verification/rev
 import { parseReviewedEmploymentJobProjection, reviewedEmploymentJobSubmitProofParts,
   type ReviewedEmploymentJobProjection, type ReviewedEmploymentJobSubmitInput } from "../../../../shared/reviewed-employment-jobs";
 import { productionReviewedEmploymentEnabled, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY } from "../../../../shared/reviewed-employment-policy";
+import { createPublicationFilterBinding, parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL } from "../../../../shared/gemini-publication-filter";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -64,6 +65,7 @@ type ChatBody = {
   userClientId?: string;
   historyComplete?: boolean;
   attachmentIds?: string[];
+  streaming?: "provisional-v1";
 };
 type ResearchManifest = {
   authorizedScopeSize: number;
@@ -84,6 +86,8 @@ type Coverage = {
 };
 const POLICY_MANIFEST: ResearchManifest = { authorizedScopeSize: 0, stores: [], partialCoverage: false };
 type CompletionInput = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
+  publicationFilterBinding?: string;
   routeNonce: string;
   externalId: string;
   jurisdictionId: string;
@@ -121,6 +125,9 @@ type CompletionResult = {
 type StreamEvent =
   | { type: "delta"; text: string }
   | { type: "status"; stage: ChatProgressStage; searches: number }
+  | { type: "draft_start" }
+  | { type: "draft_delta"; text: string }
+  | { type: "verifying" }
   | {
     type: "done";
     result: string;
@@ -137,13 +144,17 @@ const MAX_HISTORY_MESSAGES = 20;
 const MAX_MESSAGE_LENGTH = 16_000;
 const MAX_ID_LENGTH = 200;
 const MAX_REQUEST_BODY_BYTES = 384 * 1024;
-const MAX_MANIFEST_BODY_BYTES = 16 * 1024;
+const MAX_MANIFEST_BODY_BYTES = 512 * 1024;
 const MAX_STORES = 4;
 const MAX_PUBLIC_CITATIONS = 16;
 const MAX_PUBLIC_CITATION_LABEL = 200;
 const REQUESTS_PER_MINUTE = 15;
-const MODEL_WINDOW_MS = 90_000;
-const TERMINAL_WINDOW_MS = 110_000;
+// Ordinary research gets 180 seconds for generation, followed by the existing
+// 20-second canonical-read/completion reserve inside the 300-second host limit.
+const MODEL_WINDOW_MS = 180_000;
+const TERMINAL_WINDOW_MS = 200_000;
+const REVIEWED_MODEL_WINDOW_MS = 90_000;
+const REVIEWED_TERMINAL_WINDOW_MS = 110_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
 const RESEARCH_UNAVAILABLE = "That jurisdiction is not available for research.";
 const completeGovernedInteraction = makeFunctionReference<"mutation">(
@@ -253,7 +264,9 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(Object.hasOwn(value, "userClientId") ? ["userClientId"] : []),
     ...(Object.hasOwn(value, "historyComplete") ? ["historyComplete"] : []),
     ...(Object.hasOwn(value, "attachmentIds") ? ["attachmentIds"] : []),
+    ...(Object.hasOwn(value, "streaming") ? ["streaming"] : []),
   ])) return null;
+  if (Object.hasOwn(value, "streaming") && value.streaming !== "provisional-v1") return null;
   if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds)
     || value.attachmentIds.length > MAX_CHAT_FILES
     || value.attachmentIds.some(id => !boundedIdentifier(id, 128))
@@ -291,6 +304,7 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(value.userClientId === undefined ? {} : { userClientId: value.userClientId as string }),
     ...(value.historyComplete === undefined ? {} : { historyComplete: value.historyComplete as boolean }),
     ...(value.attachmentIds === undefined ? {} : { attachmentIds: value.attachmentIds as string[] }),
+    ...(value.streaming === undefined ? {} : { streaming: value.streaming as "provisional-v1" }),
   };
 }
 
@@ -321,7 +335,7 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const store = entry as Record<string, unknown>;
     if (
-      !exactKeys(store, ["jurisdictionId", "name", "kind", "relation", "storeName"])
+      !exactKeys(store, ["jurisdictionId", "name", "kind", "relation", "storeName", ...(Object.hasOwn(store, "publicationFilter") ? ["publicationFilter"] : [])])
       || !boundedIdentifier(store.jurisdictionId)
       || !boundedIdentifier(store.name)
       || !boundedIdentifier(store.storeName)
@@ -335,6 +349,8 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
       || jurisdictionIds.has(store.jurisdictionId)
       || storeNames.has(store.storeName)
     ) return null;
+    const publicationFilter = Object.hasOwn(store, "publicationFilter") ? parsePublicationFilter(store.publicationFilter) : undefined;
+    if (publicationFilter === null) return null;
     jurisdictionIds.add(store.jurisdictionId);
     storeNames.add(store.storeName);
     stores.push({
@@ -343,6 +359,7 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
       kind: store.kind,
       relation: store.relation,
       storeName: store.storeName,
+      ...(publicationFilter ? { publicationFilter } : {}),
     });
   }
   return {
@@ -366,7 +383,7 @@ async function loadManifest(
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ jurisdictionId }),
+      body: JSON.stringify({ jurisdictionId, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }),
       cache: "no-store",
       signal,
     }),
@@ -421,8 +438,11 @@ function failureInput(
   failureCategory?: FailureCategory,
   attachmentIds?: string[],
   diagnostics?: QueryDiagnostics,
+  publicationFilterBinding?: string,
 ): CompletionInput {
   return {
+    publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+    ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
     routeNonce,
     externalId: body.externalId,
     jurisdictionId: body.jurisdictionId,
@@ -526,6 +546,7 @@ function parseCompletionResult(value: unknown, selectedJurisdictionId: string, a
 function streamResponse(input: {
   body: ChatBody;
   manifest: ResearchManifest;
+  publicationFilterBinding?: string;
   reply: string | null;
   model: string;
   routeNonce: string;
@@ -549,6 +570,7 @@ function streamResponse(input: {
   reviewed?: { selection: ReviewedEmploymentSelection; token: string };
   localDocumentSingleAttempt?: boolean;
   progress?: boolean;
+  provisionalStreaming: boolean;
 }) {
   const encoder = new TextEncoder();
   let cancelled = input.request.signal.aborted;
@@ -606,6 +628,7 @@ function streamResponse(input: {
         try {
           if (cancelled) throw new Error("CHAT_REQUEST_ABORTED");
           if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
+          if (input.provisionalStreaming) send({ type: "draft_start" });
           if (input.reviewed) {
             completionModel = "gemini-3.8-flash/reviewed-employment-local";
             // Admission is checked again immediately before constructing the provider client.
@@ -632,7 +655,12 @@ function streamResponse(input: {
               commit: async ({ answer, citations, manifest, signal }) => {
                 // All model work has finished by its original cutoff. Retain the terminal reserve.
                 clearTimeout(input.modelTimer); phase = "completion";
+                // The reviewed flow retains this authority snapshot from
+                // before drafting and checks it throughout verification.
+                const publicationFilterBinding = await raceWithAbort(createPublicationFilterBinding(manifest.stores), signal);
                 const completion: ReviewedEmploymentCommitInput["completion"] = {
+                  publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+                  ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
                   routeNonce: input.routeNonce, externalId: input.body.externalId, jurisdictionId: input.body.jurisdictionId,
                   assistantClientId: input.body.assistantClientId, finalAnswer: answer, answerKind: "legal", citations: [...citations],
                   model: completionModel, elapsedMs: Math.max(0, Math.round(Date.now() - input.requestStartedAt)), outcome: "success",
@@ -708,9 +736,13 @@ function streamResponse(input: {
               streamDeadlineAt: input.modelDeadlineAt,
               allowStreamFileCitations: true,
               ...(input.localDocumentSingleAttempt ? { singleAttempt: true } : {}),
-              // Text remains private until canonical checks and catalog authorization complete.
-              // Only the fact that writing has started is shared.
-              onDelta: () => progress("writing"),
+              // The adapter bounds and selects model text; opted-in ordinary
+              // clients display it as a draft until the terminal checks pass.
+              // Progress-only clients learn just that writing has started.
+              onDelta: (text) => {
+                progress("writing");
+                if (input.provisionalStreaming && !input.streamSignal.aborted) send({ type: "draft_delta", text });
+              },
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
                 diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
@@ -723,6 +755,7 @@ function streamResponse(input: {
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
                 progress("checking");
+                if (input.provisionalStreaming && !input.providerSignal.aborted) send({ type: "verifying" });
               },
             }), input.streamSignal);
           }
@@ -731,6 +764,8 @@ function streamResponse(input: {
           phase = "completion";
           const answerKind: ChatAnswerKind = input.answerMode === "document" ? "document" : isChatPolicyResponse(result.answer) ? "policy" : "legal";
           const terminalInput: CompletionInput = {
+            publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+            ...(input.publicationFilterBinding === undefined ? {} : { publicationFilterBinding: input.publicationFilterBinding }),
             routeNonce: input.routeNonce,
             externalId: input.body.externalId,
             jurisdictionId: input.body.jurisdictionId,
@@ -759,8 +794,9 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
-          // Completion rechecks current scope and file access before any answer leaves the server.
-          send({ type: "delta", text: result.answer });
+          // Completion rechecks current scope and file access before releasing
+          // the final answer and its authority. Legacy clients remain buffered.
+          if (!input.provisionalStreaming) send({ type: "delta", text: result.answer });
           send({
             type: "done",
             result: result.answer,
@@ -813,6 +849,7 @@ function streamResponse(input: {
                 aborted ? undefined : category,
                 input.attachmentContext?.attachmentIds,
                 failureDiagnostics,
+                input.publicationFilterBinding,
               ),
               input.terminalDeadlineAt,
               // A client may stop reading after the terminal error. Keep that confirmed
@@ -868,8 +905,8 @@ function isProductionSection55Selection(selection: EmploymentEvidenceSelection):
 export async function POST(request: Request): Promise<Response> {
   const requestStartedAt = Date.now();
   const requestStartedMonotonic = performance.now();
-  const modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
-  const terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
+  let modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
+  let terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
   const clientAbort = new AbortController();
   const streamCutoffAbort = new AbortController();
   const terminalAbort = new AbortController();
@@ -885,14 +922,44 @@ export async function POST(request: Request): Promise<Response> {
   const detachRequestAbort = () => request.signal.removeEventListener("abort", onRequestAbort);
   const providerSignal = AbortSignal.any([clientAbort.signal, terminalAbort.signal]);
   const streamSignal = AbortSignal.any([providerSignal, streamCutoffAbort.signal]);
-  const modelTimer = setTimeout(() => {
+  let modelTimer = setTimeout(() => {
     abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
   }, Math.max(0, modelDeadlineAt - Date.now()));
-  const terminalTimer = setTimeout(() => {
+  let terminalTimer = setTimeout(() => {
     if (!terminalAbort.signal.aborted) {
       terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
     }
   }, Math.max(0, terminalDeadlineAt - Date.now()));
+  let reviewedDeadlines = false;
+  const remaining = (deadlineAt: number, windowMs: number) => Math.min(
+    deadlineAt - Date.now(),
+    windowMs - (performance.now() - requestStartedMonotonic),
+  );
+  const setReviewedDeadlines = (enabled: boolean) => {
+    const expireModel = () => abortStream(new Error("CHAT_MODEL_DEADLINE_EXPIRED"));
+    const expireTerminal = () => {
+      if (!terminalAbort.signal.aborted) terminalAbort.abort(new Error("CHAT_TERMINAL_DEADLINE_EXPIRED"));
+    };
+    // Observe exhausted preparation even when a timer callback has not run.
+    if (remaining(modelDeadlineAt, reviewedDeadlines ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS) <= 0) expireModel();
+    if (remaining(terminalDeadlineAt, reviewedDeadlines ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS) <= 0) expireTerminal();
+    // An ordinary fallback may regain its longer window, but cannot revive
+    // preparation that already exhausted the reviewed cutoff.
+    if (!enabled && streamSignal.aborted) throw abortReason(streamSignal);
+    if (enabled === reviewedDeadlines) return;
+    reviewedDeadlines = enabled;
+    modelDeadlineAt = requestStartedAt + (enabled ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS);
+    terminalDeadlineAt = requestStartedAt + (enabled ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS);
+    clearTimeout(modelTimer);
+    clearTimeout(terminalTimer);
+    // Both clocks stay anchored to request entry when the scope changes.
+    const modelRemaining = remaining(modelDeadlineAt, enabled ? REVIEWED_MODEL_WINDOW_MS : MODEL_WINDOW_MS);
+    const terminalRemaining = remaining(terminalDeadlineAt, enabled ? REVIEWED_TERMINAL_WINDOW_MS : TERMINAL_WINDOW_MS);
+    if (modelRemaining <= 0) expireModel();
+    else modelTimer = setTimeout(expireModel, modelRemaining);
+    if (terminalRemaining <= 0) expireTerminal();
+    else terminalTimer = setTimeout(expireTerminal, terminalRemaining);
+  };
   const stopEarly = (response: Response) => {
     clearTimeout(modelTimer);
     clearTimeout(terminalTimer);
@@ -929,6 +996,11 @@ export async function POST(request: Request): Promise<Response> {
     const preliminarySelection = productionScope ? selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: [] }) : undefined;
     const productionCandidate = preliminarySelection !== undefined && isProductionSection55Selection(preliminarySelection);
     const reviewedScope = localReviewedScope || productionCandidate;
+    if (reviewedScope) {
+      // Reviewed research retains its original route deadlines and separate
+      // stage budgets. Late scope discovery must never restart either clock.
+      setReviewedDeadlines(true);
+    }
     if (localReviewedScope && !isLocalReviewedEmploymentRequest(request, reviewedEmploymentNextEnvironment())) {
       return stopEarly(jsonError("This research option is not available here.", 403));
     }
@@ -957,6 +1029,9 @@ export async function POST(request: Request): Promise<Response> {
       const selection = selectEmploymentEvidence({ question: body.query, history: body.messages, attachments: attachmentContext?.attachments ?? [] });
       if (localReviewedScope || isProductionSection55Selection(selection)
         || (productionCandidate && selection.status === "blocked")) {
+        // Readable attachments can identify the reviewed scope only now.
+        setReviewedDeadlines(true);
+        if (streamSignal.aborted) throw abortReason(streamSignal);
         if (productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
           return stopEarly(jsonError("This research option is not available here.", 403));
         }
@@ -979,6 +1054,7 @@ export async function POST(request: Request): Promise<Response> {
         }
       }
     }
+    if (productionScope && !reviewed && !coverageGap) setReviewedDeadlines(false);
     const mode = chatRoutingMode();
     let reply: string | null = coverageGap ? CHAT_POLICY_RESPONSES.reviewed_coverage_gap
       : !reviewed && !hasAttachments && mode === "on" && exactFormality(body.query)
@@ -1015,6 +1091,11 @@ export async function POST(request: Request): Promise<Response> {
       manifest = resolved.manifest;
     }
 
+    // Capture the actual admitted allowlist before any governed provider work.
+    // Final completion compares this original snapshot with the current backend
+    // catalogue, including changes to uncited documents and ancestor stores.
+    const publicationFilterBinding = await raceWithAbort(createPublicationFilterBinding(manifest.stores), streamSignal);
+
     const routeNonce = createOpaqueTelemetryToken();
     // An in-flight production rollback must never open the synchronous verifier.
     if (reviewed && productionScope && !isReviewedEmploymentBackgroundRequest(request, reviewedEmploymentNextEnvironment())) {
@@ -1028,6 +1109,7 @@ export async function POST(request: Request): Promise<Response> {
         return stopEarly(jsonError("This conversation has more detail than this answer can safely review. Start a new chat with the relevant facts and files.", 400));
       }
       const input: ReviewedEmploymentJobSubmitInput = { submissionId: body.assistantClientId, externalId: body.externalId,
+        publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
         jurisdictionId: body.jurisdictionId, userClientId: body.userClientId!, assistantClientId: body.assistantClientId,
         submission, issuedAt: Date.now() };
       // Once admission is complete, saving the job and scheduling its worker are
@@ -1086,6 +1168,7 @@ export async function POST(request: Request): Promise<Response> {
     return streamResponse({
       body: reviewed ? body : { ...body, messages: legacyHistory },
       manifest,
+      ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
       reply,
       model: safeModelName(),
       routeNonce,
@@ -1107,6 +1190,7 @@ export async function POST(request: Request): Promise<Response> {
       attachmentContext,
       answerMode,
       reviewed,
+      provisionalStreaming: body.streaming === "provisional-v1" && !reviewed && !coverageGap && !localReviewedScope,
       ...(localReviewedScope && answerMode === "document" ? { localDocumentSingleAttempt: true } : {}),
       progress: request.headers.get(CHAT_PROGRESS_HEADER) === "1",
     });

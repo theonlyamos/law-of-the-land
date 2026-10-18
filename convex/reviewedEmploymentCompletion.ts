@@ -8,20 +8,25 @@ import { completeGovernedInteractionProofParts, completeGovernedInteractionForJo
   type VerifiedReviewedEmploymentJobPrincipal } from "./chats";
 import { authorizeSourceForJobPrincipal } from "./reviewedEmployment";
 import { MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
+import { citationPassageValidator } from "./lib/citationProvenance";
 import { chatCitationValidator } from "./lib/jurisdictionDomain";
 import { queryDiagnosticsValidator, validateQueryDiagnostics } from "./lib/queryDiagnostics";
 import { requireUserId } from "./lib/requireUser";
 import { createTelemetryServiceProof, isOpaqueTelemetryToken, verifyTelemetryServiceProof } from "./lib/telemetryProof";
 import { reviewedEmploymentBackendPolicy, reviewedEmploymentBackendPolicyId,
   reviewedEmploymentBackendExecutionAllowed } from "../shared/reviewed-employment-policy";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 
 const sourceValidator = v.object({ jurisdictionId: v.id("jurisdictions"), resourceId: v.id("legalResources"),
   versionId: v.id("documentVersions"), expectedSha256: v.string(), expectedByteSize: v.number(), asOfDate: v.string() });
 const completionValidator = v.object({
+  publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)),
+  publicationFilterBinding: v.optional(v.string()),
   diagnostics: v.optional(queryDiagnosticsValidator), routeNonce: v.string(), externalId: v.string(), jurisdictionId: v.string(),
   assistantClientId: v.string(), finalAnswer: v.string(), answerKind: v.literal("legal"), outcome: v.literal("success"),
   citations: v.array(v.object({ jurisdictionId: v.string(), resourceId: v.string(), versionId: v.string(),
-    providerStoreName: v.string(), providerDocumentName: v.optional(v.string()), pageNumber: v.optional(v.number()) })),
+    providerStoreName: v.string(), providerDocumentName: v.optional(v.string()), pageNumber: v.optional(v.number()),
+    passages: v.optional(v.array(citationPassageValidator)) })),
   model: v.string(), elapsedMs: v.number(), authorizedScopeSize: v.number(), readyStoreCount: v.number(), partialCoverage: v.boolean(),
   jurisdictionCoverage: v.array(v.object({ ordinal: v.number(),
     relation: v.union(v.literal("selected"), v.literal("geographic_ancestor"), v.literal("organizational_geography")),
@@ -35,7 +40,7 @@ type ReviewedEmploymentCommitResult = Extract<
   Awaited<ReturnType<typeof completeGovernedInteractionForJobPrincipal>>,
   { status: "completed"; outcome: "success" }
 > & { answerKind: "legal"; persisted: true };
-const authorizeRef = makeFunctionReference<"query", Infer<typeof sourceValidator> & { externalId: string },
+const authorizeRef = makeFunctionReference<"query", Infer<typeof sourceValidator> & { externalId: string; publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL },
   { status: "authorized" | "unavailable" }>("reviewedEmployment:authorizeSource");
 const completeRef = makeFunctionReference<"mutation", FunctionArgs<typeof api.chats.completeGovernedInteraction>,
   FunctionReturnType<typeof api.chats.completeGovernedInteraction>>("chats:completeGovernedInteraction");
@@ -106,8 +111,9 @@ if (!policy || !reviewedEmploymentBackendExecutionAllowed(process.env)
 const verified = jobPrincipal ? await revalidateReviewedEmploymentJobPrincipal(ctx, jobPrincipal,
   { externalId: completion.externalId, jurisdictionId: source.jurisdictionId }) : null;
 const grant = verified
-  ? await authorizeSourceForJobPrincipal(ctx, { externalId: completion.externalId, ...source }, verified)
-  : await ctx.runQuery(authorizeRef, { externalId: completion.externalId, ...source });
+  ? await authorizeSourceForJobPrincipal(ctx, { externalId: completion.externalId, ...source, publicationFilterProtocol: completion.publicationFilterProtocol }, verified)
+  : await ctx.runQuery(authorizeRef, { externalId: completion.externalId, ...source,
+    ...(completion.publicationFilterProtocol ? { publicationFilterProtocol: completion.publicationFilterProtocol } : {}) });
 if (grant.status !== "authorized") throw new ConvexError("REVIEWED_EMPLOYMENT_AUTHORITY_UNAVAILABLE");
 const userId = verified?.ownerId ?? await requireUserId(ctx);
 const session = verified?.session ?? await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>

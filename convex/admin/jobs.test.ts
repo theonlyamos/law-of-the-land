@@ -41,6 +41,7 @@ const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGem
 const reconcileStaleJobs = makeFunctionReference<"mutation">("admin/jobs:reconcileStaleJobs");
 const listJobs = makeFunctionReference<"query">("admin/jobs:listJobs");
 const listIntegrationHealth = makeFunctionReference<"query">("admin/operations:listIntegrationHealth");
+const reconcileManualReviewJob = makeFunctionReference<"mutation">("admin/jobs:reconcileManualReviewJob");
 
 function createBackend() {
   const t = convexTest(schema, modules);
@@ -86,7 +87,7 @@ async function seedBoundGeminiIndexJob(
     });
     return { jurisdictionId, storeName, resourceId, versionId };
   });
-  const queued = await t.mutation(enqueueJob, {
+  const queued: { jobId: Id<"integrationJobs">; duplicate: boolean } = await t.mutation(enqueueJob, {
     type: "gemini_index_document", targetType: "documentVersion", targetId: fixture.versionId,
     payload: { operation: "publish", storeName: fixture.storeName, sha256: "a".repeat(64) },
     idempotencyKey: `job-${input.suffix}`, systemActor: "gemini_orchestrator",
@@ -198,6 +199,225 @@ async function claimLease(t: Backend, jobId: Id<"integrationJobs">) {
 }
 
 describe("durable Gemini jobs", () => {
+  it("preserves an existing retention marker when a job is claimed again", async () => {
+    const t = createBackend();
+    const fixture = await seedBoundGeminiIndexJob(t, { suffix: "retained-claim", status: "queued", providerSyncState: "synced" });
+    await t.run(ctx => ctx.db.patch(fixture.jobId, { retentionPending: true }));
+    const claim = await t.mutation(claimJob, { jobId: fixture.jobId });
+    expect(claim).toMatchObject({ job: { retentionPending: true, status: "running" } });
+    await expect(t.query(makeFunctionReference<"query">("admin/jobs:getJobForRun"), { jobId: fixture.jobId, leaseToken: claim!.leaseToken })).resolves.toMatchObject({ retentionPending: true });
+  });
+
+  async function failedObservation(fixture: Awaited<ReturnType<typeof seedBoundGeminiIndexJob>>) {
+    const { hashJobValue } = await import("./jobs");
+    return {
+      documentReference: `sha256:${await hashJobValue(`${fixture.storeName}/documents/failed-1`)}`,
+      operationReference: `sha256:${await hashJobValue(`${fixture.storeName}/upload/operations/${fixture.storeName.slice("fileSearchStores/".length)}`)}`,
+      observedAt: Date.now(),
+      metadata: { environment: "test", jurisdiction_id: fixture.jurisdictionId, resource_id: fixture.resourceId, version_id: fixture.versionId, version_number: "1", sha256: "a".repeat(64) },
+    };
+  }
+
+  it("confirms contradictory failed document observations on separate polls, preserving evidence and locks", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 10, 15));
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-confirm", status: "waiting_provider", providerSyncState: "synced", lockDurationMs: 24 * 60 * 60_000 });
+      await t.run(ctx => ctx.db.patch(fixture.jobId, { lastErrorKind: "timeout", providerPollCount: 7 }));
+      const first = await failedObservation(fixture);
+      let leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: first } });
+      let job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "waiting_provider", failedDocumentObservation: { documentReference: first.documentReference, operationReference: first.operationReference, observedAt: first.observedAt } });
+      expect(job).not.toHaveProperty("failedDocumentEvidence");
+      vi.setSystemTime(job.nextAttemptAt!);
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "manual_review", lastErrorKind: "provider", providerPollCount: 9, failedDocumentEvidence: { documentReference: first.documentReference, operationReference: first.operationReference, firstObservedAt: first.observedAt, confirmedAt: Date.now(), priorErrorKind: "timeout", priorProviderPollCount: 8, observedOperationDone: false, observedDocumentState: "STATE_FAILED" } });
+      expect(job).not.toHaveProperty("nextAttemptAt");
+      expect(job).not.toHaveProperty("lastProviderStatus");
+      const version = await t.run(ctx => ctx.db.get(fixture.versionId));
+      expect(version).toMatchObject({ status: "publishing", failureSummary: expect.stringContaining("STATE_FAILED") });
+      expect(version?.failureSummary).toContain("Google service or the document");
+      expect(version).not.toHaveProperty("geminiDocumentName");
+      await expect(t.run(ctx => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted" });
+      await expect(t.run(ctx => ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", q => q.eq("resourceId", fixture.resourceId)).unique())).resolves.toMatchObject({ jobId: fixture.jobId });
+      await expect(t.run(ctx => ctx.db.get(fixture.resourceId))).resolves.not.toHaveProperty("activeVersionId");
+      await expect(t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_completed", documentName: `${fixture.storeName}/documents/failed-1` } })).rejects.toThrow("INTEGRATION_LEASE_INVALID");
+      const admin = await asAdmin(t, "super_admin");
+      await expect(admin.client.mutation(retryJob, { jobId: fixture.jobId, reason: "Inspect failed document", idempotencyKey: "failed-confirm-retry" })).rejects.toThrow("GEMINI_FAILED_DOCUMENT_RECONCILIATION_REQUIRED");
+      await expect(t.mutation(reconcileManualReviewJob, { jobId: fixture.jobId })).resolves.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("resets an unconfirmed failure when the next poll cannot prove it", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-reset", status: "waiting_provider", providerSyncState: "synced" });
+      let leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      let job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      vi.setSystemTime(job.nextAttemptAt!);
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending" } });
+      job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "waiting_provider" });
+      expect(job).not.toHaveProperty("failedDocumentObservation");
+      expect(job).not.toHaveProperty("failedDocumentEvidence");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not confirm changed document identity or a poll earlier than its required interval", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 10, 15));
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-spacing", status: "waiting_provider", providerSyncState: "synced" });
+      const first = await failedObservation(fixture);
+      let leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: first } });
+      // Simulate an early scheduler wake-up. Normal claims also gate nextAttemptAt.
+      vi.setSystemTime(first.observedAt + 1_000);
+      await t.run(ctx => ctx.db.patch(fixture.jobId, { nextAttemptAt: Date.now() }));
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      let job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "waiting_provider", failedDocumentObservation: { observedAt: first.observedAt } });
+      expect(job).not.toHaveProperty("failedDocumentEvidence");
+      vi.setSystemTime(job.nextAttemptAt!);
+      leaseToken = await claimLease(t, fixture.jobId);
+      const changed = { ...await failedObservation(fixture), documentReference: `sha256:${"b".repeat(64)}` };
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: changed } });
+      job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "waiting_provider", failedDocumentObservation: { documentReference: changed.documentReference, observedAt: changed.observedAt } });
+      expect(job).not.toHaveProperty("failedDocumentEvidence");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("resets unconfirmed failure evidence on a provider request error", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-error-reset", status: "waiting_provider", providerSyncState: "synced" });
+      let leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      const job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      vi.setSystemTime(job.nextAttemptAt!);
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(recordProviderFailure, { jobId: fixture.jobId, leaseToken, kind: "network", retryable: true });
+      await expect(t.run(ctx => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "queued", lastErrorKind: "network" });
+      await expect(t.run(ctx => ctx.db.get(fixture.jobId))).resolves.not.toHaveProperty("failedDocumentObservation");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("requires mature failures to remain contradictory for the five-minute poll cadence", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.UTC(2026, 9, 10, 12);
+      vi.setSystemTime(startedAt);
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-mature-spacing", status: "waiting_provider", providerSyncState: "synced", lockDurationMs: 24 * 60 * 60_000 });
+      vi.setSystemTime(startedAt + 3 * 60 * 60_000);
+      let leaseToken = await claimLease(t, fixture.jobId);
+      const first = await failedObservation(fixture);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: first } });
+      let job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job.nextAttemptAt).toBe(first.observedAt + 300_000);
+      vi.setSystemTime(first.observedAt + 60_000);
+      await t.run(ctx => ctx.db.patch(fixture.jobId, { nextAttemptAt: Date.now() }));
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job).toMatchObject({ status: "waiting_provider" });
+      expect(job).not.toHaveProperty("failedDocumentEvidence");
+      vi.setSystemTime(job.nextAttemptAt!);
+      leaseToken = await claimLease(t, fixture.jobId);
+      await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: await failedObservation(fixture) } });
+      await expect(t.run(ctx => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "manual_review", failedDocumentEvidence: { firstObservedAt: first.observedAt } });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("preserves the previous published version when a replacement's Gemini document fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = createBackend();
+      await enablePanel(t);
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-replacement", status: "waiting_provider", providerSyncState: "synced", lockDurationMs: 24 * 60 * 60_000 });
+      const previousVersionId = await t.run(async ctx => {
+        const candidate = (await ctx.db.get(fixture.versionId))!;
+        const previousId = await ctx.db.insert("documentVersions", {
+          resourceId: fixture.resourceId, versionNumber: 1, originalStorageId: candidate.originalStorageId,
+          filename: "old.pdf", mimeType: "application/pdf", byteSize: 3, sha256: "b".repeat(64), sourceUrl: "https://example.invalid/old", status: "published", geminiDocumentName: `${fixture.storeName}/documents/old-active`, geminiIndexedAt: Date.now(), publishedAt: Date.now(), submittedBy: "fixture", createdAt: Date.now(), updatedAt: Date.now(),
+        });
+        await ctx.db.patch(candidate._id, { versionNumber: 2 });
+        await ctx.db.patch(fixture.resourceId, { activeVersionId: previousId, catalogPublished: true });
+        await ctx.db.patch(fixture.jobId, { payload: JSON.stringify({ operation: "replace_index", previousVersionId: previousId, storeName: fixture.storeName, sha256: "a".repeat(64) }) });
+        return previousId;
+      });
+      const previous = await t.run(ctx => ctx.db.get(previousVersionId));
+      for (let index = 0; index < 2; index += 1) {
+        const leaseToken = await claimLease(t, fixture.jobId);
+        const observation = await failedObservation(fixture);
+        observation.metadata.version_number = "2";
+        await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument: observation } });
+        const job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+        if (index === 0) vi.setSystemTime(job.nextAttemptAt!);
+      }
+      await expect(t.run(ctx => ctx.db.get(previousVersionId))).resolves.toEqual(previous);
+      await expect(t.run(ctx => ctx.db.get(fixture.resourceId))).resolves.toMatchObject({ activeVersionId: previousVersionId, catalogPublished: true });
+      await expect(t.run(ctx => ctx.db.get(fixture.versionId))).resolves.toMatchObject({ status: "publishing" });
+      await expect(t.run(ctx => ctx.db.get(fixture.jobId))).resolves.toMatchObject({ status: "manual_review", failedDocumentEvidence: { observedDocumentState: "STATE_FAILED" } });
+      await expect(t.run(ctx => ctx.db.query("integrationJobs").take(2))).resolves.toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("preserves bounded failed-document evidence through ordinary diagnostic retention", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 10, 15));
+      const t = createBackend();
+      const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-retention", status: "manual_review", providerSyncState: "drifted" });
+      const evidence = { documentReference: `sha256:${"b".repeat(64)}`, operationReference: `sha256:${"c".repeat(64)}`, firstObservedAt: Date.now() - 300_000, confirmedAt: Date.now(), priorErrorKind: "timeout", priorProviderPollCount: 144, observedOperationDone: false as const, observedDocumentState: "STATE_FAILED" as const, coverageVerifiedAt: Date.now(), publishedCount: 18 };
+      await t.run(ctx => ctx.db.patch(fixture.jobId, { status: "failed", failedDocumentEvidence: evidence, retentionPending: true, createdAt: Date.now() - 100 * 24 * 60 * 60_000, lastProviderRawResponse: "old diagnostic" }));
+      const originalPayload = (await t.run(ctx => ctx.db.get("integrationJobs", fixture.jobId)))!.payload;
+      await t.mutation(makeFunctionReference<"mutation">("admin/operations:runRetentionBatch"), { cursor: null });
+      const job = (await t.run(ctx => ctx.db.get(fixture.jobId)))!;
+      expect(job.failedDocumentEvidence).toEqual(evidence);
+      expect(job.payload).toBe(originalPayload);
+      expect(job).not.toHaveProperty("lastProviderRawResponse");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("rejects failure evidence for a changed operation, metadata or stale lease", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-binding", status: "waiting_provider", providerSyncState: "synced" });
+    const leaseToken = await claimLease(t, fixture.jobId);
+    const observation = await failedObservation(fixture);
+    for (const failedDocument of [{ ...observation, operationReference: `sha256:${"b".repeat(64)}` }, { ...observation, metadata: { ...observation.metadata, sha256: "b".repeat(64) } }]) {
+      await expect(t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_pending", failedDocument } })).rejects.toThrow("GEMINI_PROVIDER_RESULT_INVALID");
+    }
+    await expect(t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken: "stale", result: { kind: "index_pending", failedDocument: observation } })).rejects.toThrow("INTEGRATION_LEASE_INVALID");
+    await expect(t.run(ctx => ctx.db.get(fixture.jobId))).resolves.not.toHaveProperty("failedDocumentObservation");
+  });
+
+  it("keeps a restricted jurisdiction drifted after an unrelated terminal publication failure", async () => {
+    const t = createBackend();
+    const fixture = await seedBoundGeminiIndexJob(t, { suffix: "failed-restriction", status: "waiting_provider", providerSyncState: "drifted" });
+    await t.run(ctx => ctx.db.patch(fixture.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [fixture.versionId] } }));
+    const leaseToken = await claimLease(t, fixture.jobId);
+    await t.mutation(applyGeminiProviderResult, { jobId: fixture.jobId, leaseToken, result: { kind: "index_failed", errorKind: "provider" } });
+    await expect(t.run(ctx => ctx.db.get(fixture.jurisdictionId))).resolves.toMatchObject({ providerSyncState: "drifted", geminiSearchRestriction: { kind: "published_only" } });
+  });
+
   it("does not expose the generic provider dispatcher as a privileged public function", () => {
     expect(E2E_PRIVILEGED_FUNCTIONS.map((entry) => entry.path)).not.toContain("admin/jobs:enqueueJob");
   });

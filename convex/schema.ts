@@ -1,4 +1,5 @@
 import { defineSchema, defineTable } from "convex/server";
+import { citationProvenanceValidator } from "./lib/citationProvenance";
 import { v } from "convex/values";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
@@ -71,6 +72,11 @@ export default defineSchema({
     productionBucketId: v.optional(v.string()),
     geminiFileSearchStoreName: v.optional(v.string()),
     geminiEmbeddingModel: v.optional(v.string()),
+    // Failed provider documents can later change state; retrieval remains published-only.
+    geminiSearchRestriction: v.optional(v.object({
+      kind: v.literal("published_only"), establishedAt: v.number(),
+      failedVersionIds: v.array(v.id("documentVersions")),
+    })),
     // Server-only provider serialization. Client projections deliberately omit it.
     geminiExecutionPermit: v.optional(v.object({
       jobId: v.id("integrationJobs"),
@@ -229,6 +235,11 @@ export default defineSchema({
       v.literal("archived"),
     ),
     activeVersionId: v.optional(v.id("documentVersions")),
+    // Durable resource-level guard: uploading another version cannot replay a pending operation.
+    geminiPublicationBlock: v.optional(v.object({
+      jobId: v.id("integrationJobs"), versionId: v.id("documentVersions"),
+      storeName: v.string(), sha256: v.string(), recordedAt: v.number(),
+    })),
     catalogPublished: v.optional(v.boolean()),
     createdBy: v.string(),
     updatedBy: v.string(),
@@ -538,6 +549,17 @@ export default defineSchema({
     providerOperationName: v.optional(v.string()),
     providerPollCount: v.optional(v.number()),
     providerPollingStartedAt: v.optional(v.number()),
+    failedDocumentObservation: v.optional(v.object({
+      documentReference: v.string(), operationReference: v.string(), observedAt: v.number(),
+    })),
+    // Preserve this bounded tombstone through ordinary diagnostic retention.
+    failedDocumentEvidence: v.optional(v.object({
+      documentReference: v.string(), operationReference: v.string(),
+      firstObservedAt: v.number(), confirmedAt: v.number(), priorErrorKind: v.optional(v.string()),
+      priorProviderPollCount: v.number(), observedOperationDone: v.literal(false),
+      observedDocumentState: v.literal("STATE_FAILED"),
+      coverageVerifiedAt: v.optional(v.number()), publishedCount: v.optional(v.number()),
+    })),
     knownStoreResult: v.optional(v.union(
       v.object({
         kind: v.literal("store_created"),
@@ -876,6 +898,7 @@ export default defineSchema({
     assistantClientIdBinding: v.string(),
     assistantContentBinding: v.string(),
     orderedCitationBinding: v.string(),
+    citationProvenance: v.optional(v.array(citationProvenanceValidator)),
     expiresAt: v.number(),
   })
     .index("by_tokenHash", ["tokenHash"])
@@ -989,6 +1012,7 @@ export default defineSchema({
     clientId: v.optional(v.string()),
     citations: v.optional(v.array(chatCitationValidator)),
     guestSources: v.optional(v.array(guestSourceValidator)),
+    citationProvenance: v.optional(v.array(citationProvenanceValidator)),
     // Written only by the verified atomic reviewed completion, never by callers
     // of appendMessages. Source URLs are resolved on access rather than stored.
     reviewedOriginalSource: v.optional(v.object({

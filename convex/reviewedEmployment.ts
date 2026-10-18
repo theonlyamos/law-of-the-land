@@ -5,8 +5,10 @@ import type { Id } from "./_generated/dataModel";
 import { canAccessSession, validateGovernedCitations, revalidateReviewedEmploymentJobPrincipal, type VerifiedReviewedEmploymentJobPrincipal } from "./chats";
 import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
 import { requireUserId } from "./lib/requireUser";
-import { authComponent } from "./auth";
+import { citationSourceUserId } from "./lib/citationSourceAccess";
+import { citationFileProofValidators, validCitationFileProof } from "./lib/citationFileProof";
 import { reviewedEmploymentBackendPolicy, reviewedEmploymentBackendPolicyId } from "../shared/reviewed-employment-policy";
+import { PUBLICATION_FILTER_PROTOCOL } from "../shared/gemini-publication-filter";
 
 const unavailable = () => ({ status: "unavailable" as const });
 
@@ -33,6 +35,7 @@ function storageHashMatches(base64: string, expected: string): boolean {
  * The existing atomic completion and citation-claim consumption remain mandatory.
  */
 export type ReviewedEmploymentSourceAuthorizationInput = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
   externalId: string; jurisdictionId: Id<"jurisdictions">; resourceId: Id<"legalResources">;
   versionId: Id<"documentVersions">; expectedSha256: string; expectedByteSize: number; asOfDate: string;
 };
@@ -49,7 +52,7 @@ try {
   const session = verified?.session ?? await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>
     q.eq("userId", userId).eq("externalId", args.externalId)).unique();
   if (!session || session.jurisdictionId !== args.jurisdictionId || !(await canAccessSession(ctx, session))) return unavailable();
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId);
+  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId, args.publicationFilterProtocol);
   const selected = resolution.stores[0];
   if (!selected || selected.jurisdictionId !== args.jurisdictionId || selected.relation !== "selected"
     || selected.kind !== "geographic") return unavailable();
@@ -87,6 +90,7 @@ export async function authorizeSourceForJobPrincipal(
 
 export const authorizeSource = query({
   args: {
+    publicationFilterProtocol: v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL)),
     externalId: v.string(), jurisdictionId: v.id("jurisdictions"), resourceId: v.id("legalResources"),
     versionId: v.id("documentVersions"), expectedSha256: v.string(), expectedByteSize: v.number(), asOfDate: v.string(),
   },
@@ -107,12 +111,12 @@ const citationFileAtDateRef = makeFunctionReference<"query">("reviewedEmployment
 // Actions are not cached: the current UTC date is supplied only by this server
 // boundary, never by a browser. The internal query grants access in one snapshot.
 export const resolveCitationFile = action({
-  args: citationFileArgs, returns: citationFileResult,
+  args: { ...citationFileArgs, ...citationFileProofValidators }, returns: citationFileResult,
   handler: async (ctx, args): Promise<{ url: string; filename: string; mimeType: "application/pdf"; byteSize: number } | null> => {
     // The uncached action also checks native session expiry; a cached query's
     // database reads alone cannot observe the passage of time.
-    if (!(await authComponent.safeGetAuthUser(ctx))) return null;
-    return await ctx.runQuery(citationFileAtDateRef, { ...args, asOfDate: new Date().toISOString().slice(0, 10) });
+    if (!(await validCitationFileProof(args)) || !(await citationSourceUserId(ctx))) return null;
+    return await ctx.runQuery(citationFileAtDateRef, { externalId: args.externalId, messageId: args.messageId, citationIndex: args.citationIndex, asOfDate: new Date().toISOString().slice(0, 10) });
   },
 });
 
@@ -127,7 +131,8 @@ export const resolveCitationFileAtDate = internalQuery({
     if (!args.externalId.trim() || args.externalId !== args.externalId.trim() || args.externalId.length > 200
       || !Number.isSafeInteger(args.citationIndex) || args.citationIndex < 0 || args.citationIndex > 3) return null;
     try {
-      const userId = await requireUserId(ctx);
+      const userId = await citationSourceUserId(ctx);
+      if (!userId) return null;
       const session = await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>
         q.eq("userId", userId).eq("externalId", args.externalId)).unique();
       if (!session || !(await canAccessSession(ctx, session))) return null;
@@ -147,7 +152,7 @@ export const resolveCitationFileAtDate = internalQuery({
         || !Object.entries(policy).every(([key, value]) => source[key as keyof typeof policy] === value)) return null;
       const { pageNumbers: _pages, ...identity } = source;
       const grant: { status: "authorized" | "unavailable" } = await ctx.runQuery(authorizeSourceRef,
-        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate });
+        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
       if (grant.status !== "authorized") return null;
       const version = await ctx.db.get(source.versionId);
       if (!version || version.mimeType !== "application/pdf") return null;

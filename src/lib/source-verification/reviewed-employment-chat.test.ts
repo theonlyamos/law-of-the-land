@@ -40,6 +40,17 @@ function fixture() {
 }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe("normal reviewed employment chat", () => {
+  it("binds original evidence passages to citation pages only after verification succeeds", async () => {
+    const f = fixture();
+    const result = await createReviewedEmploymentChat(f.deps).run(f.input);
+    expect(result.status).toBe("verified");
+    const citations = f.commit.mock.calls[0][0].citations;
+    expect(citations.flatMap(citation => citation.passages ?? [])).toEqual(
+      f.input.selection.evidence.passages.map(passage => ({ pageNumber: passage.pdfOrdinal, quote: passage.text })),
+    );
+    expect(JSON.stringify(citations)).not.toContain(candidate);
+  });
+
   it("retains only immutable numeric provider metadata on a verified result", async () => {
     const f = fixture();
     const timingMs = { preparation: 3, provider: 101, validation: 4, total: 108 };

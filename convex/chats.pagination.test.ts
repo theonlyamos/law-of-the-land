@@ -56,7 +56,8 @@ async function issueClaim(
     ]);
     const stores = new Map<Id<"jurisdictions">, string>();
     for (const jurisdictionId of uniqueJurisdictionIds) {
-      const storeName = `fileSearchStores/${crypto.randomUUID()}`;
+      const jurisdiction = await ctx.db.get(jurisdictionId);
+      const storeName = jurisdiction?.geminiFileSearchStoreName ?? `fileSearchStores/${crypto.randomUUID()}`;
       await ctx.db.patch(jurisdictionId, {
         geminiFileSearchStoreName: storeName,
         geminiEmbeddingModel: "models/gemini-embedding-2",
@@ -102,7 +103,7 @@ async function issueClaim(
         createdAt: now,
         updatedAt: now,
       });
-      await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
       identities.push({
         jurisdictionId: citation.jurisdictionId,
         resourceId,
@@ -620,6 +621,7 @@ describe("chat pagination", () => {
         "assistantClientIdBinding",
         "assistantContentBinding",
         "chatSessionId",
+        "citationProvenance",
         "expiresAt",
         "jurisdictionId",
         "orderedCitationBinding",

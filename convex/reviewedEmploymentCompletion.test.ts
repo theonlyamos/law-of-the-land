@@ -6,11 +6,14 @@ import { api, components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
+import { citationFileProofParts } from "../shared/citation-source-preview";
 import * as chats from "./chats";
 import * as reviewedCompletion from "./reviewedEmploymentCompletion";
 import * as reviewedSource from "./reviewedEmployment";
 import { createOpaqueTelemetryToken, createTelemetryServiceProof } from "./lib/telemetryProof";
 import { reviewedEmploymentCommitProofParts, type ReviewedEmploymentCommitInput } from "./reviewedEmploymentCompletion";
+import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { createPublicationFilterBinding } from "../shared/gemini-publication-filter";
 
 // Only the deployment-specific fixed catalog is replaced with synthetic fixture
 // IDs/bytes. Authentication, authorization, completion and persistence are real.
@@ -26,6 +29,10 @@ const authModules = Object.fromEntries(Object.entries(import.meta.glob("./better
   .map(([path, load]) => [`./${path.slice("./betterAuth/".length)}`, load]));
 const commitRef = makeFunctionReference<"mutation">("reviewedEmploymentCompletion:commit");
 const authorizeRef = makeFunctionReference<"query">("reviewedEmployment:authorizeSource");
+async function signCitationFileArgs<T extends { externalId: string; messageId: string; citationIndex: number }>(args: T) {
+  const input = { ...args, expiresAt: Date.now() + 60_000 };
+  return { ...input, serviceProof: await createTelemetryServiceProof(citationFileProofParts(input)) };
+}
 const citationFileRef = makeFunctionReference<"action">("reviewedEmployment:resolveCitationFile");
 const prepareRef = makeFunctionReference<"mutation">("chatAttachments:prepareUpload");
 const finalizeRef = makeFunctionReference<"mutation">("chatAttachments:finalizeUpload");
@@ -155,10 +162,10 @@ describe("reviewed employment trusted job principal", () => {
     const saved = await state(f.t), assistant = saved.messages.find(message => message.role === "assistant")!;
     expect(assistant.reviewedOriginalSource).toEqual({ ...policy, pageNumbers: [18] });
     productionEnvironment(false, false);
-    expect(await f.owner.action(citationFileRef, { externalId: f.input.completion.externalId,
-      messageId: assistant._id, citationIndex: 0 })).toMatchObject({ filename: "fixture.pdf", mimeType: "application/pdf", byteSize: policy.expectedByteSize });
-    expect(await f.other.action(citationFileRef, { externalId: f.input.completion.externalId,
-      messageId: assistant._id, citationIndex: 0 })).toBeNull();
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({ externalId: f.input.completion.externalId,
+      messageId: assistant._id, citationIndex: 0 }))).toMatchObject({ filename: "fixture.pdf", mimeType: "application/pdf", byteSize: policy.expectedByteSize });
+    expect(await f.other.action(citationFileRef, await signCitationFileArgs({ externalId: f.input.completion.externalId,
+      messageId: assistant._id, citationIndex: 0 }))).toBeNull();
   });
   it("atomically persists without a browser request identity", async () => {
     const f = await fixture(), result = await jobCommit(f), saved = await state(f.t);
@@ -230,6 +237,21 @@ describe("reviewed employment trusted job principal", () => {
 });
 
 describe("reviewed employment atomic commit", () => {
+  it("requires the signed original allowlist binding to commit reviewed research in a restricted store", async () => {
+    const f = await fixture();
+    await f.t.run(async ctx => {
+      const { _id: _id, _creationTime: _creationTime, ...version } = (await ctx.db.get(f.ids.versionId))!;
+      const failedId = await ctx.db.insert("documentVersions", { ...version, versionNumber: 2, status: "failed", geminiDocumentName: undefined });
+      await ctx.db.patch(f.ids.jurisdictionId, { geminiSearchRestriction: { kind: "published_only", establishedAt: Date.now(), failedVersionIds: [failedId] } });
+    });
+    f.input.completion.publicationFilterProtocol = "published-v1";
+    await expect(f.commit()).rejects.toThrow("GOVERNED_INTERACTION_SCOPE_CHANGED");
+    expect(await state(f.t)).toEqual({ claims: [], runs: [], messages: [] });
+    const manifest = await f.t.run(ctx => resolveChatResearchStoresForJurisdiction(ctx, f.ids.jurisdictionId, "published-v1"));
+    f.input.completion.publicationFilterBinding = await createPublicationFilterBinding(manifest.stores);
+    expect(await f.commit()).toMatchObject({ status: "completed", persisted: true });
+    expect((await state(f.t)).messages).toHaveLength(2);
+  });
   it("pins the real server policy to the exact reviewed ACT 651 edition", async () => {
     const actual = await vi.importActual<typeof import("../shared/reviewed-employment-policy")>("../shared/reviewed-employment-policy");
     expect(actual.REVIEWED_EMPLOYMENT_POLICY).toEqual({ jurisdictionId: "md744z756x2etfcscnx9ayys8n8dp2mc",
@@ -288,19 +310,38 @@ describe("reviewed employment atomic commit", () => {
     })).toEqual({ page: [], isDone: true, continueCursor: "" });
   });
 
+  it.each([false, true])("withholds denied reviewed original URLs (legacy provenance only: %s)", async legacyOnly => {
+    const f = await fixture(); await f.commit();
+    const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
+    if (legacyOnly) await f.t.run(ctx => ctx.db.patch(assistant._id, { citationProvenance: undefined }));
+    const list = () => f.owner.query(api.chats.listMessages, {
+      externalId: f.input.completion.externalId, paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect((await list()).page[1].originalSourceUrls).toEqual([
+      `/api/chat/sources/${assistant._id}/0?chat=${f.input.completion.externalId}#page=11`,
+    ]);
+    await f.t.run(ctx => ctx.db.patch(f.ids.resourceId, { catalogPublished: false }));
+    const denied = (await list()).page[1];
+    expect(denied.originalSourceUrls).toEqual([""]);
+    if (denied.citationPreviews) expect(denied.citationPreviews).toEqual([{}]);
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({
+      externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0,
+    }))).toBeNull();
+  });
+
   it("opens only the exact committed original for the current ordinary owner", async () => {
     const f = await fixture(); await f.commit();
     const saved = await state(f.t), assistant = saved.messages.find(message => message.role === "assistant")!;
     const args = { externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0 };
-    const file = await f.owner.action(citationFileRef, args);
+    const file = await f.owner.action(citationFileRef, await signCitationFileArgs(args));
     expect(file).toMatchObject({ filename: "fixture.pdf", mimeType: "application/pdf", byteSize: f.ids.expectedByteSize });
     expect(file.url).toEqual(await f.t.run(ctx => ctx.storage.getUrl(f.ids.originalStorageId)));
-    expect(await f.other.action(citationFileRef, args)).toBeNull();
-    expect(await f.t.action(citationFileRef, args)).toBeNull();
-    expect(await f.owner.action(citationFileRef, { ...args, externalId: "different-session" })).toBeNull();
-    expect(await f.owner.action(citationFileRef, { ...args, messageId: saved.messages.find(message => message.role === "user")!._id })).toBeNull();
+    expect(await f.other.action(citationFileRef, await signCitationFileArgs(args))).toBeNull();
+    expect(await f.t.action(citationFileRef, await signCitationFileArgs(args))).toBeNull();
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({ ...args, externalId: "different-session" }))).toBeNull();
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({ ...args, messageId: saved.messages.find(message => message.role === "user")!._id }))).toBeNull();
     for (const citationIndex of [-1, 0.5, 1, 4, 1000])
-      expect(await f.owner.action(citationFileRef, { ...args, citationIndex })).toBeNull();
+      expect(await f.owner.action(citationFileRef, await signCitationFileArgs({ ...args, citationIndex }))).toBeNull();
   });
 
   it.each(["catalog withdrawn", "version drift", "original replaced", "lifecycle lock", "session access revoked"] as const)(
@@ -308,7 +349,7 @@ describe("reviewed employment atomic commit", () => {
       const f = await fixture(); await f.commit();
       const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
       const args = { externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0 };
-      expect(await f.owner.action(citationFileRef, args)).not.toBeNull();
+      expect(await f.owner.action(citationFileRef, await signCitationFileArgs(args))).not.toBeNull();
       await f.t.run(async ctx => {
         if (change === "catalog withdrawn") await ctx.db.patch(f.ids.resourceId, { catalogPublished: false });
         else if (change === "version drift") await ctx.db.patch(f.ids.versionId, { sha256: "a".repeat(64) });
@@ -320,7 +361,7 @@ describe("reviewed employment atomic commit", () => {
           jurisdictionId: f.ids.jurisdictionId, operation: "unpublish", actorId: "fixture", idempotencyKey: "source-lock",
           expiresAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now() });
       });
-      expect(await f.owner.action(citationFileRef, args)).toBeNull();
+      expect(await f.owner.action(citationFileRef, await signCitationFileArgs(args))).toBeNull();
     },
   );
 
@@ -328,25 +369,38 @@ describe("reviewed employment atomic commit", () => {
     const f = await fixture(); await f.commit();
     const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
     const args = { externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0 };
-    expect(await f.owner.action(citationFileRef, args)).not.toBeNull();
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs(args))).not.toBeNull();
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(Date.now() + 2 * 86_400_000);
-      expect(await f.owner.action(citationFileRef, args)).toBeNull();
+      expect(await f.owner.action(citationFileRef, await signCitationFileArgs(args))).toBeNull();
     } finally { vi.useRealTimers(); }
+  });
+
+  it("does not expose a reviewed original to a direct caller without a current proxy proof", async () => {
+    const f = await fixture(); await f.commit();
+    const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
+    const args = { externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0 };
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs(args))).not.toBeNull();
+    expect(await f.owner.action(citationFileRef, args)).toBeNull();
+    const signed = await signCitationFileArgs(args);
+    expect(await f.owner.action(citationFileRef, { ...signed, serviceProof: "x".repeat(43) })).toBeNull();
+    const expired = { ...args, expiresAt: Date.now() - 1 };
+    expect(await f.owner.action(citationFileRef, { ...expired,
+      serviceProof: await createTelemetryServiceProof(citationFileProofParts(expired)) })).toBeNull();
   });
 
   it("keeps legacy citations as labels and rejects caller-supplied original provenance", async () => {
     const f = await fixture(); await f.commit();
     const assistant = (await state(f.t)).messages.find(message => message.role === "assistant")!;
-    await f.t.run(ctx => ctx.db.patch(assistant._id, { reviewedOriginalSource: undefined }));
+    await f.t.run(ctx => ctx.db.patch(assistant._id, { reviewedOriginalSource: undefined, citationProvenance: undefined }));
     const reloaded = await f.owner.query(api.chats.listMessages, {
       externalId: f.input.completion.externalId, paginationOpts: { numItems: 10, cursor: null },
     });
     expect(reloaded.page[1]).not.toHaveProperty("originalSourceUrls");
-    expect(await f.owner.action(citationFileRef, {
+    expect(await f.owner.action(citationFileRef, await signCitationFileArgs({
       externalId: f.input.completion.externalId, messageId: assistant._id, citationIndex: 0,
-    })).toBeNull();
+    }))).toBeNull();
     await expect(f.owner.mutation(makeFunctionReference<"mutation">("chats:appendMessages"), {
       externalId: f.input.completion.externalId, lastMessage: "forged provenance", messages: [{ role: "user",
         content: "forged provenance", clientId: "forged", reviewedOriginalSource: { ...f.input.source, pageNumbers: [11] } }],

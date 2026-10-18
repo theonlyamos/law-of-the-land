@@ -28,6 +28,27 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("normal employment authority adapter", () => {
+  it("retains a strict published-document filter and opts into capable source authority", async () => {
+    const deps = dependencies();
+    const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
+      { resourceId: PILOT_CATALOG.resourceId, versionId: PILOT_CATALOG.versionId, sha256: PILOT_IDENTITY.originalSha256 },
+    ] };
+    deps.loadManifest.mockResolvedValue({ ...manifest(), stores: [{ ...manifest().stores[0], publicationFilter }] });
+    const result = await createEmploymentAuthority(deps).resolve(request());
+    expect(result).toMatchObject({ status: "authorized", manifest: { stores: [{ publicationFilter }] } });
+    expect(deps.authorizeSource).toHaveBeenCalledWith(expect.objectContaining({ publicationFilterProtocol: "published-v1" }));
+    expect(deps.loadManifest).toHaveBeenCalledWith(expect.objectContaining({ publicationFilterProtocol: "published-v1" }));
+  });
+
+  it("does not authorize the reviewed edition when the allowlist excludes its exact bytes", async () => {
+    const deps = dependencies();
+    deps.loadManifest.mockResolvedValue({ ...manifest(), stores: [{ ...manifest().stores[0], publicationFilter: {
+      protocol: "published-v1", environment: "production", documents: [
+        { resourceId: PILOT_CATALOG.resourceId, versionId: PILOT_CATALOG.versionId, sha256: "a".repeat(64) },
+      ],
+    } }] });
+    expect(await createEmploymentAuthority(deps).resolve(request())).toMatchObject({ status: "unavailable", reason: "manifest_invalid" });
+  });
   it("binds the unchanged reviewed bytes to the production edition supplied by trusted server construction", async () => {
     const policy = PRODUCTION_REVIEWED_EMPLOYMENT_POLICY;
     const catalog = { jurisdictionId: policy.jurisdictionId, resourceId: policy.resourceId, versionId: policy.versionId };
@@ -38,7 +59,7 @@ describe("normal employment authority adapter", () => {
     expect(result).toMatchObject({ status: "authorized", identities: [PILOT_IDENTITY], citationIdentity: { ...catalog, providerStoreName: storeName } });
     expect(deps.authorizeSource).toHaveBeenCalledWith({ externalId: "normal-owned-chat", ...catalog,
       expectedSha256: PILOT_IDENTITY.originalSha256, expectedByteSize: PILOT_IDENTITY.originalByteLength,
-      asOfDate: "2026-10-05", signal: expect.any(AbortSignal) });
+      asOfDate: "2026-10-05", signal: expect.any(AbortSignal), publicationFilterProtocol: "published-v1" });
   });
   it("rejects a DEV catalog grant when the trusted server selected the production edition", async () => {
     const deps = dependencies();
@@ -52,7 +73,7 @@ describe("normal employment authority adapter", () => {
     expect(await createEmploymentAuthority({ ...deps, timingPolicy: "background" }).resolve(request({ deadlineAt: NOW + 240_000 })))
       .toMatchObject({ status: "authorized" });
     expect(deps.loadManifest).toHaveBeenCalledWith({ jurisdictionId: PILOT_CATALOG.jurisdictionId,
-      deadlineAt: NOW + 240_000, signal: expect.any(AbortSignal) });
+      deadlineAt: NOW + 240_000, signal: expect.any(AbortSignal), publicationFilterProtocol: "published-v1" });
   });
 
   it.each([null, "unknown", 240_000])("rejects an invalid trusted authority timing policy %s before querying", async timingPolicy => {
@@ -74,9 +95,9 @@ describe("normal employment authority adapter", () => {
     expect(getFunctionName(employmentAuthorizationReference)).toBe("reviewedEmployment:authorizeSource");
     expect(deps.authorizeSource).toHaveBeenCalledWith({ externalId: "normal-owned-chat", ...PILOT_CATALOG,
       expectedSha256: PILOT_IDENTITY.originalSha256, expectedByteSize: PILOT_IDENTITY.originalByteLength,
-      asOfDate: "2026-10-05", signal: expect.any(AbortSignal) });
+      asOfDate: "2026-10-05", signal: expect.any(AbortSignal), publicationFilterProtocol: "published-v1" });
     expect(deps.loadManifest).toHaveBeenCalledWith({ jurisdictionId: PILOT_CATALOG.jurisdictionId,
-      deadlineAt: NOW + 30_000, signal: expect.any(AbortSignal) });
+      deadlineAt: NOW + 30_000, signal: expect.any(AbortSignal), publicationFilterProtocol: "published-v1" });
     expect(result).toEqual({ status: "authorized", identities: [PILOT_IDENTITY], manifest: manifest(),
       citationIdentity: { ...PILOT_CATALOG, providerStoreName: storeName }, applicability: "source_edition_only",
       requiresFinalAtomicCompletion: true, productionEligible: false });

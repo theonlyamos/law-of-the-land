@@ -46,6 +46,10 @@ const resourceTypeValidator = v.union(
   v.literal("protocol"),
   v.literal("declaration"),
 );
+const geminiPublicationBlockValidator = v.optional(v.object({
+  jobId: v.id("integrationJobs"), versionId: v.id("documentVersions"),
+  storeName: v.string(), sha256: v.string(), recordedAt: v.number(),
+}));
 
 const jurisdictionDocValidator = v.object({
   _id: v.id("jurisdictions"), _creationTime: v.number(), code: v.string(), name: v.string(),
@@ -59,6 +63,7 @@ const resourceDocValidator = v.object({
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
+  geminiPublicationBlock: geminiPublicationBlockValidator,
   createdAt: v.number(), updatedAt: v.number(),
 });
 const versionStatusValidator = v.union(
@@ -82,6 +87,7 @@ const resourceDetailValidator = v.object({
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
+  geminiPublicationBlock: geminiPublicationBlockValidator,
   createdAt: v.number(), updatedAt: v.number(),
   jurisdiction: v.object({
     code: v.optional(v.string()),

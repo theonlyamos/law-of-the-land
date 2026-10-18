@@ -51,3 +51,9 @@ docs/admin/2026-07-29-responsive-admin-plan.md
 
 # Generated performance-harness output
 artifacts/admin-performance.json
+
+# Generated local PDF.js fonts, CMaps and decoders
+/public/pdfjs/
+
+# Isolated source-preview fixture bundle
+/e2e/citation-preview/dist/

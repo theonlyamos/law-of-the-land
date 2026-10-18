@@ -76,6 +76,34 @@ describe("disabled development split-verifier integration", () => {
   const overtime = () => request({ query: "Can my employer require overtime while I am pregnant?" });
   const enable = () => vi.stubEnv("LOCAL_REVIEWED_EMPLOYMENT_SPLIT_ENABLED", "1");
 
+  it("keeps reviewed context preparation on the original 90-second cutoff", async () => {
+    vi.useFakeTimers();
+    mocks.loadChatAttachmentContext.mockReturnValue(new Promise(() => undefined));
+    let responseSettled = false;
+    const response = POST(overtime()).then(value => { responseSettled = true; return value; });
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(responseSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await response).status).toBe(400);
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.stage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not revive a reviewed request discovered after its original deadlines", async () => {
+    vi.useFakeTimers();
+    mocks.isAuthenticated.mockImplementationOnce(() => new Promise(resolve => {
+      setTimeout(() => resolve(true), 111_000);
+    }));
+    const response = POST(overtime());
+    await vi.advanceTimersByTimeAsync(111_000);
+    expect((await response).status).toBe(500);
+    expect(mocks.loadChatAttachmentContext).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.stage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([undefined, "0", "true"])("does not construct the split executor when the flag is %s", async flag => {
     vi.stubEnv("LOCAL_REVIEWED_EMPLOYMENT_SPLIT_ENABLED", flag);
     expect((await events(await POST(request()))).at(-1)).toMatchObject({ type: "done", persisted: true });
@@ -83,14 +111,14 @@ describe("disabled development split-verifier integration", () => {
     expect(mocks.create).toHaveBeenCalledTimes(2);
   });
 
-  it("requires all three stages and the atomic save before releasing any text", async () => {
+  it.each([undefined, "provisional-v1"])("requires all three stages and the atomic save before releasing any text with streaming %s", async streaming => {
     enable();
     const original = mocks.fetchAuthMutation.getMockImplementation()!;
     let finishSave!: (value: unknown) => void;
     mocks.fetchAuthMutation.mockImplementation((reference, args) => getFunctionName(reference) === "reviewedEmploymentCompletion:commit"
       ? new Promise(resolve => { finishSave = resolve; }) : original(reference, args));
     const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    const response = await POST(overtime());
+    const response = await POST(request({ query: "Can my employer require overtime while I am pregnant?", ...(streaming ? { streaming } : {}) }));
     const reader = response.body!.getReader(); let released = false;
     const first = reader.read().then(value => { released = true; return value; });
     await vi.waitFor(() => expect(finishSave).toBeTypeOf("function"));
@@ -423,11 +451,12 @@ describe("normal local reviewed employment route", () => {
     const response = await POST(request({ query: "Summarize my contract and explain whether my employer can fire me.", attachmentIds: ["pdf"] }));
     expect(response.status).toBe(400); expect((await response.json()).error).toMatch(/readable text/i); expect(mocks.create).not.toHaveBeenCalled();
   });
-  it("preserves document-only dispatch with no legal citations and client persistence", async () => {
+  it.each([undefined, "provisional-v1"])("preserves buffered local document dispatch with streaming %s", async streaming => {
     mocks.loadChatAttachmentContext.mockResolvedValue({ attachments: [{ id: "text", filename: "letter.txt", mimeType: "text/plain", kind: "text", text: "Your contract ends Friday." }],
       attachmentIds: ["text"], selectedJurisdiction: { id: PILOT_CATALOG.jurisdictionId, name: "Ghana", kind: "geographic" } });
     const run = vi.spyOn(GeminiFileSearchChat.prototype, "run").mockResolvedValue({ answer: "Your contract ends Friday.", citations: [] } as never);
-    const output = await events(await POST(request({ query: "Summarize this letter", attachmentIds: ["text"] })));
+    const output = await events(await POST(request({ query: "Summarize this letter", attachmentIds: ["text"], ...(streaming ? { streaming } : {}) })));
+    expect(output.map(event => event.type)).toEqual(["delta", "done"]);
     expect(output.at(-1)).toMatchObject({ type: "done", answerKind: "document", citations: [] }); expect(output.at(-1)).not.toHaveProperty("persisted");
     expect(run).toHaveBeenCalledTimes(1); expect(run.mock.calls[0][1]).toMatchObject({ singleAttempt: true });
     expect(mocks.fetchAuthQuery).not.toHaveBeenCalled(); expect(mutation("chats:appendMessages")).toBeUndefined();

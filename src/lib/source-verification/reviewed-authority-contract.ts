@@ -1,4 +1,5 @@
 import type { SourceIdentity } from "./evidence";
+import type { PublicationFilter } from "../../../shared/gemini-publication-filter";
 
 /** Pure source-edition authority contract. Deployment admission remains separate. */
 export type ReviewedSourceManifest = {
@@ -9,6 +10,7 @@ export type ReviewedSourceManifest = {
     kind: "geographic" | "organizational";
     relation: "selected" | "geographic_ancestor" | "organizational_geography";
     storeName: string;
+    publicationFilter?: PublicationFilter;
   }[];
   partialCoverage: boolean;
 };

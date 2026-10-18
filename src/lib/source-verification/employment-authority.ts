@@ -7,8 +7,10 @@ import { captureReviewedEmploymentPolicy, REVIEWED_EMPLOYMENT_POLICY,
   type ReviewedEmploymentPolicy } from "../../../shared/reviewed-employment-policy";
 import type { ReviewedSourceAuthorityReason as LocalPilotAuthorityReason, ReviewedSourceAuthorityResult as LocalPilotAuthorityResult } from "./reviewed-authority-contract";
 import { captureTrustedTimingPolicy, type TrustedTimingPolicy } from "./trusted-timing-policy";
+import { parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL, type PublicationFilter } from "../../../shared/gemini-publication-filter";
 
 export type EmploymentAuthorizationArgs = {
+  publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL;
   externalId: string; jurisdictionId: Id<"jurisdictions">; resourceId: Id<"legalResources">;
   versionId: Id<"documentVersions">; expectedSha256: string; expectedByteSize: number; asOfDate: string;
 };
@@ -25,7 +27,7 @@ export type EmploymentAuthorityDependencies = Readonly<{
   /** Use the current user's authenticated public query, never an admin client. */
   authorizeSource(input: Readonly<EmploymentAuthorizationArgs & { signal: AbortSignal }>): Promise<unknown>;
   /** The existing authenticated private research manifest remains server-only. */
-  loadManifest(input: Readonly<{ jurisdictionId: string; deadlineAt: number; signal: AbortSignal }>): Promise<unknown>;
+  loadManifest(input: Readonly<{ jurisdictionId: string; deadlineAt: number; signal: AbortSignal; publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL }>): Promise<unknown>;
 }>;
 export type EmploymentAuthorityResult = LocalPilotAuthorityResult;
 
@@ -45,7 +47,9 @@ const manifestSchema = z.strictObject({ authorizedScopeSize: z.number().int().mi
   stores: z.array(z.strictObject({ jurisdictionId: id,
     name: z.string().min(1).max(200).refine(value => value.trim().length > 0),
     kind: z.enum(["geographic", "organizational"]), relation: z.enum(["selected", "geographic_ancestor", "organizational_geography"]),
-    storeName: z.string().max(200).refine(isGeminiFileSearchStoreName) })).min(1).max(32) });
+    storeName: z.string().max(200).refine(isGeminiFileSearchStoreName),
+    publicationFilter: z.custom<PublicationFilter>(value => parsePublicationFilter(value) !== null)
+      .transform(value => parsePublicationFilter(value)!).optional() })).min(1).max(32) });
 
 const unavailable = (reason: LocalPilotAuthorityReason): EmploymentAuthorityResult =>
   Object.freeze({ status: "unavailable", reason, productionEligible: false });
@@ -99,6 +103,7 @@ export function createEmploymentAuthority(dependencies?: EmploymentAuthorityDepe
           let stop = stopped(); if (stop) return unavailable(stop);
           const today = new Date(Date.now()).toISOString().slice(0, 10);
           const grant = grantSchema.safeParse(await authorizeSource({ externalId,
+            publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
             jurisdictionId: catalog.jurisdictionId as Id<"jurisdictions">,
             resourceId: catalog.resourceId as Id<"legalResources">,
             versionId: catalog.versionId as Id<"documentVersions">,
@@ -110,6 +115,7 @@ export function createEmploymentAuthority(dependencies?: EmploymentAuthorityDepe
           if (!applicable(grant.data.resourceEffectiveDate, grant.data.resourceRepealDate, today)
             || !applicable(grant.data.versionEffectiveDate, grant.data.versionRepealDate, today)) return unavailable("source_not_applicable");
           const parsedManifest = manifestSchema.safeParse(await loadManifest({ jurisdictionId: catalog.jurisdictionId,
+            publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
             deadlineAt, signal: controller.signal }));
           stop = stopped(); if (stop) return unavailable(stop);
           // A date boundary invalidates this grant; never extend the deadline to retry.
@@ -121,8 +127,17 @@ export function createEmploymentAuthority(dependencies?: EmploymentAuthorityDepe
             || manifest.authorizedScopeSize < manifest.stores.length
             || manifest.partialCoverage !== (manifest.authorizedScopeSize !== manifest.stores.length)
             || new Set(manifest.stores.map(store => store.jurisdictionId)).size !== manifest.stores.length
-            || new Set(manifest.stores.map(store => store.storeName)).size !== manifest.stores.length) return unavailable("manifest_invalid");
-          for (const store of manifest.stores) Object.freeze(store);
+            || new Set(manifest.stores.map(store => store.storeName)).size !== manifest.stores.length
+            || (selected.publicationFilter && !selected.publicationFilter.documents.some(document =>
+              document.resourceId === catalog.resourceId && document.versionId === catalog.versionId
+              && document.sha256 === PILOT_IDENTITY.originalSha256))) return unavailable("manifest_invalid");
+          for (const store of manifest.stores) {
+            if (store.publicationFilter) {
+              for (const document of store.publicationFilter.documents) Object.freeze(document);
+              Object.freeze(store.publicationFilter.documents); Object.freeze(store.publicationFilter);
+            }
+            Object.freeze(store);
+          }
           Object.freeze(manifest.stores); Object.freeze(manifest);
           return Object.freeze({ status: "authorized", identities: Object.freeze([Object.freeze({ ...PILOT_IDENTITY })]), manifest,
             citationIdentity: Object.freeze({ ...catalog, providerStoreName: selected.storeName }),

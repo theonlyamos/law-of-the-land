@@ -723,10 +723,13 @@ export const bootstrapRecords = internalMutation({
     });
     await ctx.db.insert("dailyUsage", { userId: `fixture:${tag}`, day: tag, count: 3 });
 
+    // The tagged pending-provider diagnostic belongs to the admin retention
+    // scenario. Keep this synthetic work terminal in widget runs, whose
+    // unfiltered library must contain no unattributable current provider job.
     const providerJobId = await ctx.db.insert("integrationJobs", {
       type: "gemini_index_document", targetType: "e2e_fixture", targetId: tag, payload: "{}", actorId: "system", actorRoles: [],
       idempotencyKey: `${tag}-provider`, requestFingerprint: "{}", correlationId: `${tag}-provider`,
-      providerOperationName: FIXTURE_GEMINI_OPERATION_NAME, recoveryKind: "poll_operation", status: "waiting_provider",
+      providerOperationName: FIXTURE_GEMINI_OPERATION_NAME, recoveryKind: "poll_operation", status: widgetMode ? "cancelled" : "waiting_provider",
       attemptCount: 1, createdAt: now - 100 * 24 * 60 * 60_000, updatedAt: now,
     });
 

@@ -29,9 +29,11 @@ vi.mock("@google/genai", () => ({
 
 import { POST, maxDuration } from "./route";
 import { CHAT_POLICY_RESPONSES } from "../../../../convex/lib/chatPolicy";
+import { CHAT_NO_EVIDENCE } from "../../../../convex/lib/chatNoEvidence";
 import { ChatAttachmentError } from "@/lib/chat-attachment-server";
 import { completeGovernedInteractionProofParts } from "../../../../convex/chats";
 import { verifyTelemetryServiceProof } from "../../../../convex/lib/telemetryProof";
+import { createPublicationFilterBinding } from "../../../../shared/gemini-publication-filter";
 
 const selectedJurisdictionId = "selected-jurisdiction-id";
 const selectedResourceId = "selected-resource-id";
@@ -97,44 +99,44 @@ function request(
 function successfulStream(answer = "Employees are protected.") {
   return (async function* () {
     yield {
-      event_type: "interaction.created",
+      event_type: "interaction.created" as const,
       interaction: { id: "interaction-1", status: "in_progress" },
     };
     yield {
-      event_type: "step.start",
+      event_type: "step.start" as const,
       interaction_id: "interaction-1",
       index: 0,
       step: { type: "file_search_call", id: "search-call-1" },
     };
-    yield { event_type: "step.stop", interaction_id: "interaction-1", index: 0 };
+    yield { event_type: "step.stop" as const, interaction_id: "interaction-1", index: 0 };
     yield {
-      event_type: "step.start",
+      event_type: "step.start" as const,
       interaction_id: "interaction-1",
       index: 1,
       step: { type: "file_search_result", call_id: "search-call-1" },
     };
-    yield { event_type: "step.stop", interaction_id: "interaction-1", index: 1 };
+    yield { event_type: "step.stop" as const, interaction_id: "interaction-1", index: 1 };
     yield {
-      event_type: "step.start",
+      event_type: "step.start" as const,
       interaction_id: "interaction-1",
       index: 2,
       step: { type: "model_output" },
     };
     yield {
-      event_type: "step.delta",
+      event_type: "step.delta" as const,
       interaction_id: "interaction-1",
       index: 2,
       delta: { type: "text", text: answer.slice(0, 10) },
     };
     yield {
-      event_type: "step.delta",
+      event_type: "step.delta" as const,
       interaction_id: "interaction-1",
       index: 2,
       delta: { type: "text", text: answer.slice(10) },
     };
-    yield { event_type: "step.stop", interaction_id: "interaction-1", index: 2 };
+    yield { event_type: "step.stop" as const, interaction_id: "interaction-1", index: 2 };
     yield {
-      event_type: "interaction.completed",
+      event_type: "interaction.completed" as const,
       interaction: { id: "interaction-1", status: "completed" },
     };
   })();
@@ -226,6 +228,119 @@ afterEach(() => {
   delete process.env.TELEMETRY_INGEST_SECRET;
   delete process.env.CHAT_INTENT_ROUTING_MODE;
   delete process.env.TYPESAFE_API_KEY;
+});
+
+it("opts into published-document filtering and preserves the backend allowlist through provider and completion", async () => {
+  const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+  ] };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  const response = await POST(request());
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+  const manifestRequest = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+  expect(manifestRequest).toEqual({ jurisdictionId: selectedJurisdictionId, publicationFilterProtocol: "published-v1" });
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).toContain(`version_id="${selectedVersionId}"`);
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion.publicationFilterProtocol).toBe("published-v1");
+  expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
+});
+
+it.each([true, false])("decodes a 101-document manifest above 16 KiB with declared length %s", async declaredLength => {
+  const publicationFilter = { protocol: "published-v1" as const, environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+    ...Array.from({ length: 100 }, (_, index) => ({ resourceId: `resource-${String(index).padStart(55, "0")}`,
+      versionId: `version-${String(index).padStart(56, "0")}`, sha256: "b".repeat(64) })),
+  ] };
+  const stores = [{ ...manifest.stores[0], publicationFilter }];
+  const bytes = new TextEncoder().encode(JSON.stringify({ ...manifest, stores }));
+  expect(bytes.byteLength).toBeGreaterThan(16 * 1024);
+  const headers = new Headers({ "content-type": "application/json" });
+  if (declaredLength) headers.set("content-length", String(bytes.byteLength));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes.slice(0, 12 * 1024));
+      controller.enqueue(bytes.slice(12 * 1024));
+      controller.close();
+    },
+  }), { headers })));
+  const response = await POST(request());
+  expect(response.status).toBe(200);
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal", citations: [publicCitation] });
+  const filter = interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter as string;
+  expect(filter.match(/resource_id=/gu)).toHaveLength(101);
+  for (const document of publicationFilter.documents) {
+    expect(filter).toContain(`(resource_id="${document.resourceId}" AND version_id="${document.versionId}" AND sha256="${document.sha256}")`);
+  }
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion.publicationFilterBinding).toBe(await createPublicationFilterBinding(stores));
+});
+
+it.each([true, false])("rejects a manifest above 512 KiB before quota or provider work with declared length %s", async declaredLength => {
+  const json = JSON.stringify(manifest);
+  const bytes = new TextEncoder().encode(json + " ".repeat(512 * 1024 + 1 - new TextEncoder().encode(json).byteLength));
+  expect(bytes.byteLength).toBe(512 * 1024 + 1);
+  const headers = new Headers({ "content-type": "application/json" });
+  if (declaredLength) headers.set("content-length", String(bytes.byteLength));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(bytes, { headers })));
+  expect((await POST(request())).status).toBe(400);
+  expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+  expect(interactionMocks.create).not.toHaveBeenCalled();
+});
+
+it("retains the original restricted allowlist binding on provider failure", async () => {
+  const publicationFilter = { protocol: "published-v1", environment: "production", documents: [
+    { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
+  ] };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  interactionMocks.create.mockRejectedValueOnce(new Error("provider unavailable"));
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const response = await POST(request());
+  expect((await events(response)).at(-1)).toMatchObject({ type: "error" });
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction")?.[1];
+  expect(completion).toMatchObject({ outcome: "failure", publicationFilterProtocol: "published-v1" });
+  expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
+});
+
+it("withholds an answer when an uncited allowlisted document changes during provider work", async () => {
+  const cited = { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "c".repeat(64) };
+  const originalStores = [{ ...manifest.stores[0], publicationFilter: { protocol: "published-v1" as const,
+    environment: "production", documents: [cited, { resourceId: "resource-A", versionId: "version-A", sha256: "a".repeat(64) }] } }];
+  const changedStores = [{ ...manifest.stores[0], publicationFilter: { protocol: "published-v1" as const,
+    environment: "production", documents: [cited, { resourceId: "resource-B", versionId: "version-B", sha256: "b".repeat(64) }] } }];
+  const originalBinding = await createPublicationFilterBinding(originalStores);
+  const changedBinding = await createPublicationFilterBinding(changedStores);
+  let currentBinding = originalBinding;
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest, stores: originalStores })));
+  interactionMocks.create.mockImplementationOnce(async () => { currentBinding = changedBinding; return successfulStream(); });
+  const originalMutation = authMocks.fetchAuthMutation.getMockImplementation()!;
+  authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+    if (getFunctionName(reference) === "chats:completeGovernedInteraction" && args.outcome === "success"
+      && args.publicationFilterBinding !== currentBinding) throw new Error("INVALID_GOVERNED_INTERACTION");
+    return originalMutation(reference, args);
+  });
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const response = await POST(request());
+  const result = await events(response);
+  expect(result.at(-1)).toMatchObject({ type: "error" });
+  expect(result.some(event => event.type === "done")).toBe(false);
+  const completion = authMocks.fetchAuthMutation.mock.calls.find(([reference, args]) =>
+    getFunctionName(reference) === "chats:completeGovernedInteraction" && args.outcome === "success")?.[1];
+  expect(completion.publicationFilterBinding).toBe(originalBinding);
+  expect(completion.publicationFilterBinding).not.toBe(changedBinding);
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).toContain('version_id="version-A"');
+  expect(interactionMocks.create.mock.calls[0][0].tools[0].metadata_filter).not.toContain('version_id="version-B"');
+});
+
+it.each([null, { protocol: "published-v1", environment: "production", documents: [] },
+  { protocol: "published-v1", environment: "production", documents: [{ resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "invalid" }] },
+])("rejects malformed backend publication filters before consuming quota %j", async publicationFilter => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ...manifest,
+    stores: [{ ...manifest.stores[0], publicationFilter }] })));
+  expect((await POST(request())).status).toBe(400);
+  expect(mutationNames()).not.toContain("usage:recordQuestion");
+  expect(interactionMocks.create).not.toHaveBeenCalled();
 });
 
 describe("POST /api/chat attachment integration", () => {
@@ -748,7 +863,7 @@ describe("POST /api/chat request boundary", () => {
     }));
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -787,7 +902,7 @@ describe("POST /api/chat request boundary", () => {
     } as RequestInit & { duplex: "half" });
 
     const responsePromise = POST(stalledRequest);
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     let response: Response | null = null;
     try {
       response = await Promise.race([responsePromise, Promise.resolve(null)]);
@@ -900,7 +1015,7 @@ describe("POST /api/chat request boundary", () => {
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ authorization: "Bearer user-session-token" }),
-        body: JSON.stringify({ jurisdictionId: selectedJurisdictionId }),
+        body: JSON.stringify({ jurisdictionId: selectedJurisdictionId, publicationFilterProtocol: "published-v1" }),
         cache: "no-store",
         signal: expect.any(AbortSignal),
       }),
@@ -1075,7 +1190,63 @@ describe("POST /api/chat streamed governed interaction", () => {
   });
 
   it("reserves hosting time beyond the application deadline", () => {
-    expect(maxDuration).toBeGreaterThan(110);
+    expect(maxDuration).toBeGreaterThan(200);
+  });
+
+  it("completes an ordinary answer after the previous 90-second cutoff", async () => {
+    vi.useFakeTimers();
+    let releaseGeneration!: () => void;
+    const generation = new Promise<void>(resolve => { releaseGeneration = resolve; });
+    interactionMocks.create.mockImplementation(async () => {
+      await generation;
+      return successfulStream();
+    });
+    const reader = (await POST(request())).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(150_000);
+      expect(released).toBe(false);
+      releaseGeneration();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toEqual({
+        type: "delta", text: "Employees are protected.",
+      });
+      expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toMatchObject({
+        type: "done", result: "Employees are protected.", citationClaim,
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseGeneration();
+      await reader.cancel();
+    }
+  });
+
+  it("retains the ordinary canonical-read reserve after 180 seconds", async () => {
+    vi.useFakeTimers();
+    let releaseCanonical!: (value: ReturnType<typeof canonicalInteraction>) => void;
+    interactionMocks.get.mockReturnValue(new Promise(resolve => { releaseCanonical = resolve; }));
+    const reader = (await POST(request())).body!.getReader();
+    let released = false;
+    const firstRead = reader.read().then(value => { released = true; return value; });
+    try {
+      await vi.advanceTimersByTimeAsync(190_000);
+      expect(released).toBe(false);
+      releaseCanonical(canonicalInteraction());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toEqual({
+        type: "delta", text: "Employees are protected.",
+      });
+      expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toMatchObject({
+        type: "done", result: "Employees are protected.", citationClaim,
+      });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      releaseCanonical(canonicalInteraction());
+      await reader.cancel();
+    }
   });
 
   it("completes an uncited greeting as a claimed no-evidence answer", async () => {
@@ -1100,7 +1271,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     interactionMocks.get.mockImplementation(() => new Promise(() => undefined));
     const resultPromise = events(await POST(request()));
-    await vi.advanceTimersByTimeAsync(110_000);
+    await vi.advanceTimersByTimeAsync(200_000);
     expect((await resultPromise).at(-1)?.type).toBe("error");
     const summary = JSON.parse(errorLog.mock.calls.at(-1)![1]);
     expect(summary).toMatchObject({ phase: "canonical_read", category: "timeout", execution: {
@@ -1117,7 +1288,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     vi.spyOn(crypto.subtle, "sign").mockImplementationOnce(async (...args) => {
       const proof = await sign(...args);
       // A clock jump advances the deadline guard without dispatching timer callbacks.
-      vi.setSystemTime(startedAt + 110_000);
+      vi.setSystemTime(startedAt + 200_000);
       return proof;
     });
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1339,7 +1510,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it.each([8, 14, 16])("records the 90-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
+  it.each([8, 14, 16])("records the 180-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
@@ -1365,7 +1536,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
 
     const responsePromise = POST(request());
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     const streamEvents = await events(await responsePromise);
 
     expect(providerSignal?.aborted).toBe(true);
@@ -1379,7 +1550,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(terminalArgs).toMatchObject({
       outcome: "failure",
       failureCategory: "timeout",
-      elapsedMs: 90_000,
+      elapsedMs: 180_000,
       diagnostics: {
         phase: "generation", reason: "deadline_exceeded",
         searchCallCount: searches, searchResultCount: searches,
@@ -1393,7 +1564,7 @@ describe("POST /api/chat streamed governed interaction", () => {
 
   it.each((["create", "iterator", "completion_eof", "resume"] as const).flatMap(
     boundary => (["resolve", "reject"] as const).map(lateOutcome => ({ boundary, lateOutcome })),
-  ))("releases the 90-second waiter when $boundary ignores abort, despite late $lateOutcome", async ({ boundary, lateOutcome }) => {
+  ))("releases the 180-second waiter when $boundary ignores abort, despite late $lateOutcome", async ({ boundary, lateOutcome }) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1430,7 +1601,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     let firstReadSettled = false;
     const firstRead = reader.read().then(value => { firstReadSettled = true; return value; });
     try {
-      await vi.advanceTimersByTimeAsync(89_999);
+      await vi.advanceTimersByTimeAsync(179_999);
       expect(firstReadSettled).toBe(false);
       expect(interactionMocks.create).toHaveBeenCalledTimes(1);
       expect(interactionMocks.get).toHaveBeenCalledTimes(boundary === "resume" ? 1 : 0);
@@ -1449,7 +1620,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       );
       expect(completedCalls).toHaveLength(1);
       expect(completedCalls[0][1]).toMatchObject({
-        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 180_000,
         diagnostics: { phase: "generation", reason: "deadline_exceeded", canonicalReadCompleted: false,
           execution: { modelDeadlineReached: true, terminalDeadlineReached: false,
             clientAbortObserved: false, streamAbortObserved: true, providerFailure: "none",
@@ -1476,7 +1647,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     }
   });
 
-  it("includes preparation time in the original 90-second generation waiter", async () => {
+  it("includes preparation time in the original 180-second generation waiter", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-09-04T00:00:00.000Z").getTime();
     vi.setSystemTime(startedAt);
@@ -1493,7 +1664,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     try {
       expect(Date.now() - startedAt).toBe(30_000);
       expect(interactionMocks.create).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(59_999);
+      await vi.advanceTimersByTimeAsync(149_999);
       expect(firstReadSettled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       expect(firstReadSettled).toBe(true);
@@ -1502,7 +1673,7 @@ describe("POST /api/chat streamed governed interaction", () => {
       });
       await expect(reader.read()).resolves.toMatchObject({ done: true });
       expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
-        outcome: "failure", failureCategory: "timeout", elapsedMs: 90_000,
+        outcome: "failure", failureCategory: "timeout", elapsedMs: 180_000,
         diagnostics: { execution: { modelDeadlineReached: true, terminalDeadlineReached: false } },
       });
       expect(interactionMocks.get).not.toHaveBeenCalled();
@@ -1512,7 +1683,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     }
   });
 
-  it("uses the terminal reserve for the canonical read after the stream completes near 90 seconds", async () => {
+  it("uses the terminal reserve for the canonical read after the stream completes near 180 seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let streamSignal: AbortSignal | undefined;
@@ -1520,7 +1691,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     interactionMocks.create.mockImplementation(async (_input, options) => {
       streamSignal = options.signal;
       return (async function* () {
-        await new Promise((resolve) => setTimeout(resolve, 89_900));
+        await new Promise((resolve) => setTimeout(resolve, 179_900));
         for await (const event of successfulStream()) yield event;
       })();
     });
@@ -1537,7 +1708,7 @@ describe("POST /api/chat streamed governed interaction", () => {
 
     const response = await POST(request());
     const streamEventsPromise = events(response);
-    await vi.advanceTimersByTimeAsync(91_000);
+    await vi.advanceTimersByTimeAsync(181_000);
     const streamEvents = await streamEventsPromise;
 
     expect(streamSignal?.aborted).toBe(false);
@@ -1546,7 +1717,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     expect(streamEvents.at(-1)?.type).toBe("done");
   });
 
-  it("emits no answer text when terminal validation exhausts the shared 110-second deadline", async () => {
+  it("emits no answer text when terminal validation exhausts the shared 200-second deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     authMocks.fetchAuthMutation.mockImplementation(async (reference) => {
@@ -1565,7 +1736,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
     expect(firstReadResolved).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(110_000);
+    await vi.advanceTimersByTimeAsync(200_000);
     const terminalEvent = JSON.parse(decoder.decode((await firstRead).value).trim());
 
     expect(terminalEvent).toEqual({
@@ -1601,5 +1772,300 @@ describe("POST /api/chat streamed governed interaction", () => {
       diagnostics: { reason: "aborted", execution: { clientAbortObserved: true,
         modelDeadlineReached: false, terminalDeadlineReached: false, streamAbortObserved: true } },
     });
+  });
+});
+
+describe("POST /api/chat provisional ordinary streaming", () => {
+  const optedIn = { streaming: "provisional-v1" };
+  const readEvent = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+    const chunk = await reader.read();
+    expect(chunk.done).toBe(false);
+    return JSON.parse(new TextDecoder().decode(chunk.value).trim());
+  };
+  const completions = () => authMocks.fetchAuthMutation.mock.calls.filter(
+    ([reference]) => getFunctionName(reference) === "chats:completeGovernedInteraction",
+  );
+
+  it.each([true, false, 1, null, "", "provisional-v2", [], {}])("rejects an invalid streaming capability %j before billing or generation", async streaming => {
+    const response = await POST(request({ streaming }));
+    expect(response.status).toBe(400);
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["answerKind", "citationClaim", "verified"])("rejects client-selected %s despite a valid streaming capability", async field => {
+    const response = await POST(request({ ...optedIn, [field]: "client-selected" }));
+    expect(response.status).toBe(400);
+    expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges ordinary draft mode before a blocked provider call produces any text", async () => {
+    interactionMocks.create.mockImplementation(() => new Promise(() => undefined));
+    const response = await POST(request(optedIn));
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    try {
+      let firstReleased = false;
+      const first = reader.read().then(chunk => { firstReleased = true; return chunk; });
+      await vi.waitFor(() => expect(interactionMocks.create).toHaveBeenCalledTimes(1));
+      expect(firstReleased).toBe(true);
+      expect(JSON.parse(new TextDecoder().decode((await first).value).trim())).toEqual({ type: "draft_start" });
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+      expect(completions()).toHaveLength(0);
+    } finally {
+      await reader.cancel();
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      expect(completions()[0][1]).toMatchObject({ outcome: "aborted", citations: [] });
+      expect(completions()[0][1]).not.toHaveProperty("finalAnswer");
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    }
+  });
+
+  it("releases provider drafts during generation and withholds done through canonical and current-access checks", async () => {
+    let finishGeneration!: () => void;
+    const generation = new Promise<void>(resolve => { finishGeneration = resolve; });
+    let finishCanonical!: () => void;
+    const canonical = new Promise<void>(resolve => { finishCanonical = resolve; });
+    let finishCompletion!: () => void;
+    const completion = new Promise<void>(resolve => { finishCompletion = resolve; });
+    const originalMutation = authMocks.fetchAuthMutation.getMockImplementation()!;
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "interaction.completed") await generation;
+        yield event;
+      }
+    })());
+    interactionMocks.get.mockImplementation(async () => {
+      await canonical;
+      return canonicalInteraction();
+    });
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "chats:completeGovernedInteraction") await completion;
+      return originalMutation(reference, args);
+    });
+    const response = await POST(request(optedIn));
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+      reader = response.body!.getReader();
+      expect(await readEvent(reader)).toEqual({ type: "draft_start" });
+      expect(await readEvent(reader)).toEqual({ type: "draft_delta", text: "Employees " });
+      expect(await readEvent(reader)).toEqual({ type: "draft_delta", text: "are protected." });
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+      expect(completions()).toHaveLength(0);
+      finishGeneration();
+      expect(await readEvent(reader)).toEqual({ type: "verifying" });
+      let terminalReleased = false;
+      const terminal = reader.read().then(chunk => { terminalReleased = true; return chunk; });
+      await vi.waitFor(() => expect(interactionMocks.get).toHaveBeenCalledTimes(1));
+      expect(terminalReleased).toBe(false);
+      expect(completions()).toHaveLength(0);
+      finishCanonical();
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      expect(terminalReleased).toBe(false);
+      finishCompletion();
+      const done = JSON.parse(new TextDecoder().decode((await terminal).value).trim());
+      expect(done).toEqual({ type: "done", result: "Employees are protected.", answerKind: "legal",
+        citations: [publicCitation], citationClaim, partialCoverage: false });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).toHaveBeenCalledTimes(1);
+      expect(completions()[0][1].finalAnswer).toBe(done.result);
+      expect(completions()[0][1]).not.toHaveProperty("streaming");
+    } finally {
+      finishGeneration(); finishCanonical(); finishCompletion();
+      if (reader) await reader.cancel();
+      else await response.body?.cancel();
+    }
+  });
+
+  it("keeps legacy ordinary events exactly buffered when the capability is absent", async () => {
+    expect(await events(await POST(request()))).toEqual([
+      { type: "delta", text: "Employees are protected." },
+      { type: "done", result: "Employees are protected.", answerKind: "legal",
+        citations: [publicCitation], citationClaim, partialCoverage: false },
+    ]);
+  });
+
+  it("replaces an uncited provider draft with the server's fixed no-evidence answer", async () => {
+    const canonical = canonicalInteraction();
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.get.mockResolvedValue(canonical);
+    const output = await events(await POST(request(optedIn)));
+    expect(output).toEqual([
+      { type: "draft_start" },
+      { type: "draft_delta", text: "Employees " }, { type: "draft_delta", text: "are protected." },
+      { type: "verifying" },
+      { type: "done", result: CHAT_NO_EVIDENCE, answerKind: "legal", citations: [], citationClaim, partialCoverage: false },
+    ]);
+    expect(completions()[0][1].finalAnswer).toBe(CHAT_NO_EVIDENCE);
+  });
+
+  it("acknowledges a fixed ordinary policy reply before done without a provider invocation", async () => {
+    process.env.CHAT_INTENT_ROUTING_MODE = "on";
+    const output = await events(await POST(request({ ...optedIn, query: "Hello" })));
+    expect(output).toEqual([{ type: "draft_start" }, { type: "done", result: CHAT_POLICY_RESPONSES.courtesy, answerKind: "policy",
+      citations: [], citationClaim, partialCoverage: false }]);
+    expect(interactionMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("streams provider policy text but completes it with server-selected policy metadata", async () => {
+    const answer = CHAT_POLICY_RESPONSES.out_of_scope;
+    const canonical = canonicalInteraction(answer);
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.create.mockResolvedValue(successfulStream(answer));
+    interactionMocks.get.mockResolvedValue(canonical);
+    const output = await events(await POST(request(optedIn)));
+    expect(output.map(event => event.type)).toEqual(["draft_start", "draft_delta", "draft_delta", "verifying", "done"]);
+    expect(output.at(-1)).toEqual({ type: "done", result: answer, answerKind: "policy",
+      citations: [], citationClaim, partialCoverage: false });
+  });
+
+  it("streams an ordinary document answer and claims the final text with its resolved attachment bindings", async () => {
+    const answer = "The monthly rent is 900.";
+    attachmentMocks.loadChatAttachmentContext.mockResolvedValue({
+      attachments: [{ id: "saved-file", filename: "notes.txt", mimeType: "text/plain", kind: "text", text: answer }],
+      attachmentIds: ["saved-file"], selectedJurisdiction: { id: selectedJurisdictionId, name: "Ghana", kind: "geographic" },
+    });
+    const canonical = canonicalInteraction(answer);
+    canonical.steps[0].content[0].annotations = [];
+    interactionMocks.create.mockResolvedValue(successfulStream(answer));
+    interactionMocks.get.mockResolvedValue(canonical);
+    const output = await events(await POST(request({ ...optedIn, query: "Summarize this file", attachmentIds: ["saved-file"] })));
+    expect(output.map(event => event.type)).toEqual(["draft_start", "draft_delta", "draft_delta", "verifying", "done"]);
+    expect(output.filter(event => event.type === "draft_delta").map(event => event.text).join("")).toBe(answer);
+    expect(output.at(-1)).toEqual({ type: "done", result: answer, answerKind: "document", citations: [], citationClaim, partialCoverage: false });
+    expect(completions()[0][1]).toMatchObject({ finalAnswer: answer, answerKind: "document", attachmentIds: ["saved-file"],
+      authorizedScopeSize: 0, readyStoreCount: 0, jurisdictionCoverage: [] });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["canonical mismatch", "catalog rejection", "current attachment access", "invalid completion"])("clears authority from a provisional draft after %s fails", async scenario => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    if (scenario === "canonical mismatch") interactionMocks.get.mockResolvedValue(canonicalInteraction("Different canonical text."));
+    if (scenario === "current attachment access") {
+      attachmentMocks.loadChatAttachmentContext.mockResolvedValue({
+        attachments: [{ id: "saved-file", filename: "facts.txt", mimeType: "text/plain", kind: "text", text: "Employment facts." }],
+        attachmentIds: ["saved-file"], selectedJurisdiction: { id: selectedJurisdictionId, name: "Ghana", kind: "geographic" },
+      });
+    }
+    const originalMutation = authMocks.fetchAuthMutation.getMockImplementation()!;
+    authMocks.fetchAuthMutation.mockImplementation(async (reference, args) => {
+      if (getFunctionName(reference) === "chats:completeGovernedInteraction" && args.outcome === "success") {
+        if (scenario === "catalog rejection") throw new Error("CHAT_CITATION_UNAVAILABLE");
+        if (scenario === "current attachment access") throw new Error("CHAT_ATTACHMENT_UNAVAILABLE");
+        if (scenario === "invalid completion") return { status: "completed", outcome: "success" };
+      }
+      return originalMutation(reference, args);
+    });
+    const output = await events(await POST(request({ ...optedIn,
+      ...(scenario === "current attachment access" ? { attachmentIds: ["saved-file"] } : {}),
+    })));
+    expect(output.slice(0, 4)).toEqual([
+      { type: "draft_start" },
+      { type: "draft_delta", text: "Employees " }, { type: "draft_delta", text: "are protected." }, { type: "verifying" },
+    ]);
+    expect(output.at(-1)).toEqual({ type: "error", error: "We couldn't process your request. Please try again." });
+    expect(output.some(event => event.type === "done" || event.type === "delta")).toBe(false);
+    expect(output.some(event => "citations" in event || "citationClaim" in event || "answerKind" in event)).toBe(false);
+    const failure = completions().find(([, args]) => args.outcome === "failure")?.[1];
+    expect(failure).toMatchObject({ outcome: "failure", citations: [] });
+    expect(failure).not.toHaveProperty("finalAnswer");
+  });
+
+  it("bounds provisional output at the adapter's 64 KiB limit", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const answer = "a".repeat(64 * 1024 + 1);
+    interactionMocks.create.mockResolvedValue(successfulStream(answer));
+    const output = await events(await POST(request(optedIn)));
+    expect(output[0]).toEqual({ type: "draft_start" });
+    expect(output[1]).toEqual({ type: "draft_delta", text: answer.slice(0, 10) });
+    expect(output.filter(event => event.type === "draft_delta").map(event => event.text).join("").length).toBe(10);
+    expect(output.at(-1)?.type).toBe("error");
+    expect(output.some(event => event.type === "done" || event.type === "verifying")).toBe(false);
+    expect(interactionMocks.get).not.toHaveBeenCalled();
+    expect(completions()[0][1]).not.toHaveProperty("finalAnswer");
+  });
+
+  it("ends a draft at the original 180-second generation cutoff without late provider text or verification", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let releaseProvider!: () => void;
+    const pending = new Promise<void>(resolve => { releaseProvider = resolve; });
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "step.delta" && event.delta.type === "text" && event.delta.text === "are protected.") await pending;
+        yield event;
+      }
+    })());
+    const reader = (await POST(request(optedIn))).body!.getReader();
+    try {
+      expect(await readEvent(reader)).toEqual({ type: "draft_start" });
+      expect(await readEvent(reader)).toEqual({ type: "draft_delta", text: "Employees " });
+      let terminalReleased = false;
+      const terminal = reader.read().then(chunk => { terminalReleased = true; return chunk; });
+      await vi.advanceTimersByTimeAsync(179_999);
+      expect(terminalReleased).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(terminalReleased).toBe(true);
+      expect(JSON.parse(new TextDecoder().decode((await terminal).value).trim())).toEqual({
+        type: "error", reason: "deadline_exceeded",
+        error: "This answer took too long and could not be verified. You can ask a more focused question or try again later.",
+      });
+      await vi.waitFor(() => expect(completions()).toHaveLength(1));
+      expect(completions()[0][1]).toMatchObject({ outcome: "failure", failureCategory: "timeout", elapsedMs: 180_000,
+        citations: [], diagnostics: { execution: { modelDeadlineReached: true, terminalDeadlineReached: false } } });
+      expect(completions()[0][1]).not.toHaveProperty("finalAnswer");
+      const failure = JSON.stringify(completions()[0][1]);
+      releaseProvider();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+      expect(completions()).toHaveLength(1);
+      expect(JSON.stringify(completions()[0][1])).toBe(failure);
+    } finally {
+      releaseProvider();
+      await vi.advanceTimersByTimeAsync(0);
+      await reader.cancel();
+    }
+  });
+
+  it.each(["request", "reader"])("closes drafts after %s cancellation even when the provider later yields text", async boundary => {
+    const abort = new AbortController();
+    let releaseProvider!: () => void;
+    const pending = new Promise<void>(resolve => { releaseProvider = resolve; });
+    interactionMocks.create.mockResolvedValue((async function* () {
+      for await (const event of successfulStream()) {
+        if (event.event_type === "step.delta" && event.delta.type === "text" && event.delta.text === "are protected.") await pending;
+        yield event;
+      }
+    })());
+    const response = await POST(request(optedIn, { signal: abort.signal }));
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      expect(response.status).toBe(200);
+      reader = response.body!.getReader();
+      expect(await readEvent(reader)).toEqual({ type: "draft_start" });
+      expect(await readEvent(reader)).toEqual({ type: "draft_delta", text: "Employees " });
+      if (boundary === "request") abort.abort();
+      else await reader.cancel();
+      await vi.waitFor(() => expect(completions().at(-1)?.[1]).toMatchObject({ outcome: "aborted", citations: [] }));
+      expect(completions().at(-1)?.[1]).not.toHaveProperty("finalAnswer");
+      releaseProvider();
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+      expect(interactionMocks.create).toHaveBeenCalledTimes(1);
+      expect(interactionMocks.get).not.toHaveBeenCalled();
+      expect(completions()).toHaveLength(1);
+    } finally {
+      releaseProvider();
+      if (reader) await reader.cancel();
+      else await response.body?.cancel();
+    }
   });
 });

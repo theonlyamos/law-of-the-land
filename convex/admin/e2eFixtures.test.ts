@@ -98,11 +98,21 @@ describe("isolated admin E2E fixture control plane", () => {
     const t = backend();
     await t.run(ctx => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: Date.now() }));
     const fixture = await t.action(bootstrap, { tag: "e2e_widgetcleanup123" });
+    const diagnosticJobId = fixture.records.providerJobId as Id<"integrationJobs">;
+    expect(await t.run(ctx => ctx.db.get(diagnosticJobId))).toMatchObject({
+      targetType: "e2e_fixture", status: "cancelled",
+    });
     const publicId = fixture.records.widget.publicId;
+    await t.run(ctx => ctx.db.patch(diagnosticJobId, { status: "waiting_provider" }));
+    const unavailable = await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:createSession"), {
+      publicId, parentOrigin: "https://allowed.widget.test", tokenHash: "b".repeat(43), ipKey: "fixture-ip",
+    });
+    expect(unavailable.error).toMatchObject({ code: "WIDGET_UNAVAILABLE" });
+    await t.run(ctx => ctx.db.patch(diagnosticJobId, { status: "cancelled" }));
     const tokenHash = "a".repeat(43);
     const session = await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:createSession"), { publicId, parentOrigin: "https://allowed.widget.test", tokenHash, ipKey: "fixture-ip" });
     expect(session.error).toBeUndefined();
-    await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:beginTurn"), { publicId, tokenHash, ipKey: "fixture-ip", requestId: crypto.randomUUID(), query: "Fixture question" });
+    expect(await t.mutation(makeFunctionReference<"mutation">("widgetRuntime:beginTurn"), { publicId, tokenHash, ipKey: "fixture-ip", requestId: crypto.randomUUID(), query: "Fixture question" })).toMatchObject({ kind: "admitted" });
     await drainCleanup(t, fixture.tag);
     await t.run(async ctx => {
       for (const table of ["jurisdictionWidgets", "organizationWidgetAllowances", "widgetSessions", "widgetTurns", "widgetRateBuckets", "widgetUsageBuckets", "legalResources", "documentVersions"] as const) {
@@ -195,6 +205,7 @@ describe("isolated admin E2E fixture control plane", () => {
     expect(JSON.stringify(result)).not.toContain("ADMIN_E2E");
     const jobs = await t.run((ctx) => ctx.db.query("integrationJobs").withIndex("by_targetType_and_targetId", (q) => q.eq("targetType", "e2e_fixture").eq("targetId", "e2e_contractfixture1")).take(10));
     expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe("waiting_provider");
     await expect(t.run(async (ctx) => ({
       run: await ctx.db.query("e2eFixtureRuns").withIndex("by_tag", (q) => q.eq("tag", "e2e_contractfixture1")).unique(),
       flags: await ctx.db.query("featureFlags").withIndex("by_key_and_environment", (q) => q.eq("key", "unified_jurisdictions").eq("environment", "test")).take(2),

@@ -11,6 +11,7 @@ import { caseInput } from "./test-fixtures/reviewed-request-catalog";
 import { authoredStage, FAKE_CREDENTIAL } from "./test-fixtures/reviewed-answer-fixtures";
 import type { StageRequest } from "./split-verification/contracts";
 import * as module from "./reviewed-employment-job-worker";
+import { createPublicationFilterBinding } from "../../../shared/gemini-publication-filter";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 type Reply = { status: "ok" | "ignored"; payload: string | null };
@@ -71,10 +72,23 @@ function fixture(age = 0, policy: ReviewedEmploymentPolicy = REVIEWED_EMPLOYMENT
 }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
+it("supplies the original reviewed allowlist binding in its final signed completion", async () => {
+  const f = fixture();
+  Object.assign(f.bundle.manifest.stores[0], { publicationFilter: { protocol: "published-v1", environment: "test",
+    documents: [{ resourceId: PILOT_CATALOG.resourceId, versionId: PILOT_CATALOG.versionId, sha256: PILOT_IDENTITY.originalSha256 }] } });
+  const expectedBinding = await createPublicationFilterBinding(f.bundle.manifest.stores);
+  await f.run();
+  const commit = JSON.parse(f.operations.find(operation => operation.operation === "commit")!.body);
+  expect(commit.completion.publicationFilterBinding).toBe(expectedBinding);
+  expect(f.wires.map(wire => wire.stage).sort()).toEqual(["consent", "draft", "inventory", "overtime"]);
+});
+
 it("runs all four stages against the pinned production edition and saves its exact citation provenance", async () => {
   const f = fixture(0, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY, "act651-s55-prod-v1"); await f.run();
   expect(f.fetch).toHaveBeenCalledTimes(4);
   const commit = JSON.parse(f.operations.find(o => o.operation === "commit")!.body);
+  for (const operation of f.operations) expect(operation.publicationFilterProtocol).toBe("published-v1");
+  expect(commit.completion.publicationFilterProtocol).toBe("published-v1");
   expect(commit.source).toMatchObject(PRODUCTION_REVIEWED_EMPLOYMENT_POLICY);
   expect(commit.completion.citations.every((c: Record<string, unknown>) => c.resourceId === PRODUCTION_REVIEWED_EMPLOYMENT_POLICY.resourceId
     && c.versionId === PRODUCTION_REVIEWED_EMPLOYMENT_POLICY.versionId)).toBe(true);

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createPublicationFilterBinding, PUBLICATION_FILTER_PROTOCOL } from "../../../shared/gemini-publication-filter";
 import type { Interactions } from "@google/genai";
 import { ConvexHttpClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
@@ -126,7 +127,8 @@ export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmployme
     };
     const invoke = async (operation: ReviewedEmploymentJobOperation, body: unknown, signal = controller.signal): Promise<Reply> => {
       guard(); signal.throwIfAborted();
-      const result = await raceAbort(rpc({ jobId, workerId, operation, body: JSON.stringify(body), issuedAt: Date.now() }), signal);
+      const result = await raceAbort(rpc({ jobId, workerId, operation, body: JSON.stringify(body), issuedAt: Date.now(),
+        publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }), signal);
       guard(); signal.throwIfAborted();
       if (!object(result) || !["ok", "ignored"].includes(result.status) || (result.payload !== null && typeof result.payload !== "string")) throw new WorkerStopped(failure);
       return result;
@@ -231,11 +233,15 @@ export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmployme
         } },
         commit: async ({ answer, citations, manifest, signal }) => {
           failure = "commit_failed"; guard(); signal.throwIfAborted(); armPhase("commit");
+          const publicationFilterBinding = await createPublicationFilterBinding(manifest.stores);
+          guard(); signal.throwIfAborted();
           // The atomic commit checks current persisted cancellation. Stop the
           // observer so our own successful state cannot abort its response.
           stopPolling();
           const value: ReviewedEmploymentCommitInput = {
             completion: { routeNonce: submission.routeNonce, externalId: claim!.externalId, jurisdictionId: claim!.jurisdictionId,
+              publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
+              ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
               assistantClientId: claim!.assistantClientId, finalAnswer: answer, answerKind: "legal", citations: [...citations],
               model: GOOGLE_PROVIDER_SETTINGS.model, elapsedMs: Math.min(270_000, Math.max(0, Math.round(Math.max(Date.now() - claim!.createdAt,
                 queueAgeMs + performance.now() - entryMono)))), outcome: "success",

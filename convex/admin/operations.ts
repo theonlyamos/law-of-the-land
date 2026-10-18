@@ -308,7 +308,9 @@ export const runRetentionBatch = internalMutation({
         ]);
         for (const row of [...pending, ...legacy].sort((a, b) => a.createdAt - b.createdAt).slice(0, capacity)) {
           await ctx.db.patch(row._id, {
-            payload: "{}",
+            // A failed-document tombstone still owns an uncertain provider operation.
+            // Keep its bounded publication intent so a future recovery cannot reupload it.
+            payload: row.failedDocumentEvidence !== undefined ? row.payload : "{}",
             lastErrorKind: undefined,
             lastProviderOperation: undefined,
             lastProviderStatus: undefined,
