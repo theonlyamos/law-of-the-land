@@ -277,6 +277,7 @@ describe("provisional ordinary streaming", () => {
     const stream = openStream(); submit();
     await act(async () => stream.send({ type: "draft_start" }));
     expect(await screen.findByRole("button", { name: "Stop answer" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send question" })).not.toBeInTheDocument();
     expect(screen.getByRole("status", { name: "Preparing answer" })).toBeVisible();
     expect(screen.queryByText("Draft — not verified")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Sources" })).not.toBeInTheDocument();
@@ -284,6 +285,8 @@ describe("provisional ordinary streaming", () => {
     expect((vi.mocked(fetch).mock.calls[0][1]!.signal as AbortSignal).aborted).toBe(true);
     expect(screen.getByRole("textbox")).toBeEnabled();
     expect(screen.getByRole("textbox")).toHaveValue("What are my rights?");
+    expect(screen.queryByRole("button", { name: "Stop answer" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send question" })).toBeVisible();
     await act(async () => { stream.send({ type: "draft_delta", text: "Stopped late preview" }); stream.send({ type: "verifying" }); stream.send(done("Stopped late final")); });
     expect(screen.getByText("Answer stopped. No answer was saved.")).toBeVisible();
     expect(screen.queryByText("Stopped late preview")).not.toBeInTheDocument();
