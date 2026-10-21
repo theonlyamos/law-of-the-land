@@ -881,11 +881,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     if (requestChatId) requests.stop(requestChatId);
     setIsStartingNewChat(false);
   };
-  const stopAnswerControl = requestLoading && canStop && !backgroundJobId && !backgroundRecovery ? (
-    <div className="mb-3 flex justify-end">
-      <Button type="button" variant="ghost" size="sm" onClick={stopAnswer} aria-label="Stop answer">Stop answer</Button>
-    </div>
-  ) : null;
+  const canStopAnswer = requestLoading && canStop && !backgroundJobId && !backgroundRecovery;
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {isMobileSidebarOpen && (
@@ -958,7 +954,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   Ask a question. Understand the answer.<br />Explore the sources behind it.
                 </p>
                 <div className="mt-7">
-                  {stopAnswerControl}
                   {ensureError && <p role="alert" className="mb-2 text-sm text-destructive">{ensureError}</p>}
                   {retainedAttachmentTray}
                   <ChatInput
@@ -971,6 +966,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     onSearch={() => void handleSearch(query)}
                     onKeyDown={handleKeyDown}
                     isLoading={isLoading}
+                    onStop={canStopAnswer ? stopAnswer : undefined}
                     submitDisabled={!selectionReady || attachmentBlocked}
                     attachments={composerAttachments}
                     hasFiles={files.some((file) => Boolean(file.attachment))}
@@ -1131,7 +1127,6 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
         <div className="shrink-0">
           <div className={`${THREAD_RAIL} pb-4 pt-2`}>
-            {stopAnswerControl}
             {savedAnswerUnavailable && (
               <p role="status" className="mb-2 text-sm text-muted-foreground">
                 Verification finished, but we could not load its saved answer. Reload this chat or load older messages to find it.
@@ -1190,6 +1185,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               onSearch={() => void handleSearch(query)}
               onKeyDown={handleKeyDown}
               isLoading={isLoading || !selectionReady}
+              onStop={canStopAnswer ? stopAnswer : undefined}
               submitDisabled={attachmentBlocked}
               attachments={composerAttachments}
               hasFiles={files.some((file) => Boolean(file.attachment))}

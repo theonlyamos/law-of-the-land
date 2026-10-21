@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowUp, Paperclip, Send } from "lucide-react";
+import { ArrowUp, Paperclip, Send, Square } from "lucide-react";
 import React from "react";
 
 export interface ChatInputProps {
@@ -23,6 +23,8 @@ export interface ChatInputProps {
   submitDisabled?: boolean;
   ariaLabel?: string;
   hasFiles?: boolean;
+  /** When set, the submit button becomes a stop button that calls this. */
+  onStop?: () => void;
   attachments?: {
     accept: string;
     hasFiles: boolean;
@@ -47,6 +49,7 @@ export function ChatInput({
   submitDisabled = false,
   ariaLabel,
   hasFiles = false,
+  onStop,
   attachments,
 }: ChatInputProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -54,13 +57,25 @@ export function ChatInput({
   const attachmentDisabled = disabled || isLoading || attachments?.disabled;
   const editorial = variant === "editorial";
   const SendIcon = editorial ? ArrowUp : Send;
-  const sendButton = (
+  const buttonClassName = `h-11 w-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${editorial ? "rounded-lg shadow-none" : "absolute right-2 top-1/2 -translate-y-1/2"}`;
+  const sendButton = onStop ? (
+    <Button
+      type="button"
+      onClick={onStop}
+      size="icon"
+      aria-label="Stop answer"
+      title="Stop answer"
+      className={buttonClassName}
+    >
+      <Square className="h-4 w-4 fill-current" aria-hidden="true" />
+    </Button>
+  ) : (
     <Button
       type="button"
       onClick={onSearch}
       disabled={disabled || isLoading || submitDisabled || (!query.trim() && !hasFiles && !attachments?.hasFiles)}
       size="icon"
-      className={`h-11 w-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${editorial ? "rounded-lg shadow-none" : "absolute right-2 top-1/2 -translate-y-1/2"}`}
+      className={buttonClassName}
     >
       <SendIcon className={`h-5 w-5 ${isLoading ? "animate-pulse" : ""}`} aria-hidden="true" />
       <span className="sr-only">Send question</span>
