@@ -115,7 +115,7 @@ describe("limited production section 55 admission", () => {
   it.each([
     { kind: "document", question: "Summarize this file.", history: [{ role: "user", content: query }], text: "My employer asks me to work overtime." },
     { kind: "legal", question: "Can my employer require overtime under this agreement?", history: [], text: "My employer must give written notice." },
-  ])("gives an ordinary $kind answer its 180-second window after preliminary overtime selection", async ({ kind, question, history, text }) => {
+  ])("gives an ordinary $kind answer its 270-second window after preliminary overtime selection", async ({ kind, question, history, text }) => {
     vi.useFakeTimers();
     let releaseAnswer!: () => void;
     const answer = new Promise<void>(resolve => { releaseAnswer = resolve; });
@@ -194,10 +194,10 @@ describe("limited production section 55 admission", () => {
     let released = false;
     const firstRead = reader.read().then(value => { released = true; return value; });
     try {
-      monotonicTime = 179_999;
-      await vi.advanceTimersByTimeAsync(99_999);
+      monotonicTime = 269_999;
+      await vi.advanceTimersByTimeAsync(189_999);
       expect(released).toBe(false);
-      monotonicTime = 180_000;
+      monotonicTime = 270_000;
       await vi.advanceTimersByTimeAsync(1);
       expect(released).toBe(true);
       expect(JSON.parse(new TextDecoder().decode((await firstRead).value))).toMatchObject({ type: "error", reason: "deadline_exceeded" });
