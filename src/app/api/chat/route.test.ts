@@ -246,6 +246,23 @@ it("opts into published-document filtering and preserves the backend allowlist t
   expect(completion.publicationFilterBinding).toMatch(/^[a-f0-9]{64}$/);
 });
 
+it("adds confirmed profile memory to the answer request", async () => {
+  authMocks.fetchAuthQuery.mockImplementation(async (reference) =>
+    getFunctionName(reference) === "profileMemory:forChat" ? { role: ["tenant"], unknown: ["x"] } : null);
+  const response = await POST(request());
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+  const sent = interactionMocks.create.mock.calls[0][0];
+  expect(JSON.parse(sent.input.text).untrustedUserProfile).toEqual({ role: ["tenant"] });
+  expect(sent.system_instruction).toContain("USER PROFILE");
+});
+
+it("answers without profile memory when the lookup fails", async () => {
+  authMocks.fetchAuthQuery.mockRejectedValue(new Error("unavailable"));
+  const fallback = await POST(request());
+  expect((await events(fallback)).at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+  expect(JSON.parse(interactionMocks.create.mock.calls[0][0].input.text)).not.toHaveProperty("untrustedUserProfile");
+});
+
 it.each([true, false])("decodes a 101-document manifest above 16 KiB with declared length %s", async declaredLength => {
   const publicationFilter = { protocol: "published-v1" as const, environment: "production", documents: [
     { resourceId: selectedResourceId, versionId: selectedVersionId, sha256: "a".repeat(64) },
@@ -999,7 +1016,9 @@ describe("POST /api/chat request boundary", () => {
     const response = await POST(request());
 
     expect(response.status).toBe(402);
-    expect(authMocks.fetchAuthQuery).not.toHaveBeenCalled();
+    // Only the optional profile-memory read may run alongside the store lookup.
+    expect(authMocks.fetchAuthQuery.mock.calls.map(([reference]) => getFunctionName(reference)))
+      .toEqual(["profileMemory:forChat"]);
     expect(interactionMocks.create).not.toHaveBeenCalled();
   });
 

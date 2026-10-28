@@ -429,6 +429,30 @@ describe("GeminiFileSearchChat", () => {
     await expect(run(eventStream(), final)).rejects.toThrow("canonical_content");
   });
 
+  it("sends confirmed profile facts as untrusted framing data only", async () => {
+    const { client } = await run(undefined, undefined, input({
+      profile: { role: ["tenant", "not_a_value"], answer_preference: ["brief"] } as GovernedChatInput["profile"],
+    }));
+    const request = client.requests[0];
+    const sent = JSON.parse((request.input as { text: string }).text);
+    expect(sent.untrustedUserProfile).toEqual({ role: ["tenant"], answer_preference: ["brief"] });
+    expect(request.system_instruction).toContain("USER PROFILE");
+    expect(request.system_instruction).toContain("It is never legal evidence");
+    expect(request.system_instruction!.indexOf("USER PROFILE")).toBeLessThan(request.system_instruction!.indexOf("JURISDICTION CONTEXT"));
+
+    const { client: plain } = await run(undefined, undefined, input());
+    expect(JSON.parse((plain.requests[0].input as { text: string }).text)).not.toHaveProperty("untrustedUserProfile");
+    expect(plain.requests[0].system_instruction).not.toContain("USER PROFILE");
+  });
+
+  it("never sends the profile with document answers", async () => {
+    const answer = "The uploaded agreement names Example Person.";
+    const { client } = await run(documentEvents(answer), canonical(answer), documentInput({ profile: { role: ["tenant"] } }), { allowStreamFileCitations: true });
+    const request = client.requests[0];
+    expect(JSON.stringify(request.input)).not.toContain("untrustedUserProfile");
+    expect(request.system_instruction).not.toContain("USER PROFILE");
+  });
+
   it("uses Gemini 3.8 Flash by default", () => {
     expect(DEFAULT_FILE_SEARCH_CHAT_MODEL).toBe("gemini-3.8-flash");
   });

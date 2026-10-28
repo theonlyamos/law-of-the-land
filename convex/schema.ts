@@ -6,6 +6,12 @@ import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, w
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
 import { attachmentKindValidator } from "./lib/chatAttachmentContracts";
 import {
+  profileEvidenceKindValidator,
+  profileFactSourceValidator,
+  profileFactStatusValidator,
+  profileFactTypeValidator,
+} from "./lib/profileMemoryContracts";
+import {
   chatCitationValidator,
   geographicLevelValidator,
   jurisdictionKindValidator,
@@ -870,6 +876,9 @@ export default defineSchema({
     jurisdictionContract: v.optional(
       v.union(v.literal("legacy"), v.literal("unified")),
     ),
+    // The person turned profile memory off for this chat: nothing is learned
+    // from it and the profile is not used to answer in it.
+    memoryDisabled: v.optional(v.boolean()),
   })
     .index("by_user", ["userId"])
     .index("by_updatedAt", ["updatedAt"])
@@ -1027,6 +1036,52 @@ export default defineSchema({
     .index("by_session_and_createdAt", ["sessionId", "createdAt"])
     .index("by_sessionId_and_role_and_createdAt", ["sessionId", "role", "createdAt"])
     .index("by_session_clientId", ["sessionId", "clientId"]),
+  // Profile memory: a few typed facts about the person, learned from their own
+  // questions or added by them. Only "confirmed" rows reach the answer model.
+  userProfileFacts: defineTable({
+    userId: v.string(),
+    // "personal", or the organization id for an organization's own profile.
+    scope: v.string(),
+    organizationId: v.optional(v.id("organizations")),
+    type: profileFactTypeValidator,
+    value: v.string(),
+    status: profileFactStatusValidator,
+    source: profileFactSourceValidator,
+    sightings: v.number(),
+    chatCount: v.number(),
+    firstSeenAt: v.number(),
+    lastSeenAt: v.number(),
+    confirmedAt: v.optional(v.number()),
+    // When the cleanup job next looks at this row; absent rows never decay.
+    decaysAt: v.optional(v.number()),
+    quote: v.optional(v.string()),
+    updatedAt: v.number(),
+  })
+    .index("by_userId_and_scope_and_type_and_value", ["userId", "scope", "type", "value"])
+    .index("by_userId_and_scope_and_status_and_lastSeenAt", ["userId", "scope", "status", "lastSeenAt"])
+    .index("by_userId", ["userId"])
+    .index("by_decaysAt", ["decaysAt"]),
+  userProfileEvidence: defineTable({
+    userId: v.string(),
+    factId: v.id("userProfileFacts"),
+    sessionId: v.id("chatSessions"),
+    messageId: v.id("messages"),
+    kind: profileEvidenceKindValidator,
+    // The supporting words, so a fact's shown quote always comes from a chat that still exists.
+    quote: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_factId_and_sessionId", ["factId", "sessionId"])
+    .index("by_messageId_and_factId", ["messageId", "factId"])
+    .index("by_sessionId", ["sessionId"])
+    .index("by_userId", ["userId"]),
+  userMemorySettings: defineTable({
+    userId: v.string(),
+    enabled: v.boolean(),
+    // Set by "clear all": questions asked before it are never learned from again.
+    resetAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_userId", ["userId"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown
   // after reload but never becomes legal-answer context or transcript history.
   failedChatTurns: defineTable({
