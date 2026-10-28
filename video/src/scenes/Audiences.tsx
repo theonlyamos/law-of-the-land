@@ -47,7 +47,7 @@ export const Audiences: React.FC = () => {
         >
           <MaskLine start={4}>Clear answers for</MaskLine>
           <MaskLine start={12}>
-            <span style={{ fontStyle: "italic", color: C.brass }}>everyone the law affects.</span>
+            <span style={{ fontStyle: "italic", color: C.copper }}>everyone the law affects.</span>
           </MaskLine>
         </div>
 
@@ -66,7 +66,7 @@ export const Audiences: React.FC = () => {
               <div key={a.title} style={{ flex: 1, ...rise(frame, start, 36) }}>
                 <div style={{ height: 2, background: C.ink, width: `${rule * 100}%` }} />
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 24 }}>
-                  <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.16em", textTransform: "uppercase", color: C.brass }}>
+                  <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.16em", textTransform: "uppercase", color: C.copper }}>
                     {a.register}
                   </span>
                   <a.Icon size={32} color={C.inkSoft} strokeWidth={1.6} />

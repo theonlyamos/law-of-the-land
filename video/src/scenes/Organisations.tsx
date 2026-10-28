@@ -3,6 +3,7 @@ import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
 import { CheckCircle2, Eye, FileUp, MessageSquare } from "lucide-react";
 import { easeInOut, prog, rise, typed, useLayout } from "../anim";
 import { Bar, Eyebrow, Paper } from "../components/ui";
+import { LogoMark } from "../components/LogoMark";
 import { C, F } from "../theme";
 
 const STAGES = [
@@ -12,7 +13,7 @@ const STAGES = [
 ];
 
 const DOCS = [
-  { name: "Labour Act, 2003", t: 26 },
+  { name: "Labour Act", t: 26 },
   { name: "Staff handbook", t: 44 },
   { name: "Data Protection Act", t: 62 },
 ];
@@ -73,7 +74,7 @@ export const Organisations: React.FC = () => {
                   background: i === 2 ? "oklch(94% 0.03 150 / 0.5)" : "oklch(98% 0.014 84 / 0.6)",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 20px 0", fontSize: 18, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: i === 2 ? C.fine : C.brass }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 20px 0", fontSize: 18, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", color: i === 2 ? C.fine : C.copper }}>
                   <s.Icon size={22} /> {s.label}
                 </div>
               </div>
@@ -158,7 +159,8 @@ export const Organisations: React.FC = () => {
                   transformOrigin: "bottom right",
                 }}
               >
-                <div style={{ background: C.ink, color: C.paperLight, padding: "14px 18px", fontSize: 19, fontWeight: 600 }}>
+                <div style={{ background: C.ink, color: C.paperLight, padding: "12px 18px", fontSize: 19, fontWeight: 600, display: "flex", alignItems: "center", gap: 10 }}>
+                  <LogoMark size={34} nib={C.copperLight} grip={C.paperLight} />
                   Ask about our policies
                 </div>
                 <div style={{ padding: 16, fontSize: 18, lineHeight: 1.45 }}>
@@ -167,7 +169,7 @@ export const Organisations: React.FC = () => {
                   </div>
                   <div style={{ marginTop: 12, opacity: prog(frame, 196, 16) }}>
                     Your contract and the Labour Act both apply…
-                    <span style={{ marginLeft: 6, display: "inline-grid", placeItems: "center", width: 24, height: 24, borderRadius: 6, background: C.brass, color: C.white, fontSize: 14, fontWeight: 700 }}>
+                    <span style={{ marginLeft: 6, display: "inline-grid", placeItems: "center", width: 24, height: 24, borderRadius: 6, background: C.copper, color: C.white, fontSize: 14, fontWeight: 700 }}>
                       1
                     </span>
                   </div>
@@ -204,7 +206,7 @@ export const Organisations: React.FC = () => {
                 padding: "14px 18px",
                 borderRadius: 10,
                 background: C.ink,
-                color: C.brassLight,
+                color: C.copperLight,
                 fontFamily: F.mono,
                 fontSize: vertical ? 17 : 16,
                 minHeight: 50,

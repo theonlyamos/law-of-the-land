@@ -1,8 +1,10 @@
 # Law of the Land promo video
 
 A ~72 second narrated motion graphics promo, built in code with [Remotion](https://remotion.dev).
-It uses the app's own palette (from `src/components/landing/landing-page.module.css`), fonts
-(Instrument Serif, DM Sans, Geist Mono) and logo.
+It uses the app's own palette (from `src/components/landing/landing-page.module.css`) with the
+Equal Nib copper accent, the app's fonts (Instrument Serif, DM Sans, Geist Mono), and an animated
+copy of the Equal Nib mark (`src/components/LogoMark.tsx`, same geometry as
+`src/components/brand/logo-mark.tsx` in the app).
 
 Two compositions share the same scenes:
 

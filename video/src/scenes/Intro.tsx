@@ -1,7 +1,8 @@
 import React from "react";
 import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
 import { prog, useLayout } from "../anim";
-import { Eyebrow, Logo, Paper } from "../components/ui";
+import { Eyebrow, Paper } from "../components/ui";
+import { LogoMark } from "../components/LogoMark";
 import { C, F } from "../theme";
 
 const TITLE = "Law of the Land";
@@ -10,7 +11,7 @@ export const Intro: React.FC = () => {
   const frame = useCurrentFrame();
   const { vertical } = useLayout();
 
-  const logoP = prog(frame, 4, 40);
+  const logoP = prog(frame, 2, 56);
   const ruleP = prog(frame, 30, 36);
   const scale = interpolate(frame, [0, 150], [1.04, 1]);
 
@@ -19,15 +20,7 @@ export const Intro: React.FC = () => {
       <AbsoluteFill
         style={{ alignItems: "center", justifyContent: "center", transform: `scale(${scale})` }}
       >
-        <div
-          style={{
-            clipPath: `inset(${(1 - logoP) * 100}% 0 0 0)`,
-            opacity: logoP,
-            transform: `translateY(${(1 - logoP) * 30}px)`,
-          }}
-        >
-          <Logo width={vertical ? 360 : 300} />
-        </div>
+        <LogoMark size={vertical ? 380 : 330} reveal={logoP} style={{ margin: "-60px 0 -50px" }} />
 
         <div
           style={{
@@ -64,7 +57,7 @@ export const Intro: React.FC = () => {
             marginTop: 40,
             height: 2,
             width: 520 * ruleP,
-            background: C.brass,
+            background: C.copper,
           }}
         />
 

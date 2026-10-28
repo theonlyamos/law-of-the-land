@@ -1,5 +1,5 @@
 import React from "react";
-import { AbsoluteFill, Img, interpolate, staticFile, useCurrentFrame } from "remotion";
+import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
 import { prog } from "../anim";
 import { C, F } from "../theme";
 
@@ -25,13 +25,13 @@ export const Paper: React.FC<{ tone?: "paper" | "light" | "ink"; children?: Reac
   );
 };
 
-/** Small uppercase brass label, like the site's eyebrows. */
+/** Small uppercase copper label, like the site's eyebrows. */
 export const Eyebrow: React.FC<{
   children: React.ReactNode;
   style?: React.CSSProperties;
   rule?: boolean;
   color?: string;
-}> = ({ children, style, rule, color = C.brass }) => (
+}> = ({ children, style, rule, color = C.copper }) => (
   <div
     style={{
       display: "flex",
@@ -78,13 +78,6 @@ export const SectionGlyph: React.FC<{ size?: number; style?: React.CSSProperties
     </div>
   );
 };
-
-export const Logo: React.FC<{ width: number; style?: React.CSSProperties }> = ({ width, style }) => (
-  <Img
-    src={staticFile("logo.png")}
-    style={{ width, height: "auto", filter: "saturate(0.78) contrast(1.05)", ...style }}
-  />
-);
 
 /** Line of text revealed upward from behind a mask. */
 export const MaskLine: React.FC<{

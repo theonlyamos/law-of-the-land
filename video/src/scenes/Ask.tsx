@@ -90,7 +90,7 @@ export const Ask: React.FC = () => {
             width: card.w,
             height: card.h,
             background: C.white,
-            border: `1.5px solid ${listening ? C.brass : C.line}`,
+            border: `1.5px solid ${listening ? C.copper : C.line}`,
             borderRadius: 22,
             boxShadow: `0 ${20 + lift * 30}px ${50 + lift * 40}px oklch(40% 0.05 80 / ${0.12 + lift * 0.08})`,
             opacity: cardIn,
@@ -117,9 +117,9 @@ export const Ask: React.FC = () => {
           >
             {Array.from({ length: 22 }, (_, i) => {
               const h = 8 + Math.abs(Math.sin(frame * 0.35 + i * 0.9) * Math.cos(frame * 0.13 + i)) * 32;
-              return <span key={i} style={{ width: 5, height: h, borderRadius: 3, background: C.brass }} />;
+              return <span key={i} style={{ width: 5, height: h, borderRadius: 3, background: C.copper }} />;
             })}
-            <span style={{ marginLeft: 14, fontSize: 22, color: C.brass, fontWeight: 600 }}>Listening…</span>
+            <span style={{ marginLeft: 14, fontSize: 22, color: C.copper, fontWeight: 600 }}>Listening…</span>
           </div>
 
           {/* Jurisdiction pill */}
@@ -157,10 +157,10 @@ export const Ask: React.FC = () => {
               borderRadius: 12,
               display: "grid",
               placeItems: "center",
-              background: listening ? C.brass : C.paperLight,
+              background: listening ? C.copper : C.paperLight,
               color: listening ? C.white : C.ink,
-              border: `1.5px solid ${listening ? C.brass : C.line}`,
-              boxShadow: listening ? `0 0 0 ${8 + Math.sin(frame * 0.3) * 6}px oklch(55% 0.09 72 / 0.18)` : "none",
+              border: `1.5px solid ${listening ? C.copper : C.line}`,
+              boxShadow: listening ? `0 0 0 ${8 + Math.sin(frame * 0.3) * 6}px rgb(194 95 46 / 0.18)` : "none",
             }}
           >
             <Mic size={28} />
