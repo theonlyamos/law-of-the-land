@@ -91,7 +91,9 @@ to make publication appear successful. A later transition or provider explanatio
 requires a separately reviewed recovery. If Gemini later makes the same document
 ACTIVE and completes its upload operation before this action runs, this action
 fails closed; use [the recovered-document recovery](gemini-recovered-document-recovery.md)
-instead. A verifier error cleans up only its
+instead. To see whether Gemini later accepted an already excluded document, run the
+read-only `admin/geminiDiagnosticActions:inspectIndexJob` with its job ID; it reads
+the retained operation and the store without changing anything. A verifier error cleans up only its
 claimed lease and permit; it does not release the publication lock or restore
 search. No automatic retry or upload is scheduled by this action.
 
