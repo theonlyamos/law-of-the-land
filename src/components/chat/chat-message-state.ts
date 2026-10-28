@@ -1,5 +1,5 @@
 import type { ChatCitation } from "@/lib/countries";
-import type { ChatErrorReason } from "@/lib/chat-errors";
+import { CHAT_SEARCH_LIMIT_MESSAGE, CHAT_TIMEOUT_MESSAGE, type ChatErrorReason } from "@/lib/chat-errors";
 import type { ChatAnswerKind } from "../../../convex/lib/chatPolicy";
 import type { GuestTurnView } from "../../../convex/lib/guestResearchContracts";
 import type { ChatAttachment } from "../../../shared/chat-attachments";
@@ -63,6 +63,53 @@ export function restoreBackgroundMessages(job: ReviewedEmploymentJobProjection, 
     { localId: `background:${job.jobId}:assistant`, clientId: job.assistantClientId, role: "assistant", content: terminalMessage ?? "...",
       createdAt: job.createdAt, sequence: 1, state: terminalMessage ? "error" : "pending", backgroundJobId: job.jobId },
   ];
+}
+
+export type FailedTurnKind = "timeout" | "search_limit" | "failed";
+
+export interface SavedFailedTurn {
+  id: string;
+  userClientId: string;
+  question: string;
+  failureKind: FailedTurnKind;
+  createdAt: number;
+}
+
+export const FAILED_TURN_MESSAGE = "We could not finish an answer to this question, so no answer was saved. You can ask it again.";
+
+/** Maps a failed request to the saved failure kind, or null when the question was never processed. */
+export function failedTurnKind(error: { status: number; reason?: ChatErrorReason } | null): FailedTurnKind | null {
+  if (!error) return "failed";
+  if (error.reason === "deadline_exceeded" || error.status === 504) return "timeout";
+  if (error.reason === "file_search_budget_exhausted") return "search_limit";
+  // Sign-in, quota, rate-limit and validation refusals were not attempted answers.
+  return error.status >= 500 ? "failed" : null;
+}
+
+/**
+ * Shows saved failed questions after a reload. They are local error messages,
+ * so they are displayed but never sent as research context.
+ */
+export function restoreFailedTurnMessages(
+  turns: readonly SavedFailedTurn[],
+  local: readonly LocalChatMessage[],
+  persisted: readonly PersistedChatMessage[],
+): LocalChatMessage[] {
+  const known = new Set<string>();
+  for (const message of local) known.add(message.clientId);
+  for (const message of persisted) if (message.clientId) known.add(message.clientId);
+  return turns.filter(turn => !known.has(turn.userClientId)).flatMap((turn): LocalChatMessage[] => {
+    const errorReason: ChatErrorReason | undefined = turn.failureKind === "timeout" ? "deadline_exceeded"
+      : turn.failureKind === "search_limit" ? "file_search_budget_exhausted" : undefined;
+    const content = turn.failureKind === "timeout" ? CHAT_TIMEOUT_MESSAGE
+      : turn.failureKind === "search_limit" ? CHAT_SEARCH_LIMIT_MESSAGE : FAILED_TURN_MESSAGE;
+    return [
+      { localId: `failed:${turn.id}:user`, clientId: turn.userClientId, role: "user", content: turn.question,
+        createdAt: turn.createdAt, sequence: 0, state: "error", ...(errorReason ? { errorReason } : {}) },
+      { localId: `failed:${turn.id}:assistant`, clientId: `failed:${turn.userClientId}`, role: "assistant", content,
+        createdAt: turn.createdAt, sequence: 1, state: "error", ...(errorReason ? { errorReason } : {}) },
+    ];
+  });
 }
 
 export type DisplayChatMessage =

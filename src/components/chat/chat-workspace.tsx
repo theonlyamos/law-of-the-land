@@ -35,8 +35,10 @@ import {
   clearRejectedRouteEnsure,
   consumeComposerBottomScroll,
   consumePrependScroll,
+  failedTurnKind,
   reconcileChatMessages,
   restoreBackgroundMessages,
+  restoreFailedTurnMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
@@ -169,6 +171,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     isAuthenticated && chatId ? { externalId: chatId } : "skip",
     { initialNumItems: 50 }
   );
+  const savedFailedTurns = useQuery(
+    api.chatFailedTurns.list,
+    isAuthenticated && chatId ? { externalId: chatId } : "skip"
+  );
+  const recordFailedTurn = useMutation(api.chatFailedTurns.record);
   const ensureSession = useMutation(api.chats.ensure);
   const appendMessages = useMutation(api.chats.appendMessages);
   const removeSession = useMutation(api.chats.remove);
@@ -220,13 +227,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const waitingForSavedBackgroundAnswer = backgroundToRestore?.status === "succeeded"
     && !persistedMessages.some(message => message.role === "assistant" && message.clientId === background.job?.assistantClientId);
   const isLoading = requestLoading || isStartingNewChat || background.checking || background.isPending || waitingForSavedBackgroundAnswer;
-  const displayMessages = useMemo(
-    () => reconcileChatMessages({ persisted: persistedMessages,
-      local: backgroundToRestore ? restoreBackgroundMessages(backgroundToRestore, localMessages)
-        : savedAnswerUnavailable && background.job ? localMessages.filter(message =>
-          message.clientId !== background.job?.userClientId && message.clientId !== background.job?.assistantClientId) : localMessages }),
-    [background.job, backgroundToRestore, savedAnswerUnavailable, localMessages, persistedMessages]
-  );
+  const displayMessages = useMemo(() => {
+    const local = backgroundToRestore ? restoreBackgroundMessages(backgroundToRestore, localMessages)
+      : savedAnswerUnavailable && background.job ? localMessages.filter(message =>
+        message.clientId !== background.job?.userClientId && message.clientId !== background.job?.assistantClientId) : localMessages;
+    // Saved failures keep a question visible after reload, as local error turns.
+    const failed = Array.isArray(savedFailedTurns) && savedFailedTurns.length ? restoreFailedTurnMessages(savedFailedTurns, local, persistedMessages) : [];
+    return reconcileChatMessages({ persisted: persistedMessages, local: failed.length ? [...local, ...failed] : local });
+  }, [background.job, backgroundToRestore, savedAnswerUnavailable, localMessages, persistedMessages, savedFailedTurns]);
   const isChatLoading =
     authLoading ||
     (chatId !== null &&
@@ -766,6 +774,18 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             return message;
           })
         );
+        // Keep the failed question after a reload. It is saved apart from the
+        // transcript, so it never becomes context for a later legal answer.
+        const failureKind = failedTurnKind(error instanceof ApiError ? error : null);
+        if (failureKind) {
+          void Promise.resolve().then(() => recordFailedTurn({
+            externalId: submissionChatId,
+            userClientId: userMessage.clientId,
+            question: userMessage.content,
+            failureKind,
+            createdAt: userMessage.createdAt,
+          })).catch(() => undefined);
+        }
       } finally {
         streamPhase = "closed";
         cancelPendingStreamRender();
@@ -776,6 +796,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     },
     [
       appendMessages,
+      recordFailedTurn,
       chatResearchJurisdiction,
       chatId,
       displayMessages,

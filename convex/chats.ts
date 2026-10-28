@@ -41,6 +41,7 @@ import { CHAT_NO_EVIDENCE } from "./lib/chatNoEvidence";
 import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
 import { attachmentMetadata, checkedAttachments } from "./chatAttachments";
+import { clearFailedTurn, scheduleFailedTurnDeletion } from "./chatFailedTurns";
 import { chatAttachmentMetadataValidator, MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
 import { queryDiagnosticsProofParts, queryDiagnosticsValidator, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 
@@ -1511,6 +1512,7 @@ for (const message of unsavedMessages) {
     createdAt: message.createdAt ?? Date.now(),
     attachmentIds: message.role === "user" ? message.attachmentIds : undefined,
   });
+  if (message.role === "user" && message.clientId) await clearFailedTurn(ctx, session._id, message.clientId);
 }
 
 await ctx.db.patch(session._id, {
@@ -1561,6 +1563,7 @@ export const remove = mutation({
     });
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch"), { sessionId: session._id });
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("reviewedEmploymentJobs:deleteForChatBatch"), { sessionId: session._id });
+    await scheduleFailedTurnDeletion(ctx, session._id);
     return { deleted: true };
   },
 });

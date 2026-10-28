@@ -771,6 +771,35 @@ describe("GeminiFileSearchChat", () => {
   });
 });
 
+describe("canonical annotation bounds", () => {
+  it("accepts repeated span annotations across several text blocks when they cite few distinct pages", async () => {
+    // The provider attaches source annotations to each cited span, so a long
+    // answer can carry far more than 64 raw annotations for a handful of pages.
+    const answer = "The Constitution applies.";
+    const final = canonical(answer, []);
+    final.steps = [{
+      type: "model_output",
+      content: [
+        { type: "text", text: answer.slice(0, 8), annotations: Array.from({ length: 60 }, (_, index) => citation({ page_number: (index % 3) + 1 })) },
+        { type: "text", text: answer.slice(8), annotations: Array.from({ length: 60 }, (_, index) => citation({ page_number: (index % 3) + 1 })) },
+      ],
+    }];
+    const { result } = await run(eventStream(answer), final);
+    expect(result.answer).toBe(answer);
+    expect(result.citations.map(value => value.pageNumber)).toEqual([1, 2, 3]);
+  });
+
+  it("accepts exactly the public limit of distinct cited pages", async () => {
+    const { result } = await run(eventStream(), canonical(undefined, Array.from({ length: 16 }, (_, page) => citation({ page_number: page + 1 }))));
+    expect(result.citations).toHaveLength(16);
+  });
+
+  it("fails closed when distinct cited pages exceed the public citation limit", async () => {
+    await expect(run(eventStream(), canonical(undefined, Array.from({ length: 17 }, (_, page) => citation({ page_number: page + 1 })))))
+      .rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:citation_limit");
+  });
+});
+
 describe("closed execution telemetry", () => {
   function observe(
     client: GeminiInteractionsClient,
@@ -1847,7 +1876,8 @@ describe("GeminiFileSearchChat structural diagnostics", () => {
     ["citation_identity", canonical(undefined, [citation({ document_uri: undefined })])],
     ["canonical_text_mismatch", canonical("different text", [citation()])],
     ["citation_offsets_invalid", canonical(undefined, [citation({ start_index: -1, end_index: 1 })])],
-    ["canonical_annotations_limit", canonical(undefined, Array.from({ length: 65 }, () => citation()))],
+    ["canonical_annotations_limit", canonical(undefined, Array.from({ length: 513 }, () => citation()))],
+    ["citation_limit", canonical(undefined, Array.from({ length: 17 }, (_, page) => citation({ page_number: page + 1 })))],
   ] as const)("preserves the exact local %s failure reason", async (reason, final) => {
     const { operation, snapshots } = observedRun(undefined, final);
     await expect(operation).rejects.toThrow(`GOVERNED_CHAT_RESPONSE_INVALID:${reason}`);

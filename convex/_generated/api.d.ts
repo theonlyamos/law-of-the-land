@@ -43,6 +43,7 @@ import type * as admin_users from "../admin/users.js";
 import type * as auth from "../auth.js";
 import type * as chatAttachmentHttp from "../chatAttachmentHttp.js";
 import type * as chatAttachments from "../chatAttachments.js";
+import type * as chatFailedTurns from "../chatFailedTurns.js";
 import type * as chats from "../chats.js";
 import type * as crons from "../crons.js";
 import type * as guestResearch from "../guestResearch.js";
@@ -133,6 +134,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   chatAttachmentHttp: typeof chatAttachmentHttp;
   chatAttachments: typeof chatAttachments;
+  chatFailedTurns: typeof chatFailedTurns;
   chats: typeof chats;
   crons: typeof crons;
   guestResearch: typeof guestResearch;

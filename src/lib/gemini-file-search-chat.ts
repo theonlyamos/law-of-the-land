@@ -112,7 +112,13 @@ const MAX_QUERY_LENGTH = 4_000;
 const MAX_HISTORY_BYTES = 24 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_OUTPUT_BLOCKS = 32;
+// Bounds one streamed annotation batch. The canonical response has its own
+// larger bound because the provider repeats source annotations for each cited
+// span; those collapse to far fewer distinct source pages after validation.
 const MAX_ANNOTATIONS = 64;
+const MAX_CANONICAL_ANNOTATIONS = 512;
+// Matches the public citation limit enforced when the answer is completed.
+const MAX_DISTINCT_CITATIONS = 16;
 const MAX_IDENTIFIER_LENGTH = 200;
 // Each search needs a call and result step. Preserve the former full-budget
 // headroom (32 total minus 16 search steps), without increasing output limits.
@@ -568,7 +574,7 @@ function canonicalOutput(interaction: Interactions.Interaction, observeAnnotatio
       if (content.annotations) {
         observeAnnotations(content.annotations);
         annotations.push(...content.annotations);
-        if (annotations.length > MAX_ANNOTATIONS) return invalidResponse("canonical_annotations_limit");
+        if (annotations.length > MAX_CANONICAL_ANNOTATIONS) return invalidResponse("canonical_annotations_limit");
       }
     }
   }
@@ -768,6 +774,7 @@ function citationsFor(
     }
   }
   if (!citations.some((citation) => citation.jurisdictionId === stores[0].jurisdictionId)) return invalidResponse("selected_evidence_missing");
+  if (citations.length > MAX_DISTINCT_CITATIONS) return invalidResponse("citation_limit");
   return citations;
 }
 
