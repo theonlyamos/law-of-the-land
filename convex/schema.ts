@@ -1167,7 +1167,7 @@ export default defineSchema({
     recommendation: v.string(),
     suggestedWording: v.optional(v.string()),
     citations: v.array(storedFindingCitationValidator),
-  }).index("by_reviewId_and_ordinal", ["reviewId", "ordinal"]),
+  }).index("by_reviewId_and_attempt_and_ordinal", ["reviewId", "attempt", "ordinal"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown
   // after reload but never becomes legal-answer context or transcript history.
   failedChatTurns: defineTable({

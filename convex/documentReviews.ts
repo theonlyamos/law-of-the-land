@@ -80,10 +80,9 @@ const reviewSummaryValidator = v.object({
 });
 
 async function currentFindings(ctx: ReviewCtx, review: Doc<"documentReviews">): Promise<Doc<"documentReviewFindings">[]> {
-  const rows = await ctx.db.query("documentReviewFindings")
-    .withIndex("by_reviewId_and_ordinal", (q) => q.eq("reviewId", review._id))
+  return await ctx.db.query("documentReviewFindings")
+    .withIndex("by_reviewId_and_attempt_and_ordinal", (q) => q.eq("reviewId", review._id).eq("attempt", review.attempt))
     .take(LIMITS.maxFindings + LIMITS.maxGapFindings);
-  return rows.filter((row) => row.attempt === review.attempt);
 }
 
 async function segmentRefs(ctx: ReviewCtx, reviewId: Id<"documentReviews">): Promise<Map<number, string | undefined>> {
@@ -406,6 +405,11 @@ export const retry = mutation({
     const hasReading = (review.segmentCount ?? 0) > 0;
     const hasChoices = review.roleId !== undefined;
     if (hasReading && hasChoices) await captureResearch(ctx, review, session, attempt);
+    // Earlier attempts' findings are never shown again.
+    const stale = await ctx.db.query("documentReviewFindings")
+      .withIndex("by_reviewId_and_attempt_and_ordinal", (q) => q.eq("reviewId", review._id).lt("attempt", attempt))
+      .take(2 * (LIMITS.maxFindings + LIMITS.maxGapFindings));
+    for (const row of stale) await ctx.db.delete("documentReviewFindings", row._id);
     await ctx.db.patch("documentReviews", review._id, {
       attempt, failure: undefined, headline: undefined, overview: undefined, nextSteps: undefined, counts: undefined,
       completedAt: undefined, checkedCount: 0, updatedAt: Date.now(),
@@ -738,7 +742,7 @@ export const deleteForSessionBatch = internalMutation({
     if (!review) return { hasMore: false };
     const [segments, findings] = await Promise.all([
       ctx.db.query("documentReviewSegments").withIndex("by_reviewId_and_ordinal", (q) => q.eq("reviewId", review._id)).take(DELETE_BATCH_SIZE),
-      ctx.db.query("documentReviewFindings").withIndex("by_reviewId_and_ordinal", (q) => q.eq("reviewId", review._id)).take(DELETE_BATCH_SIZE),
+      ctx.db.query("documentReviewFindings").withIndex("by_reviewId_and_attempt_and_ordinal", (q) => q.eq("reviewId", review._id)).take(DELETE_BATCH_SIZE),
     ]);
     for (const row of segments) await ctx.db.delete("documentReviewSegments", row._id);
     for (const row of findings) await ctx.db.delete("documentReviewFindings", row._id);

@@ -59,8 +59,14 @@ const failRef = makeFunctionReference<"mutation", ReviewArgs & { failure: Docume
 const READING_TIMEOUT_MS = 240_000;
 const CHECK_TIMEOUT_MS = 150_000;
 const SUMMARY_TIMEOUT_MS = 45_000;
-/** Convex stops actions at 10 minutes; leave room to save what was found. */
+/** Convex stops actions at 10 minutes. Checking must end by this point, leaving room for the summary and saving. */
 const CHECK_BUDGET_MS = 8 * 60_000;
+/** The summary and final save must finish before this point. */
+const ACTION_LIMIT_MS = 9 * 60_000 + 30_000;
+/** A checking request is not started with less time than this left. */
+const MIN_REQUEST_MS = 20_000;
+
+class BudgetExhausted extends Error {}
 
 type Client = Pick<GoogleGenAI, "interactions">;
 type CreateParams = Parameters<GoogleGenAI["interactions"]["create"]>[0];
@@ -92,6 +98,7 @@ export const read = internalAction({
   args: { reviewId: v.id("documentReviews"), attempt: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const startedAt = Date.now();
     const input = await ctx.runQuery(readingInputRef, args);
     if (!input) return null;
     const apiKey = process.env.GOOGLE_AI_API_KEY;
@@ -119,8 +126,10 @@ export const read = internalAction({
     const client: Client = new GoogleGenAI({ apiKey });
     let reading: ReadingResult | null = null;
     let lastError: unknown;
-    // One retry covers a malformed or truncated response.
+    // One retry covers a malformed or truncated response, within the action's time limit.
     for (let attempt = 0; attempt < 2 && !reading; attempt++) {
+      const timeout = Math.min(READING_TIMEOUT_MS, startedAt + ACTION_LIMIT_MS - Date.now());
+      if (timeout < MIN_REQUEST_MS) break;
       try {
         const response = await client.interactions.create({
           model: model(),
@@ -131,7 +140,7 @@ export const read = internalAction({
           stream: false,
           generation_config: { thinking_level: "low", thinking_summaries: "none", tool_choice: "none", max_output_tokens: 32_768 },
           response_format: { type: "text", mime_type: "application/json", schema: READING_SCHEMA },
-        } as unknown as CreateParams, { maxRetries: 1, timeout: READING_TIMEOUT_MS });
+        } as unknown as CreateParams, { maxRetries: 0, timeout });
         const output = interactionPlainText(response);
         reading = output ? parseReading(output) : null;
       } catch (error) {
@@ -195,7 +204,11 @@ export const check = internalAction({
       file_search_store_names: stores.map((store) => store.storeName),
       ...(metadataFilter === undefined ? {} : { metadata_filter: metadataFilter }),
     };
+    const remaining = () => startedAt + CHECK_BUDGET_MS - Date.now();
+    // Every request is bounded by the time left, so the action always reaches a final state.
     const ask = async (instruction: string, prompt: string) => {
+      const timeout = Math.min(CHECK_TIMEOUT_MS, remaining());
+      if (timeout < MIN_REQUEST_MS) throw new BudgetExhausted();
       const response = await client.interactions.create({
         model: model(),
         input: { type: "text", text: prompt },
@@ -204,7 +217,7 @@ export const check = internalAction({
         store: false,
         stream: false,
         generation_config: { max_output_tokens: 16_384 },
-      } as unknown as CreateParams, { maxRetries: 1, timeout: CHECK_TIMEOUT_MS });
+      } as unknown as CreateParams, { maxRetries: 0, timeout });
       return interactionOutput(response, stores);
     };
 
@@ -225,18 +238,19 @@ export const check = internalAction({
     };
 
     const checkBatch = async (batch: typeof passages) => {
-      if (stopped || Date.now() - startedAt > CHECK_BUDGET_MS) {
+      if (stopped || remaining() < MIN_REQUEST_MS) {
         stopped = true;
         await save(batch.map(placeholder), [], batch.map((passage) => passage.ordinal));
         return;
       }
       let parsed: ReturnType<typeof parseCheckOutput> = null;
-      for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+      for (let attempt = 0; attempt < 2 && !parsed && !stopped; attempt++) {
         try {
           const output = await ask(CHECK_INSTRUCTION, checkPrompt(input.context, batch));
           parsed = output ? parseCheckOutput(output, { kind: "passage", passageOrdinals: batch.map((passage) => passage.ordinal) }) : null;
-        } catch {
-          providerErrors += 1;
+        } catch (error) {
+          if (error instanceof BudgetExhausted) stopped = true;
+          else providerErrors += 1;
         }
       }
       const findings = parsed?.findings ?? [];
@@ -251,8 +265,8 @@ export const check = internalAction({
         const output = await ask(GAPS_INSTRUCTION, gapsPrompt(input.context, input.outline));
         const parsed = output ? parseCheckOutput(output, { kind: "missing", passageOrdinals: [] }) : null;
         if (parsed?.findings.length) await save(parsed.findings, parsed.pool, []);
-      } catch {
-        providerErrors += 1;
+      } catch (error) {
+        if (!(error instanceof BudgetExhausted)) providerErrors += 1;
       }
     };
 
@@ -268,7 +282,8 @@ export const check = internalAction({
       return null;
     }
     let summary = null;
-    try {
+    const summaryTimeout = Math.min(SUMMARY_TIMEOUT_MS, startedAt + ACTION_LIMIT_MS - Date.now());
+    if (summaryTimeout >= 10_000) try {
       const response = await client.interactions.create({
         model: model(),
         input: { type: "text", text: summaryPrompt(summaryInput) },
@@ -278,7 +293,7 @@ export const check = internalAction({
         stream: false,
         generation_config: { thinking_level: "low", thinking_summaries: "none", tool_choice: "none", max_output_tokens: 2_048 },
         response_format: { type: "text", mime_type: "application/json", schema: SUMMARY_SCHEMA },
-      } as unknown as CreateParams, { maxRetries: 1, timeout: SUMMARY_TIMEOUT_MS });
+      } as unknown as CreateParams, { maxRetries: 0, timeout: summaryTimeout });
       const output = interactionPlainText(response);
       summary = output ? parseSummary(output) : null;
     } catch {

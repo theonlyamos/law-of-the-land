@@ -252,6 +252,32 @@ describe("document reviews", () => {
     expect(review!.review.failure).toBeUndefined();
   });
 
+  it("never lets findings from an earlier attempt hide or block the current ones", async () => {
+    const f = await fixture();
+    const { reviewId } = await sendForReview(f);
+    await f.t.mutation(saveReading, { reviewId, attempt: 1, reading: READING });
+    await startChecking(f.t, reviewId);
+    await f.t.run(async (ctx) => {
+      for (let ordinal = 0; ordinal < 70; ordinal += 1) {
+        await ctx.db.insert("documentReviewFindings", {
+          reviewId, attempt: 1, ordinal, segmentOrdinal: 1, kind: "passage", status: "attention", title: `Old ${ordinal}`,
+          meaning: "Old", lawSummary: "Old", recommendation: "Old", citations: [],
+        });
+      }
+      await ctx.db.patch(reviewId, { attempt: 2 });
+    });
+    await f.t.mutation(saveFindings, { reviewId, attempt: 2, checkedOrdinals: [1], pool: [], findings: [finding()] });
+    const review = await f.client.query(api.documentReviews.get, { reviewId });
+    expect(review!.findings.map((item) => item.title)).toEqual(["Entry without notice"]);
+    expect(review!.review.checkedCount).toBe(1);
+
+    // A retry clears what earlier attempts left behind.
+    await f.t.mutation(fail, { reviewId, attempt: 2, failure: "timeout" });
+    await f.t.run(async (ctx) => { await ctx.db.patch(reviewId, { roleId: undefined, roleLabel: undefined }); });
+    await f.client.mutation(api.documentReviews.retry, { reviewId });
+    expect(await f.t.run((ctx) => ctx.db.query("documentReviewFindings").take(200))).toEqual([]);
+  });
+
   it("shows a failure and lets the person try again from reading", async () => {
     const f = await fixture();
     const { reviewId } = await sendForReview(f);
