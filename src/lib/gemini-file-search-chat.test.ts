@@ -495,8 +495,11 @@ describe("GeminiFileSearchChat", () => {
     ]);
     expect(request.system_instruction).toContain("PDF page numbers belong only in the application's Sources display when citation metadata supplies them");
     expect(request.system_instruction).toContain("A printed-page label may appear in prose only when it is explicitly exposed for the cited passage in the retrieved text");
-    expect(request.system_instruction).toContain("The application permits at most 20 File Search calls for this answer, including all follow-ups");
+    expect(request.system_instruction).toContain("The application permits at most 8 File Search calls for this answer, including all follow-ups");
     expect(request.system_instruction).toContain("After the last permitted search result, give the final answer without another search");
+    expect(request.system_instruction).toContain("Answers have a strict time limit and each search takes several seconds, so treat this as a hard budget");
+    expect(request.system_instruction).toContain("state the evidence gap for remaining sub-issues instead of searching for every one of them");
+    expect(request.system_instruction).toContain("stop searching for it and say the library does not appear to contain it");
     expect(request.system_instruction).toContain("Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit");
     // Overnight QA regressions: a fixed-term follow-up skipped the Labour Act s.66
     // exclusion, and an intermeddling penalty was presented as current law.
@@ -644,25 +647,29 @@ describe("GeminiFileSearchChat", () => {
     await expect(run(events)).rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID");
   });
 
-  it("accepts twenty searches with complete canonical tool steps and the existing non-search headroom", async () => {
-    const { events, final } = researchedAnswer(20);
-    expect(final.steps).toHaveLength(56);
+  it("accepts twelve searches, the enforced cap, with complete canonical tool steps", async () => {
+    const { events, final } = researchedAnswer(12);
+    expect(final.steps).toHaveLength(40);
     const snapshots: QueryDiagnostics[] = [];
     const { result } = await run(events, final, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) });
     expect(result.citations).toHaveLength(1);
-    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 20, searchResultCount: 20, reason: "completed" });
+    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 12, searchResultCount: 12, reason: "completed" });
   });
 
-  it("rejects the twenty-first File Search call before canonical retrieval", async () => {
-    const { events, final } = researchedAnswer(21);
+  it("rejects the thirteenth File Search call before canonical retrieval", async () => {
+    const { events, final } = researchedAnswer(13);
     const snapshots: QueryDiagnostics[] = [];
     await expect(run(events, final, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow("file_search_budget_exhausted");
-    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 20, canonicalReadCompleted: false });
+    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 12, canonicalReadCompleted: false });
   });
 
   it("bounds total canonical steps separately from the unchanged content-block limit", async () => {
-    const { events, final } = researchedAnswer(20);
-    final.steps!.push({ type: "thought" });
+    const { events, final } = researchedAnswer(12);
+    // 40 steps; pad with search-result steps (outside the non-search allowance) past 56.
+    final.steps!.push(...Array.from({ length: 16 }, () => ({ type: "file_search_result" as const, call_id: "call-0" })));
+    expect(final.steps).toHaveLength(56);
+    expect((await run(events, final)).result.citations).toHaveLength(1);
+    final.steps!.push({ type: "file_search_result", call_id: "call-0" });
     await expect(run(events, final)).rejects.toThrow("canonical_state");
     const tooManyBlocks = canonical();
     tooManyBlocks.steps = [{ type: "model_output", content: [
@@ -1200,15 +1207,15 @@ describe("bounded recovery of a clean premature stream EOF", () => {
     expect(test.snapshots.at(-1)?.searchCallCount).toBe(1);
   });
 
-  it.each([20, 21])("keeps the twenty-call budget across resume for %i total searches", async totalCalls => {
+  it.each([12, 13])("keeps the twelve-call budget across resume for %i total searches", async totalCalls => {
     const { events, final } = researchedAnswer(totalCalls);
     // Disconnect after ten complete searches; subsequent searches share the budget.
     const split = 1 + 15 * 2 + 10 * 5;
     const test = attempt(cursors(events.slice(0, split)), events.slice(split), final);
-    if (totalCalls === 21) await expect(test.operation).rejects.toThrow("file_search_budget_exhausted");
+    if (totalCalls === 13) await expect(test.operation).rejects.toThrow("file_search_budget_exhausted");
     else await expect(test.operation).resolves.toMatchObject({ citations: [{ resourceId: "resource-1" }] });
-    expect(test.snapshots.at(-1)).toMatchObject({ searchCallCount: 20, searchResultCount: 20 });
-    expect(test.client.getIds).toHaveLength(totalCalls === 21 ? 1 : 2);
+    expect(test.snapshots.at(-1)).toMatchObject({ searchCallCount: 12, searchResultCount: 12 });
+    expect(test.client.getIds).toHaveLength(totalCalls === 13 ? 1 : 2);
   });
 
   it.each([
@@ -1567,7 +1574,7 @@ describe("verified stream file citations", () => {
   });
 
   it.each(["file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted"] as const)(
-    "distinguishes %s at the twenty-call budget", async reason => {
+    "distinguishes %s at the twelve-call budget", async reason => {
       let events = eventStream();
       if (reason === "file_search_call_id") {
         const start = events[4];
@@ -1576,7 +1583,7 @@ describe("verified stream file citations", () => {
       } else if (reason === "file_search_call_duplicate") {
         events.splice(10, 0, { event_type: "step.start", index: 4, step: { type: "file_search_call", id: "file-search-1" } });
       } else {
-        events = [events[0], ...Array.from({ length: 21 }, (_, index) => ([
+        events = [events[0], ...Array.from({ length: 13 }, (_, index) => ([
           { event_type: "step.start", index, step: { type: "file_search_call", id: `call-${index}` } },
           { event_type: "step.stop", index },
         ] satisfies StreamEvent[])).flat()];
@@ -1584,7 +1591,7 @@ describe("verified stream file citations", () => {
       const snapshots: QueryDiagnostics[] = [];
       await expect(run(events, undefined, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow(reason);
       expect(snapshots.at(-1)?.reason).toBe(reason);
-      expect(snapshots.at(-1)?.searchCallCount).toBe(reason === "file_search_budget_exhausted" ? 20 : reason === "file_search_call_duplicate" ? 1 : 0);
+      expect(snapshots.at(-1)?.searchCallCount).toBe(reason === "file_search_budget_exhausted" ? 12 : reason === "file_search_call_duplicate" ? 1 : 0);
     },
   );
 });

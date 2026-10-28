@@ -707,7 +707,7 @@ describe("POST /api/chat private query diagnostics", () => {
     });
     interactionMocks.create.mockResolvedValue((async function* () {
       yield { event_type: "interaction.created", interaction: { id: "interaction-1", status: "in_progress" } };
-      for (let index = 0; index < 21; index++) {
+      for (let index = 0; index < 13; index++) {
         yield { event_type: "step.start", interaction_id: "interaction-1", index: index * 2,
           step: { type: "file_search_call", id: `search-${index}` } };
         yield { event_type: "step.stop", interaction_id: "interaction-1", index: index * 2 };
@@ -730,7 +730,7 @@ describe("POST /api/chat private query diagnostics", () => {
       await reader.cancel();
       await vi.waitFor(() => expect(terminalArgs()).toMatchObject({
         outcome: "failure", failureCategory: "validation", citations: [],
-        diagnostics: { reason: "file_search_budget_exhausted", searchCallCount: 20, canonicalReadCompleted: false },
+        diagnostics: { reason: "file_search_budget_exhausted", searchCallCount: 12, canonicalReadCompleted: false },
       }));
       expect(terminalArgs().finalAnswer).toBeUndefined();
       expect(interactionMocks.get).not.toHaveBeenCalled();
@@ -1510,7 +1510,7 @@ describe("POST /api/chat streamed governed interaction", () => {
     });
   });
 
-  it.each([8, 14, 16])("records the 180-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
+  it.each([4, 8, 11])("records the 180-second cutoff after %s searches without confusing it with search exhaustion", async (searches) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
     let providerSignal: AbortSignal | undefined;
