@@ -22,6 +22,7 @@ import type * as admin_featureFlags from "../admin/featureFlags.js";
 import type * as admin_geminiActions from "../admin/geminiActions.js";
 import type * as admin_geminiDiagnosticActions from "../admin/geminiDiagnosticActions.js";
 import type * as admin_geminiDiagnostics from "../admin/geminiDiagnostics.js";
+import type * as admin_geminiRecoveredRecovery from "../admin/geminiRecoveredRecovery.js";
 import type * as admin_geminiRecovery from "../admin/geminiRecovery.js";
 import type * as admin_geminiRecoveryActions from "../admin/geminiRecoveryActions.js";
 import type * as admin_integrations_geminiActiveDocument from "../admin/integrations/geminiActiveDocument.js";
@@ -122,6 +123,7 @@ declare const fullApi: ApiFromModules<{
   "admin/geminiActions": typeof admin_geminiActions;
   "admin/geminiDiagnosticActions": typeof admin_geminiDiagnosticActions;
   "admin/geminiDiagnostics": typeof admin_geminiDiagnostics;
+  "admin/geminiRecoveredRecovery": typeof admin_geminiRecoveredRecovery;
   "admin/geminiRecovery": typeof admin_geminiRecovery;
   "admin/geminiRecoveryActions": typeof admin_geminiRecoveryActions;
   "admin/integrations/geminiActiveDocument": typeof admin_integrations_geminiActiveDocument;

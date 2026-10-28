@@ -5,7 +5,9 @@ import { ConvexError, v } from "convex/values";
 import { internalAction } from "../_generated/server";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
 import type { ActiveDocumentRecoveryClaim, ActiveDocumentRecoveryResult } from "./geminiRecovery";
+import type { RecoveredDocumentRecoveryClaim, RecoveredDocumentRecoveryResult } from "./geminiRecoveredRecovery";
 import { verifyActiveGeminiDocument } from "./integrations/geminiActiveDocument";
+import { verifyRecoveredGeminiDocument } from "./integrations/geminiFailedDocumentObservation";
 
 const claimRef = makeFunctionReference<"mutation">("admin/geminiRecovery:claimActiveDocumentRecovery");
 const completeRef = makeFunctionReference<"mutation">("admin/geminiRecovery:completeActiveDocumentRecovery");
@@ -42,6 +44,44 @@ export const reconcileActiveDocument = internalAction({
         return await ctx.runMutation(abortRef, attempt);
       } catch {
         throw new ConvexError("GEMINI_ACTIVE_DOCUMENT_RECOVERY_FAILED");
+      }
+    }
+  },
+});
+
+const claimRecoveredRef = makeFunctionReference<"mutation">("admin/geminiRecoveredRecovery:claimRecoveredDocumentRecovery");
+const completeRecoveredRef = makeFunctionReference<"mutation">("admin/geminiRecoveredRecovery:completeRecoveredDocumentRecovery");
+const abortRecoveredRef = makeFunctionReference<"mutation">("admin/geminiRecoveredRecovery:abortRecoveredDocumentRecovery");
+
+/** Deployment-admin recovery for a confirmed failed document that Gemini later made active. */
+export const reconcileRecoveredDocument = internalAction({
+  args: { jobId: v.id("integrationJobs"), reason: v.string(), idempotencyKey: v.string() },
+  returns: v.object({
+    status: v.union(v.literal("succeeded"), v.literal("failed")),
+    jobId: v.id("integrationJobs"), correlationId: v.string(),
+  }),
+  handler: async (ctx, args): Promise<RecoveredDocumentRecoveryResult> => {
+    if (resolveE2EProviderIsolation() !== "normal") {
+      throw new ConvexError("GEMINI_RECOVERED_DOCUMENT_RECOVERY_UNAVAILABLE_IN_E2E");
+    }
+    const apiKey = process.env.GOOGLE_AI_API_KEY;
+    if (!apiKey?.trim()) throw new ConvexError("GEMINI_RECOVERED_DOCUMENT_RECOVERY_NOT_CONFIGURED");
+
+    const claim: RecoveredDocumentRecoveryClaim = await ctx.runMutation(claimRecoveredRef, args);
+    if (claim.kind === "completed") return claim.result;
+
+    const attempt = {
+      operationId: claim.operationId, leaseToken: claim.leaseToken,
+      binding: claim.binding, jurisdictionId: claim.jurisdictionId,
+    };
+    try {
+      const proof = await verifyRecoveredGeminiDocument(claim.target, claim.failedDocumentReference, apiKey);
+      return await ctx.runMutation(completeRecoveredRef, { ...attempt, ...proof });
+    } catch {
+      try {
+        return await ctx.runMutation(abortRecoveredRef, attempt);
+      } catch {
+        throw new ConvexError("GEMINI_RECOVERED_DOCUMENT_RECOVERY_FAILED");
       }
     }
   },
