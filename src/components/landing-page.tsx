@@ -30,6 +30,7 @@ interface LandingPageProps {
 const PRIMARY_LINKS = [
   { href: "#jurisdictions", label: "Jurisdictions" },
   { href: "#how-it-works", label: "How it works" },
+  { href: "#document-review", label: "Document review" },
   { href: "#for-professionals", label: "For professionals" },
   { href: "#plans", label: "Plans" },
 ] as const;
@@ -90,8 +91,9 @@ export function LandingPage({
               Understand the law where you are.
             </h1>
             <p className={styles.heroDescription}>
-              Ask a question in plain language. Receive a clear, jurisdiction-specific answer with
-              the legal sources and citations needed to verify it.
+              Ask a question in plain language, or attach a legal document to have it checked
+              against the law. Every answer is specific to your jurisdiction and cites the legal
+              sources needed to verify it.
             </p>
             <ul aria-label="Designed for" className={styles.audienceLine}>
               <li>Individuals</li>
@@ -140,6 +142,11 @@ export function LandingPage({
                 {researchJurisdiction
                   ? `Answers will use sources relevant to ${researchJurisdiction.organization ? `${researchJurisdiction.organization.name} / ` : ""}${researchJurisdiction.name}.`
                   : "Choose the jurisdiction your question relates to."}
+              </p>
+
+              <p className={styles.reviewNote}>
+                Have a contract, lease or notice to check?{" "}
+                <Link href="#document-review">See how document review works</Link>
               </p>
 
               {!isAuthenticated ? (

@@ -3,6 +3,7 @@ import type { ChatSession } from "@/lib/chat-sessions";
 import { ArrowRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
+import { DocumentReviewSection } from "./document-review-section";
 import { LegalInformationNotice } from "./legal-information-notice";
 import styles from "./landing-page.module.css";
 
@@ -68,21 +69,21 @@ const AUDIENCES: readonly AudienceEntry[] = [
     title: "Individuals",
     description:
       "Understand laws that affect everyday life without beginning with a specialist database.",
-    needs: ["Housing and tenancy", "Employment and workplace rights", "Consumer and public services"],
+    needs: ["Housing and tenancy", "Employment and workplace rights", "Checking a lease or contract"],
   },
   {
     register: "02 / Practice",
     title: "Legal professionals",
     description:
       "Accelerate issue spotting and source discovery while preserving a clear path back to the legal text.",
-    needs: ["Preliminary legal research", "Section and article discovery", "Jurisdiction-specific review"],
+    needs: ["Preliminary legal research", "Section and article discovery", "First-pass document review"],
   },
   {
     register: "03 / Operations",
     title: "Organisations",
     description:
       "Develop an initial understanding of legislation and regulations relevant to operations and compliance.",
-    needs: ["Business obligations", "Regulatory requirements", "Policy and compliance research"],
+    needs: ["Business obligations", "Regulatory requirements", "Policy and contract review"],
   },
 ];
 
@@ -157,6 +158,8 @@ export function LandingSections({
         </ol>
       </section>
 
+      <DocumentReviewSection isAuthenticated={isAuthenticated} />
+
       <section
         id="for-professionals"
         aria-labelledby="audience-title"
@@ -171,7 +174,7 @@ export function LandingSections({
           </div>
           <p className={styles.sectionCopy}>
             The same research system supports a straightforward personal question, a professional
-            source check, or an initial review of regulatory obligations.
+            source check, a document review, or an initial look at regulatory obligations.
           </p>
         </div>
 

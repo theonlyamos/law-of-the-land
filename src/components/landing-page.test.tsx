@@ -143,6 +143,26 @@ describe("professional landing research shell", () => {
     expect(screen.getByRole("link", { name: "Session controls" })).toHaveAttribute("href", "/settings/sessions");
   });
 
+  it("explains document review and links guests and members to start one", () => {
+    const { rerender } = render(<LandingPage {...landingProps()} />);
+    expect(screen.getByRole("link", { name: "Document review" })).toHaveAttribute("href", "#document-review");
+    expect(screen.getByRole("link", { name: "See how document review works" })).toHaveAttribute("href", "#document-review");
+
+    const section = screen.getByRole("region", { name: "Check a document against the law before you rely on it." });
+    expect(within(section).getByText("Attach the document")).toBeVisible();
+    for (const label of ["Needs attention", "Worth checking", "Looks fine", "Couldn\u2019t confirm"]) {
+      expect(within(section).getByText(label, { selector: "dt" })).toBeVisible();
+    }
+    expect(within(section).getByText(/general legal information, not legal advice/i)).toBeVisible();
+    expect(within(section).getByRole("link", { name: "Create a free account to review" })).toHaveAttribute(
+      "href",
+      "/signin?mode=signup&redirect=%2Fnew",
+    );
+
+    rerender(<LandingPage {...landingProps({ isAuthenticated: true })} />);
+    expect(screen.getByRole("link", { name: "Review a document" })).toHaveAttribute("href", "/new");
+  });
+
   it("uses the brand logo in the footer home link", () => {
     render(<LandingPage {...landingProps()} />);
     const footerHomeLink = screen.getAllByRole("link", { name: "Law of the Land home" }).at(-1);
