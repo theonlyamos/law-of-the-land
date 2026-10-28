@@ -4,7 +4,7 @@ import { isGeminiFileSearchStoreName, isGeminiUploadOperationForStore } from "..
 
 export const indexDiagnosticJobValidator = v.object({
   id: v.id("integrationJobs"),
-  status: v.union(v.literal("manual_review"), v.literal("waiting_provider"), v.literal("running")),
+  status: v.union(v.literal("manual_review"), v.literal("waiting_provider"), v.literal("running"), v.literal("failed")),
   correlationId: v.string(),
   providerPollingStartedAt: v.union(v.number(), v.null()),
   providerPollCount: v.number(),
@@ -35,9 +35,15 @@ export const getIndexDiagnosticTarget = internalQuery({
   returns: indexDiagnosticContextValidator,
   handler: async (ctx, { jobId }): Promise<IndexDiagnosticContext> => {
     const job = await ctx.db.get(jobId);
+    // A version excluded by failed-document recovery keeps its operation and payload as a tombstone.
+    // Reading it is how an operator learns whether Gemini later accepted that document.
+    const excludedFailure = job?.status === "failed" && job.recoveryKind === undefined &&
+      job.failedDocumentEvidence?.coverageVerifiedAt !== undefined;
+    const pollable = (job?.status === "manual_review" || job?.status === "waiting_provider" || job?.status === "running") &&
+      job.recoveryKind === "poll_operation";
     if (!job || job.type !== "gemini_index_document" || job.targetType !== "documentVersion"
-      || (job.status !== "manual_review" && job.status !== "waiting_provider" && job.status !== "running")
-      || job.recoveryKind !== "poll_operation" || !job.providerOperationName) invalidTarget();
+      || (!pollable && !excludedFailure) || !job.providerOperationName) invalidTarget();
+    const status = job.status as "manual_review" | "waiting_provider" | "running" | "failed";
     if (new TextEncoder().encode(job.payload).byteLength > 8_192) invalidTarget();
     let parsed: unknown;
     try { parsed = JSON.parse(job.payload); } catch { invalidTarget(); }
@@ -72,7 +78,7 @@ export const getIndexDiagnosticTarget = internalQuery({
       throw new ConvexError("GEMINI_DIAGNOSTIC_ENVIRONMENT_INVALID");
     }
     return {
-      job: { id: job._id, status: job.status, correlationId: job.correlationId,
+      job: { id: job._id, status, correlationId: job.correlationId,
         providerPollingStartedAt: job.providerPollingStartedAt ?? null,
         providerPollCount: job.providerPollCount ?? 0, updatedAt: job.updatedAt },
       target: { storeName, operationName: job.providerOperationName, metadata: {
