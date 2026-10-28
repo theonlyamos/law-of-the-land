@@ -237,6 +237,17 @@ export const check = internalAction({
       } as unknown as CreateParams, { maxRetries: 0, timeout });
       return interactionOutput(response, stores);
     };
+    // Counts only, so citation problems can be traced from the logs without document content.
+    const logCheck = (step: "passages" | "gaps", output: Awaited<ReturnType<typeof ask>>, parsed: ReturnType<typeof parseCheckOutput>) => {
+      const statuses: Record<string, number> = {};
+      for (const finding of parsed?.findings ?? []) statuses[finding.status] = (statuses[finding.status] ?? 0) + 1;
+      console.info("document_review_check", JSON.stringify({
+        step, outcome: parsed ? "ok" : output ? "invalid_response" : "empty",
+        searches: output?.searches ?? 0, citationsSeen: output?.citationsSeen ?? 0, citationsKept: output?.annotations.length ?? 0,
+        findings: parsed?.findings.length ?? 0, findingsWithCitations: parsed?.findings.filter((finding) => finding.citations.length > 0).length ?? 0,
+        pool: parsed?.pool.length ?? 0, statuses,
+      }));
+    };
 
     const done = new Set(input.alreadyChecked);
     const passages = input.passages.filter((passage) => !done.has(passage.ordinal));
@@ -265,6 +276,7 @@ export const check = internalAction({
         try {
           const output = await ask(CHECK_INSTRUCTION, checkPrompt(input.context, batch));
           parsed = output ? parseCheckOutput(output, { kind: "passage", passageOrdinals: batch.map((passage) => passage.ordinal) }) : null;
+          logCheck("passages", output, parsed);
         } catch (error) {
           if (error instanceof BudgetExhausted) stopped = true;
           else {
@@ -284,6 +296,7 @@ export const check = internalAction({
       try {
         const output = await ask(GAPS_INSTRUCTION, gapsPrompt(input.context, input.outline));
         const parsed = output ? parseCheckOutput(output, { kind: "missing", passageOrdinals: [] }) : null;
+        logCheck("gaps", output, parsed);
         if (parsed?.findings.length) await save(parsed.findings, parsed.pool, []);
       } catch (error) {
         if (!(error instanceof BudgetExhausted)) {

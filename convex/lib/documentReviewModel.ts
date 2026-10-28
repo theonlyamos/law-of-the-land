@@ -380,7 +380,7 @@ function annotationMetadata(value: unknown): Record<(typeof METADATA_KEYS)[numbe
  * Read a completed, non-streaming interaction into its output text and the
  * file citations attached to it. Unknown shapes return null.
  */
-export function interactionOutput(response: unknown, stores: readonly { jurisdictionId: string; storeName: string }[]): { text: string; annotations: OutputAnnotation[]; searches: number } | null {
+export function interactionOutput(response: unknown, stores: readonly { jurisdictionId: string; storeName: string }[]): { text: string; annotations: OutputAnnotation[]; searches: number; citationsSeen: number } | null {
   if (!response || typeof response !== "object") return null;
   const { status, steps } = response as { status?: unknown; steps?: unknown };
   if (status !== "completed" || !Array.isArray(steps) || steps.length > 256) return null;
@@ -389,6 +389,7 @@ export function interactionOutput(response: unknown, stores: readonly { jurisdic
   let text = "";
   let bytes = 0;
   let searches = 0;
+  let citationsSeen = 0;
   const annotations: OutputAnnotation[] = [];
   for (const step of steps) {
     if (!step || typeof step !== "object") return null;
@@ -407,6 +408,7 @@ export function interactionOutput(response: unknown, stores: readonly { jurisdic
         if (!annotation || typeof annotation !== "object") continue;
         const record = annotation as Record<string, unknown>;
         if (record.type !== "file_citation") continue;
+        citationsSeen += 1;
         const metadata = annotationMetadata(record.custom_metadata);
         if (!metadata) continue;
         const storeName = storeByJurisdiction.get(metadata.jurisdiction_id);
@@ -432,7 +434,7 @@ export function interactionOutput(response: unknown, stores: readonly { jurisdic
       }
     }
   }
-  return { text, annotations, searches };
+  return { text, annotations, searches, citationsSeen };
 }
 
 /** Plain text output of a completed interaction without tools (reading, summary). */
@@ -554,13 +556,15 @@ export function attachPooledCitations<T extends ModelCitation>(
   pool: readonly (T & { title: string })[],
 ): T[] {
   if (finding.citations.length > 0 || finding.status === "unconfirmed") return finding.citations;
-  const haystack = `${finding.provisions.join(" ")} ${finding.lawSummary}`.toLowerCase();
+  // Punctuation is ignored so "Contracts Act, 1960" matches "Contracts Act 1960".
+  const plain = (value: string) => ` ${value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+  const haystack = plain(`${finding.provisions.join(" ")} ${finding.lawSummary}`);
   const matches = pool.filter((citation) => {
-    const title = citation.title.toLowerCase().replace(/\s+/gu, " ").trim();
-    if (!title) return false;
+    const title = plain(citation.title);
+    if (!title.trim()) return false;
     // Titles often carry a year or Act number the model may shorten; compare the leading words.
-    const lead = title.split(/[,(]/u)[0].trim();
-    return haystack.includes(title) || (lead.length >= 8 && haystack.includes(lead));
+    const lead = plain(citation.title.split(/[,(]/u)[0]);
+    return haystack.includes(title) || (lead.trim().length >= 8 && haystack.includes(lead));
   });
   return uniqueCitations(matches.map(({ title, ...citation }) => citation as unknown as T));
 }
