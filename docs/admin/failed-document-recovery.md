@@ -88,7 +88,10 @@ evidence, operation reference, bounded payload, resource block, and jurisdiction
 restriction survive terminal-job retention. Do not clear the block or restriction,
 force a synced state, resubmit, delete provider documents, or remove the tombstone
 to make publication appear successful. A later transition or provider explanation
-requires a separately reviewed recovery. A verifier error cleans up only its
+requires a separately reviewed recovery. If Gemini later makes the same document
+ACTIVE and completes its upload operation before this action runs, this action
+fails closed; use [the recovered-document recovery](gemini-recovered-document-recovery.md)
+instead. A verifier error cleans up only its
 claimed lease and permit; it does not release the publication lock or restore
 search. No automatic retry or upload is scheduled by this action.
 

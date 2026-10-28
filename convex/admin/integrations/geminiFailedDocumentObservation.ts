@@ -145,3 +145,39 @@ export async function verifyCompletedGeminiDocument(target: DiagnosticTarget, do
     throw new Error("GEMINI_COMPLETED_DOCUMENT_PROOF_FAILED");
   }
 }
+
+async function completedOperationDocument(client: GeminiDiagnosticClient, target: DiagnosticTarget): Promise<string> {
+  const operation = new UploadToFileSearchStoreOperation();
+  operation.name = target.operationName;
+  const raw = record(await client.operations.get({ operation }));
+  const response = record(raw?.response);
+  if (!raw || raw.name !== target.operationName || raw.error !== undefined || raw.done !== true ||
+      typeof response?.documentName !== "string") invalidProof();
+  return response.documentName as string;
+}
+
+/**
+ * Proves that a document once confirmed STATE_FAILED later became active: its upload operation
+ * finished without error, it names the same document, and that document is the unique ACTIVE match.
+ */
+export async function verifyRecoveredGeminiDocument(
+  target: DiagnosticTarget,
+  failedDocumentReference: string,
+  apiKey: string,
+  injectedClient?: GeminiDiagnosticClient,
+): Promise<{ documentName: string; verifiedAt: number }> {
+  try {
+    validateTarget(target);
+    if (!apiKey.trim() || !/^sha256:[a-f0-9]{64}$/.test(failedDocumentReference)) invalidProof();
+    const client = injectedClient ?? defaultClient(apiKey);
+    const documentName = await completedOperationDocument(client, target);
+    if (parseGeminiDocumentName(documentName)?.storeName !== target.storeName ||
+        await reference(documentName) !== failedDocumentReference) invalidProof();
+    if (await uniqueDocument(target, client, "STATE_ACTIVE") !== documentName) invalidProof();
+    await requireOperation(client, target, documentName);
+    return { documentName, verifiedAt: Date.now() };
+  } catch {
+    // Never attach raw provider responses, headers, resource names, or credentials as cause.
+    throw new Error("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+  }
+}

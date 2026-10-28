@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { observeFailedGeminiDocument, verifyCompletedGeminiDocument } from "./geminiFailedDocumentObservation";
+import { observeFailedGeminiDocument, verifyCompletedGeminiDocument, verifyRecoveredGeminiDocument } from "./geminiFailedDocumentObservation";
 import type { DiagnosticTarget, GeminiDiagnosticClient } from "./geminiDiagnostic";
 
 const STORE = "fileSearchStores/ohada-failed";
@@ -114,5 +114,77 @@ describe("completed Gemini document proof", () => {
     sdk.fileSearchStores.documents.get.mockResolvedValue(document({ state }));
     sdk.operations.get.mockResolvedValue({ name: OPERATION, done: true, response: { documentName: DOCUMENT } });
     await expect(verifyCompletedGeminiDocument(target, DOCUMENT, SECRET, sdk)).rejects.toThrow("GEMINI_COMPLETED_DOCUMENT_PROOF_FAILED");
+  });
+});
+
+async function hashReference(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+const COMPLETED = { name: OPERATION, done: true, response: { documentName: DOCUMENT } };
+function recoveredClient(operation: unknown = COMPLETED, { state }: { state?: string } = { state: "STATE_ACTIVE" }) {
+  const fake = client([[document({ state })]]);
+  fake.sdk.fileSearchStores.documents.get.mockImplementation(async () => { fake.calls.push("document"); return document({ state }); });
+  fake.sdk.operations.get.mockImplementation(async () => { fake.calls.push("operation"); return operation; });
+  return fake;
+}
+
+describe("recovered Gemini document proof", () => {
+  it("returns the failed document once it is active and its operation completed without error", async () => {
+    const { sdk, calls } = recoveredClient();
+    const before = Date.now();
+    const proof = await verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, sdk);
+    expect(proof).toEqual({ documentName: DOCUMENT, verifiedAt: expect.any(Number) });
+    expect(proof.verifiedAt).toBeGreaterThanOrEqual(before);
+    expect(calls).toEqual(["operation", "list", "document", "operation"]);
+  });
+
+  it("rejects a different document than the one confirmed failed", async () => {
+    const { sdk } = recoveredClient();
+    await expect(verifyRecoveredGeminiDocument(target, await hashReference(`${STORE}/documents/other`), SECRET, sdk))
+      .rejects.toThrow("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+    expect(sdk.fileSearchStores.documents.list).not.toHaveBeenCalled();
+  });
+
+  it.each(["STATE_FAILED", "STATE_PENDING", "STATE_UNSPECIFIED", undefined])("rejects a %s document", async state => {
+    const { sdk } = recoveredClient(COMPLETED, { state });
+    await expect(verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, sdk))
+      .rejects.toThrow("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+  });
+
+  it.each([
+    null, {}, { name: OPERATION, done: false }, { name: OPERATION }, { name: OPERATION, done: "true", response: { documentName: DOCUMENT } },
+    { name: OPERATION, done: true }, { name: OPERATION, done: true, response: {} },
+    { name: OPERATION, done: true, error: { code: 13 }, response: { documentName: DOCUMENT } },
+    { name: `${STORE}/upload/operations/other`, done: true, response: { documentName: DOCUMENT } },
+    { name: OPERATION, done: true, response: { documentName: "fileSearchStores/foreign/documents/failed-1" } },
+  ])("rejects unfinished, failed, or mismatched operation %j", async operation => {
+    const { sdk } = recoveredClient(operation);
+    await expect(verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, sdk))
+      .rejects.toThrow("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+  });
+
+  it("rejects an operation that changes between the first and final reads", async () => {
+    const { sdk } = recoveredClient();
+    sdk.operations.get
+      .mockResolvedValueOnce({ name: OPERATION, done: true, response: { documentName: DOCUMENT } })
+      .mockResolvedValueOnce({ name: OPERATION, done: true, error: { code: 13 } });
+    await expect(verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, sdk))
+      .rejects.toThrow("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+  });
+
+  it("rejects duplicate matches and malformed references without leaking secrets", async () => {
+    const duplicate = recoveredClient();
+    duplicate.sdk.fileSearchStores.documents.list.mockResolvedValue({
+      page: [document({ state: "STATE_ACTIVE" }), document({ name: `${STORE}/documents/second`, state: "STATE_ACTIVE" })],
+      hasNextPage: () => false, nextPage: async () => [],
+    } as never);
+    await expect(verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, duplicate.sdk)).rejects.toThrow();
+    const { sdk } = recoveredClient();
+    await expect(verifyRecoveredGeminiDocument(target, "not-a-reference", SECRET, sdk)).rejects.toThrow("GEMINI_RECOVERED_DOCUMENT_PROOF_FAILED");
+    sdk.fileSearchStores.documents.get.mockRejectedValue(new Error(SECRET));
+    const error = await verifyRecoveredGeminiDocument(target, await hashReference(DOCUMENT), SECRET, sdk).catch((caught: Error) => caught);
+    expect(String(error)).not.toContain(SECRET);
   });
 });
