@@ -20,6 +20,7 @@ import logo from "@/app/logo-transparent.png";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
+import { transcribeRecording } from "@/components/chat/use-voice-recorder";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatSession } from "@/lib/chat-sessions";
 import { publicChatErrorMessage } from "@/lib/chat-errors";
@@ -990,6 +991,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     onStop={canStopAnswer ? stopAnswer : undefined}
                     submitDisabled={!selectionReady || attachmentBlocked}
                     attachments={composerAttachments}
+                    transcribe={transcribeRecording}
                     hasFiles={files.some((file) => Boolean(file.attachment))}
                     rows={2}
                     placeholder={files.length ? "Send to summarize these files, or add a question." : "What would you like to understand?"}
@@ -1209,6 +1211,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               onStop={canStopAnswer ? stopAnswer : undefined}
               submitDisabled={attachmentBlocked}
               attachments={composerAttachments}
+              transcribe={transcribeRecording}
               hasFiles={files.some((file) => Boolean(file.attachment))}
               rows={2}
               footer={chatResearchJurisdiction ? (
