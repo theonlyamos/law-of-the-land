@@ -133,7 +133,7 @@ describe("failed chat turns", () => {
     const turns = await client.query(api.chatFailedTurns.list, { externalId: "chat-1" });
     expect(turns).toHaveLength(MAX_FAILED_TURNS_PER_CHAT);
     expect(turns[0].question).toBe("Question 3");
-    expect(turns.at(-1)?.question).toBe(`Question ${MAX_FAILED_TURNS_PER_CHAT + 2}`);
+    expect(turns[turns.length - 1].question).toBe(`Question ${MAX_FAILED_TURNS_PER_CHAT + 2}`);
   });
 
   it("deletes failed questions with the chat", async () => {
