@@ -46,6 +46,9 @@ import type * as chatAttachments from "../chatAttachments.js";
 import type * as chatFailedTurns from "../chatFailedTurns.js";
 import type * as chats from "../chats.js";
 import type * as crons from "../crons.js";
+import type * as documentReviewActions from "../documentReviewActions.js";
+import type * as documentReviewSources from "../documentReviewSources.js";
+import type * as documentReviews from "../documentReviews.js";
 import type * as guestResearch from "../guestResearch.js";
 import type * as http from "../http.js";
 import type * as jurisdictions from "../jurisdictions.js";
@@ -58,6 +61,8 @@ import type * as lib_chatAttachmentContracts from "../lib/chatAttachmentContract
 import type * as lib_chatAttachmentProof from "../lib/chatAttachmentProof.js";
 import type * as lib_chatCitationClaim from "../lib/chatCitationClaim.js";
 import type * as lib_chatNoEvidence from "../lib/chatNoEvidence.js";
+import type * as lib_documentReviewContracts from "../lib/documentReviewContracts.js";
+import type * as lib_documentReviewModel from "../lib/documentReviewModel.js";
 import type * as lib_chatPolicy from "../lib/chatPolicy.js";
 import type * as lib_email from "../lib/email.js";
 import type * as lib_geminiFileSearchNames from "../lib/geminiFileSearchNames.js";
@@ -141,6 +146,9 @@ declare const fullApi: ApiFromModules<{
   chatFailedTurns: typeof chatFailedTurns;
   chats: typeof chats;
   crons: typeof crons;
+  documentReviewActions: typeof documentReviewActions;
+  documentReviewSources: typeof documentReviewSources;
+  documentReviews: typeof documentReviews;
   guestResearch: typeof guestResearch;
   http: typeof http;
   jurisdictions: typeof jurisdictions;
@@ -153,6 +161,8 @@ declare const fullApi: ApiFromModules<{
   "lib/chatAttachmentProof": typeof lib_chatAttachmentProof;
   "lib/chatCitationClaim": typeof lib_chatCitationClaim;
   "lib/chatNoEvidence": typeof lib_chatNoEvidence;
+  "lib/documentReviewContracts": typeof lib_documentReviewContracts;
+  "lib/documentReviewModel": typeof lib_documentReviewModel;
   "lib/chatPolicy": typeof lib_chatPolicy;
   "lib/email": typeof lib_email;
   "lib/geminiFileSearchNames": typeof lib_geminiFileSearchNames;

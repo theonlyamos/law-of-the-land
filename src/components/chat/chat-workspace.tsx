@@ -9,10 +9,14 @@ import { useChatAttachments } from "./use-chat-attachments";
 import { DraftAttachmentTray, MessageAttachments } from "./chat-attachment-cards";
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentUploadsEnabled, type ChatAttachment } from "../../../shared/chat-attachments";
 import { chatProgressLabel } from "../../../shared/chat-progress";
+import { DEFAULT_REVIEW_QUESTION, isDocumentReviewRequest } from "../../../shared/document-review";
+import { DocumentReviewCard, reviewActionErrorMessage, type DocumentReviewSummary } from "@/components/document-review/document-review-card";
+import { DocumentReviewWorkspace } from "@/components/document-review/document-review-workspace";
+import { ReviewModeToggle, pickReviewAttachment } from "@/components/document-review/review-mode-toggle";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { Fragment, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { AssistantMessage, assistantMarkdown } from "./assistant-message";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
@@ -130,6 +134,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     isDeleting: isDeletingCurrentChat, isDeleted: isCurrentChatDeleted, backgroundJobId, backgroundRecovery, canStop,
   } = useChatRequests(requestChatId);
   const [sourcePreview, setSourcePreview] = useState<{ source: CitationPreviewSource; chatId: string | null } | null>(null);
+  /** null follows what the question asks for; true or false is the person's own choice. */
+  const [reviewOverride, setReviewOverride] = useState<boolean | null>(null);
+  const [openReview, setOpenReview] = useState<{ reviewId: Id<"documentReviews">; chatId: string } | null>(null);
+  const [reviewError, setReviewError] = useState<{ chatId: string; message: string; retry?: () => Promise<unknown> } | null>(null);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -180,6 +188,17 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const recordFailedTurn = useMutation(api.chatFailedTurns.record);
   const ensureSession = useMutation(api.chats.ensure);
   const appendMessages = useMutation(api.chats.appendMessages);
+  const createDocumentReview = useMutation(api.documentReviews.create);
+  const documentReviews = useQuery(
+    api.documentReviews.listForChat,
+    isAuthenticated && chatId ? { externalId: chatId } : "skip"
+  );
+  const reviewsByMessage = useMemo(() => {
+    const map = new Map<string, DocumentReviewSummary[]>();
+    for (const review of documentReviews ?? []) map.set(review.userClientId, [...(map.get(review.userClientId) ?? []), review]);
+    return map;
+  }, [documentReviews]);
+  const reviewWanted = files.length > 0 && isAuthenticated && (reviewOverride ?? isDocumentReviewRequest(query));
   const removeSession = useMutation(api.chats.remove);
 
   const sessions = sessionsData.map(toSidebarSession);
@@ -271,7 +290,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     allocatedNewChatIdRef.current = null;
     routeEnsureRef.current = null;
     setSelectedResearchJurisdiction(null);
+    setOpenReview(null);
   }, [chatId, resetChatView]);
+
+  useEffect(() => {
+    if (!files.length) setReviewOverride(null);
+  }, [files.length]);
 
   useEffect(() => {
     if (!chatId || !isAuthenticated || sessionData === undefined || (!sessionData && !selectionReady)) return;
@@ -501,8 +525,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   }, [chatId, chatResearchJurisdiction, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
 
   const handleSearch = useCallback(
-    async (searchQuery: string) => {
-      const trimmed = searchQuery.trim() || (files.length ? "Summarize these files." : "");
+    async (searchQuery: string, options?: { review?: boolean }) => {
+      // A document review needs a signed-in owner and a file to read.
+      const wantsReview = files.length > 0 && isAuthenticated
+        && (options?.review ?? reviewOverride ?? isDocumentReviewRequest(searchQuery));
+      const trimmed = searchQuery.trim() || (files.length ? wantsReview ? DEFAULT_REVIEW_QUESTION : "Summarize these files." : "");
       if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
       const submittedFiles = files;
 
@@ -600,6 +627,64 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         }
         if (!isCurrentRequest()) return;
         userMessage.attachments = uploadedAttachments;
+      }
+
+      const reviewTarget = wantsReview ? pickReviewAttachment(uploadedAttachments) : null;
+      if (reviewTarget) {
+        if (isVisibleRoute()) {
+          prependScrollIntentRef.current = null;
+          composerScrollIntentRef.current = beginComposerBottomScroll({ routeGeneration: requestGeneration });
+        }
+        setReviewError(null);
+        requests.update(submissionChatId, request, { canStop: false, messages: [...request.state.messages, userMessage] });
+        const startReview = () => createDocumentReview({
+          externalId: submissionChatId,
+          userClientId: userMessage.clientId,
+          attachmentId: reviewTarget.id as Id<"chatAttachments">,
+          question: trimmed,
+        });
+        let saved = false;
+        try {
+          const ran = await runAfterRouteEnsure({
+            ensurePromise: persistenceEnsure,
+            isCurrentRoute: isCurrentRequest,
+            run: () => appendMessages({
+              externalId: submissionChatId,
+              title: displayMessages.length === 0 ? trimmed.slice(0, 30) + (trimmed.length > 30 ? "..." : "") : undefined,
+              lastMessage: trimmed,
+              jurisdictionId: chatResearchJurisdiction!.id as Id<"jurisdictions">,
+              jurisdictionName: chatResearchJurisdiction!.name,
+              jurisdictionKind: chatResearchJurisdiction!.kind,
+              messages: [{
+                role: "user" as const,
+                content: userMessage.content,
+                clientId: userMessage.clientId,
+                createdAt: userMessage.createdAt,
+                attachmentIds: uploadedAttachments.map((file) => file.id as Id<"chatAttachments">),
+              }],
+            }),
+          });
+          if (!ran || !isCurrentRequest()) return;
+          saved = true;
+          setLocalMessages((previous) => previous.map((message) =>
+            message.localId === userMessage.localId ? { ...message, state: "verified" } : message));
+          clearSentDraft(submissionChatId, searchQuery, submittedFiles);
+          setReviewOverride(null);
+          await startReview();
+        } catch (error) {
+          if (!isCurrentRequest()) return;
+          console.error(saved ? "Failed to start document review:" : "Failed to save review question:", error);
+          if (saved) {
+            setReviewError({ chatId: submissionChatId, message: `Your file was saved, but the review didn't start. ${reviewActionErrorMessage(error)}`, retry: startReview });
+          } else {
+            setReviewError({ chatId: submissionChatId, message: "We couldn't send this document for review. Check your connection and try again." });
+            setLocalMessages((previous) => previous.map((message) =>
+              message.localId === userMessage.localId ? { ...message, state: "error" } : message));
+          }
+        } finally {
+          if (isCurrentRequest()) requests.update(submissionChatId, request, { isLoading: false, canStop: false, activeTurn: null });
+        }
+        return;
       }
 
       if (isVisibleRoute()) {
@@ -798,6 +883,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     },
     [
       appendMessages,
+      createDocumentReview,
+      isAuthenticated,
+      reviewOverride,
       recordFailedTurn,
       chatResearchJurisdiction,
       chatId,
@@ -890,8 +978,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   const jurisdictionLabel = chatResearchJurisdiction
     ? `${chatResearchJurisdiction.organization ? `${chatResearchJurisdiction.organization.name} / ` : ""}${chatResearchJurisdiction.name}`
     : "";
-  const attachmentTray = <DraftAttachmentTray files={files} error={attachments.error} disabled={isLoading}
-    onRemove={(file) => void removeFile(file)} onRetry={newUploadsEnabled ? (file) => void retryFile(file) : undefined} />;
+  const attachmentTray = <>
+    <DraftAttachmentTray files={files} error={attachments.error} disabled={isLoading}
+      onRemove={(file) => void removeFile(file)} onRetry={newUploadsEnabled ? (file) => void retryFile(file) : undefined} />
+    {files.length > 0 && isAuthenticated && (
+      <ReviewModeToggle checked={reviewWanted} disabled={isLoading} fileCount={files.length}
+        onChange={(checked) => setReviewOverride(checked)} />
+    )}
+  </>;
   const composerAttachments = newUploadsEnabled ? {
     accept: CHAT_ATTACHMENT_ACCEPT,
     hasFiles: files.length > 0,
@@ -995,7 +1089,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     transcribe={transcribeRecording}
                     hasFiles={files.some((file) => Boolean(file.attachment))}
                     rows={2}
-                    placeholder={files.length ? "Send to summarize these files, or add a question." : "What would you like to understand?"}
+                    placeholder={files.length
+                      ? reviewWanted ? "Send to review this document, or say what to focus on." : "Send to summarize these files, or add a question."
+                      : "What would you like to understand?"}
                     footer={
                       <ResearchJurisdictionPicker
                         compact
@@ -1061,10 +1157,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             )}
             {displayMessages.map((message, index) => {
               const isUser = message.role === "user";
+              const messageReviews = isUser && message.clientId ? reviewsByMessage.get(message.clientId) : undefined;
 
               return (
+                <Fragment key={message.key}>
                 <div
-                  key={message.key}
                   className={`flex min-w-0 ${
                     isUser
                       ? `justify-end ${index > 0 ? "mt-12" : ""}`
@@ -1143,6 +1240,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     </div>
                   )}
                 </div>
+                {messageReviews?.map((review) => (
+                  <div key={review.id} className="mt-7 flex min-w-0 justify-start">
+                    <DocumentReviewCard review={review} busy={isLoading}
+                      onOpen={(reviewId) => chatId && setOpenReview({ reviewId, chatId })}
+                      onSummarise={() => void handleSearch("Summarize this document.", { review: false })} />
+                  </div>
+                ))}
+                </Fragment>
               );
             })}
             <div ref={messagesEndRef} />
@@ -1199,8 +1304,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   : "This answer took too long. You can ask a more focused question or try again later."}
               </p>
             )}
+            {reviewError && reviewError.chatId === chatId && (
+              <div role="alert" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-destructive">
+                <span>{reviewError.message}</span>
+                {reviewError.retry && (
+                  <Button type="button" variant="outline" size="sm" onClick={() => {
+                    const retry = reviewError.retry!;
+                    setReviewError(null);
+                    void retry().catch((error: unknown) => setReviewError({ ...reviewError, message: `The review didn't start. ${reviewActionErrorMessage(error)}` }));
+                  }}>Try again</Button>
+                )}
+              </div>
+            )}
             {retainedAttachmentTray}
             <ChatInput
+              id="follow-up-question"
               variant="editorial"
               ariaLabel="Follow-up question"
               describedBy={errorReason ? "chat-request-error" : undefined}
@@ -1227,7 +1345,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               ) : undefined}
               placeholder={
                 files.length
-                  ? "Send to summarize these files, or add a question."
+                  ? reviewWanted ? "Send to review this document, or say what to focus on." : "Send to summarize these files, or add a question."
                   : displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
                   : "Ask a follow-up…"
@@ -1241,6 +1359,14 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           </>
         )}
       </div>
+      {openReview && openReview.chatId === chatId && isAuthenticated && !isCurrentChatDeleted && (
+        <DocumentReviewWorkspace key={openReview.reviewId} reviewId={openReview.reviewId} onClose={() => setOpenReview(null)}
+          onAsk={(prompt) => {
+            setOpenReview(null);
+            setQuery(prompt);
+            window.setTimeout(() => document.getElementById("follow-up-question")?.focus(), 0);
+          }} />
+      )}
       {sourcePreview && sourcePreview.chatId === chatId && isAuthenticated && !isCurrentChatDeleted && (
         <CitationSourcePreview key={`${chatId}:${sourcePreview.source.label}:${sourcePreview.source.originalUrl}`} source={sourcePreview.source} onClose={() => setSourcePreview(null)} />
       )}
