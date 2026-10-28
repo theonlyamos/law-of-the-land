@@ -68,6 +68,8 @@ import type * as lib_legacyJurisdictionCompatibility from "../lib/legacyJurisdic
 import type * as lib_organizationAccess from "../lib/organizationAccess.js";
 import type * as lib_organizationManagement from "../lib/organizationManagement.js";
 import type * as lib_placeClaim from "../lib/placeClaim.js";
+import type * as lib_profileMemoryContracts from "../lib/profileMemoryContracts.js";
+import type * as lib_profileMemoryExtraction from "../lib/profileMemoryExtraction.js";
 import type * as lib_queryDiagnostics from "../lib/queryDiagnostics.js";
 import type * as lib_rateBuckets from "../lib/rateBuckets.js";
 import type * as lib_requireAdmin from "../lib/requireAdmin.js";
@@ -83,6 +85,8 @@ import type * as organizationJurisdictions from "../organizationJurisdictions.js
 import type * as organizationMembers from "../organizationMembers.js";
 import type * as organizations from "../organizations.js";
 import type * as polar from "../polar.js";
+import type * as profileMemory from "../profileMemory.js";
+import type * as profileMemoryActions from "../profileMemoryActions.js";
 import type * as reviewedEmployment from "../reviewedEmployment.js";
 import type * as reviewedEmploymentCompletion from "../reviewedEmploymentCompletion.js";
 import type * as reviewedEmploymentJobs from "../reviewedEmploymentJobs.js";
@@ -159,6 +163,8 @@ declare const fullApi: ApiFromModules<{
   "lib/organizationAccess": typeof lib_organizationAccess;
   "lib/organizationManagement": typeof lib_organizationManagement;
   "lib/placeClaim": typeof lib_placeClaim;
+  "lib/profileMemoryContracts": typeof lib_profileMemoryContracts;
+  "lib/profileMemoryExtraction": typeof lib_profileMemoryExtraction;
   "lib/queryDiagnostics": typeof lib_queryDiagnostics;
   "lib/rateBuckets": typeof lib_rateBuckets;
   "lib/requireAdmin": typeof lib_requireAdmin;
@@ -174,6 +180,8 @@ declare const fullApi: ApiFromModules<{
   organizationMembers: typeof organizationMembers;
   organizations: typeof organizations;
   polar: typeof polar;
+  profileMemory: typeof profileMemory;
+  profileMemoryActions: typeof profileMemoryActions;
   reviewedEmployment: typeof reviewedEmployment;
   reviewedEmploymentCompletion: typeof reviewedEmploymentCompletion;
   reviewedEmploymentJobs: typeof reviewedEmploymentJobs;

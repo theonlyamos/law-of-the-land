@@ -51,6 +51,7 @@ import { parseReviewedEmploymentJobProjection, reviewedEmploymentJobSubmitProofP
 import { productionReviewedEmploymentEnabled, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY } from "../../../../shared/reviewed-employment-policy";
 import { createPublicationFilterBinding, parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL } from "../../../../shared/gemini-publication-filter";
 import { createChatTimingTrace } from "@/lib/chat-timing";
+import { parseChatUserProfile, type ChatUserProfile } from "../../../../shared/profile-memory";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -371,6 +372,17 @@ function parseManifest(bytes: Uint8Array, selectedJurisdictionId: string): Resea
   };
 }
 
+// Profile memory is optional context: a slow or failed lookup answers without it.
+const PROFILE_LOOKUP_TIMEOUT_MS = 1_500;
+async function loadChatProfile(externalId: string, signal: AbortSignal): Promise<ChatUserProfile | undefined> {
+  try {
+    const lookup = AbortSignal.any([signal, AbortSignal.timeout(PROFILE_LOOKUP_TIMEOUT_MS)]);
+    return parseChatUserProfile(await raceWithAbort(fetchAuthQuery(api.profileMemory.forChat, { externalId }), lookup));
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadManifest(
   jurisdictionId: string,
   token: string,
@@ -572,6 +584,7 @@ function streamResponse(input: {
   reviewed?: { selection: ReviewedEmploymentSelection; token: string };
   localDocumentSingleAttempt?: boolean;
   progress?: boolean;
+  profile?: ChatUserProfile;
   provisionalStreaming: boolean;
 }) {
   const encoder = new TextEncoder();
@@ -728,6 +741,7 @@ function streamResponse(input: {
               query: input.body.query,
               stores: input.manifest.stores,
               history: input.body.messages,
+              ...(input.profile && input.answerMode !== "document" ? { profile: input.profile } : {}),
               ...(input.attachmentContext?.attachments.length ? {
                 attachments: input.attachmentContext.attachments,
                 answerKind: input.answerMode ?? "legal",
@@ -1089,6 +1103,9 @@ export async function POST(request: Request): Promise<Response> {
       : null;
     // A token failure is reported when the stores are awaited; it is moot for fixed replies.
     researchStores?.catch(() => undefined);
+    const profileLookup = reply === null && answerMode !== "document" && !reviewed
+      ? loadChatProfile(body.externalId, researchSignal)
+      : null;
     if (!coverageGap && !reviewed && !hasAttachments && (mode === "shadow" || (mode === "on" && reply === null))) {
       const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode);
       if (mode === "on") reply = policyReply(choice);
@@ -1102,6 +1119,7 @@ export async function POST(request: Request): Promise<Response> {
       if (!resolved.manifest) return stopEarly(jsonError(RESEARCH_UNAVAILABLE, 400));
       manifest = resolved.manifest;
     }
+    const profile = reply === null && profileLookup ? await profileLookup : undefined;
 
     // Capture the actual admitted allowlist before any governed provider work.
     // Final completion compares this original snapshot with the current backend
@@ -1202,6 +1220,7 @@ export async function POST(request: Request): Promise<Response> {
       attachmentContext,
       answerMode,
       reviewed,
+      ...(profile ? { profile } : {}),
       provisionalStreaming: body.streaming === "provisional-v1" && !reviewed && !coverageGap && !localReviewedScope,
       ...(localReviewedScope && answerMode === "document" ? { localDocumentSingleAttempt: true } : {}),
       progress: request.headers.get(CHAT_PROGRESS_HEADER) === "1",
