@@ -6,10 +6,10 @@ export const DOCUMENT_REVIEW_LIMITS = {
   maxSegmentCharacters: 2_400,
   /** Passages checked against the law in one review. */
   maxCheckedSegments: 40,
-  /** Passages sent to the model in one checking request. */
-  checkBatchSize: 5,
+  /** Passages sent to the model in one checking request. Small batches leave room to search each one. */
+  checkBatchSize: 3,
   /** Checking requests running at the same time. */
-  checkConcurrency: 3,
+  checkConcurrency: 4,
   maxFindings: 60,
   maxGapFindings: 6,
   maxCitationsPerFinding: 4,
