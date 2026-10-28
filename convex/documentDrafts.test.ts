@@ -232,6 +232,16 @@ describe("document drafts", () => {
     expect(data!.clauses[1]).toMatchObject({ lawSummary: "", citations: [] });
   });
 
+  it("does not finish a draft until every planned section is saved", async () => {
+    const f = await fixture();
+    const draftId = await requestDraft(f);
+    await f.t.mutation(savePlan, { draftId, attempt: 1, plan: PLAN });
+    await startDrafting(f.t, draftId);
+    await f.t.mutation(saveClauses, { draftId, attempt: 1, pool: [], draftedOrdinals: [0, 1], clauses: [clause(0), clause(1)] });
+    await f.t.mutation(complete, { draftId, attempt: 1 });
+    expect((await f.client.query(api.documentDrafts.get, { draftId }))!.draft).toMatchObject({ status: "failed", failure: "internal" });
+  });
+
   it("saves the person's edits as a new version and keeps at least one clause", async () => {
     const f = await fixture();
     const draftId = await completedDraft(f);

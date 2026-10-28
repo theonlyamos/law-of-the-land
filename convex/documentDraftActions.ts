@@ -230,12 +230,19 @@ export const draft = internalAction({
     let drafted = 0;
     const instruction = draftInstruction(input.context.audience);
 
+    let saveFailed = false;
     const save = async (clauses: ProposedClause[], pool: unknown[], draftedOrdinals: number[]) => {
-      try {
-        await ctx.runMutation(saveClausesRef, { ...args, clauses: clauses.map(clauseForStorage), pool, draftedOrdinals });
-      } catch (error) {
-        console.warn("document_draft_save", JSON.stringify({ outcome: "save_error", message: error instanceof Error ? error.name : "unknown" }));
+      // One retry covers a transient write conflict; a batch that still can't be saved fails the draft.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await ctx.runMutation(saveClausesRef, { ...args, clauses: clauses.map(clauseForStorage), pool, draftedOrdinals });
+          return true;
+        } catch (error) {
+          console.warn("document_draft_save", JSON.stringify({ outcome: "save_error", attempt, message: error instanceof Error ? error.name : "unknown" }));
+        }
       }
+      saveFailed = true;
+      return false;
     };
 
     const draftBatch = async (batch: typeof pending) => {
@@ -263,10 +270,10 @@ export const draft = internalAction({
         }
       }
       const clauses = parsed?.clauses ?? [];
-      drafted += clauses.length;
+      const written = clauses.length;
       const covered = new Set(clauses.map((clause) => clause.sectionOrdinal));
       for (const section of batch) if (!covered.has(section.ordinal)) clauses.push(placeholderClause(section));
-      await save(clauses, parsed?.pool ?? [], batch.map((section) => section.ordinal));
+      if (await save(clauses, parsed?.pool ?? [], batch.map((section) => section.ordinal))) drafted += written;
     };
 
     const listFormalities = async () => {
@@ -289,6 +296,10 @@ export const draft = internalAction({
 
     await Promise.all([listFormalities(), runInParallel(batches, LIMITS.draftConcurrency, draftBatch)]);
 
+    if (saveFailed) {
+      await ctx.runMutation(failRef, { ...args, failure: "internal" });
+      return null;
+    }
     // Nothing drafted at all is a failure, not an empty document.
     if (drafted === 0 && pending.length > 0 && done.size === 0) {
       await ctx.runMutation(failRef, { ...args, failure: providerErrors > 0 ? "provider" : "timeout" });

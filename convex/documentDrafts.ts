@@ -787,8 +787,15 @@ export const complete = internalMutation({
   handler: async (ctx, args) => {
     const active = await activeDraft(ctx, args.draftId, args.attempt, "drafting");
     if (!active) return null;
-    const research = await researchSnapshot(ctx, active.draft._id);
     const now = Date.now();
+    // Every planned section must be saved, drafted or as a blank, before the document is shown as finished.
+    const saved = new Set((await currentClauses(ctx, active.draft)).map((clause) => clause.ordinal));
+    const planned = active.draft.sections?.length ?? 0;
+    if (planned === 0 || saved.size < planned) {
+      await ctx.db.patch("documentDrafts", active.draft._id, { status: "failed", failure: "internal", startRequested: false, updatedAt: now });
+      return null;
+    }
+    const research = await researchSnapshot(ctx, active.draft._id);
     await ctx.db.patch("documentDrafts", active.draft._id, {
       status: "completed",
       formalities: active.draft.formalities ?? [],

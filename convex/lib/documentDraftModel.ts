@@ -437,12 +437,15 @@ export function parseFormalities(output: { text: string; annotations: readonly O
 
 /** A clause written when its section could not be drafted this time, so the document stays complete. */
 export function placeholderClause(section: { ordinal: number; heading: string; purpose: string }): ProposedClause {
+  // Kept short enough to count as a [blank], so the missing section is flagged and highlighted everywhere.
+  const name = section.heading.replace(/[[\]\n]+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 56) || "this section";
+  const purpose = section.purpose ? ` It should cover: ${section.purpose}` : "";
   return {
     sectionOrdinal: section.ordinal,
     heading: section.heading,
-    text: `[This section could not be drafted this time. It should cover: ${section.purpose || section.heading}]`,
+    text: `[Write this section: ${name}]`,
     basis: "common",
-    why: "We couldn't draft this section against the library this time. Ask for a change to try again, or write it yourself.",
+    why: `We couldn't draft this section against the library this time.${purpose} Ask for a change to try again, or write it yourself.`,
     lawSummary: "",
     provisions: [],
     citations: [],

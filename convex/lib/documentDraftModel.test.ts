@@ -131,6 +131,10 @@ describe("drafting output", () => {
     expect(prompt.sectionsToDraft).toEqual([{ section_id: "S1", heading: "Parties", kind: "opening", mustCover: "Name them" }]);
     expect(prompt.untrustedAnswers).toEqual([{ question: "Rent", answer: "2000" }]);
     expect(placeholderClause({ ordinal: 3, heading: "Deposit", purpose: "Deposit terms" })).toMatchObject({ sectionOrdinal: 3, basis: "common", citations: [] });
+    // A failed section always counts as a blank, however long its heading or purpose.
+    const long = placeholderClause({ ordinal: 4, heading: `Rent [and] advance payments ${"x".repeat(200)}`, purpose: "Rent and advance payments, how and when they are paid." });
+    expect(placeholdersIn(long.text)).toHaveLength(1);
+    expect(long.why).toContain("Rent and advance payments");
   });
 });
 
