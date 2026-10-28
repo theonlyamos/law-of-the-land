@@ -18,6 +18,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
 import { Fragment, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { AssistantMessage, assistantMarkdown } from "./assistant-message";
+import { AnswerSkeleton, ConversationSkeleton } from "./answer-skeleton";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import logo from "@/app/logo-transparent.png";
@@ -1054,7 +1055,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           </div>
         </header>
 
-        {isChatLoading || isCurrentChatDeleted || isDeletingCurrentChat ? (
+        {isChatLoading && !isCurrentChatDeleted && !isDeletingCurrentChat ? (
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <ConversationSkeleton label={chatStatusLabel} className={THREAD_RAIL} />
+          </div>
+        ) : isCurrentChatDeleted || isDeletingCurrentChat ? (
           <div role="status" aria-label={chatStatusLabel} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4">
             <Spinner />
             <p className="text-sm text-muted-foreground">{chatStatusLabel}</p>
@@ -1185,13 +1190,11 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                       <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</div>
                     </div>
                   ) : message.source === "local" && message.state === "pending" && message.content === "..." ? (
-                    <div className="flex items-center gap-3 py-2 text-sm text-muted-foreground" role="status" aria-label="Preparing answer">
-                      <Spinner className="size-4" />{message.backgroundJobId && background.job
-                        ? background.job.status === "succeeded" ? "Loading the saved answer."
-                          : ({ queued: "Verification is queued.", draft: "Preparing the answer for verification.", inventory: "Checking the source evidence.",
-                            consent: "Checking written consent.", overtime: "Checking overtime limits.", commit: "Saving the verified answer.", complete: "Loading the saved answer." })[background.job.progress]
-                        : chatProgressLabel(message.progress)}
-                    </div>
+                    <AnswerSkeleton label={message.backgroundJobId && background.job
+                      ? background.job.status === "succeeded" ? "Loading the saved answer."
+                        : ({ queued: "Verification is queued.", draft: "Preparing the answer for verification.", inventory: "Checking the source evidence.",
+                          consent: "Checking written consent.", overtime: "Checking overtime limits.", commit: "Saving the verified answer.", complete: "Loading the saved answer." })[background.job.progress]
+                      : chatProgressLabel(message.progress)} />
                   ) : (
                     <div className="min-w-0 w-full text-sm leading-7">
                       <div className="mb-4 flex items-center gap-2 text-xs font-semibold">
