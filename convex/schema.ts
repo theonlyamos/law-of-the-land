@@ -1067,6 +1067,8 @@ export default defineSchema({
     sessionId: v.id("chatSessions"),
     messageId: v.id("messages"),
     kind: profileEvidenceKindValidator,
+    // The supporting words, so a fact's shown quote always comes from a chat that still exists.
+    quote: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_factId_and_sessionId", ["factId", "sessionId"])
@@ -1076,6 +1078,8 @@ export default defineSchema({
   userMemorySettings: defineTable({
     userId: v.string(),
     enabled: v.boolean(),
+    // Set by "clear all": questions asked before it are never learned from again.
+    resetAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_userId", ["userId"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown

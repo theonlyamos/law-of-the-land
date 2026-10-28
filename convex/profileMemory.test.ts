@@ -156,6 +156,7 @@ describe("profile memory", () => {
   });
 
   it("never relearns a fact the person removed", async () => {
+    vi.useFakeTimers();
     const t = createTestBackend();
     const { userId, client } = await createClient(t);
     const chat = await createChat(t, userId, "chat-1", await createJurisdiction(t));
@@ -165,6 +166,7 @@ describe("profile memory", () => {
 
     await client.mutation(api.profileMemory.removeFact, { factId: fact._id });
     await observe(t, await ask(t, chat, "I run a company and need to dismiss someone"), [stated]);
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers());
 
     expect(await facts(t)).toMatchObject([{ status: "dismissed", sightings: 0 }]);
     await expect(t.run(async (ctx) => await ctx.db.query("userProfileEvidence").take(10))).resolves.toEqual([]);
@@ -284,6 +286,70 @@ describe("profile memory", () => {
     await t.finishAllScheduledFunctions(() => vi.runAllTimers());
 
     expect((await facts(t)).map((fact) => fact.value)).toEqual(["employee"]);
+  });
+
+  it("removes every piece of evidence for a fact seen in many questions", async () => {
+    vi.useFakeTimers();
+    const t = createTestBackend();
+    const { userId, client } = await createClient(t);
+    const chat = await createChat(t, userId, "chat-1", await createJurisdiction(t));
+    const factId = await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await ctx.db.insert("userProfileFacts", {
+        userId, scope: "personal", type: "topic", value: "tenancy", status: "confirmed", source: "implied",
+        sightings: 250, chatCount: 1, firstSeenAt: now, lastSeenAt: now, updatedAt: now,
+      });
+      for (let index = 0; index < 250; index += 1) {
+        const messageId = await ctx.db.insert("messages", { sessionId: chat, role: "user", content: `rent question ${index}`, createdAt: now });
+        await ctx.db.insert("userProfileEvidence", { userId, factId: id, sessionId: chat, messageId, kind: "implied", createdAt: now });
+      }
+      return id;
+    });
+    await client.mutation(api.profileMemory.removeFact, { factId });
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+    await expect(t.run(async (ctx) => await ctx.db.query("userProfileEvidence").take(1))).resolves.toEqual([]);
+  });
+
+  it("shows only a quote from a chat that still exists", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000_000);
+    const t = createTestBackend();
+    const { userId, client } = await createClient(t);
+    const jurisdictionId = await createJurisdiction(t);
+    const kept = await createChat(t, userId, "kept", jurisdictionId);
+    const removed = await createChat(t, userId, "removed", jurisdictionId);
+    await observe(t, await ask(t, kept, "I am a landlord in Tema with one flat"), [
+      { type: "role", value: "landlord", kind: "stated", quote: "I am a landlord in Tema" },
+    ]);
+    vi.setSystemTime(1_000_000_000_000 + 1_000);
+    await observe(t, await ask(t, removed, "I am a landlord and my tenant left owing rent"), [
+      { type: "role", value: "landlord", kind: "stated", quote: "I am a landlord and my tenant" },
+    ]);
+    expect((await facts(t))[0].quote).toBe("I am a landlord and my tenant");
+
+    await client.mutation(api.chats.remove, { externalId: "removed" });
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+    expect(await facts(t)).toMatchObject([{ value: "landlord", status: "confirmed", sightings: 1, quote: "I am a landlord in Tema" }]);
+  });
+
+  it("does not let an extraction that was running during clear all bring old facts back", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000_000_000);
+    const t = createTestBackend();
+    const { userId, client } = await createClient(t);
+    const chat = await createChat(t, userId, "chat-1", await createJurisdiction(t));
+    const before = await ask(t, chat, "I am a landlord with two flats to let");
+
+    vi.setSystemTime(1_000_000_000_000 + 1_000);
+    await client.mutation(api.profileMemory.clearAll, {});
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+    await expect(observe(t, before, [{ type: "role", value: "landlord", kind: "stated", quote: "I am a landlord" }]))
+      .resolves.toEqual({ recorded: 0 });
+
+    vi.setSystemTime(1_000_000_000_000 + 2_000);
+    const after = await ask(t, chat, "I am a landlord and want to raise the rent");
+    await expect(observe(t, after, [{ type: "role", value: "landlord", kind: "stated", quote: "I am a landlord" }]))
+      .resolves.toEqual({ recorded: 1 });
   });
 
   it("expires stale candidates and demotes implied facts that stop showing up", async () => {

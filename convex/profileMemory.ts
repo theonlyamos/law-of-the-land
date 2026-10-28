@@ -38,13 +38,16 @@ export function profileMemoryAvailable(): boolean {
   return process.env.PROFILE_MEMORY_ENABLED === "true";
 }
 
-/** Memory is on by default for each person until they pause it. */
-async function memoryEnabledFor(ctx: Ctx, userId: string): Promise<boolean> {
-  const settings = await ctx.db
+async function settingsFor(ctx: Ctx, userId: string) {
+  return await ctx.db
     .query("userMemorySettings")
     .withIndex("by_userId", (q) => q.eq("userId", userId))
     .unique();
-  return settings?.enabled ?? true;
+}
+
+/** Memory is on by default for each person until they pause it. */
+async function memoryEnabledFor(ctx: Ctx, userId: string): Promise<boolean> {
+  return (await settingsFor(ctx, userId))?.enabled ?? true;
 }
 
 /**
@@ -137,14 +140,33 @@ async function maybePromote(ctx: MutationCtx, fact: Doc<"userProfileFacts">, now
   });
 }
 
-async function deleteFactWithEvidence(ctx: MutationCtx, factId: Id<"userProfileFacts">) {
-  const evidence = await ctx.db
-    .query("userProfileEvidence")
-    .withIndex("by_factId_and_sessionId", (q) => q.eq("factId", factId))
-    .take(MAX_EVIDENCE_PER_FACT_READ);
-  for (const row of evidence) await ctx.db.delete(row._id);
-  await ctx.db.delete(factId);
+/** Deletes a fact's evidence in batches until none is left. */
+async function scheduleEvidenceDeletion(ctx: MutationCtx, factId: Id<"userProfileFacts">) {
+  await ctx.scheduler.runAfter(0, internal.profileMemory.deleteEvidenceForFactBatch, { factId });
 }
+
+async function deleteFactWithEvidence(ctx: MutationCtx, factId: Id<"userProfileFacts">) {
+  await ctx.db.delete(factId);
+  await scheduleEvidenceDeletion(ctx, factId);
+}
+
+export const deleteEvidenceForFactBatch = internalMutation({
+  args: { factId: v.id("userProfileFacts") },
+  returns: v.object({ hasMore: v.boolean() }),
+  handler: async (ctx, args) => {
+    const fact = await ctx.db.get("userProfileFacts", args.factId);
+    // Only a deleted or removed fact loses all its evidence.
+    if (fact && fact.status !== "dismissed") return { hasMore: false };
+    const evidence = await ctx.db
+      .query("userProfileEvidence")
+      .withIndex("by_factId_and_sessionId", (q) => q.eq("factId", args.factId))
+      .take(DELETE_BATCH_SIZE);
+    for (const row of evidence) await ctx.db.delete(row._id);
+    const hasMore = evidence.length === DELETE_BATCH_SIZE;
+    if (hasMore) await scheduleEvidenceDeletion(ctx, args.factId);
+    return { hasMore };
+  },
+});
 
 /** Drops the stalest candidates so one scope never holds more than the cap. */
 async function trimCandidates(ctx: MutationCtx, userId: string, scope: string) {
@@ -180,7 +202,11 @@ async function loadExtractionContext(ctx: Ctx, messageId: Id<"messages">) {
   if (!message || message.role !== "user") return null;
   const session = await ctx.db.get("chatSessions", message.sessionId);
   if (!session || session.memoryDisabled) return null;
-  if (!(await memoryEnabledFor(ctx, session.userId))) return null;
+  const settings = await settingsFor(ctx, session.userId);
+  if (settings && !settings.enabled) return null;
+  // After "clear all", nothing asked before it is learned again, including
+  // an extraction that was still running when memory was cleared.
+  if (settings?.resetAt !== undefined && message.createdAt <= settings.resetAt) return null;
   const scope = await scopeForSession(ctx, session.userId, session);
   if (!scope) return null;
   return { message, session, scope };
@@ -249,6 +275,7 @@ export const recordObservations = internalMutation({
         sessionId: session._id,
         messageId: message._id,
         kind: observation.kind,
+        quote: trimQuote(observation.quote),
         createdAt: now,
       });
       const source = fact.source === "user" ? "user" : observation.kind === "stated" ? "stated" : fact.source;
@@ -379,10 +406,7 @@ export const setEnabled = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const existing = await ctx.db
-      .query("userMemorySettings")
-      .withIndex("by_userId", (q) => q.eq("userId", userId))
-      .unique();
+    const existing = await settingsFor(ctx, userId);
     if (existing) await ctx.db.patch(existing._id, { enabled: args.enabled, updatedAt: Date.now() });
     else await ctx.db.insert("userMemorySettings", { userId, enabled: args.enabled, updatedAt: Date.now() });
     return null;
@@ -441,15 +465,11 @@ export const removeFact = mutation({
     const userId = await requireUserId(ctx);
     const fact = await ctx.db.get("userProfileFacts", args.factId);
     if (!fact || fact.userId !== userId) return null;
-    const evidence = await ctx.db
-      .query("userProfileEvidence")
-      .withIndex("by_factId_and_sessionId", (q) => q.eq("factId", fact._id))
-      .take(MAX_EVIDENCE_PER_FACT_READ);
-    for (const row of evidence) await ctx.db.delete(row._id);
     await ctx.db.patch(fact._id, {
       status: "dismissed", confirmedAt: undefined, decaysAt: undefined, quote: undefined,
       sightings: 0, chatCount: 0, updatedAt: Date.now(),
     });
+    await scheduleEvidenceDeletion(ctx, fact._id);
     return null;
   },
 });
@@ -460,6 +480,10 @@ export const clearAll = mutation({
   returns: v.null(),
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
+    const now = Date.now();
+    const settings = await settingsFor(ctx, userId);
+    if (settings) await ctx.db.patch(settings._id, { resetAt: now, updatedAt: now });
+    else await ctx.db.insert("userMemorySettings", { userId, enabled: true, resetAt: now, updatedAt: now });
     await ctx.scheduler.runAfter(0, internal.profileMemory.deleteAllForUserBatch, { userId });
     return null;
   },
@@ -537,7 +561,13 @@ async function recountFact(ctx: MutationCtx, factId: Id<"userProfileFacts">, now
     await ctx.db.delete(factId);
     return;
   }
-  if (fact.source === "user") return;
+  // The shown quote always comes from evidence that still exists.
+  const latest = remaining.reduce<(typeof remaining)[number] | undefined>(
+    (best, row) => (!best || row.createdAt > best.createdAt ? row : best), undefined);
+  if (fact.source === "user") {
+    await ctx.db.patch(factId, { quote: latest?.quote, updatedAt: now });
+    return;
+  }
   const chats = new Set(remaining.map((row) => row.sessionId));
   const times = remaining.map((row) => row.createdAt);
   const recounted = {
@@ -555,6 +585,7 @@ async function recountFact(ctx: MutationCtx, factId: Id<"userProfileFacts">, now
     chatCount: recounted.chatCount,
     firstSeenAt: recounted.firstSeenAt,
     lastSeenAt: recounted.lastSeenAt,
+    quote: latest?.quote,
     status,
     ...(status === "candidate" ? { confirmedAt: undefined } : {}),
     decaysAt: decayTime({ ...recounted, status }),
