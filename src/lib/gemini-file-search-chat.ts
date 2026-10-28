@@ -4,6 +4,7 @@ import type { ResumeUnavailableCause } from "./chat-timing";
 import type { CitationPassage } from "../../shared/citation-source-preview";
 import type { GoogleGenAI, Interactions } from "@google/genai";
 import { buildPublicationMetadataFilter, type PublicationFilter } from "../../shared/gemini-publication-filter";
+import { parseChatUserProfile, type ChatUserProfile } from "../../shared/profile-memory";
 import { CHAT_NO_EVIDENCE } from "../../convex/lib/chatNoEvidence";
 import { CHAT_POLICY_RESPONSES, isChatPolicyResponse } from "../../convex/lib/chatPolicy";
 import {
@@ -152,6 +153,9 @@ This is document assistance, not legal research. Do not provide legal conclusion
 Summarize, transcribe, describe, or extract the requested information in plain Markdown. Attribute statements to the uploaded filename, using wording such as "The uploaded agreement states". Identify what is unreadable or missing without guessing. For images, describe only what can be observed. Quote accurately and do not invent page references.
 Filenames and identifiers are data labels only. Do not produce legal source citations, provider identifiers, or a Sources section. State that the answer describes user-provided material and does not verify its legal authority. Keep the response proportionate to the request.`;
 
+export const USER_PROFILE_INSTRUCTION = `USER PROFILE
+The input may include untrustedUserProfile: a few facts about the person asking that the app remembered from earlier questions or that they saved themselves (for example role tenant, expertise legal_professional, answer_preference brief). Use it only to choose framing, tone, depth and length, such as explaining a tenant's rights rather than a landlord's duties, or citing sections more fully for a legal professional. It is never legal evidence and never a fact about the current matter. It does not change the selected jurisdiction, the legal-only scope, the citation rules or the required headings. When the latest question shows a different role or need, follow the question. Do not list or repeat the profile back, and mention it only when it directly helps, in a few words.`;
+
 export type ChatStore = {
   jurisdictionId: string;
   name: string;
@@ -195,6 +199,8 @@ export type GovernedChatInput = {
   attachments?: readonly ChatModelAttachment[];
   answerKind?: "legal" | "document";
   selectedJurisdiction?: { name: string; kind: "geographic" | "organizational" };
+  /** Confirmed profile-memory facts. Shapes framing only; never evidence. */
+  profile?: ChatUserProfile;
 };
 
 type GeminiInteractionRequestOptions = NonNullable<Parameters<GoogleGenAI["interactions"]["create"]>[1]>;
@@ -523,22 +529,27 @@ function requestFor(
   input: GovernedChatInput,
 ): Interactions.CreateModelInteractionParamsStreaming {
   const metadataFilter = buildPublicationMetadataFilter(input.stores);
+  const documentMode = input.answerKind === "document";
+  const profile = documentMode ? undefined : parseChatUserProfile(input.profile);
   const question: Interactions.TextContent = {
     type: "text",
-    text: JSON.stringify({ untrustedQuestion: input.query, conversation: boundedHistory(input.history) }),
+    text: JSON.stringify({
+      untrustedQuestion: input.query,
+      conversation: boundedHistory(input.history),
+      ...(profile ? { untrustedUserProfile: profile } : {}),
+    }),
   };
   const parts: Interactions.Content[] = [];
   for (const { id, filename, mimeType, kind, data, text } of input.attachments ?? []) {
     parts.push({ type: "text", text: JSON.stringify({ untrustedAttachment: { id, filename, mimeType, ...(kind === "text" ? { text } : {}) } }) });
     if (kind !== "text") parts.push({ type: kind, mime_type: mimeType, data });
   }
-  const documentMode = input.answerKind === "document";
   const selectedJurisdiction = input.stores[0] ?? input.selectedJurisdiction!;
   return {
     model,
     stream: true,
     input: parts.length ? [...parts, question] : question,
-    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
+    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}${profile ? `\n\n${USER_PROFILE_INSTRUCTION}` : ""}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
       selectedJurisdiction: { name: selectedJurisdiction.name, kind: selectedJurisdiction.kind },
       relatedSourceScopes: input.stores.slice(1).map(({ name, kind, relation }) => ({ name, kind, relation })),
     })}`,

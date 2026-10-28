@@ -17,6 +17,7 @@ import { AssistantMessage, assistantMarkdown } from "./assistant-message";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import logo from "@/app/logo-transparent.png";
+import { ChatMemoryToggle } from "@/components/memory/chat-memory-toggle";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
 import { ChatInput } from "@/components/ui/chat-input";
@@ -1215,10 +1216,13 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               hasFiles={files.some((file) => Boolean(file.attachment))}
               rows={2}
               footer={chatResearchJurisdiction ? (
-                <span className="chat-scope-label" title={`${jurisdictionLabel} — fixed for this conversation`}>
-                  <Globe2 className="size-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{jurisdictionLabel}</span>
-                  <LockKeyhole className="size-3 shrink-0" aria-label="Fixed for this conversation" />
+                <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="chat-scope-label" title={`${jurisdictionLabel} — fixed for this conversation`}>
+                    <Globe2 className="size-3.5 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{jurisdictionLabel}</span>
+                    <LockKeyhole className="size-3 shrink-0" aria-label="Fixed for this conversation" />
+                  </span>
+                  {isAuthenticated && chatId && sessionData ? <ChatMemoryToggle chatId={chatId} /> : null}
                 </span>
               ) : undefined}
               placeholder={

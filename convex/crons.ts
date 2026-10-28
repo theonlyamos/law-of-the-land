@@ -40,4 +40,11 @@ crons.interval(
   { cursor: null },
 );
 
+crons.interval(
+  "expire stale profile memory",
+  { hours: 6 },
+  makeFunctionReference<"mutation">("profileMemory:decayBatch"),
+  {},
+);
+
 export default crons;

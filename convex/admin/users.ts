@@ -1496,6 +1496,8 @@ const executeQueuedUserDeletionReference =
   makeFunctionReference<"mutation">(
     "admin/users:executeQueuedUserDeletion",
   );
+const deleteProfileMemoryReference =
+  makeFunctionReference<"mutation">("profileMemory:deleteAllForUserBatch");
 
 export const queueUserDeletion = mutation({
   args: {
@@ -1657,6 +1659,7 @@ export const executeQueuedUserDeletion = internalMutation({
         );
         return null;
       }
+      await ctx.scheduler.runAfter(0, deleteProfileMemoryReference, { userId: request.targetUserId });
       const adapter = authComponent.adapter(ctx)(createAuthOptions(ctx));
       await adapter.delete({
         model: "user",

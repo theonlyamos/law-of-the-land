@@ -42,6 +42,7 @@ import { guestSourceValidator } from "./lib/guestResearchContracts";
 import { isChatPolicyResponse, type ChatAnswerKind } from "./lib/chatPolicy";
 import { attachmentMetadata, checkedAttachments } from "./chatAttachments";
 import { clearFailedTurn, scheduleFailedTurnDeletion } from "./chatFailedTurns";
+import { scheduleProfileExtraction } from "./profileMemory";
 import { chatAttachmentMetadataValidator, MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
 import { queryDiagnosticsProofParts, queryDiagnosticsValidator, validateQueryDiagnostics, type QueryDiagnostics } from "./lib/queryDiagnostics";
 
@@ -1479,6 +1480,7 @@ for (const message of args.messages) {
 }
 
 if (unsavedMessages.length === 0) return { id: session.externalId };
+let pendingQuestion: { id: Id<"messages">; content: string } | null = null;
 for (const message of unsavedMessages) {
   await validateCitations(ctx, session, [message]);
   if (message.role === "user" && message.attachmentIds?.length) {
@@ -1501,7 +1503,7 @@ for (const message of unsavedMessages) {
     }, verified ?? undefined);
   }
 
-  await ctx.db.insert("messages", {
+  const messageId = await ctx.db.insert("messages", {
     sessionId: session._id,
     role: message.role,
     content: message.content,
@@ -1513,6 +1515,15 @@ for (const message of unsavedMessages) {
     attachmentIds: message.role === "user" ? message.attachmentIds : undefined,
   });
   if (message.role === "user" && message.clientId) await clearFailedTurn(ctx, session._id, message.clientId);
+  // Profile memory learns only from a question whose legal answer was saved
+  // with it, never from fixed replies, document answers or failed turns.
+  if (message.role === "user") pendingQuestion = { id: messageId, content: message.content };
+  else {
+    if (pendingQuestion && message.answerKind === "legal") {
+      await scheduleProfileExtraction(ctx, { userId, session, messageId: pendingQuestion.id, question: pendingQuestion.content });
+    }
+    pendingQuestion = null;
+  }
 }
 
 await ctx.db.patch(session._id, {
@@ -1564,6 +1575,7 @@ export const remove = mutation({
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch"), { sessionId: session._id });
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("reviewedEmploymentJobs:deleteForChatBatch"), { sessionId: session._id });
     await scheduleFailedTurnDeletion(ctx, session._id);
+    await ctx.scheduler.runAfter(0, internal.profileMemory.deleteEvidenceForSessionBatch, { sessionId: session._id });
     return { deleted: true };
   },
 });
