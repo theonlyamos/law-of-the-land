@@ -150,7 +150,7 @@ describe("professional landing research shell", () => {
 
     const section = screen.getByRole("region", { name: "Check a document against the law before you rely on it." });
     expect(within(section).getByText("Attach the document")).toBeVisible();
-    for (const label of ["Needs attention", "Worth checking", "Looks fine", "Couldn\u2019t confirm"]) {
+    for (const label of ["Needs attention", "Worth checking", "Looks fine", "No law cited"]) {
       expect(within(section).getByText(label, { selector: "dt" })).toBeVisible();
     }
     expect(within(section).getByText(/general legal information, not legal advice/i)).toBeVisible();

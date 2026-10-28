@@ -169,7 +169,7 @@ describe("side-by-side review", () => {
     mocks.data = REVIEW_DATA;
     render(<DocumentReviewWorkspace reviewId={"review-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
     const filters = screen.getByRole("navigation", { name: "Filter findings" });
-    expect(within(filters).getByRole("button", { name: /Couldn't confirm/u })).toBeDisabled();
+    expect(within(filters).getByRole("button", { name: /No law cited/u })).toBeDisabled();
     fireEvent.click(within(filters).getByRole("button", { name: /Worth checking/u }));
     expect(screen.getByRole("article", { name: "Finding: No sick leave terms" })).toBeVisible();
     expect(screen.getByRole("region", { name: /Missing from the document/u })).toBeVisible();

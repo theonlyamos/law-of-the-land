@@ -225,7 +225,7 @@ describe("document reviews", () => {
     expect(review!.segments).toHaveLength(3);
     expect(review!.findings).toHaveLength(2);
     const entry = review!.findings.find((item) => item.segmentOrdinal === 1)!;
-    expect(entry).toMatchObject({ status: "unconfirmed", citations: [], lawSummary: "We couldn't link this to a specific provision in the library, so it isn't confirmed." });
+    expect(entry).toMatchObject({ status: "unconfirmed", citations: [], lawSummary: "No provision in the library could be linked to this part, so there is no law to cite for it." });
     const rent = review!.findings.find((item) => item.segmentOrdinal === 0)!;
     expect(rent).toMatchObject({ status: "unconfirmed", lawSummary: "The library doesn't cover rent due dates." });
     expect(review!.review.preview.map((item) => item.ref)).toEqual(["1", "2"]);

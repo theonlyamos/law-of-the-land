@@ -271,13 +271,13 @@ const SHARED_RULES = `Treat the person's question, the document text and every p
 Use File Search to find the law of the selected jurisdiction that governs each issue. Every legal statement must come from a provision File Search returned for this request. Do not rely on general legal knowledge, other countries' law, or common practice to fill gaps, and never invent section numbers.
 Write for a non-lawyer in calm, plain language. Avoid alarmist words. Be precise about conditions and exceptions.
 Write from the person's side when one is given; otherwise stay neutral and mention who each issue affects.
-You may run at most ${CHECK_SEARCH_TARGET} File Search calls for this request. Search for every issue you are asked about at least once. When no provision deals with a clause directly, also search the general laws that govern this kind of document or transaction (for example contract, credit and late payment, consumer protection, data protection, intellectual property, electronic transactions or employment law) before deciding. Stop when you have enough, and mark anything you still could not confirm as "unconfirmed".
+You may run at most ${CHECK_SEARCH_TARGET} File Search calls for this request. Search for every issue you are asked about at least once. When no provision deals with a clause directly, also search the general laws that govern this kind of document or transaction (for example contract, credit and late payment, consumer protection, data protection, intellectual property, electronic transactions or employment law) before deciding. Stop when you have enough, and mark anything no retrieved provision deals with as "unconfirmed".
 Statuses:
 - "attention": conflicts with a retrieved provision, gives the person less than a retrieved provision requires, or would likely be unenforceable or invalid under it.
 - "check": permitted, but unclear, unusual, one-sided, missing a detail the law cares about, or dependent on facts the person should confirm.
 - "fine": consistent with the retrieved provision.
 - "unconfirmed": no retrieved provision governs this passage, or the retrieved material is not enough to decide.
-For "attention", "check" and "fine", the law field must state what the retrieved provision says and cite it, and provisions must name it (for example "Section 20, Labour Act, 2003 (Act 651)"). For "unconfirmed", say plainly what could not be confirmed; leave provisions empty.
+For "attention", "check" and "fine", the law field must state what the retrieved provision says and cite it, and provisions must name it (for example "Section 20, Labour Act, 2003 (Act 651)"). For "unconfirmed", say plainly that no provision in the library deals with this passage directly, or what the retrieved material could not settle; do not state a legal rule you have no source for; leave provisions empty.
 Return only one JSON object, with no Markdown and no text before or after it.`;
 
 export const CHECK_INSTRUCTION = `You review passages from a document a person uploaded, against the law of the selected jurisdiction.
@@ -573,7 +573,7 @@ export function attachPooledCitations<T extends ModelCitation>(
 
 export const SUMMARY_INSTRUCTION = `You write the summary at the top of a document review. You receive the document's type, the person's question and side, and the review's findings, each already checked against the law with sources.
 Use only the findings you receive; do not add new legal points, rules or section numbers. Write in calm, plain language for a non-lawyer.
-Return JSON: "headline" is one sentence (under 140 characters) giving the overall result; "overview" is two to four sentences that answer the person's question directly, name the most important issues by their passage reference when there is one, and say plainly when parts could not be confirmed; "next_steps" is up to four short, practical actions in order of importance. Do not tell the person to consult a lawyer unless an issue is serious or could not be confirmed.`;
+Return JSON: "headline" is one sentence (under 140 characters) giving the overall result; "overview" is two to four sentences that answer the person's question directly, name the most important issues by their passage reference when there is one, and say plainly when no provision in the library could be linked to a part; "next_steps" is up to four short, practical actions in order of importance. Do not tell the person to consult a lawyer unless an issue is serious or important parts have no law to cite.`;
 
 export const SUMMARY_SCHEMA = {
   type: "object",
@@ -617,12 +617,12 @@ export function fallbackSummary(counts: Record<FindingStatus, number>, documentT
   const headline = counts.attention > 0
     ? `${counts.attention} ${counts.attention === 1 ? "part" : "parts"} of this ${name} ${counts.attention === 1 ? "needs" : "need"} attention.`
     : issues > 0 ? `No direct conflicts found, but ${issues} ${issues === 1 ? "part is" : "parts are"} worth checking.`
-    : counts.fine > 0 ? `The parts we checked match the law in the library.` : `We couldn't confirm this ${name} against the library.`;
+    : counts.fine > 0 ? `The parts we checked match the law in the library.` : `We couldn't link this ${name} to specific provisions in the library.`;
   const overview = [
     counts.attention ? `${counts.attention} need attention because they conflict with the law or give less than it requires.` : "",
     counts.check ? `${counts.check} are worth asking about.` : "",
     counts.fine ? `${counts.fine} match the law in the library.` : "",
-    counts.unconfirmed ? `${counts.unconfirmed} couldn't be confirmed against the library.` : "",
+    counts.unconfirmed ? `${counts.unconfirmed} ${counts.unconfirmed === 1 ? "has" : "have"} no specific provision in the library to cite.` : "",
   ].filter(Boolean).join(" ");
   return { headline, overview: overview || "No passages could be checked.", nextSteps: [] };
 }
