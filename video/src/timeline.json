@@ -1,0 +1,16 @@
+{
+  "fps": 30,
+  "transition": 18,
+  "scenes": [
+    { "id": "Intro", "duration": 120 },
+    { "id": "Problem", "duration": 190 },
+    { "id": "Hero", "duration": 170 },
+    { "id": "Ask", "duration": 285 },
+    { "id": "Answer", "duration": 330 },
+    { "id": "DocReview", "duration": 320 },
+    { "id": "Audiences", "duration": 200 },
+    { "id": "Organisations", "duration": 260 },
+    { "id": "Features", "duration": 250 },
+    { "id": "Outro", "duration": 200 }
+  ]
+}
