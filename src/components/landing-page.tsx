@@ -11,6 +11,7 @@ import type { ChatSession } from "@/lib/chat-sessions";
 import type { ResearchJurisdiction } from "@/lib/countries";
 import Image from "next/image";
 import Link from "next/link";
+import { chatAttachmentUploadsEnabled } from "../../shared/chat-attachments";
 
 interface LandingPageProps {
   query: string;
@@ -30,7 +31,7 @@ interface LandingPageProps {
 const PRIMARY_LINKS = [
   { href: "#jurisdictions", label: "Jurisdictions" },
   { href: "#how-it-works", label: "How it works" },
-  { href: "#document-review", label: "Document review" },
+  { href: "#document-review", label: "Document review", needsReview: true },
   { href: "#for-professionals", label: "For professionals" },
   { href: "#plans", label: "Plans" },
 ] as const;
@@ -52,6 +53,12 @@ export function LandingPage({
   const selectorReady = Boolean(researchJurisdiction?.id);
   const researchDisabled =
     isLoading || !selectorReady || !query.trim();
+  // Document review needs file uploads, so only promote it where the chat accepts them.
+  const documentReviewEnabled = chatAttachmentUploadsEnabled({
+    NODE_ENV: process.env.NODE_ENV,
+    NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED: process.env.NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED,
+  });
+  const navLinks = PRIMARY_LINKS.filter((link) => documentReviewEnabled || !("needsReview" in link));
   const plansHref = isAuthenticated
     ? "/settings/billing"
     : "/signin?redirect=%2Fsettings%2Fbilling";
@@ -65,7 +72,7 @@ export function LandingPage({
           </Link>
           <nav aria-label="Primary navigation" className={styles.primaryNav}>
             <ul>
-              {PRIMARY_LINKS.map((link) => (
+              {navLinks.map((link) => (
                 <li key={link.href}>
                   <Link href={link.href}>{link.label}</Link>
                 </li>
@@ -91,9 +98,9 @@ export function LandingPage({
               Understand the law where you are.
             </h1>
             <p className={styles.heroDescription}>
-              Ask a question in plain language, or attach a legal document to have it checked
-              against the law. Every answer is specific to your jurisdiction and cites the legal
-              sources needed to verify it.
+              {documentReviewEnabled
+                ? "Ask a question in plain language, or attach a legal document to have it checked against the law. Every answer is specific to your jurisdiction and cites the legal sources needed to verify it."
+                : "Ask a question in plain language. Receive a clear, jurisdiction-specific answer with the legal sources and citations needed to verify it."}
             </p>
             <ul aria-label="Designed for" className={styles.audienceLine}>
               <li>Individuals</li>
@@ -144,10 +151,12 @@ export function LandingPage({
                   : "Choose the jurisdiction your question relates to."}
               </p>
 
-              <p className={styles.reviewNote}>
-                Have a contract, lease or notice to check?{" "}
-                <Link href="#document-review">See how document review works</Link>
-              </p>
+              {documentReviewEnabled ? (
+                <p className={styles.reviewNote}>
+                  Have a contract, lease or notice to check?{" "}
+                  <Link href="#document-review">See how document review works</Link>
+                </p>
+              ) : null}
 
               {!isAuthenticated ? (
                 <p className={styles.signInNote}>
@@ -164,6 +173,7 @@ export function LandingPage({
       <LandingSections
         recentChats={recentChats}
         isAuthenticated={isAuthenticated}
+        documentReviewEnabled={documentReviewEnabled}
         onResumeChat={onResumeChat}
         plansHref={plansHref}
       />

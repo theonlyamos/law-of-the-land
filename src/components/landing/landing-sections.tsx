@@ -10,6 +10,7 @@ import styles from "./landing-page.module.css";
 interface LandingSectionsProps {
   recentChats: readonly ChatSession[];
   isAuthenticated: boolean;
+  documentReviewEnabled: boolean;
   onResumeChat: (chatId: string) => void;
   plansHref: string;
 }
@@ -22,6 +23,7 @@ interface LedgerEntry {
 interface AudienceEntry extends LedgerEntry {
   register: string;
   needs: readonly string[];
+  reviewNeed: string;
 }
 
 const ASSURANCES: readonly LedgerEntry[] = [
@@ -69,21 +71,24 @@ const AUDIENCES: readonly AudienceEntry[] = [
     title: "Individuals",
     description:
       "Understand laws that affect everyday life without beginning with a specialist database.",
-    needs: ["Housing and tenancy", "Employment and workplace rights", "Checking a lease or contract"],
+    needs: ["Housing and tenancy", "Employment and workplace rights", "Consumer and public services"],
+    reviewNeed: "Checking a lease or contract",
   },
   {
     register: "02 / Practice",
     title: "Legal professionals",
     description:
       "Accelerate issue spotting and source discovery while preserving a clear path back to the legal text.",
-    needs: ["Preliminary legal research", "Section and article discovery", "First-pass document review"],
+    needs: ["Preliminary legal research", "Section and article discovery", "Jurisdiction-specific review"],
+    reviewNeed: "First-pass document review",
   },
   {
     register: "03 / Operations",
     title: "Organisations",
     description:
       "Develop an initial understanding of legislation and regulations relevant to operations and compliance.",
-    needs: ["Business obligations", "Regulatory requirements", "Policy and contract review"],
+    needs: ["Business obligations", "Regulatory requirements", "Policy and compliance research"],
+    reviewNeed: "Policy and contract review",
   },
 ];
 
@@ -100,6 +105,7 @@ function registerNumber(index: number) {
 export function LandingSections({
   recentChats,
   isAuthenticated,
+  documentReviewEnabled,
   onResumeChat,
   plansHref,
 }: LandingSectionsProps) {
@@ -158,7 +164,7 @@ export function LandingSections({
         </ol>
       </section>
 
-      <DocumentReviewSection isAuthenticated={isAuthenticated} />
+      {documentReviewEnabled ? <DocumentReviewSection isAuthenticated={isAuthenticated} /> : null}
 
       <section
         id="for-professionals"
@@ -174,7 +180,8 @@ export function LandingSections({
           </div>
           <p className={styles.sectionCopy}>
             The same research system supports a straightforward personal question, a professional
-            source check, a document review, or an initial look at regulatory obligations.
+            source check{documentReviewEnabled ? ", a document review," : ","} or an initial review of
+            regulatory obligations.
           </p>
         </div>
 
@@ -186,7 +193,7 @@ export function LandingSections({
                 <h3>{audience.title}</h3>
                 <p>{audience.description}</p>
                 <ul>
-                  {audience.needs.map((need) => (
+                  {(documentReviewEnabled ? [...audience.needs, audience.reviewNeed] : audience.needs).map((need) => (
                     <li key={need}>{need}</li>
                   ))}
                 </ul>

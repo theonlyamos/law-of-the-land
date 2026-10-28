@@ -163,6 +163,21 @@ describe("professional landing research shell", () => {
     expect(screen.getByRole("link", { name: "Review a document" })).toHaveAttribute("href", "/new");
   });
 
+  it("leaves document review out where uploads are switched off", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_CHAT_ATTACHMENTS_ENABLED", "0");
+    try {
+      render(<LandingPage {...landingProps()} />);
+      expect(screen.queryByRole("link", { name: "Document review" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "See how document review works" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("region", { name: "Check a document against the law before you rely on it." })).not.toBeInTheDocument();
+      expect(screen.queryByText("Checking a lease or contract")).not.toBeInTheDocument();
+      expect(screen.queryByText(/attach a legal document/i)).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("uses the brand logo in the footer home link", () => {
     render(<LandingPage {...landingProps()} />);
     const footerHomeLink = screen.getAllByRole("link", { name: "Law of the Land home" }).at(-1);
