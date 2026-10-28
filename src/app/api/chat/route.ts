@@ -150,10 +150,11 @@ const MAX_STORES = 4;
 const MAX_PUBLIC_CITATIONS = 16;
 const MAX_PUBLIC_CITATION_LABEL = 200;
 const REQUESTS_PER_MINUTE = 15;
-// Ordinary research gets 180 seconds for generation, followed by the existing
-// 20-second canonical-read/completion reserve inside the 300-second host limit.
-const MODEL_WINDOW_MS = 180_000;
-const TERMINAL_WINDOW_MS = 200_000;
+// Ordinary research gets 270 seconds for generation, followed by the existing
+// 20-second canonical-read/completion reserve. That leaves 10 seconds of the
+// 300-second host limit for recording a failure.
+const MODEL_WINDOW_MS = 270_000;
+const TERMINAL_WINDOW_MS = 290_000;
 const REVIEWED_MODEL_WINDOW_MS = 90_000;
 const REVIEWED_TERMINAL_WINDOW_MS = 110_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
