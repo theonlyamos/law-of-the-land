@@ -630,6 +630,7 @@ export const saveFindings = internalMutation({
     const pool = args.pool.flatMap((citation) => titles.has(citation.resourceId) ? [{ ...citation, title: titles.get(citation.resourceId)! }] : []);
     let ordinal = existing.reduce((highest, finding) => Math.max(highest, finding.ordinal + 1), 0);
     let saved = existing.length;
+    const tally = { proposed: args.findings.length, pool: args.pool.length, poolWithTitles: pool.length, withCandidates: 0, candidates: 0, validated: 0, downgraded: 0 };
     for (const finding of args.findings) {
       if (saved >= LIMITS.maxFindings + LIMITS.maxGapFindings) break;
       if (finding.segmentOrdinal !== undefined && (covered.has(finding.segmentOrdinal) || !args.checkedOrdinals.includes(finding.segmentOrdinal))) continue;
@@ -637,6 +638,12 @@ export const saveFindings = internalMutation({
       const citations = finding.status === "unconfirmed" ? [] : await validatedCitations(ctx, stores, candidates);
       // Every legal conclusion needs a current, in-scope source.
       const status = citations.length === 0 && finding.status !== "unconfirmed" ? "unconfirmed" : finding.status;
+      if (finding.status !== "unconfirmed") {
+        if (candidates.length > 0) tally.withCandidates += 1;
+        tally.candidates += candidates.length;
+        tally.validated += citations.length;
+        if (status === "unconfirmed") tally.downgraded += 1;
+      }
       if (finding.kind === "missing" && status === "unconfirmed") continue;
       await ctx.db.insert("documentReviewFindings", {
         reviewId: review._id,
@@ -657,6 +664,7 @@ export const saveFindings = internalMutation({
       saved += 1;
       if (finding.segmentOrdinal !== undefined) covered.add(finding.segmentOrdinal);
     }
+    console.info("document_review_save", JSON.stringify(tally));
     const checkedCount = Math.min(review.checkTotal ?? 0, (review.checkedCount ?? 0) + args.checkedOrdinals.length);
     await ctx.db.patch("documentReviews", review._id, { checkedCount, updatedAt: Date.now() });
     return null;

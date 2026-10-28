@@ -211,6 +211,12 @@ describe("checking output", () => {
     expect(attachPooledCitations({ status: "unconfirmed", lawSummary: "Labour Act", provisions: [], citations: [] as ModelCitation[] }, pool)).toEqual([]);
   });
 
+  it("matches pooled sources when the model writes the title with different punctuation", () => {
+    const pool = [{ jurisdictionId: "j", resourceId: "contracts", versionId: "v", providerStoreName: "s", title: "Contracts Act 1960 (Act 25)" }];
+    const matched = attachPooledCitations({ status: "check", lawSummary: "Under the Contracts Act, 1960, a penalty clause may not be enforced.", provisions: [], citations: [] as ModelCitation[] }, pool);
+    expect(matched.map((citation) => citation.resourceId)).toEqual(["contracts"]);
+  });
+
   it("ignores incomplete interactions", () => {
     expect(interactionOutput({ status: "in_progress", steps: [] }, stores)).toBeNull();
     expect(interactionOutput(null, stores)).toBeNull();
