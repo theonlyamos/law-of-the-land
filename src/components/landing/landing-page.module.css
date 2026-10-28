@@ -1244,6 +1244,13 @@
   }
 }
 
+/* Keep the sign-in control visible on very narrow phones: show the mark alone. */
+@media (max-width: 420px) {
+  .brandName {
+    display: none;
+  }
+}
+
 :global(.dark) .reviewSection {
     --tone-attention: oklch(72% 0.12 35);
     --tone-fine: oklch(74% 0.08 150);
