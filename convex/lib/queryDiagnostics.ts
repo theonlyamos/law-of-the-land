@@ -13,6 +13,7 @@ export const QUERY_DIAGNOSTIC_REASONS = [
   "completion_invalid", "research_unavailable", "not_configured",
   "file_search_call_id", "file_search_call_duplicate", "file_search_budget_exhausted",
   "stream_citation_batch", "stream_citation_limit", "stream_citation_ambiguous",
+  "citation_limit",
 ] as const;
 
 export const QUERY_DIAGNOSTIC_ANNOTATION_KINDS = [

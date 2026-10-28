@@ -498,6 +498,11 @@ describe("GeminiFileSearchChat", () => {
     expect(request.system_instruction).toContain("The application permits at most 20 File Search calls for this answer, including all follow-ups");
     expect(request.system_instruction).toContain("After the last permitted search result, give the final answer without another search");
     expect(request.system_instruction).toContain("Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit");
+    // Overnight QA regressions: a fixed-term follow-up skipped the Labour Act s.66
+    // exclusion, and an intermeddling penalty was presented as current law.
+    expect(request.system_instruction).toContain("check whether the Act, Part, or section limits who or what it covers");
+    expect(request.system_instruction).toContain("When a follow-up changes or adds facts, re-check every earlier conclusion against the new facts");
+    expect(request.system_instruction).toContain("Do not present an offence, penalty, or sanction as current law unless retrieved sources support it");
     expect(request.system_instruction).toContain("Every legal conclusion must be supported by a specific retrieved provision");
     expect(request.system_instruction).toContain('When the user asks for "exact", "all", or "when"');
     expect(request.system_instruction).toContain("support both its identity and its role in this specific issue");
@@ -768,6 +773,58 @@ describe("GeminiFileSearchChat", () => {
       onDelta: () => { controller.abort(); },
     })).rejects.toThrow("GOVERNED_CHAT_ABORTED");
     expect(client.getIds).toEqual([]);
+  });
+});
+
+describe("canonical annotation bounds", () => {
+  it("accepts repeated span annotations across several text blocks when they cite few distinct pages", async () => {
+    // The provider attaches source annotations to each cited span, so a long
+    // answer can carry far more than 64 raw annotations for a handful of pages.
+    const answer = "The Constitution applies.";
+    const final = canonical(answer, []);
+    final.steps = [{
+      type: "model_output",
+      content: [
+        { type: "text", text: answer.slice(0, 8), annotations: Array.from({ length: 60 }, (_, index) => citation({ page_number: (index % 3) + 1 })) },
+        { type: "text", text: answer.slice(8), annotations: Array.from({ length: 60 }, (_, index) => citation({ page_number: (index % 3) + 1 })) },
+      ],
+    }];
+    const { result } = await run(eventStream(answer), final);
+    expect(result.answer).toBe(answer);
+    expect(result.citations.map(value => value.pageNumber)).toEqual([1, 2, 3]);
+  });
+
+  it("accepts exactly the public limit of distinct cited pages", async () => {
+    const { result } = await run(eventStream(), canonical(undefined, Array.from({ length: 16 }, (_, page) => citation({ page_number: page + 1 }))));
+    expect(result.citations).toHaveLength(16);
+  });
+
+  it("fails closed when distinct cited pages exceed the public citation limit", async () => {
+    await expect(run(eventStream(), canonical(undefined, Array.from({ length: 17 }, (_, page) => citation({ page_number: page + 1 })))))
+      .rejects.toThrow("GOVERNED_CHAT_RESPONSE_INVALID:citation_limit");
+  });
+});
+
+describe("resume tracing", () => {
+  async function causes(events: StreamEvent[], singleAttempt = false) {
+    const seen: string[] = [];
+    const client = new FakeInteractionsClient(events, canonical(undefined, [citation()]));
+    const signal = new AbortController().signal;
+    const deadlineAt = Date.now() + 10_000;
+    await expect(new GeminiFileSearchChat(client, {}).run(input(), {
+      signal, deadlineAt, streamSignal: signal, streamDeadlineAt: deadlineAt, onDelta: () => undefined,
+      onResumeUnavailable: cause => { seen.push(cause); throw new Error("observer failure is ignored"); },
+      ...(singleAttempt ? { singleAttempt: true } : {}),
+    })).rejects.toThrow("incomplete_stream");
+    return seen;
+  }
+
+  it("reports a missing event cursor when a stream closes without completing", async () => {
+    expect(await causes(eventStream().slice(0, -1))).toEqual(["missing_event_cursor"]);
+  });
+
+  it("reports single-attempt mode when resume is not permitted", async () => {
+    expect(await causes(eventStream().slice(0, -1), true)).toEqual(["single_attempt"]);
   });
 });
 
@@ -1847,7 +1904,8 @@ describe("GeminiFileSearchChat structural diagnostics", () => {
     ["citation_identity", canonical(undefined, [citation({ document_uri: undefined })])],
     ["canonical_text_mismatch", canonical("different text", [citation()])],
     ["citation_offsets_invalid", canonical(undefined, [citation({ start_index: -1, end_index: 1 })])],
-    ["canonical_annotations_limit", canonical(undefined, Array.from({ length: 65 }, () => citation()))],
+    ["canonical_annotations_limit", canonical(undefined, Array.from({ length: 513 }, () => citation()))],
+    ["citation_limit", canonical(undefined, Array.from({ length: 17 }, (_, page) => citation({ page_number: page + 1 })))],
   ] as const)("preserves the exact local %s failure reason", async (reason, final) => {
     const { operation, snapshots } = observedRun(undefined, final);
     await expect(operation).rejects.toThrow(`GOVERNED_CHAT_RESPONSE_INVALID:${reason}`);

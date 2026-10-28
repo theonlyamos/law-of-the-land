@@ -6,8 +6,11 @@ import {
   clearRejectedRouteEnsure,
   consumeComposerBottomScroll,
   consumePrependScroll,
+  FAILED_TURN_MESSAGE,
+  failedTurnKind,
   reconcileChatMessages,
   restoreBackgroundMessages,
+  restoreFailedTurnMessages,
   routeAfterDeletingCurrentSession,
   runAfterRouteEnsure,
   runRemovalAfterRouteEnsure,
@@ -17,6 +20,7 @@ import {
   type PersistedChatMessage,
   type RouteEnsureEntry,
 } from "./chat-message-state";
+import { CHAT_TIMEOUT_MESSAGE } from "@/lib/chat-errors";
 
 const persisted = (overrides: Partial<PersistedChatMessage> = {}): PersistedChatMessage => ({
   storageId: "storage-1",
@@ -326,5 +330,37 @@ describe("background message attachment restoration", () => {
     expect(result.find(message => message.clientId === job.userClientId)?.attachments).toEqual([attachment]);
     expect(result.find(message => message.clientId === "unrelated-user")?.attachments).toEqual([other]);
     expect(result.find(message => message.clientId === job.assistantClientId)?.attachments).toBeUndefined();
+  });
+});
+
+describe("saved failed turns", () => {
+  const turn = { id: "turn-1", userClientId: "user-1", question: "Is a weekend counted?", failureKind: "timeout" as const, createdAt: 5 };
+
+  it("restores a failed question and its failure note as error turns", () => {
+    const restored = restoreFailedTurnMessages([turn], [], []);
+    expect(restored).toMatchObject([
+      { role: "user", clientId: "user-1", content: "Is a weekend counted?", state: "error", errorReason: "deadline_exceeded" },
+      { role: "assistant", content: CHAT_TIMEOUT_MESSAGE, state: "error", errorReason: "deadline_exceeded" },
+    ]);
+  });
+
+  it("does not duplicate a turn still shown locally or already saved", () => {
+    const local = [{ localId: "a", clientId: "user-1", role: "user", content: "x", createdAt: 1, sequence: 1, state: "error" }] satisfies LocalChatMessage[];
+    expect(restoreFailedTurnMessages([turn], local, [])).toEqual([]);
+    const persisted = [{ storageId: "s", clientId: "user-1", role: "user", content: "x", createdAt: 1, creationTime: 1 }] satisfies PersistedChatMessage[];
+    expect(restoreFailedTurnMessages([turn], [], persisted)).toEqual([]);
+  });
+
+  it("uses a generic note for other failures", () => {
+    expect(restoreFailedTurnMessages([{ ...turn, failureKind: "failed" }], [], [])[1].content).toBe(FAILED_TURN_MESSAGE);
+  });
+
+  it("only saves failures for questions the server tried to answer", () => {
+    expect(failedTurnKind(null)).toBe("failed");
+    expect(failedTurnKind({ status: 500, reason: "deadline_exceeded" })).toBe("timeout");
+    expect(failedTurnKind({ status: 504 })).toBe("timeout");
+    expect(failedTurnKind({ status: 500, reason: "file_search_budget_exhausted" })).toBe("search_limit");
+    expect(failedTurnKind({ status: 500 })).toBe("failed");
+    for (const status of [400, 401, 402, 403, 409, 429]) expect(failedTurnKind({ status })).toBeNull();
   });
 });
