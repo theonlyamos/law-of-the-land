@@ -47,8 +47,8 @@ const REVIEW_STATUSES = [
   },
   {
     tone: "unconfirmed",
-    label: "Couldn’t confirm",
-    description: "Not covered by the published library, so it is marked rather than guessed.",
+    label: "No law cited",
+    description: "No provision in the published library deals with it, so it is marked rather than guessed.",
   },
 ] as const;
 
