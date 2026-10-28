@@ -139,6 +139,8 @@ Return JSON matching the schema:
 - segments: the document split into its passages in reading order, up to ${LIMITS.maxSegments}. A passage is a clause, numbered paragraph, section or other meaningful unit. Copy the text exactly as written, without paraphrasing. ref is the document's own number or label for the passage (such as "7.1" or "Schedule 2"), or empty. heading is the passage's heading, or empty. page is the page number, or 0 when unknown. priority is "key" for passages that create rights, duties, money obligations, deadlines, penalties or legal effects; "standard" for other substantive text; "boilerplate" for titles, definitions of no consequence, signature blocks, addresses and similar. topics lists the focus options the passage relates to.
 For long passages or very long documents, keep each passage under ${LIMITS.maxSegmentCharacters - 400} characters by quoting the opening and the operative part, and set excerpt to true. When the document has more passages than the limit, keep every key passage and leave out boilerplate first.`;
 
+// No maxItems here: Gemini rejects schemas whose limits expand into too many decoding states.
+// The prompt states the limits and parseReading enforces them.
 export const READING_SCHEMA = {
   type: "object",
   properties: {
@@ -146,16 +148,15 @@ export const READING_SCHEMA = {
     title: { type: "string" },
     summary: { type: "string" },
     is_legal_document: { type: "boolean" },
-    parties: { type: "array", maxItems: 8, items: { type: "object", properties: { role: { type: "string" }, name: { type: "string" } }, required: ["role", "name"] } },
-    role_options: { type: "array", maxItems: LIMITS.maxRoleOptions, items: { type: "string" } },
+    parties: { type: "array", items: { type: "object", properties: { role: { type: "string" }, name: { type: "string" } }, required: ["role", "name"] } },
+    role_options: { type: "array", items: { type: "string" } },
     suggested_role: { type: "string" },
-    focus_options: { type: "array", maxItems: LIMITS.maxFocusOptions, items: { type: "string" } },
-    suggested_focus: { type: "array", maxItems: LIMITS.maxFocusOptions, items: { type: "string" } },
+    focus_options: { type: "array", items: { type: "string" } },
+    suggested_focus: { type: "array", items: { type: "string" } },
     user_goal: { type: "string" },
     scope: { type: "string", enum: ["full", "targeted"] },
     segments: {
       type: "array",
-      maxItems: LIMITS.maxSegments,
       items: {
         type: "object",
         properties: {
@@ -165,7 +166,7 @@ export const READING_SCHEMA = {
           page: { type: "integer" },
           excerpt: { type: "boolean" },
           priority: { type: "string", enum: ["key", "standard", "boilerplate"] },
-          topics: { type: "array", maxItems: LIMITS.maxFocusOptions, items: { type: "string" } },
+          topics: { type: "array", items: { type: "string" } },
         },
         required: ["ref", "heading", "text", "page", "excerpt", "priority", "topics"],
       },
