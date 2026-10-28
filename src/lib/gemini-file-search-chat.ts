@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { ResumeUnavailableCause } from "./chat-timing";
 import type { CitationPassage } from "../../shared/citation-source-preview";
 import type { GoogleGenAI, Interactions } from "@google/genai";
 import { buildPublicationMetadataFilter, type PublicationFilter } from "../../shared/gemini-publication-filter";
@@ -57,6 +58,13 @@ Distinguish legislation from guidance, policy, and other source types. Do not ma
 ACCURACY AND QUALIFICATION
 State important conditions and exceptions before a definite conclusion. Do not begin with an unconditional yes or no when the result depends on ownership or registration, the nature of a marriage or relationship, whether land is self-acquired, family, stool, or state land, reasons for dismissal, detention, closure, or account restriction, contract contents, amendments, or subsidiary legislation.
 Clearly distinguish what the law expressly says, a qualified inference supported by the retrieved law, practical suggestions that are not legal requirements, and facts or documents that must still be established. Do not assume disputed facts or that the library is complete or current.
+
+SCOPE, EXCLUSIONS AND CHANGED FACTS
+Before relying on a statutory right, protection, or remedy, check whether the Act, Part, or section limits who or what it covers, for example an application or exclusion provision for particular categories of workers, contracts, tenancies, or persons. Search for that provision when it has not been retrieved. State whether a retrieved exclusion applies to the user's facts before recommending the right or remedy, and apply an exclusion only to the provisions it actually governs. If the scope or exclusion provision cannot be retrieved, say coverage could not be confirmed instead of treating the protection as applying to everyone.
+When a follow-up changes or adds facts, re-check every earlier conclusion against the new facts, including coverage, exclusions, notice, and remedies, not only the point the user mentioned. Do not repeat an earlier conclusion that the new facts may defeat without re-establishing it from retrieved provisions.
+
+CURRENT VALIDITY
+A retrieved provision shows what a text says, not that it is still in force or enforceable today. Do not present an offence, penalty, or sanction as current law unless retrieved sources support it. When rules of court or subsidiary legislation and a parent Act both address the same conduct, base an offence or penalty on the provision that retrieved sources show actually creates it, and say when that cannot be established. If a retrieved judgment, amendment, or later instrument questions, invalidates, replaces, or limits a provision, state that before relying on it. When the user asks whether a rule is still valid or current, explain that the library may not include every later amendment or court decision, answer only what retrieved sources establish, and recommend checking current validity with a qualified lawyer when it matters.
 
 CONFLICTS AND INCOMPLETE COVERAGE
 When the user asks for "exact", "all", or "when", or otherwise asks for exhaustive conditions, exceptions, deadlines, or exact wording, use File Search to seek the complete relevant section and adjacent pages before answering. Follow continuations, subsections, exceptions, and relevant cross-references; do not treat an isolated search chunk as a complete section. If the available tool results do not expose the full section or adjacent pages, say completeness could not be established and do not claim an exhaustive answer or exact wording. Never claim to have retrieved pages that were not returned.
@@ -807,6 +815,8 @@ export class GeminiFileSearchChat {
       onDelta: (text: string) => void | Promise<void>;
       onStreamComplete?: () => void;
       onDiagnostics?: (snapshot: QueryDiagnostics) => void;
+      /** Content-free note of why a closed stream could not be resumed. */
+      onResumeUnavailable?: (cause: ResumeUnavailableCause) => void;
       allowStreamFileCitations?: boolean;
       singleAttempt?: boolean;
     },
@@ -861,6 +871,9 @@ export class GeminiFileSearchChat {
     };
     const observe = (action: () => void) => {
       try { action(); } catch { diagnostics.countsClamped = true; }
+    };
+    const resumeUnavailable = (cause: ResumeUnavailableCause) => {
+      try { options.onResumeUnavailable?.(cause); } catch { /* Optional tracing must not alter the outcome. */ }
     };
     const report = (update: Partial<QueryDiagnostics> = {}) => {
       Object.assign(diagnostics, update);
@@ -1065,7 +1078,11 @@ export class GeminiFileSearchChat {
         report();
         checkStream();
         if (completed) break;
-        if (singleAttempt || resumed || !interactionId || !lastEventId) return invalidResponse("incomplete_stream");
+        if (singleAttempt || resumed || !interactionId || !lastEventId) {
+          resumeUnavailable(singleAttempt ? "single_attempt" : resumed ? "already_resumed"
+            : !interactionId ? "missing_interaction" : "missing_event_cursor");
+          return invalidResponse("incomplete_stream");
+        }
         resumed = true;
         execution.resumeAttempted = true;
         execution.resumeOutcome = "pending";
@@ -1075,7 +1092,10 @@ export class GeminiFileSearchChat {
           stream: true, last_event_id: lastEventId,
         }, { signal: options.streamSignal, maxRetries: 0 }), options.streamSignal, true);
         checkStream();
-        if (!isInteractionStream(continuation)) return invalidResponse("incomplete_stream");
+        if (!isInteractionStream(continuation)) {
+          resumeUnavailable("resume_not_stream");
+          return invalidResponse("incomplete_stream");
+        }
         stream = continuation;
       }
       if (!completed || !interactionId) return invalidResponse("incomplete_stream");

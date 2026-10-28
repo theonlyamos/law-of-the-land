@@ -50,6 +50,7 @@ import { parseReviewedEmploymentJobProjection, reviewedEmploymentJobSubmitProofP
   type ReviewedEmploymentJobProjection, type ReviewedEmploymentJobSubmitInput } from "../../../../shared/reviewed-employment-jobs";
 import { productionReviewedEmploymentEnabled, PRODUCTION_REVIEWED_EMPLOYMENT_POLICY } from "../../../../shared/reviewed-employment-policy";
 import { createPublicationFilterBinding, parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL } from "../../../../shared/gemini-publication-filter";
+import { createChatTimingTrace } from "@/lib/chat-timing";
 
 export const runtime = "nodejs";
 // Leave time for the route to close its stream before the host kills the function.
@@ -593,6 +594,8 @@ function streamResponse(input: {
       // Progress events carry a stage and a search count only, never model text.
       let lastProgress = "";
       let searches = 0;
+      // Content-free timing, logged with the outcome to locate slow phases.
+      const timing = createChatTimingTrace(input.requestStartedAt);
       const progress = (stage: ChatProgressStage) => {
         if (!input.progress) return;
         const key = `${stage}:${searches}`;
@@ -740,18 +743,22 @@ function streamResponse(input: {
               // clients display it as a draft until the terminal checks pass.
               // Progress-only clients learn just that writing has started.
               onDelta: (text) => {
+                timing.output();
                 progress("writing");
                 if (input.provisionalStreaming && !input.streamSignal.aborted) send({ type: "draft_delta", text });
               },
               onDiagnostics: (snapshot) => {
                 validateQueryDiagnostics(snapshot);
                 diagnostics = { ...snapshot, ...(snapshot.execution ? { execution: { ...snapshot.execution } } : {}) };
+                timing.searches(snapshot.searchCallCount);
                 if (snapshot.searchCallCount > searches) {
                   searches = snapshot.searchCallCount;
                   progress("searching");
                 }
               },
+              onResumeUnavailable: (cause) => timing.resumeUnavailable(cause),
               onStreamComplete: () => {
+                timing.streamComplete();
                 phase = "canonical_read";
                 clearTimeout(input.modelTimer);
                 progress("checking");
@@ -794,6 +801,9 @@ function streamResponse(input: {
             answerKind,
           );
           if (!completed) throw new Error("CHAT_TERMINAL_RESULT_INVALID");
+          if (input.reply === null) console.info("chat_request_completed", JSON.stringify({
+            elapsedMs: Date.now() - input.requestStartedAt, timing: timing.snapshot(),
+          }));
           // Completion rechecks current scope and file access before releasing
           // the final answer and its authority. Legacy clients remain buffered.
           if (!input.provisionalStreaming) send({ type: "delta", text: result.answer });
@@ -828,6 +838,7 @@ function streamResponse(input: {
             phase, category, elapsedMs: Date.now() - input.requestStartedAt,
             reason: failureDiagnostics?.reason,
             execution: failureDiagnostics?.execution,
+            ...(input.reply === null && !input.reviewed ? { timing: timing.snapshot() } : {}),
             ...(reviewedDiagnostics ? { reviewed: reviewedDiagnostics } : {}),
           }));
           input.abortStream(new Error("CHAT_INTERACTION_FAILED"));
