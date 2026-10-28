@@ -12,7 +12,7 @@ export type CitationPreviewSource = CitationPreviewMetadata & { label: string; o
 
 /** Only server-owned, same-origin source proxies may supply preview bytes. */
 export function privateCitationSourceUrl(value?: string): { url: string; pageNumber?: number } | null {
-  const review = value?.match(/^(\/api\/document-reviews\/[A-Za-z0-9_-]{1,128}\/sources\/[A-Za-z0-9_-]{1,128}\/[0-3])(?:#page=([1-9][0-9]{0,4}))?$/u);
+  const review = value?.match(/^(\/api\/document-(?:reviews|drafts)\/[A-Za-z0-9_-]{1,128}\/sources\/[A-Za-z0-9_-]{1,128}\/[0-3])(?:#page=([1-9][0-9]{0,4}))?$/u);
   if (review) {
     const pageNumber = review[2] ? Number(review[2]) : undefined;
     if (pageNumber !== undefined && pageNumber > 10_000) return null;

@@ -14,6 +14,10 @@ import { DEFAULT_REVIEW_QUESTION, isDocumentReviewRequest } from "../../../share
 import { DocumentReviewCard, reviewActionErrorMessage, type DocumentReviewSummary } from "@/components/document-review/document-review-card";
 import { DocumentReviewWorkspace } from "@/components/document-review/document-review-workspace";
 import { ReviewModeToggle, pickReviewAttachment } from "@/components/document-review/review-mode-toggle";
+import { DEFAULT_DRAFT_REQUEST, isDocumentDraftRequest } from "../../../shared/document-draft";
+import { DocumentDraftCard, draftActionErrorMessage, type DocumentDraftSummary } from "@/components/document-draft/document-draft-card";
+import { DocumentDraftWorkspace } from "@/components/document-draft/document-draft-workspace";
+import { DraftModeNote, DraftModeToggle } from "@/components/document-draft/draft-mode-toggle";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, BookOpen, BriefcaseBusiness, Globe2, House, LockKeyhole, Menu, Store } from "lucide-react";
@@ -137,7 +141,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   /** null follows what the question asks for; true or false is the person's own choice. */
   const [reviewOverride, setReviewOverride] = useState<boolean | null>(null);
   const [openReview, setOpenReview] = useState<{ reviewId: Id<"documentReviews">; chatId: string } | null>(null);
-  const [reviewError, setReviewError] = useState<{ chatId: string; message: string; retry?: () => Promise<unknown> } | null>(null);
+  const [reviewError, setReviewError] = useState<{ chatId: string; message: string; retry?: () => Promise<unknown>; job?: "review" | "draft" } | null>(null);
+  /** null follows what the message asks for; true or false is the person's own choice. */
+  const [draftOverride, setDraftOverride] = useState<boolean | null>(null);
+  const [openDraft, setOpenDraft] = useState<{ draftId: Id<"documentDrafts">; chatId: string } | null>(null);
   const [isStartingNewChat, setIsStartingNewChat] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -198,7 +205,18 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     for (const review of documentReviews ?? []) map.set(review.userClientId, [...(map.get(review.userClientId) ?? []), review]);
     return map;
   }, [documentReviews]);
-  const reviewWanted = files.length > 0 && isAuthenticated && (reviewOverride ?? isDocumentReviewRequest(query));
+  const createDocumentDraft = useMutation(api.documentDrafts.create);
+  const documentDrafts = useQuery(
+    api.documentDrafts.listForChat,
+    isAuthenticated && chatId ? { externalId: chatId } : "skip"
+  );
+  const draftsByMessage = useMemo(() => {
+    const map = new Map<string, DocumentDraftSummary[]>();
+    for (const draft of documentDrafts ?? []) map.set(draft.userClientId, [...(map.get(draft.userClientId) ?? []), draft]);
+    return map;
+  }, [documentDrafts]);
+  const draftWanted = isAuthenticated && (draftOverride ?? (isDocumentDraftRequest(query) && reviewOverride !== true));
+  const reviewWanted = !draftWanted && files.length > 0 && isAuthenticated && (reviewOverride ?? isDocumentReviewRequest(query));
   const removeSession = useMutation(api.chats.remove);
 
   const sessions = sessionsData.map(toSidebarSession);
@@ -291,6 +309,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     routeEnsureRef.current = null;
     setSelectedResearchJurisdiction(null);
     setOpenReview(null);
+    setOpenDraft(null);
   }, [chatId, resetChatView]);
 
   useEffect(() => {
@@ -525,11 +544,16 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   }, [chatId, chatResearchJurisdiction, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
 
   const handleSearch = useCallback(
-    async (searchQuery: string, options?: { review?: boolean }) => {
+    async (searchQuery: string, options?: { review?: boolean; draft?: boolean }) => {
+      // Drafting needs a signed-in owner; a file attached to a draft request is background for it.
+      const wantsDraft = isAuthenticated
+        && (options?.draft ?? draftOverride ?? (isDocumentDraftRequest(searchQuery) && (options?.review ?? reviewOverride) !== true));
       // A document review needs a signed-in owner and a file to read.
-      const wantsReview = files.length > 0 && isAuthenticated
+      const wantsReview = !wantsDraft && files.length > 0 && isAuthenticated
         && (options?.review ?? reviewOverride ?? isDocumentReviewRequest(searchQuery));
-      const trimmed = searchQuery.trim() || (files.length ? wantsReview ? DEFAULT_REVIEW_QUESTION : "Summarize these files." : "");
+      const trimmed = searchQuery.trim() || (files.length
+        ? wantsDraft ? DEFAULT_DRAFT_REQUEST : wantsReview ? DEFAULT_REVIEW_QUESTION : "Summarize these files."
+        : "");
       if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
       const submittedFiles = files;
 
@@ -630,19 +654,28 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       }
 
       const reviewTarget = wantsReview ? pickReviewAttachment(uploadedAttachments) : null;
-      if (reviewTarget) {
+      const draftSource = wantsDraft ? pickReviewAttachment(uploadedAttachments) : null;
+      if (reviewTarget || wantsDraft) {
+        const job = wantsDraft ? "draft" : "review";
         if (isVisibleRoute()) {
           prependScrollIntentRef.current = null;
           composerScrollIntentRef.current = beginComposerBottomScroll({ routeGeneration: requestGeneration });
         }
         setReviewError(null);
         requests.update(submissionChatId, request, { canStop: false, messages: [...request.state.messages, userMessage] });
-        const startReview = () => createDocumentReview({
-          externalId: submissionChatId,
-          userClientId: userMessage.clientId,
-          attachmentId: reviewTarget.id as Id<"chatAttachments">,
-          question: trimmed,
-        });
+        const startReview = () => job === "draft"
+          ? createDocumentDraft({
+              externalId: submissionChatId,
+              userClientId: userMessage.clientId,
+              request: trimmed,
+              ...(draftSource ? { attachmentId: draftSource.id as Id<"chatAttachments"> } : {}),
+            })
+          : createDocumentReview({
+              externalId: submissionChatId,
+              userClientId: userMessage.clientId,
+              attachmentId: reviewTarget!.id as Id<"chatAttachments">,
+              question: trimmed,
+            });
         let saved = false;
         try {
           const ran = await runAfterRouteEnsure({
@@ -670,14 +703,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             message.localId === userMessage.localId ? { ...message, state: "verified" } : message));
           clearSentDraft(submissionChatId, searchQuery, submittedFiles);
           setReviewOverride(null);
+          setDraftOverride(null);
           await startReview();
         } catch (error) {
           if (!isCurrentRequest()) return;
-          console.error(saved ? "Failed to start document review:" : "Failed to save review question:", error);
+          console.error(saved ? `Failed to start document ${job}:` : `Failed to save ${job} request:`, error);
           if (saved) {
-            setReviewError({ chatId: submissionChatId, message: `Your file was saved, but the review didn't start. ${reviewActionErrorMessage(error)}`, retry: startReview });
+            setReviewError(job === "draft"
+              ? { chatId: submissionChatId, message: `Your request was saved, but drafting didn't start. ${draftActionErrorMessage(error)}`, retry: startReview, job }
+              : { chatId: submissionChatId, message: `Your file was saved, but the review didn't start. ${reviewActionErrorMessage(error)}`, retry: startReview, job });
           } else {
-            setReviewError({ chatId: submissionChatId, message: "We couldn't send this document for review. Check your connection and try again." });
+            setReviewError({ chatId: submissionChatId, message: job === "draft"
+              ? "We couldn't send your request for drafting. Check your connection and try again."
+              : "We couldn't send this document for review. Check your connection and try again." });
             setLocalMessages((previous) => previous.map((message) =>
               message.localId === userMessage.localId ? { ...message, state: "error" } : message));
           }
@@ -884,8 +922,10 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     [
       appendMessages,
       createDocumentReview,
+      createDocumentDraft,
       isAuthenticated,
       reviewOverride,
+      draftOverride,
       recordFailedTurn,
       chatResearchJurisdiction,
       chatId,
@@ -983,9 +1023,22 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
       onRemove={(file) => void removeFile(file)} onRetry={newUploadsEnabled ? (file) => void retryFile(file) : undefined} />
     {files.length > 0 && isAuthenticated && (
       <ReviewModeToggle checked={reviewWanted} disabled={isLoading} fileCount={files.length}
-        onChange={(checked) => setReviewOverride(checked)} />
+        onChange={(checked) => {
+          setReviewOverride(checked);
+          if (checked) setDraftOverride(false);
+        }} />
     )}
+    {draftWanted && <DraftModeNote fileCount={files.length} />}
   </>;
+  const draftToggle = isAuthenticated ? (
+    <DraftModeToggle checked={draftWanted} disabled={isLoading} onChange={(checked) => {
+      setDraftOverride(checked);
+      if (checked) setReviewOverride(false);
+    }} />
+  ) : null;
+  const draftPlaceholder = files.length
+    ? "Describe the document you need. Your file will be used as background."
+    : "Describe the document you need, e.g. a tenancy agreement for a two-bedroom flat, one year, rent paid monthly.";
   const composerAttachments = newUploadsEnabled ? {
     accept: CHAT_ATTACHMENT_ACCEPT,
     hasFiles: files.length > 0,
@@ -1093,16 +1146,19 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     transcribe={transcribeRecording}
                     hasFiles={files.some((file) => Boolean(file.attachment))}
                     rows={2}
-                    placeholder={files.length
+                    placeholder={draftWanted ? draftPlaceholder : files.length
                       ? reviewWanted ? "Send to review this document, or say what to focus on." : "Send to summarize these files, or add a question."
                       : "What would you like to understand?"}
                     footer={
-                      <ResearchJurisdictionPicker
-                        compact
-                        disabled={isLoading}
-                        value={selectedResearchJurisdiction}
-                        onChange={setSelectedResearchJurisdiction}
-                      />
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                        <ResearchJurisdictionPicker
+                          compact
+                          disabled={isLoading}
+                          value={selectedResearchJurisdiction}
+                          onChange={setSelectedResearchJurisdiction}
+                        />
+                        {draftToggle}
+                      </span>
                     }
                   />
                 </div>
@@ -1162,6 +1218,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
             {displayMessages.map((message, index) => {
               const isUser = message.role === "user";
               const messageReviews = isUser && message.clientId ? reviewsByMessage.get(message.clientId) : undefined;
+              const messageDrafts = isUser && message.clientId ? draftsByMessage.get(message.clientId) : undefined;
 
               return (
                 <Fragment key={message.key}>
@@ -1246,7 +1303,12 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   <div key={review.id} className="mt-7 flex min-w-0 justify-start">
                     <DocumentReviewCard review={review} busy={isLoading}
                       onOpen={(reviewId) => chatId && setOpenReview({ reviewId, chatId })}
-                      onSummarise={() => void handleSearch("Summarize this document.", { review: false })} />
+                      onSummarise={() => void handleSearch("Summarize this document.", { review: false, draft: false })} />
+                  </div>
+                ))}
+                {messageDrafts?.map((draft) => (
+                  <div key={draft.id} className="mt-7 flex min-w-0 justify-start">
+                    <DocumentDraftCard draft={draft} onOpen={(draftId) => chatId && setOpenDraft({ draftId, chatId })} />
                   </div>
                 ))}
                 </Fragment>
@@ -1313,7 +1375,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   <Button type="button" variant="outline" size="sm" onClick={() => {
                     const retry = reviewError.retry!;
                     setReviewError(null);
-                    void retry().catch((error: unknown) => setReviewError({ ...reviewError, message: `The review didn't start. ${reviewActionErrorMessage(error)}` }));
+                    void retry().catch((error: unknown) => setReviewError({ ...reviewError, message: reviewError.job === "draft"
+                      ? `Drafting didn't start. ${draftActionErrorMessage(error)}`
+                      : `The review didn't start. ${reviewActionErrorMessage(error)}` }));
                   }}>Try again</Button>
                 )}
               </div>
@@ -1343,10 +1407,13 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     <LockKeyhole className="size-3 shrink-0" aria-label="Fixed for this conversation" />
                   </span>
                   {isAuthenticated && chatId && sessionData ? <ChatMemoryToggle chatId={chatId} /> : null}
+                  {draftToggle}
                 </span>
               ) : undefined}
               placeholder={
-                files.length
+                draftWanted
+                  ? draftPlaceholder
+                  : files.length
                   ? reviewWanted ? "Send to review this document, or say what to focus on." : "Send to summarize these files, or add a question."
                   : displayMessages.length === 0
                   ? "e.g. What are my rights as a tenant?"
@@ -1365,6 +1432,15 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         <DocumentReviewWorkspace key={openReview.reviewId} reviewId={openReview.reviewId} onClose={() => setOpenReview(null)}
           onAsk={(prompt) => {
             setOpenReview(null);
+            setQuery(prompt);
+            window.setTimeout(() => document.getElementById("follow-up-question")?.focus(), 0);
+          }} />
+      )}
+      {openDraft && openDraft.chatId === chatId && isAuthenticated && !isCurrentChatDeleted && (
+        <DocumentDraftWorkspace key={openDraft.draftId} draftId={openDraft.draftId} onClose={() => setOpenDraft(null)}
+          onAsk={(prompt) => {
+            setOpenDraft(null);
+            setDraftOverride(false);
             setQuery(prompt);
             window.setTimeout(() => document.getElementById("follow-up-question")?.focus(), 0);
           }} />
