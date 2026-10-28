@@ -21,6 +21,13 @@ it("accepts only the private same-origin citation proxy and bounded pages", () =
     expect(privateCitationSourceUrl(input)).toBeNull();
   }
 });
+it("accepts document review source proxies with a bounded citation index", () => {
+  expect(privateCitationSourceUrl("/api/document-reviews/rev_1/sources/find_1/3#page=12")).toEqual({ url: "/api/document-reviews/rev_1/sources/find_1/3", pageNumber: 12 });
+  expect(privateCitationSourceUrl("/api/document-reviews/rev_1/sources/find_1/0")).toEqual({ url: "/api/document-reviews/rev_1/sources/find_1/0" });
+  for (const input of ["/api/document-reviews/rev_1/sources/find_1/4", "/api/document-reviews/rev_1/sources/find_1/0?x=1", "/api/document-reviews/rev_1/sources/find_1/0#page=0", "/api/document-reviews/../sources/find_1/0"]) {
+    expect(privateCitationSourceUrl(input)).toBeNull();
+  }
+});
 it("opens an accessible preview, fetches privately and jumps to the source page", async () => {
   render(<CitationSourcePreview source={{ label: "Employment Act", originalUrl: url }} onClose={vi.fn()} />);
   expect(screen.getByRole("dialog", { name: "Employment Act" })).toBeVisible();

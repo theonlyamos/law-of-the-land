@@ -6,6 +6,15 @@ import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, w
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
 import { attachmentKindValidator } from "./lib/chatAttachmentContracts";
 import {
+  documentReviewCountsValidator,
+  documentReviewFailureValidator,
+  documentReviewOptionValidator,
+  documentReviewStatusValidator,
+  findingStatusValidator,
+  researchSnapshotValidator,
+  storedFindingCitationValidator,
+} from "./lib/documentReviewContracts";
+import {
   profileEvidenceKindValidator,
   profileFactSourceValidator,
   profileFactStatusValidator,
@@ -1082,6 +1091,83 @@ export default defineSchema({
     resetAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_userId", ["userId"]),
+  // A review of one uploaded document against the law library. Reading runs as
+  // soon as it is requested; checking starts once the person has chosen a side.
+  documentReviews: defineTable({
+    sessionId: v.id("chatSessions"),
+    userId: v.string(),
+    userClientId: v.string(),
+    attachmentId: v.id("chatAttachments"),
+    filename: v.string(),
+    question: v.string(),
+    status: documentReviewStatusValidator,
+    // Set by the reading step.
+    documentType: v.optional(v.string()),
+    title: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    parties: v.optional(v.array(v.object({ role: v.string(), name: v.optional(v.string()) }))),
+    roleOptions: v.optional(v.array(documentReviewOptionValidator)),
+    focusOptions: v.optional(v.array(documentReviewOptionValidator)),
+    suggestedRoleId: v.optional(v.string()),
+    suggestedFocusIds: v.optional(v.array(v.string())),
+    userGoal: v.optional(v.string()),
+    scope: v.optional(v.union(v.literal("full"), v.literal("targeted"))),
+    isLegalDocument: v.optional(v.boolean()),
+    segmentCount: v.optional(v.number()),
+    // The person's choices. A start requested while reading is kept here.
+    roleId: v.optional(v.string()),
+    roleLabel: v.optional(v.string()),
+    focusIds: v.optional(v.array(v.string())),
+    focusLabels: v.optional(v.array(v.string())),
+    startRequested: v.optional(v.boolean()),
+    // Checking progress and result.
+    checkedCount: v.optional(v.number()),
+    checkTotal: v.optional(v.number()),
+    attempt: v.number(),
+    headline: v.optional(v.string()),
+    overview: v.optional(v.string()),
+    nextSteps: v.optional(v.array(v.string())),
+    counts: v.optional(documentReviewCountsValidator),
+    partialCoverage: v.optional(v.boolean()),
+    jurisdictionName: v.string(),
+    failure: v.optional(documentReviewFailureValidator),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    completedAt: v.optional(v.number()),
+  })
+    .index("by_sessionId_and_createdAt", ["sessionId", "createdAt"])
+    .index("by_sessionId_and_userClientId", ["sessionId", "userClientId"]),
+  documentReviewResearch: defineTable({
+    reviewId: v.id("documentReviews"),
+    attempt: v.number(),
+    research: researchSnapshotValidator,
+  }).index("by_reviewId", ["reviewId"]),
+  documentReviewSegments: defineTable({
+    reviewId: v.id("documentReviews"),
+    ordinal: v.number(),
+    ref: v.optional(v.string()),
+    heading: v.optional(v.string()),
+    text: v.string(),
+    page: v.optional(v.number()),
+    excerpt: v.boolean(),
+    priority: v.union(v.literal("key"), v.literal("standard"), v.literal("boilerplate")),
+    topics: v.array(v.string()),
+    checked: v.boolean(),
+  }).index("by_reviewId_and_ordinal", ["reviewId", "ordinal"]),
+  documentReviewFindings: defineTable({
+    reviewId: v.id("documentReviews"),
+    attempt: v.number(),
+    ordinal: v.number(),
+    segmentOrdinal: v.optional(v.number()),
+    kind: v.union(v.literal("passage"), v.literal("missing")),
+    status: findingStatusValidator,
+    title: v.string(),
+    meaning: v.string(),
+    lawSummary: v.string(),
+    recommendation: v.string(),
+    suggestedWording: v.optional(v.string()),
+    citations: v.array(storedFindingCitationValidator),
+  }).index("by_reviewId_and_attempt_and_ordinal", ["reviewId", "attempt", "ordinal"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown
   // after reload but never becomes legal-answer context or transcript history.
   failedChatTurns: defineTable({

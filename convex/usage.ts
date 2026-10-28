@@ -85,34 +85,36 @@ export async function getEffectiveAllowance(
 export const recordQuestion = mutation({
   args: {},
   returns: v.object({ used: v.number(), limit: v.number(), isPro: v.boolean() }),
-  handler: async (ctx) => {
-    const userId = await requireUserId(ctx);
-    const now = Date.now();
-    const allowance = await getEffectiveAllowance(ctx, userId, now);
-    const row = await usedToday(ctx, userId, now);
-    const used = allowance.used;
-
-    if (!allowance.canRecord) {
-      throw new ConvexError({
-        code: "QUOTA_EXCEEDED",
-        limit: allowance.effectiveLimit,
-        isPro: allowance.isPro,
-      });
-    }
-
-    if (row) {
-      await ctx.db.patch(row._id, { count: used + 1 });
-    } else {
-      await ctx.db.insert("dailyUsage", {
-        userId,
-        day: dayKey(now),
-        count: 1,
-      });
-    }
-
-    return { used: used + 1, limit: allowance.effectiveLimit, isPro: allowance.isPro };
-  },
+  handler: async (ctx) => await recordQuestionForUser(ctx, await requireUserId(ctx)),
 });
+
+/** Counts one question for a user the caller has already authenticated. */
+export async function recordQuestionForUser(ctx: MutationCtx, userId: string) {
+  const now = Date.now();
+  const allowance = await getEffectiveAllowance(ctx, userId, now);
+  const row = await usedToday(ctx, userId, now);
+  const used = allowance.used;
+
+  if (!allowance.canRecord) {
+    throw new ConvexError({
+      code: "QUOTA_EXCEEDED",
+      limit: allowance.effectiveLimit,
+      isPro: allowance.isPro,
+    });
+  }
+
+  if (row) {
+    await ctx.db.patch(row._id, { count: used + 1 });
+  } else {
+    await ctx.db.insert("dailyUsage", {
+      userId,
+      day: dayKey(now),
+      count: 1,
+    });
+  }
+
+  return { used: used + 1, limit: allowance.effectiveLimit, isPro: allowance.isPro };
+}
 
 /** Non-incrementing check used by the answer endpoint (the search endpoint
  * already counted this question). */
