@@ -109,6 +109,40 @@ describe("Gemini diagnostic target binding", () => {
     await expect(t.query(targetRef, { jobId })).rejects.toThrow("GEMINI_DIAGNOSTIC_TARGET_INVALID");
   });
 
+  it("reads a version excluded by failed-document recovery, without changing it", async () => {
+    const { t, jobId, versionId, resourceId, jurisdictionId } = await fixture();
+    const now = Date.now();
+    await t.run(async (ctx) => {
+      await ctx.db.patch(jobId, { status: "failed", recoveryKind: undefined, failedDocumentEvidence: {
+        documentReference: `sha256:${"c".repeat(64)}`, operationReference: `sha256:${"d".repeat(64)}`,
+        firstObservedAt: now - 60_000, confirmedAt: now, priorProviderPollCount: 3, observedOperationDone: false,
+        observedDocumentState: "STATE_FAILED", coverageVerifiedAt: now, publishedCount: 4 } });
+      await ctx.db.patch(versionId, { status: "failed" });
+      await ctx.db.patch(resourceId, { geminiPublicationBlock: { jobId, versionId, storeName: "fileSearchStores/diagnostic-ohada",
+        sha256: "a".repeat(64), recordedAt: now } });
+    });
+    const snapshot = () => t.run(async (ctx) => Promise.all([jobId, versionId, resourceId, jurisdictionId].map(id => ctx.db.get(id))));
+    const before = await snapshot();
+    await expect(t.query(targetRef, { jobId })).resolves.toMatchObject({ job: { id: jobId, status: "failed" },
+      target: { operationName: "fileSearchStores/diagnostic-ohada/upload/operations/retained" } });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(["no evidence", "unreconciled evidence", "retained recovery kind", "queued"])("rejects a terminal or idle job with %s", async (scenario) => {
+    const { t, jobId } = await fixture();
+    const now = Date.now();
+    const evidence = { documentReference: `sha256:${"c".repeat(64)}`, operationReference: `sha256:${"d".repeat(64)}`,
+      firstObservedAt: now - 60_000, confirmedAt: now, priorProviderPollCount: 3, observedOperationDone: false as const,
+      observedDocumentState: "STATE_FAILED" as const };
+    await t.run(async (ctx) => {
+      if (scenario === "no evidence") await ctx.db.patch(jobId, { status: "failed", recoveryKind: undefined });
+      if (scenario === "unreconciled evidence") await ctx.db.patch(jobId, { status: "failed", recoveryKind: undefined, failedDocumentEvidence: evidence });
+      if (scenario === "retained recovery kind") await ctx.db.patch(jobId, { status: "failed", failedDocumentEvidence: { ...evidence, coverageVerifiedAt: now } });
+      if (scenario === "queued") await ctx.db.patch(jobId, { status: "queued" });
+    });
+    await expect(t.query(targetRef, { jobId })).rejects.toThrow("GEMINI_DIAGNOSTIC_TARGET_INVALID");
+  });
+
   it("rejects ambiguous store ownership", async () => {
     const { t, jobId, jurisdictionId } = await fixture();
     await t.run(async (ctx) => {
