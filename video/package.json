@@ -1,0 +1,25 @@
+{
+  "name": "law-of-the-land-video",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Motion graphics promo for Law of the Land, built with Remotion",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render LawOfTheLand out/law-of-the-land-promo.mp4",
+    "render:vertical": "remotion render LawOfTheLandVertical out/law-of-the-land-promo-vertical.mp4",
+    "still": "remotion still LawOfTheLand out/thumbnail.png --frame=150"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.539",
+    "@remotion/fonts": "4.0.539",
+    "@remotion/transitions": "4.0.539",
+    "lucide-react": "^1.63.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "remotion": "4.0.539"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}
