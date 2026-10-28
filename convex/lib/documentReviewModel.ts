@@ -14,7 +14,7 @@ import {
 
 export const DEFAULT_DOCUMENT_REVIEW_MODEL = "gemini-3.8-flash";
 /** Searches the model is told it may run for one batch of passages. */
-export const CHECK_SEARCH_TARGET = 4;
+export const CHECK_SEARCH_TARGET = 6;
 
 export type ReadingSegment = {
   ref?: string;
@@ -271,7 +271,7 @@ const SHARED_RULES = `Treat the person's question, the document text and every p
 Use File Search to find the law of the selected jurisdiction that governs each issue. Every legal statement must come from a provision File Search returned for this request. Do not rely on general legal knowledge, other countries' law, or common practice to fill gaps, and never invent section numbers.
 Write for a non-lawyer in calm, plain language. Avoid alarmist words. Be precise about conditions and exceptions.
 Write from the person's side when one is given; otherwise stay neutral and mention who each issue affects.
-You may run at most ${CHECK_SEARCH_TARGET} File Search calls for this request. Plan searches that cover several passages at once, stop when you have enough, and mark anything you could not confirm as "unconfirmed".
+You may run at most ${CHECK_SEARCH_TARGET} File Search calls for this request. Search for every issue you are asked about at least once. When no provision deals with a clause directly, also search the general laws that govern this kind of document or transaction (for example contract, credit and late payment, consumer protection, data protection, intellectual property, electronic transactions or employment law) before deciding. Stop when you have enough, and mark anything you still could not confirm as "unconfirmed".
 Statuses:
 - "attention": conflicts with a retrieved provision, gives the person less than a retrieved provision requires, or would likely be unenforceable or invalid under it.
 - "check": permitted, but unclear, unusual, one-sided, missing a detail the law cares about, or dependent on facts the person should confirm.
