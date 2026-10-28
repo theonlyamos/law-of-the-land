@@ -54,13 +54,21 @@
   min-width: max-content;
   min-height: 2.75rem;
   align-items: center;
+  gap: 0.6rem;
   color: var(--ink);
 }
 
-.brand img {
-  width: 5rem;
-  height: auto;
-  filter: saturate(0.78) contrast(1.05);
+.brandMark {
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+}
+
+.brandName {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
 }
 
 .primaryNav,
@@ -853,9 +861,9 @@
 }
 
 .footerLogo {
-  width: 3rem;
-  height: auto;
-  object-fit: contain;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
 }
 
 .footer nav {
@@ -1154,8 +1162,9 @@
     padding-inline: 1rem;
   }
 
-  .brand img {
-    width: 4.2rem;
+  .brandMark {
+    width: 2.2rem;
+    height: 2.2rem;
   }
 
   .primaryNav li:not(:last-child) {
@@ -1251,10 +1260,6 @@
     --line: oklch(42% 0.025 145);
     --focus: oklch(82% 0.09 78);
     --shadow-brass: oklch(34% 0.045 72);
-  }
-
-  :global(.dark) .brand img {
-    filter: brightness(0) invert(1) sepia(0.2) saturate(0.7) opacity(0.9);
   }
 
   :global(.dark) .workspacePreview {

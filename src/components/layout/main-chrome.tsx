@@ -1,11 +1,10 @@
 "use client";
 
-import Image from "next/image";
+import { LogoMark } from "@/components/brand/logo-mark";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserNav } from "@/components/auth/user-nav";
 import { EditorialTheme } from "@/components/chat/editorial-theme";
-import logo from "@/app/logo-transparent.png";
 
 export function MainChrome({ children }: Readonly<{ children: React.ReactNode }>) {
   const pathname = usePathname();
@@ -21,7 +20,7 @@ export function MainChrome({ children }: Readonly<{ children: React.ReactNode }>
         <nav aria-label="Main navigation" className="border-b border-border/70">
           <div className="mx-auto flex min-h-16 w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-3 sm:px-8">
             <Link href="/" aria-label="Law of the Land — home" className="flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              <Image src={logo} alt="" width={38} className="h-auto" priority />
+              <LogoMark className="h-9 w-9" />
               <span className="font-[family-name:var(--font-chat-serif)] text-xl">Law of the Land</span>
             </Link>
             <UserNav />
@@ -39,8 +38,9 @@ export function MainChrome({ children }: Readonly<{ children: React.ReactNode }>
     <>
       <nav className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <Link href="/" className="flex items-center gap-2">
-            <Image src={logo} alt="Law of the Land — home" width={80} priority />
+          <Link href="/" aria-label="Law of the Land — home" className="flex items-center gap-2">
+            <LogoMark className="h-9 w-9" />
+            <span className="text-base font-semibold tracking-tight">Law of the Land</span>
           </Link>
           <div className="flex items-center gap-4">
             <UserNav />

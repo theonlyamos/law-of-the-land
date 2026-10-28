@@ -15,7 +15,7 @@
   --accent-foreground: var(--foreground);
   --border: 67 12% 86%;
   --input: var(--border);
-  --brand: 36 38% 42%;
+  --brand: 22 62% 47%;
   --ring: var(--brand);
   --chat-panel: var(--muted);
   --color-background: hsl(var(--background));
@@ -51,7 +51,7 @@
   --muted: 132 6% 15%;
   --muted-foreground: 133 9% 68%;
   --border: 132 8% 25%;
-  --brand: 37 50% 66%;
+  --brand: 24 80% 65%;
 }
 
 .chat-editorial .chat-heading {

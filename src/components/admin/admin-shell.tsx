@@ -3,10 +3,9 @@ import {
   hasRolePermission,
   type AdminRole,
 } from "../../../convex/lib/adminPermissions";
-import Image from "next/image";
+import { LogoMark } from "@/components/brand/logo-mark";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import logo from "@/app/logo-transparent.png";
 import { AdminNav } from "./admin-nav";
 import {
   AdminNavigationProvider,
@@ -68,14 +67,7 @@ export function AdminShell({
                 href="/admin"
                 className="admin-sidebar-brand group flex min-h-11 min-w-0 items-center gap-2 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-700 sm:gap-3"
               >
-                <Image
-                  src={logo}
-                  alt="Law of the Land"
-                  width={80}
-                  height={43}
-                  priority
-                  className="h-auto w-10 shrink-0 sm:w-12"
-                />
+                <LogoMark title="Law of the Land" className="h-10 w-10 shrink-0 sm:h-11 sm:w-11" />
                 <span className="admin-sidebar-expanded min-w-0">
                   <span className="hidden text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[oklch(43%_0.055_252)] xl:block">
                     Law of the Land
