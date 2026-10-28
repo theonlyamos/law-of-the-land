@@ -36,17 +36,17 @@ export type ActiveDocumentRecoveryClaim =
 
 function invalid(): never { throw new ConvexError("GEMINI_ACTIVE_DOCUMENT_RECOVERY_INVALID"); }
 
-async function digest(value: unknown): Promise<string> {
+export async function digest(value: unknown): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
   return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function attemptCorrelation(attempt: Omit<Attempt, "operationId">): Promise<string> {
+export async function attemptCorrelation(attempt: Omit<Attempt, "operationId">): Promise<string> {
   return `rec_${await digest({ leaseToken: attempt.leaseToken, binding: attempt.binding, jurisdictionId: attempt.jurisdictionId })}`;
 }
 
 /** Internal deployment authority does not impersonate the original publisher. */
-async function assertPublisherAuthority(ctx: MutationCtx, job: GeminiIntegrationJob) {
+export async function assertPublisherAuthority(ctx: MutationCtx, job: GeminiIntegrationJob) {
   if (!(await readAdminEnabled(ctx))) throw new ConvexError("ADMIN_DISABLED");
   const publisher = await authComponent.getAnyUserById(ctx, job.actorId);
   if (!publisher || publisher.emailVerified !== true || publisher.twoFactorEnabled !== true || publisher.banned === true ||
@@ -56,7 +56,7 @@ async function assertPublisherAuthority(ctx: MutationCtx, job: GeminiIntegration
   // Organization membership is rechecked by resolveGeminiPublicationWorkflow.
 }
 
-async function recoveryContext(ctx: MutationCtx, job: GeminiIntegrationJob, now: number) {
+export async function recoveryContext(ctx: MutationCtx, job: GeminiIntegrationJob, now: number) {
   if (job.type !== "gemini_index_document" || job.targetType !== "documentVersion" ||
       job.recoveryKind !== "poll_operation" || !job.providerOperationName || job.knownStoreResult !== undefined) invalid();
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
