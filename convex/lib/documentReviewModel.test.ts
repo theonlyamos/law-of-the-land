@@ -7,6 +7,7 @@ import {
   parseJsonObject,
   parseReading,
   parseSummary,
+  READING_SCHEMA,
   selectSegmentsToCheck,
   type ModelCitation,
 } from "./documentReviewModel";
@@ -70,6 +71,16 @@ describe("shared helpers", () => {
 });
 
 describe("reading", () => {
+  it("keeps array limits out of the response schema so the provider accepts it", () => {
+    expect(JSON.stringify(READING_SCHEMA)).not.toContain("maxItems");
+  });
+
+  it("enforces the passage limit while parsing", () => {
+    const segments = Array.from({ length: 120 }, (_, index) => ({ ref: String(index + 1), heading: "", text: `Clause ${index + 1}.`, page: 1, excerpt: false, priority: "standard", topics: [] }));
+    const reading = parseReading(JSON.stringify({ document_type: "Contract", segments, focus_options: [], role_options: [] }));
+    expect(reading?.segments).toHaveLength(80);
+  });
+
   it("parses a reading, keeping only known focus topics and a valid suggested side", () => {
     const reading = parseReading("```json\n" + JSON.stringify({
       document_type: "Notice to quit",

@@ -75,6 +75,19 @@ function model(): string {
   return process.env.DOCUMENT_REVIEW_MODEL?.trim() || process.env.GEMINI_AI_MODEL?.trim() || DEFAULT_DOCUMENT_REVIEW_MODEL;
 }
 
+/** Status and a short message from a provider error, for logs. Never includes the request. */
+function providerErrorDetail(error: unknown): { status?: number; name: string; message: string } {
+  const status = typeof (error as { status?: unknown } | null)?.status === "number" ? (error as { status: number }).status : undefined;
+  const name = error instanceof Error ? error.name : "unknown";
+  const message = error instanceof Error ? error.message.replace(/\s+/gu, " ").slice(0, 300) : "";
+  return { ...(status === undefined ? {} : { status }), name, message };
+}
+
+function isRequestRejected(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 400 || /invalid argument|schema|too many states/iu.test(error instanceof Error ? error.message : "");
+}
+
 function failureFor(error: unknown): DocumentReviewFailure {
   const text = error instanceof Error ? `${error.name} ${error.message}` : "";
   if (/timeout|timed out|deadline/iu.test(text)) return "timeout";
@@ -127,6 +140,8 @@ export const read = internalAction({
     let reading: ReadingResult | null = null;
     let lastError: unknown;
     // One retry covers a malformed or truncated response, within the action's time limit.
+    // If the provider rejects the response schema, the retry asks for plain JSON instead.
+    let useSchema = true;
     for (let attempt = 0; attempt < 2 && !reading; attempt++) {
       const timeout = Math.min(READING_TIMEOUT_MS, startedAt + ACTION_LIMIT_MS - Date.now());
       if (timeout < MIN_REQUEST_MS) break;
@@ -139,16 +154,18 @@ export const read = internalAction({
           store: false,
           stream: false,
           generation_config: { thinking_level: "low", thinking_summaries: "none", tool_choice: "none", max_output_tokens: 32_768 },
-          response_format: { type: "text", mime_type: "application/json", schema: READING_SCHEMA },
+          response_format: { type: "text", mime_type: "application/json", ...(useSchema ? { schema: READING_SCHEMA } : {}) },
         } as unknown as CreateParams, { maxRetries: 0, timeout });
         const output = interactionPlainText(response);
         reading = output ? parseReading(output) : null;
+        if (!reading) console.warn("document_review_read", JSON.stringify({ outcome: "invalid_response", attempt, schema: useSchema }));
       } catch (error) {
         lastError = error;
+        console.warn("document_review_read", JSON.stringify({ outcome: "provider_error", attempt, schema: useSchema, ...providerErrorDetail(error) }));
+        if (isRequestRejected(error)) useSchema = false;
       }
     }
     if (!reading) {
-      console.warn("document_review_read", JSON.stringify({ outcome: lastError ? "provider_error" : "invalid_response" }));
       await fail(ctx, args, lastError ? failureFor(lastError) : "unreadable");
       return null;
     }
@@ -250,7 +267,10 @@ export const check = internalAction({
           parsed = output ? parseCheckOutput(output, { kind: "passage", passageOrdinals: batch.map((passage) => passage.ordinal) }) : null;
         } catch (error) {
           if (error instanceof BudgetExhausted) stopped = true;
-          else providerErrors += 1;
+          else {
+            providerErrors += 1;
+            if (providerErrors <= 3) console.warn("document_review_check", JSON.stringify({ outcome: "provider_error", ...providerErrorDetail(error) }));
+          }
         }
       }
       const findings = parsed?.findings ?? [];
@@ -266,7 +286,10 @@ export const check = internalAction({
         const parsed = output ? parseCheckOutput(output, { kind: "missing", passageOrdinals: [] }) : null;
         if (parsed?.findings.length) await save(parsed.findings, parsed.pool, []);
       } catch (error) {
-        if (!(error instanceof BudgetExhausted)) providerErrors += 1;
+        if (!(error instanceof BudgetExhausted)) {
+          providerErrors += 1;
+          if (providerErrors <= 3) console.warn("document_review_check", JSON.stringify({ outcome: "provider_error", step: "gaps", ...providerErrorDetail(error) }));
+        }
       }
     };
 
