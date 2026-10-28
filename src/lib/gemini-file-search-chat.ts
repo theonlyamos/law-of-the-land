@@ -25,7 +25,7 @@ import {
 
 export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
 // Each File Search call takes roughly 9-12 seconds in production, so the model is
-// told a budget that fits the 180-second generation window. The enforced cap keeps
+// told a budget that leaves the generation window room for writing the answer. The enforced cap keeps
 // a little grace above it so a slight overrun still completes instead of failing.
 const FILE_SEARCH_CALL_TARGET = 8;
 const MAX_FILE_SEARCH_CALLS = 12;
