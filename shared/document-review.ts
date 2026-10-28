@@ -32,14 +32,14 @@ export const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
   attention: "Needs attention",
   check: "Worth checking",
   fine: "Looks fine",
-  unconfirmed: "Couldn't confirm",
+  unconfirmed: "No law cited",
 };
 
 export const FINDING_STATUS_DESCRIPTIONS: Record<FindingStatus, string> = {
   attention: "Conflicts with the law or gives you less than the law requires.",
   check: "Unclear, unusual or one-sided. Worth asking about.",
   fine: "Matches the law in the library.",
-  unconfirmed: "The library doesn't cover this, or we couldn't link it to a specific source.",
+  unconfirmed: "No provision in the library could be linked to this part. Many terms like this are left to what the parties agree, so read them carefully.",
 };
 
 /** Most serious first. */

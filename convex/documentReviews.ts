@@ -655,7 +655,7 @@ export const saveFindings = internalMutation({
         title: finding.title,
         meaning: finding.meaning,
         lawSummary: status === "unconfirmed" && finding.status !== "unconfirmed"
-          ? "We couldn't link this to a specific provision in the library, so it isn't confirmed."
+          ? "No provision in the library could be linked to this part, so there is no law to cite for it."
           : finding.lawSummary,
         recommendation: finding.recommendation,
         ...(finding.suggestedWording && status !== "fine" ? { suggestedWording: finding.suggestedWording } : {}),
