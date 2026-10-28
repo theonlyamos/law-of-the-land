@@ -1574,6 +1574,7 @@ export const remove = mutation({
     });
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("chatAttachments:deleteSessionBatch"), { sessionId: session._id });
     await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("reviewedEmploymentJobs:deleteForChatBatch"), { sessionId: session._id });
+    await ctx.scheduler.runAfter(0, makeFunctionReference<"mutation">("documentReviews:deleteForSessionBatch"), { sessionId: session._id });
     await scheduleFailedTurnDeletion(ctx, session._id);
     await ctx.scheduler.runAfter(0, internal.profileMemory.deleteEvidenceForSessionBatch, { sessionId: session._id });
     return { deleted: true };
