@@ -41,7 +41,7 @@
 :root {
   color-scheme: light;
   /* Gold drawn from the logo; darkened for contrast on light surfaces. */
-  --brand: 38 45% 38%;
+  --brand: 22 62% 47%; /* Equal Nib copper */
   --background: 0 0% 100%;
   --foreground: 224 71.4% 4.1%;
   --card: 0 0% 100%;
@@ -72,7 +72,7 @@
 /* The theme provider resolves Light, Dark, or System to the root class. */
 .dark {
   color-scheme: dark;
-  --brand: 40 55% 64%;
+  --brand: 24 80% 65%;
   --background: 224 71.4% 4.1%;
   --foreground: 210 20% 98%;
   --card: 224 71.4% 4.1%;
@@ -102,7 +102,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
     color-scheme: dark;
-    --brand: 40 55% 64%;
+    --brand: 24 80% 65%;
     --background: 224 71.4% 4.1%;
     --foreground: 210 20% 98%;
     --card: 224 71.4% 4.1%;

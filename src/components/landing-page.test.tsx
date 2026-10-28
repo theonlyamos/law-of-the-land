@@ -182,6 +182,6 @@ describe("professional landing research shell", () => {
     render(<LandingPage {...landingProps()} />);
     const footerHomeLink = screen.getAllByRole("link", { name: "Law of the Land home" }).at(-1);
     expect(footerHomeLink).toBeDefined();
-    expect(within(footerHomeLink!).getByAltText("")).toBeVisible();
+    expect(footerHomeLink!.querySelector("svg[data-logo-mark]")).not.toBeNull();
   });
 });

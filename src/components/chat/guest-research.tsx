@@ -1,6 +1,7 @@
 "use client";
 
 import type { GuestSessionView } from "@/convex/lib/guestResearchContracts";
+import { LogoMark } from "@/components/brand/logo-mark";
 import { AssistantMessage } from "@/components/chat/assistant-message";
 import { AssistantMessageFooter } from "@/components/chat/assistant-message-footer";
 import { Button } from "@/components/ui/button";
@@ -9,8 +10,6 @@ import { PageLoader, Spinner } from "@/components/ui/spinner";
 import { clearGuestResearchDraft, readGuestResearchDraft, saveGuestResearchDraft } from "@/lib/guest-research-draft";
 import { useConvexAuth } from "convex/react";
 import { Globe2, LockKeyhole } from "lucide-react";
-import Image from "next/image";
-import logo from "@/app/logo-transparent.png";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -247,7 +246,7 @@ export function GuestResearch({ initialQuery, initialJurisdiction }: {
             </div>
             {turn.result && <div className="min-w-0 text-sm leading-7">
               <div className="mb-4 flex items-center gap-2 text-xs font-semibold">
-                <Image src={logo} alt="" width={27} height={20} className="h-5 w-7 object-contain" />
+                <LogoMark className="h-5 w-5" />
                 Law of the Land
               </div>
               <div className="markdown-content"><AssistantMessage content={turn.result.answer} /></div>

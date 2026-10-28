@@ -1,6 +1,7 @@
 "use client";
 
 import { CitationSourcePreview, type CitationPreviewSource } from "./citation-source-preview";
+import { LogoMark } from "@/components/brand/logo-mark";
 import { AssistantMessageFooter } from "./assistant-message-footer";
 import { useChatRequests } from "./chat-requests";
 import { ApiError, BackgroundAcknowledgementError, ChatSubmissionTransportError, postChat } from "./chat-stream-client";
@@ -20,8 +21,6 @@ import { Fragment, useState, useCallback, useEffect, useLayoutEffect, useMemo, u
 import { AssistantMessage, assistantMarkdown } from "./assistant-message";
 import { AnswerSkeleton, ConversationSkeleton } from "./answer-skeleton";
 import { useRouter } from "next/navigation";
-import Image from "next/image";
-import logo from "@/app/logo-transparent.png";
 import { ChatMemoryToggle } from "@/components/memory/chat-memory-toggle";
 import { useConvexAuth, useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { Sidebar } from "@/components/ui/sidebar";
@@ -1198,7 +1197,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                   ) : (
                     <div className="min-w-0 w-full text-sm leading-7">
                       <div className="mb-4 flex items-center gap-2 text-xs font-semibold">
-                        <Image src={logo} alt="" width={27} height={20} className="h-5 w-7 object-contain" />
+                        <LogoMark className="h-5 w-5" />
                         Law of the Land
                       </div>
                       <div className="markdown-content">
