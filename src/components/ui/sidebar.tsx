@@ -1,6 +1,7 @@
 "use client";
 
 import { ProfileMenu } from "./profile-menu";
+import { LogoMark } from "@/components/brand/logo-mark";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { ChatSession } from "@/lib/chat-sessions";
@@ -14,11 +15,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import logo from "@/app/logo-transparent.png";
 
 interface SidebarProps {
   sessions: ChatSession[];
@@ -102,7 +101,7 @@ export function Sidebar({
           aria-label="Law of the Land — home"
           className="flex h-11 w-11 shrink-0 items-center justify-center"
         >
-          <Image src={logo} alt="" width={34} />
+          <LogoMark className="h-8 w-8" />
         </Link>
         <span
           className={`min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight ${collapsibleLabel}`}

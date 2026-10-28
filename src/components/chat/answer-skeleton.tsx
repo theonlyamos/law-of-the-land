@@ -1,5 +1,4 @@
-import Image from "next/image";
-import logo from "@/app/logo-transparent.png";
+import { LogoMark } from "@/components/brand/logo-mark";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
@@ -61,7 +60,7 @@ export function AnswerSkeleton({ label }: { label: string }) {
   return (
     <div className="min-w-0 w-full text-sm leading-7">
       <div className="mb-3 flex items-center gap-2 text-xs font-semibold">
-        <Image src={logo} alt="" width={27} height={20} className="h-5 w-7 object-contain" />
+        <LogoMark className="h-5 w-5" />
         Law of the Land
       </div>
       <div role="status" aria-label="Preparing answer" className="flex items-center gap-2 text-sm text-muted-foreground">

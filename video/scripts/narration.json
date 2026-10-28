@@ -1,0 +1,12 @@
+[
+  { "scene": "Intro", "offset": 1.0, "text": "Law of the Land." },
+  { "scene": "Problem", "offset": 0.5, "text": "The law is written across thousands of pages. But you have one question, and it matters." },
+  { "scene": "Hero", "offset": 0.5, "text": "Understand the law where you are. In plain language, with sources you can verify." },
+  { "scene": "Ask", "offset": 0.6, "text": "Choose your jurisdiction, then ask in your own words. Type your question, or simply say it out loud." },
+  { "scene": "Answer", "offset": 1.0, "text": "Law of the Land searches the reviewed legal library for that jurisdiction, and answers clearly, citing the exact provisions, so you can check every point." },
+  { "scene": "DocReview", "offset": 0.6, "text": "Have a lease or a contract? Attach it. Each clause is checked against the law, and labelled, so you know what needs attention, and what looks fine." },
+  { "scene": "Audiences", "offset": 0.5, "text": "Built for individuals, legal professionals, and organisations alike." },
+  { "scene": "Organisations", "offset": 0.5, "text": "Organisations can review and publish their own legal library, then embed trusted answers right on their website." },
+  { "scene": "Features", "offset": 0.5, "text": "Cited answers. Voice input. Saved research. Secure accounts. Everything you need to research with confidence." },
+  { "scene": "Outro", "offset": 0.7, "text": "Begin with the jurisdiction whose law applies. Law of the Land." }
+]

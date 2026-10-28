@@ -1,7 +1,7 @@
 "use client";
 
-import logo from "@/app/logo-transparent.png";
 import { UserNav } from "@/components/auth/user-nav";
+import { LogoMark } from "@/components/brand/logo-mark";
 import { EditorialTheme } from "@/components/chat/editorial-theme";
 import { LandingSections } from "@/components/landing/landing-sections";
 import styles from "@/components/landing/landing-page.module.css";
@@ -9,7 +9,6 @@ import { ResearchJurisdictionPicker } from "@/components/jurisdictions/research-
 import { ChatInput } from "@/components/ui/chat-input";
 import type { ChatSession } from "@/lib/chat-sessions";
 import type { ResearchJurisdiction } from "@/lib/countries";
-import Image from "next/image";
 import Link from "next/link";
 import { chatAttachmentUploadsEnabled } from "../../shared/chat-attachments";
 
@@ -68,7 +67,8 @@ export function LandingPage({
       <header className={styles.mainHeader}>
         <div className={styles.headerInner}>
           <Link href="/" aria-label="Law of the Land home" className={styles.brand}>
-            <Image src={logo} alt="" width={80} height={43} priority />
+            <LogoMark className={styles.brandMark} />
+            <span className={styles.brandName}>Law of the Land</span>
           </Link>
           <nav aria-label="Primary navigation" className={styles.primaryNav}>
             <ul>
