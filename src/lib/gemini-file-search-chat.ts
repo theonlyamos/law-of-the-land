@@ -24,7 +24,11 @@ import {
 } from "../../convex/lib/queryDiagnostics";
 
 export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
-const MAX_FILE_SEARCH_CALLS = 20;
+// Each File Search call takes roughly 9-12 seconds in production, so the model is
+// told a budget that fits the 180-second generation window. The enforced cap keeps
+// a little grace above it so a slight overrun still completes instead of failing.
+const FILE_SEARCH_CALL_TARGET = 8;
+const MAX_FILE_SEARCH_CALLS = 12;
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
 
 LEGAL-ONLY SCOPE
@@ -45,8 +49,9 @@ Do not rely on general legal knowledge to fill gaps. Do not invent legal require
 If retrieved material is insufficient, say what is missing instead of constructing a plausible answer. Never use a loosely related Act as a substitute for the legislation that directly governs the issue.
 
 FOCUSED RESEARCH
-The application permits at most ${MAX_FILE_SEARCH_CALLS} File Search calls for this answer, including all follow-ups. Plan research within this limit and stop as soon as the retrieved provisions sufficiently support an answer. After the last permitted search result, give the final answer without another search: answer only the supported parts and explain unresolved evidence gaps, or abstain when support is insufficient. Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit.
+The application permits at most ${FILE_SEARCH_CALL_TARGET} File Search calls for this answer, including all follow-ups. Answers have a strict time limit and each search takes several seconds, so treat this as a hard budget. Plan research within this limit and stop as soon as the retrieved provisions sufficiently support an answer. After the last permitted search result, give the final answer without another search: answer only the supported parts and explain unresolved evidence gaps, or abstain when support is insufficient. Never omit material conditions, claim completeness, or fill gaps with general legal knowledge to fit this limit.
 Keep research proportional to the user's actual question. When the question names an instrument or provision, search for that instrument and the requested issue or provision first; do not guess a provision number. For a narrow, single-issue question, normally plan about three targeted searches: an initial search and focused follow-ups for specific missing conditions, exceptions, or cross-references. Stop searching once retrieved provisions adequately answer the requested issue. Use further searches only to resolve a material evidence gap; if it remains unresolved, answer only the supported parts and explain the gap, or abstain when there is not enough support.
+For a broad or multi-issue question, research the issues the user asked about most directly first, and state the evidence gap for remaining sub-issues instead of searching for every one of them. If two or three well-targeted searches do not retrieve the legislation that governs an issue, stop searching for it and say the library does not appear to contain it.
 Do not research ancillary agencies, remedies, procedures, or unrelated legal issues merely to fill the six required headings. For an informational question, state when no additional practical action is established or needed for the requested explanation. Keep all source restrictions, material qualifications, and evidence-gap disclosures.
 
 LEGAL CITATIONS
@@ -128,10 +133,10 @@ const MAX_CANONICAL_ANNOTATIONS = 512;
 // Matches the public citation limit enforced when the answer is completed.
 const MAX_DISTINCT_CITATIONS = 16;
 const MAX_IDENTIFIER_LENGTH = 200;
-// Each search needs a call and result step. Preserve the former full-budget
-// headroom (32 total minus 16 search steps), without increasing output limits.
-const MAX_INTERACTION_STEPS = 16 + 2 * MAX_FILE_SEARCH_CALLS;
 const MAX_NON_SEARCH_STEPS = 32;
+// Each search needs a call and result step. The total stays at the former 56 steps,
+// so a smaller search budget does not reduce the allowance for thought steps.
+const MAX_INTERACTION_STEPS = MAX_NON_SEARCH_STEPS + 2 * MAX_FILE_SEARCH_CALLS;
 const MAX_STREAM_STEP_INDEX = MAX_INTERACTION_STEPS - 1;
 const MAX_FILE_SEARCH_CALL_ID_LENGTH = 128;
 const MAX_STREAM_EVENT_ID_BYTES = 4_096;
