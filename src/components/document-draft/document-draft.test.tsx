@@ -140,7 +140,11 @@ describe("document draft workspace", () => {
     fireEvent.blur(field);
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c2", key: "landlord's name", value: "Kwame Mensah", everywhere: true }));
     expect(within(paper).getByText("[Landlord's name]")).toBeVisible();
+    // Away from the field, the scope controls fold into one line.
+    expect(within(detail).queryByRole("checkbox")).toBeNull();
+    expect(within(detail).getByText("Used in 2 clauses: Parties, Signatures")).toBeVisible();
 
+    fireEvent.focus(field);
     fireEvent.click(within(detail).getByRole("button", { name: "Parties" }));
     expect(screen.getByRole("article", { name: "Clause: Parties" })).toBeVisible();
   });
@@ -152,9 +156,9 @@ describe("document draft workspace", () => {
     const paper = screen.getByRole("region", { name: "Your document" });
     const detail = screen.getByRole("article", { name: "Clause: Parties" });
     const field = within(detail).getByLabelText("Landlord's name");
+    fireEvent.focus(field);
     fireEvent.click(within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" }));
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", key: "landlord's name", value: "", everywhere: false }));
-    fireEvent.focus(field);
     fireEvent.change(field, { target: { value: "K. Mensah" } });
     expect(within(paper).getAllByText("K. Mensah")).toHaveLength(1);
     expect(within(paper).getByText("[landlord’s name]")).toBeVisible();
@@ -168,8 +172,8 @@ describe("document draft workspace", () => {
     render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
     const detail = screen.getByRole("article", { name: "Clause: Parties" });
     const field = within(detail).getByLabelText("Landlord's name");
-    const checkbox = within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" });
     fireEvent.focus(field);
+    const checkbox = within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" });
     fireEvent.change(field, { target: { value: "K. Mensah" } });
     fireEvent.pointerDown(checkbox);
     fireEvent.blur(field, { relatedTarget: checkbox });

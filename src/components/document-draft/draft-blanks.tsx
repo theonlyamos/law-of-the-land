@@ -183,6 +183,10 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
   const usesId = useId();
   const [value, setValue] = useState(blank.value ?? "");
   const [everywhere, setEverywhere] = useState(!blank.own);
+  /** True while focus or a press is inside this field's group; the scope controls show only then. */
+  const [active, setActive] = useState(false);
+  const groupRef = useRef<HTMLDivElement>(null);
+  const pressing = useRef(false);
   const focused = useRef(false);
   const checkboxRef = useRef<HTMLInputElement>(null);
   /** Set while the "use in all clauses" box is being pressed, so leaving the field waits for the new choice. */
@@ -225,6 +229,16 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
     }, 0), { once: true });
   };
 
+  // A press inside the group can blur the field before its click lands, so the controls stay until it ends.
+  const startPress = () => {
+    pressing.current = true;
+    window.addEventListener("pointerup", () => window.setTimeout(() => {
+      pressing.current = false;
+      setActive(Boolean(groupRef.current?.contains(document.activeElement)));
+    }, 0), { once: true });
+  };
+  const fieldClass = "h-10 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none";
+
   const input = (
     <input id={inputId} data-blank-input={blank.key} value={value} maxLength={MAX_BLANK_VALUE_CHARACTERS}
       aria-describedby={shared ? usesId : undefined} autoComplete="off"
@@ -241,23 +255,36 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
         if (event.key === "Enter") { event.preventDefault(); onEnter(event.currentTarget); }
         if (event.key === "Escape" && value !== saved) { event.preventDefault(); event.stopPropagation(); setValue(saved); preview(saved); }
       }}
-      className={cn("h-10 min-w-0 flex-1 bg-transparent px-2.5 text-sm focus-visible:outline-none",
-        !currency && "rounded-md border bg-background focus-visible:ring-2 focus-visible:ring-ring")} />
+      className={currency
+        ? cn(fieldClass, "min-w-0 flex-1 bg-transparent px-3")
+        : cn(fieldClass, "w-full rounded-lg border bg-background px-3 transition-[border-color,box-shadow]", "focus:border-brand focus:ring-[3px] focus:ring-brand/20")} />
   );
+  const showScope = shared && (active || !everywhere);
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div ref={groupRef} className="flex flex-col gap-1.5" onPointerDown={startPress}
+      onFocus={() => setActive(true)}
+      onBlur={(event) => {
+        if (pressing.current || choosingScope.current) return;
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setActive(false);
+      }}>
       <label htmlFor={inputId} className="flex items-center gap-1.5 text-[13px] font-medium [overflow-wrap:anywhere]">
         {blankLabel(blank.placeholder)}
         {blank.value && <Check className="size-3.5 shrink-0 text-primary" aria-label="Filled" />}
       </label>
       {currency ? (
-        <div className="flex h-10 items-stretch overflow-hidden rounded-md border bg-background focus-within:ring-2 focus-within:ring-ring">
-          <span aria-hidden="true" className="flex items-center border-r bg-muted px-2.5 text-[13px] text-muted-foreground">{currency}</span>
+        <div className={cn("flex h-10 items-stretch overflow-hidden rounded-lg border bg-background transition-[border-color,box-shadow]",
+          "focus-within:border-brand focus-within:ring-[3px] focus-within:ring-brand/20")}>
+          <span aria-hidden="true" className="flex items-center border-r bg-muted px-3 text-[13px] text-muted-foreground">{currency}</span>
           {input}
         </div>
       ) : input}
-      {shared && (
+      {shared && !showScope && (
+        <p id={usesId} className="text-xs leading-5 text-muted-foreground">
+          {blank.value ? "Filled" : "Used"} in {uses.length} clauses: {uses.map((entry) => entry.line || entry.clause.heading || "Untitled part").join(", ")}
+        </p>
+      )}
+      {showScope && (
         <div id={usesId} className="flex flex-col gap-1.5">
           <label className="flex min-h-8 cursor-pointer items-center gap-2 text-[13px]" onPointerDown={startChoosingScope}>
             <input ref={checkboxRef} type="checkbox" checked={everywhere} className="size-4 accent-[hsl(var(--primary))]"
