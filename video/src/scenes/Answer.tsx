@@ -1,6 +1,7 @@
 import React from "react";
 import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
-import { BookOpen, Scale } from "lucide-react";
+import { BookOpen } from "lucide-react";
+import { LogoMark } from "../components/LogoMark";
 import { prog, rise, useLayout } from "../anim";
 import { Bar, Eyebrow, Footnote, Paper } from "../components/ui";
 import { C, F } from "../theme";
@@ -40,10 +41,10 @@ const CiteChip: React.FC<{ n: number; pulse: number }> = ({ n, pulse }) => (
       fontWeight: 700,
       fontFamily: F.sans,
       color: C.white,
-      background: C.brass,
+      background: C.copper,
       verticalAlign: "middle",
       transform: `scale(${1 + pulse * 0.2})`,
-      boxShadow: pulse > 0 ? `0 0 0 ${pulse * 10}px oklch(55% 0.09 72 / 0.2)` : "none",
+      boxShadow: pulse > 0 ? `0 0 0 ${pulse * 10}px rgb(194 95 46 / 0.2)` : "none",
     }}
   >
     {n}
@@ -95,7 +96,7 @@ export const Answer: React.FC = () => {
               </div>
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12, ...rise(frame, 10) }}>
-              <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: "0.16em", color: C.brass }}>GHANA</span>
+              <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: "0.16em", color: C.copper }}>GHANA</span>
             </div>
 
             <div style={{ marginTop: 34, display: "flex", gap: 22 }}>
@@ -110,10 +111,10 @@ export const Answer: React.FC = () => {
                   placeItems: "center",
                   background: C.paper,
                   border: `1.5px solid ${C.line}`,
-                  color: C.brass,
+                  color: C.copper,
                 }}
               >
-                <Scale size={36} />
+                <LogoMark size={62} />
               </div>
               <div style={{ flex: 1 }}>
                 {searching ? (
@@ -122,7 +123,7 @@ export const Answer: React.FC = () => {
                       Searching the published legal library for Ghana…
                     </div>
                     <div style={{ marginTop: 18, height: 6, width: 520, borderRadius: 3, background: C.paperDeep, overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${searchP * 100}%`, background: C.brass }} />
+                      <div style={{ height: "100%", width: `${searchP * 100}%`, background: C.copper }} />
                     </div>
                   </div>
                 ) : null}
@@ -170,7 +171,7 @@ export const Answer: React.FC = () => {
               <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10, fontSize: 28, fontWeight: 600, color: C.inkSoft }}>
                 <BookOpen size={24} /> Section 25 · Rent advance
               </div>
-              <div style={{ marginTop: 30, borderLeft: `4px solid ${C.brass}`, paddingLeft: 24 }}>
+              <div style={{ marginTop: 30, borderLeft: `4px solid ${C.copper}`, paddingLeft: 24 }}>
                 <Bar w="92%" style={{ marginBottom: 16 }} />
                 <Bar w="80%" style={{ marginBottom: 18 }} />
                 <div style={{ position: "relative", display: "inline-block", fontSize: 32, fontWeight: 600, color: C.ink, marginBottom: 18 }}>
@@ -181,7 +182,7 @@ export const Answer: React.FC = () => {
                       top: 2,
                       bottom: 2,
                       width: `calc(${highlight * 100}% + 12px)`,
-                      background: "oklch(85% 0.09 85 / 0.7)",
+                      background: "rgb(239 154 92 / 0.38)",
                       borderRadius: 6,
                       zIndex: 0,
                     }}

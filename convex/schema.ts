@@ -15,6 +15,18 @@ import {
   storedFindingCitationValidator,
 } from "./lib/documentReviewContracts";
 import {
+  clauseBasisValidator,
+  documentDraftFailureValidator,
+  documentDraftStatusValidator,
+  draftAnswerValidator,
+  draftAudienceValidator,
+  draftOptionValidator,
+  draftQuestionValidator,
+  draftSectionValidator,
+  storedClauseCitationValidator,
+  storedFormalityValidator,
+} from "./lib/documentDraftContracts";
+import {
   profileEvidenceKindValidator,
   profileFactSourceValidator,
   profileFactStatusValidator,
@@ -1168,6 +1180,71 @@ export default defineSchema({
     suggestedWording: v.optional(v.string()),
     citations: v.array(storedFindingCitationValidator),
   }).index("by_reviewId_and_attempt_and_ordinal", ["reviewId", "attempt", "ordinal"]),
+  // A legal document drafted from the law library, started from a chat message.
+  documentDrafts: defineTable({
+    sessionId: v.id("chatSessions"),
+    userId: v.string(),
+    userClientId: v.string(),
+    request: v.string(),
+    /** An optional file the draft is based on (for example a letter to reply to). */
+    attachmentId: v.optional(v.id("chatAttachments")),
+    status: documentDraftStatusValidator,
+    attempt: v.number(),
+    // Set by planning.
+    documentType: v.optional(v.string()),
+    title: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    isLegalDocument: v.optional(v.boolean()),
+    roleOptions: v.optional(v.array(draftOptionValidator)),
+    suggestedRoleId: v.optional(v.string()),
+    suggestedAudience: v.optional(draftAudienceValidator),
+    questions: v.optional(v.array(draftQuestionValidator)),
+    sections: v.optional(v.array(draftSectionValidator)),
+    sourceNotes: v.optional(v.string()),
+    // The person's choices.
+    roleId: v.optional(v.string()),
+    roleLabel: v.optional(v.string()),
+    audience: v.optional(draftAudienceValidator),
+    answers: v.optional(v.array(draftAnswerValidator)),
+    instructions: v.optional(v.string()),
+    startRequested: v.optional(v.boolean()),
+    // Drafting progress and result.
+    draftedCount: v.optional(v.number()),
+    draftTotal: v.optional(v.number()),
+    formalities: v.optional(v.array(storedFormalityValidator)),
+    partialCoverage: v.optional(v.boolean()),
+    /** Bumped on every saved change, so exports name the version they came from. */
+    version: v.optional(v.number()),
+    jurisdictionName: v.string(),
+    failure: v.optional(documentDraftFailureValidator),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    completedAt: v.optional(v.number()),
+  })
+    .index("by_sessionId_and_createdAt", ["sessionId", "createdAt"])
+    .index("by_sessionId_and_userClientId", ["sessionId", "userClientId"]),
+  documentDraftResearch: defineTable({
+    draftId: v.id("documentDrafts"),
+    attempt: v.number(),
+    research: researchSnapshotValidator,
+  }).index("by_draftId", ["draftId"]),
+  documentDraftClauses: defineTable({
+    draftId: v.id("documentDrafts"),
+    attempt: v.number(),
+    ordinal: v.number(),
+    heading: v.string(),
+    text: v.string(),
+    basis: clauseBasisValidator,
+    why: v.string(),
+    lawSummary: v.string(),
+    citations: v.array(storedClauseCitationValidator),
+    /** True once the person changed the wording by hand. */
+    edited: v.boolean(),
+    /** Counts requested rewrites; a rewrite saves only if it is still the latest. */
+    revision: v.optional(v.number()),
+    revising: v.optional(v.boolean()),
+    revisionFailed: v.optional(v.boolean()),
+  }).index("by_draftId_and_attempt_and_ordinal", ["draftId", "attempt", "ordinal"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown
   // after reload but never becomes legal-answer context or transcript history.
   failedChatTurns: defineTable({

@@ -23,7 +23,7 @@ export const Features: React.FC = () => {
     <Paper tone="ink">
       <AbsoluteFill style={{ padding: vertical ? "120px 70px" : "100px 130px", justifyContent: vertical ? "center" : undefined }}>
         <div style={rise(frame, 0)}>
-          <Eyebrow rule color={C.brassLight}>
+          <Eyebrow rule color={C.copperLight}>
             Built for trust
           </Eyebrow>
         </div>
@@ -39,7 +39,7 @@ export const Features: React.FC = () => {
         >
           <MaskLine start={4}>Everything you need to</MaskLine>
           <MaskLine start={12}>
-            <span style={{ fontStyle: "italic", color: C.brassLight }}>research with confidence.</span>
+            <span style={{ fontStyle: "italic", color: C.copperLight }}>research with confidence.</span>
           </MaskLine>
         </div>
         <div
@@ -60,7 +60,7 @@ export const Features: React.FC = () => {
                   ...rise(frame, start, 30),
                   padding: vertical ? "30px 28px" : "30px 32px",
                   borderRadius: 18,
-                  border: `1.5px solid oklch(76% 0.075 78 / ${0.2 + glow * 0.6})`,
+                  border: `1.5px solid rgb(239 154 92 / ${0.2 + glow * 0.6})`,
                   background: `oklch(30% 0.045 150 / ${0.6 + glow * 0.3})`,
                 }}
               >
@@ -71,8 +71,8 @@ export const Features: React.FC = () => {
                     borderRadius: 14,
                     display: "grid",
                     placeItems: "center",
-                    background: "oklch(76% 0.075 78 / 0.14)",
-                    color: C.brassLight,
+                    background: "rgb(239 154 92 / 0.14)",
+                    color: C.copperLight,
                   }}
                 >
                   <f.Icon size={30} strokeWidth={1.7} />

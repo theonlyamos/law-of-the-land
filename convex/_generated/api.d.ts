@@ -49,6 +49,9 @@ import type * as chats from "../chats.js";
 import type * as crons from "../crons.js";
 import type * as documentReviewActions from "../documentReviewActions.js";
 import type * as documentReviewSources from "../documentReviewSources.js";
+import type * as documentDraftActions from "../documentDraftActions.js";
+import type * as documentDraftSources from "../documentDraftSources.js";
+import type * as documentDrafts from "../documentDrafts.js";
 import type * as documentReviews from "../documentReviews.js";
 import type * as guestResearch from "../guestResearch.js";
 import type * as http from "../http.js";
@@ -62,6 +65,8 @@ import type * as lib_chatAttachmentContracts from "../lib/chatAttachmentContract
 import type * as lib_chatAttachmentProof from "../lib/chatAttachmentProof.js";
 import type * as lib_chatCitationClaim from "../lib/chatCitationClaim.js";
 import type * as lib_chatNoEvidence from "../lib/chatNoEvidence.js";
+import type * as lib_documentDraftContracts from "../lib/documentDraftContracts.js";
+import type * as lib_documentDraftModel from "../lib/documentDraftModel.js";
 import type * as lib_documentReviewContracts from "../lib/documentReviewContracts.js";
 import type * as lib_documentReviewModel from "../lib/documentReviewModel.js";
 import type * as lib_chatPolicy from "../lib/chatPolicy.js";
@@ -150,6 +155,9 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   documentReviewActions: typeof documentReviewActions;
   documentReviewSources: typeof documentReviewSources;
+  documentDraftActions: typeof documentDraftActions;
+  documentDraftSources: typeof documentDraftSources;
+  documentDrafts: typeof documentDrafts;
   documentReviews: typeof documentReviews;
   guestResearch: typeof guestResearch;
   http: typeof http;
@@ -163,6 +171,8 @@ declare const fullApi: ApiFromModules<{
   "lib/chatAttachmentProof": typeof lib_chatAttachmentProof;
   "lib/chatCitationClaim": typeof lib_chatCitationClaim;
   "lib/chatNoEvidence": typeof lib_chatNoEvidence;
+  "lib/documentDraftContracts": typeof lib_documentDraftContracts;
+  "lib/documentDraftModel": typeof lib_documentDraftModel;
   "lib/documentReviewContracts": typeof lib_documentReviewContracts;
   "lib/documentReviewModel": typeof lib_documentReviewModel;
   "lib/chatPolicy": typeof lib_chatPolicy;

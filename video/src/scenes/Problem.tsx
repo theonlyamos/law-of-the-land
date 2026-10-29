@@ -46,7 +46,7 @@ const Column: React.FC<{ seed: number; speed: number; x: number; width: number }
             style={{
               fontFamily: F.serif,
               fontSize: 30,
-              color: C.brassLight,
+              color: C.copperLight,
               opacity: 0.55,
               marginBottom: 14,
             }}
@@ -110,13 +110,13 @@ export const Problem: React.FC = () => {
         <div style={{ position: "absolute", opacity: first }}>
           <MaskLine start={8}>Thousands of pages.</MaskLine>
           <MaskLine start={22}>
-            <span style={{ color: C.brassLight }}>Hundreds of sections.</span>
+            <span style={{ color: C.copperLight }}>Hundreds of sections.</span>
           </MaskLine>
         </div>
         <div style={{ position: "absolute" }}>
           <MaskLine start={swap + 4}>And one question</MaskLine>
           <MaskLine start={swap + 16}>
-            <span style={{ fontStyle: "italic", color: C.brassLight }}>that matters to you.</span>
+            <span style={{ fontStyle: "italic", color: C.copperLight }}>that matters to you.</span>
           </MaskLine>
         </div>
       </AbsoluteFill>

@@ -49,7 +49,7 @@ export const Hero: React.FC = () => {
                       bottom: 6,
                       height: 8,
                       width: `${underline * 96}%`,
-                      background: C.brassLight,
+                      background: C.copperLight,
                       opacity: 0.7,
                       zIndex: -1,
                     }}

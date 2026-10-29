@@ -42,7 +42,7 @@ export const Cursor: React.FC<{ keys: Key[]; clicks?: number[]; opacity?: number
             width: 52 * (0.4 + ring),
             height: 52 * (0.4 + ring),
             borderRadius: "50%",
-            border: "3px solid oklch(55% 0.09 72)",
+            border: "3px solid #c25f2e",
             opacity: 1 - ring,
           }}
         />
