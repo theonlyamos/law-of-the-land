@@ -20,7 +20,7 @@ import { clauseHeadingLine, numberClauses, type ExportPaper, type ExportStyle } 
 import { CLAUSE_BASIS_MARKER_CLASSES, ClauseBasisBadge } from "./draft-status";
 import { useDraftAction } from "./document-draft-card";
 import { exportDraft, type DraftData, type ExportFormat } from "./draft-export";
-import { BlankFields, ClauseParts, uniqueBlanks, type ActiveBlank } from "./draft-blanks";
+import { BlankFields, ClauseParts, restoreBlanks, uniqueBlanks, type ActiveBlank } from "./draft-blanks";
 
 type Clause = DraftData["clauses"][number];
 
@@ -312,7 +312,7 @@ function ClauseDetail({ clause, line, draftId, canRemove, numbered, activeBlank,
       {mode === "edit" ? (
         <form className="flex flex-col gap-2.5 rounded-lg border p-3" onSubmit={(event) => {
           event.preventDefault();
-          void action.run(() => updateClause({ clauseId: clause.id, heading, text })).then((ok) => { if (ok) setMode("view"); });
+          void action.run(() => updateClause({ clauseId: clause.id, heading, text: restoreBlanks(clause, text) })).then((ok) => { if (ok) setMode("view"); });
         }}>
           <label htmlFor={headingId} className="text-xs font-medium">Heading</label>
           <input id={headingId} value={heading} onChange={(event) => setHeading(event.target.value)} maxLength={DOCUMENT_DRAFT_LIMITS.maxClauseHeading}

@@ -35,6 +35,46 @@ export function hasOpenBlank(clause: Pick<Clause, "parts">): boolean {
   return blankParts(clause).some((part) => !part.value);
 }
 
+/**
+ * Turns wording edited from the filled-in text back into wording with blanks.
+ * Filled blanks the edit left untouched become blanks again, so they keep
+ * following their field; a blank whose value was edited keeps the new text.
+ */
+export function restoreBlanks(clause: Pick<Clause, "parts">, edited: string): string {
+  const segments = clause.parts.map((part) => part.kind === "text"
+    ? { shown: part.text, raw: part.text, blank: false }
+    : { shown: part.value ?? part.placeholder, raw: part.placeholder, blank: true });
+  const shown = segments.map((segment) => segment.shown).join("");
+  if (edited === shown) return segments.map((segment) => segment.raw).join("");
+  const max = Math.min(shown.length, edited.length);
+  let prefix = 0;
+  while (prefix < max && shown[prefix] === edited[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < max - prefix && shown[shown.length - 1 - suffix] === edited[edited.length - 1 - suffix]) suffix += 1;
+
+  // Segments inside the unchanged start or end keep their blanks; a cut one keeps what was shown.
+  // Typing right against a value counts as editing it.
+  let head = "";
+  let position = 0;
+  for (const segment of segments) {
+    const end = position + segment.shown.length;
+    if (segment.blank ? end < prefix : end <= prefix) head += segment.raw;
+    else if (position < prefix) head += segment.shown.slice(0, prefix - position);
+    else break;
+    position = end;
+  }
+  let tail = "";
+  position = shown.length;
+  for (const segment of [...segments].reverse()) {
+    const start = position - segment.shown.length;
+    if (segment.blank ? start > shown.length - suffix : start >= shown.length - suffix) tail = segment.raw + tail;
+    else if (position > shown.length - suffix) tail = segment.shown.slice(shown.length - suffix - start) + tail;
+    else break;
+    position = start;
+  }
+  return head + edited.slice(prefix, edited.length - suffix) + tail;
+}
+
 /** What a blank shows in a clause right now, including what is being typed. */
 function shownValue(part: BlankPart, clauseId: string, active: ActiveBlank | null): string | undefined {
   if (active && active.key === part.key && (active.everywhere || active.clauseId === clauseId)) return cleanBlankValue(active.value) || undefined;
@@ -144,15 +184,21 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
   const [value, setValue] = useState(blank.value ?? "");
   const [everywhere, setEverywhere] = useState(!blank.own);
   const focused = useRef(false);
+  const checkboxRef = useRef<HTMLInputElement>(null);
+  /** Set while the "use in all clauses" box is being pressed, so leaving the field waits for the new choice. */
+  const choosingScope = useRef(false);
+  const lastSent = useRef<{ value: string; everywhere: boolean } | null>(null);
   const saved = blank.value ?? "";
   const shared = uses.length > 1;
   const elsewhere = uses.filter((entry) => entry.clause.id !== clause.id);
 
   // Take the saved value when it changes elsewhere, unless the person is typing here.
   useEffect(() => {
+    lastSent.current = null;
     if (!focused.current) setValue(blank.value ?? "");
   }, [blank.value]);
   useEffect(() => {
+    lastSent.current = null;
     if (!focused.current) setEverywhere(!blank.own);
   }, [blank.own]);
 
@@ -163,7 +209,20 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
   const commit = (nextEverywhere = everywhere) => {
     const clean = cleanBlankValue(value);
     if (clean !== value) setValue(clean);
-    if (clean !== saved || nextEverywhere !== !blank.own) onSave(blank.key, clean, shared ? nextEverywhere : true);
+    const scope = shared ? nextEverywhere : true;
+    const current = lastSent.current ?? { value: saved, everywhere: shared ? !blank.own : true };
+    if (clean === current.value && scope === current.everywhere) return;
+    lastSent.current = { value: clean, everywhere: scope };
+    onSave(blank.key, clean, scope);
+  };
+  const startChoosingScope = () => {
+    choosingScope.current = true;
+    // If the press ends without changing the box, save what was typed as it is.
+    window.addEventListener("pointerup", () => window.setTimeout(() => {
+      if (!choosingScope.current) return;
+      choosingScope.current = false;
+      commit();
+    }, 0), { once: true });
   };
 
   const input = (
@@ -171,7 +230,13 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
       aria-describedby={shared ? usesId : undefined} autoComplete="off"
       onFocus={() => { focused.current = true; preview(value); }}
       onChange={(event) => { setValue(event.target.value); preview(event.target.value); }}
-      onBlur={() => { focused.current = false; onPreview(null); commit(); }}
+      onBlur={(event) => {
+        focused.current = false;
+        onPreview(null);
+        // Moving to the scope box saves once the choice is made there.
+        if (choosingScope.current || (event.relatedTarget && event.relatedTarget === checkboxRef.current)) return;
+        commit();
+      }}
       onKeyDown={(event) => {
         if (event.key === "Enter") { event.preventDefault(); onEnter(event.currentTarget); }
         if (event.key === "Escape" && value !== saved) { event.preventDefault(); event.stopPropagation(); setValue(saved); preview(saved); }
@@ -194,9 +259,10 @@ function BlankField({ clause, blank, uses, onPreview, onSave, onSelect, onEnter 
       ) : input}
       {shared && (
         <div id={usesId} className="flex flex-col gap-1.5">
-          <label className="flex min-h-8 cursor-pointer items-center gap-2 text-[13px]">
-            <input type="checkbox" checked={everywhere} className="size-4 accent-[hsl(var(--primary))]"
-              onChange={(event) => { setEverywhere(event.target.checked); commit(event.target.checked); }} />
+          <label className="flex min-h-8 cursor-pointer items-center gap-2 text-[13px]" onPointerDown={startChoosingScope}>
+            <input ref={checkboxRef} type="checkbox" checked={everywhere} className="size-4 accent-[hsl(var(--primary))]"
+              onChange={(event) => { choosingScope.current = false; setEverywhere(event.target.checked); commit(event.target.checked); }}
+              onBlur={() => commit()} />
             Use in all {uses.length} clauses it appears in
           </label>
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">

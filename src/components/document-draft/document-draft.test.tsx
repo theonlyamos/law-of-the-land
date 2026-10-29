@@ -16,6 +16,7 @@ import { DocumentDraftCard, type DocumentDraftSummary } from "./document-draft-c
 import { DocumentDraftWorkspace, askAboutClausePrompt } from "./document-draft-workspace";
 import { toExportDocument, type DraftData } from "./draft-export";
 import { splitBlanks } from "../../../shared/document-draft";
+import { restoreBlanks } from "./draft-blanks";
 
 afterEach(() => { cleanup(); mocks.mutate.mockReset(); exportMock.exportDraft.mockReset(); mocks.data = undefined; mocks.usage = null; });
 
@@ -159,6 +160,54 @@ describe("document draft workspace", () => {
     expect(within(paper).getByText("[landlord’s name]")).toBeVisible();
     fireEvent.blur(field);
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", key: "landlord's name", value: "K. Mensah", everywhere: false }));
+  });
+
+  it("keeps a typed value to one clause when the box is unticked straight after typing", async () => {
+    mocks.data = draftData();
+    mocks.mutate.mockResolvedValue(null);
+    render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
+    const detail = screen.getByRole("article", { name: "Clause: Parties" });
+    const field = within(detail).getByLabelText("Landlord's name");
+    const checkbox = within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" });
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "K. Mensah" } });
+    fireEvent.pointerDown(checkbox);
+    fireEvent.blur(field, { relatedTarget: checkbox });
+    fireEvent.click(checkbox);
+    fireEvent.pointerUp(window);
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", key: "landlord's name", value: "K. Mensah", everywhere: false }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mocks.mutate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps filled blanks as blanks when a clause is edited", async () => {
+    const data = draftData();
+    data.clauses[0] = { ...data.clauses[0], text: "Between Kwame Mensah and the tenant.",
+      parts: [{ kind: "text", text: "Between " }, { kind: "blank", key: "landlord's name", placeholder: "[Landlord's name]", value: "Kwame Mensah", own: false }, { kind: "text", text: " and the tenant." }] };
+    mocks.data = data;
+    mocks.mutate.mockResolvedValue(null);
+    render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
+    const detail = screen.getByRole("article", { name: "Clause: Parties" });
+    fireEvent.click(within(detail).getByRole("button", { name: "Edit" }));
+    expect(within(detail).getByLabelText("Wording")).toHaveValue("Between Kwame Mensah and the tenant.");
+    fireEvent.change(within(detail).getByLabelText("Heading"), { target: { value: "The parties" } });
+    fireEvent.click(within(detail).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", heading: "The parties", text: "Between [Landlord's name] and the tenant." }));
+  });
+
+  it("restores only the blanks an edit did not touch", () => {
+    const clause = { parts: [
+      { kind: "text" as const, text: "Between " },
+      { kind: "blank" as const, key: "a", placeholder: "[Landlord]", value: "Kwame", own: false },
+      { kind: "text" as const, text: " and " },
+      { kind: "blank" as const, key: "b", placeholder: "[Tenant]", value: "Ama", own: false },
+      { kind: "text" as const, text: " today." },
+    ] };
+    expect(restoreBlanks(clause, "Between Kwame and Ama today.")).toBe("Between [Landlord] and [Tenant] today.");
+    expect(restoreBlanks(clause, "Between Kwame and Ama from today.")).toBe("Between [Landlord] and [Tenant] from today.");
+    // Typing straight onto a value edits it, so that value stays as written.
+    expect(restoreBlanks(clause, "Between Kwame-Mensah and Ama today.")).toBe("Between Kwame-Mensah and [Tenant] today.");
+    expect(restoreBlanks(clause, "Agreed by Kwame and Ama today.")).toBe("Agreed by [Landlord] and [Tenant] today.");
   });
 
   it("asks about an edited clause using its current wording", () => {
