@@ -15,6 +15,7 @@ vi.mock("./draft-export", async (original) => ({ ...(await original<typeof impor
 import { DocumentDraftCard, type DocumentDraftSummary } from "./document-draft-card";
 import { DocumentDraftWorkspace, askAboutClausePrompt } from "./document-draft-workspace";
 import { toExportDocument, type DraftData } from "./draft-export";
+import { splitBlanks } from "../../../shared/document-draft";
 
 afterEach(() => { cleanup(); mocks.mutate.mockReset(); exportMock.exportDraft.mockReset(); mocks.data = undefined; mocks.usage = null; });
 
@@ -48,6 +49,11 @@ function summary(overrides: Partial<DocumentDraftSummary> = {}): DocumentDraftSu
   };
 }
 
+/** A clause as the workspace query returns it, with no blanks filled yet. */
+function withParts<T extends { text: string }>(clause: T) {
+  return { ...clause, parts: splitBlanks(clause.text).map((part) => part.kind === "text" ? part : { ...part, own: false }) };
+}
+
 function draftData(): DraftData {
   return {
     draft: summary({ status: "completed", audience: "professional", roleLabel: "Landlord", counts: { required: 1, protects: 0, common: 1, choice: 1 }, placeholderCount: 1, version: 2 }),
@@ -58,7 +64,8 @@ function draftData(): DraftData {
       { id: "c0", ordinal: 0, kind: "opening", heading: "Parties", text: "Between [Landlord's name] and the tenant.", basis: "choice", why: "Names the parties.", lawSummary: "", citations: [], edited: false, revising: false, revisionFailed: false },
       { id: "c1", ordinal: 1, kind: "clause", heading: "Rent", text: "Rent is GH₵ 2,000.\n(a) Paid monthly.", basis: "required", why: "Caps advance rent.", lawSummary: "Advance rent is limited.",
         citations: [{ label: "Rent Act", provision: "s. 25", jurisdictionName: "Ghana", jurisdictionKind: "geographic", relation: "selected", pageNumber: 4, previewable: true }], edited: false, revising: false, revisionFailed: false },
-    ] as unknown as DraftData["clauses"],
+      { id: "c2", ordinal: 2, kind: "signatures", heading: "Signatures", text: "Signed by [landlord’s name] on [date of signing].", basis: "choice", why: "", lawSummary: "", citations: [], edited: false, revising: false, revisionFailed: false },
+    ].map(withParts) as unknown as DraftData["clauses"],
   };
 }
 
@@ -110,6 +117,48 @@ describe("document draft workspace", () => {
     await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c1", heading: "Rent", text: "Rent is GH₵ 2,500." }));
     fireEvent.click(screen.getByRole("tab", { name: /Before you sign/u }));
     expect(screen.getByText("Stamp the agreement")).toBeVisible();
+  });
+
+  it("fills a blank in every clause it appears in, showing it in the document as it is typed", async () => {
+    mocks.data = draftData();
+    mocks.mutate.mockResolvedValue(null);
+    render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
+    const paper = screen.getByRole("region", { name: "Your document" });
+    // Clicking a highlight opens its clause with that blank's field focused.
+    fireEvent.click(within(paper).getByText("[landlord’s name]"));
+    const detail = screen.getByRole("article", { name: "Clause: Signatures" });
+    const field = within(detail).getByLabelText("Landlord’s name");
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(within(detail).getByText("0 of 2 filled")).toBeVisible();
+    expect(within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" })).toBeChecked();
+
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "Kwame  Mensah " } });
+    expect(within(paper).getAllByText("Kwame Mensah")).toHaveLength(2);
+    expect(mocks.mutate).not.toHaveBeenCalled();
+    fireEvent.blur(field);
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c2", key: "landlord's name", value: "Kwame Mensah", everywhere: true }));
+    expect(within(paper).getByText("[Landlord's name]")).toBeVisible();
+
+    fireEvent.click(within(detail).getByRole("button", { name: "Parties" }));
+    expect(screen.getByRole("article", { name: "Clause: Parties" })).toBeVisible();
+  });
+
+  it("fills a shared blank in one clause only when asked", async () => {
+    mocks.data = draftData();
+    mocks.mutate.mockResolvedValue(null);
+    render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={vi.fn()} />);
+    const paper = screen.getByRole("region", { name: "Your document" });
+    const detail = screen.getByRole("article", { name: "Clause: Parties" });
+    const field = within(detail).getByLabelText("Landlord's name");
+    fireEvent.click(within(detail).getByRole("checkbox", { name: "Use in all 2 clauses it appears in" }));
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", key: "landlord's name", value: "", everywhere: false }));
+    fireEvent.focus(field);
+    fireEvent.change(field, { target: { value: "K. Mensah" } });
+    expect(within(paper).getAllByText("K. Mensah")).toHaveLength(1);
+    expect(within(paper).getByText("[landlord’s name]")).toBeVisible();
+    fireEvent.blur(field);
+    await waitFor(() => expect(mocks.mutate).toHaveBeenCalledWith({ clauseId: "c0", key: "landlord's name", value: "K. Mensah", everywhere: false }));
   });
 
   it("asks about an edited clause using its current wording", () => {
