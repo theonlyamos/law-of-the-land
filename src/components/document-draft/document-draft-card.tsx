@@ -152,7 +152,7 @@ function QuestionField({ question, value, onChange }: { question: DraftQuestion;
       <div role="radiogroup" aria-labelledby={fieldId} aria-describedby={described} className="flex flex-wrap gap-2">
         {question.options.map((option) => (
           <label key={option} className={cn(
-            "inline-flex min-h-9 cursor-pointer items-center rounded-full border px-3 text-[13px] transition-colors",
+            "relative inline-flex min-h-9 cursor-pointer items-center rounded-full border px-3 text-[13px] transition-colors",
             "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring",
             value === option ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background hover:bg-muted",
           )}>
@@ -187,7 +187,7 @@ function ChipRadio<T extends string>({ name, options, value, onChange }: { name:
     <div className="flex flex-wrap gap-2">
       {options.map((option) => (
         <label key={option.id} className={cn(
-          "inline-flex min-h-11 cursor-pointer items-center rounded-lg border px-4 text-sm font-medium transition-colors",
+          "relative inline-flex min-h-11 cursor-pointer items-center rounded-lg border px-4 text-sm font-medium transition-colors",
           "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring has-[:focus-visible]:ring-offset-1",
           value === option.id ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background hover:bg-muted",
         )}>
