@@ -6,6 +6,7 @@ import { api, components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import authSchema from "./betterAuth/schema";
 import schema from "./schema";
+import { blankKey } from "../shared/document-draft";
 import polarSchema from "../node_modules/@convex-dev/polar/src/component/schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -260,6 +261,41 @@ describe("document drafts", () => {
     await expect(f.client.mutation(api.documentDrafts.reviseClause, { clauseId: data.clauses[0].id, instruction: "Shorter" })).rejects.toThrow("DOCUMENT_DRAFT_RESEARCH_UNAVAILABLE");
   });
 
+  it("fills a blank in every clause that uses it, or in one clause only", async () => {
+    const f = await fixture();
+    const draftId = await completedDraft(f);
+    const get = async () => (await f.client.query(api.documentDrafts.get, { draftId }))!;
+    const [parties, , , signatures] = (await get()).clauses;
+    await f.t.run(async (ctx) => { await ctx.db.patch(signatures.id, { text: "Signed by [landlord’s full name]." }); });
+    const key = blankKey("[Landlord's full name]");
+    const setBlank = (clauseId: Id<"documentDraftClauses">, value: string, everywhere: boolean) =>
+      f.client.mutation(api.documentDrafts.setBlank, { clauseId, key, value, everywhere });
+
+    await expect(f.client.mutation(api.documentDrafts.setBlank, { clauseId: parties.id, key: "monthly rent", value: "1", everywhere: true }))
+      .rejects.toThrow("DOCUMENT_DRAFT_UNKNOWN_BLANK");
+    await setBlank(parties.id, "  Kwame [Mensah]\n ", true);
+    let data = await get();
+    expect(data.clauses[0].text).toBe("This agreement is between Kwame Mensah and [Tenant's full name].");
+    expect(data.clauses[3].text).toBe("Signed by Kwame Mensah.");
+    expect(data.clauses[0].parts).toContainEqual({ kind: "blank", key, placeholder: "[Landlord's full name]", value: "Kwame Mensah", own: false });
+    expect(data.draft).toMatchObject({ placeholderCount: 1, version: 1 });
+
+    await setBlank(signatures.id, "K. Mensah", false);
+    data = await get();
+    expect(data.clauses[0].text).toBe("This agreement is between Kwame Mensah and [Tenant's full name].");
+    expect(data.clauses[3]).toMatchObject({ text: "Signed by K. Mensah.", edited: false });
+    expect(data.clauses[3].parts).toContainEqual({ kind: "blank", key, placeholder: "[landlord’s full name]", value: "K. Mensah", own: true });
+
+    // Filling everywhere replaces the clause's own value; an empty value opens the blank again.
+    await setBlank(parties.id, "Ama Owusu", true);
+    expect((await get()).clauses[3].text).toBe("Signed by Ama Owusu.");
+    await setBlank(parties.id, "", true);
+    data = await get();
+    expect(data.clauses[3].text).toBe("Signed by [landlord’s full name].");
+    expect(data.draft.placeholderCount).toBe(3);
+    expect(await f.t.run((ctx) => ctx.db.query("documentDraftBlanks").collect())).toEqual([]);
+  });
+
   it("discards work from a stopped attempt and resumes from the setup on retry", async () => {
     const f = await fixture();
     const draftId = await requestDraft(f);
@@ -282,7 +318,9 @@ describe("document drafts", () => {
 
   it("deletes drafts and their parts with the chat", async () => {
     const f = await fixture();
-    await completedDraft(f);
+    const draftId = await completedDraft(f);
+    const [parties] = (await f.client.query(api.documentDrafts.get, { draftId }))!.clauses;
+    await f.client.mutation(api.documentDrafts.setBlank, { clauseId: parties.id, key: blankKey("[Tenant's full name]"), value: "Ama Owusu", everywhere: true });
     for (let round = 0; round < 5; round += 1) {
       const { hasMore } = await f.t.mutation(deleteBatch, { sessionId: f.sessionId });
       if (!hasMore) break;
@@ -291,7 +329,8 @@ describe("document drafts", () => {
       drafts: await ctx.db.query("documentDrafts").take(1),
       clauses: await ctx.db.query("documentDraftClauses").take(1),
       research: await ctx.db.query("documentDraftResearch").take(1),
+      blanks: await ctx.db.query("documentDraftBlanks").take(1),
     }));
-    expect(left).toEqual({ drafts: [], clauses: [], research: [] });
+    expect(left).toEqual({ drafts: [], clauses: [], research: [], blanks: [] });
   });
 });
