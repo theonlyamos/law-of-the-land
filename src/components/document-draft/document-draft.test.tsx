@@ -112,6 +112,19 @@ describe("document draft workspace", () => {
     expect(screen.getByText("Stamp the agreement")).toBeVisible();
   });
 
+  it("asks about an edited clause using its current wording", () => {
+    const data = draftData();
+    data.clauses[1] = { ...data.clauses[1], text: "Rent is GH₵ 2,500, paid quarterly in advance.", edited: true };
+    mocks.data = data;
+    const onAsk = vi.fn();
+    render(<DocumentDraftWorkspace draftId={"draft-1" as never} onClose={vi.fn()} onAsk={onAsk} />);
+    fireEvent.click(screen.getByText("1. Rent"));
+    fireEvent.click(within(screen.getByRole("article", { name: "Clause: 1. Rent" })).getByRole("button", { name: "Ask about this" }));
+    expect(onAsk).toHaveBeenCalledOnce();
+    expect(onAsk.mock.calls[0][0]).toContain("as I have edited it");
+    expect(onAsk.mock.calls[0][0]).toContain("Rent is GH₵ 2,500, paid quarterly in advance.");
+  });
+
   it("exports a watermarked PDF on the free plan and keeps Word for Pro", async () => {
     mocks.data = draftData();
     mocks.usage = { billingEnabled: true, isPro: false };
@@ -131,6 +144,15 @@ describe("document draft workspace", () => {
     expect(document).toMatchObject({ title: "Tenancy Agreement", sideLabel: "Landlord", audience: "professional", version: 2, preparedAt: 5 });
     expect(document.clauses[1]).toMatchObject({ kind: "clause", basisLabel: "Required by law", sources: ["Rent Act, s. 25"] });
     expect(document.formalities).toEqual([{ title: "Stamp the agreement", detail: "Pay stamp duty.", required: true, sources: ["Stamp Duty Act, s. 2"] }]);
-    expect(askAboutClausePrompt({ heading: "Rent" }, "Tenancy Agreement")).toContain('"Rent" clause');
+  });
+
+  it("quotes the clause's current wording, including edits, when asking about it", () => {
+    const edited = askAboutClausePrompt({ heading: "Rent", text: "Rent is GH₵ 2,500, paid quarterly.", edited: true }, "Tenancy Agreement");
+    expect(edited).toContain('the "Rent" clause, as I have edited it, reads:');
+    expect(edited).toContain("Rent is GH₵ 2,500, paid quarterly.");
+    const long = askAboutClausePrompt({ heading: "Schedule", text: "x".repeat(6_000), edited: false }, "Lease");
+    expect(long.length).toBeLessThan(4_000);
+    expect(long).toContain("[…]");
+    expect(long).not.toContain("as I have edited it");
   });
 });

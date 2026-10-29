@@ -188,7 +188,7 @@ function SetupCard({ review, onSummarise, busy }: { review: DocumentReviewSummar
             <div className="flex flex-wrap gap-2">
               {roles.map((role) => (
                 <label key={role.id} className={cn(
-                  "inline-flex min-h-11 cursor-pointer items-center rounded-lg border px-4 text-sm font-medium transition-colors",
+                  "relative inline-flex min-h-11 cursor-pointer items-center rounded-lg border px-4 text-sm font-medium transition-colors",
                   "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring has-[:focus-visible]:ring-offset-1",
                   roleId === role.id ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background hover:bg-muted",
                 )}>
