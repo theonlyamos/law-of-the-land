@@ -33,9 +33,18 @@ function relationLabel(citation: Clause["citations"][number]): string {
   return `${citation.jurisdictionName} · organization geography`;
 }
 
-/** The question placed in the composer by "Ask about this". */
-export function askAboutClausePrompt(clause: Pick<Clause, "heading">, title: string): string {
-  return `In my draft ${title}, can you explain the "${clause.heading}" clause and what the law says about it?`;
+/** Clause wording quoted in a follow-up question; the chat accepts questions up to 4,000 characters. */
+const ASK_CLAUSE_TEXT_LIMIT = 2_800;
+
+/**
+ * The question placed in the composer by "Ask about this". It quotes the clause's current
+ * wording, including the person's own edits, so the answer is about what the draft actually says.
+ */
+export function askAboutClausePrompt(clause: Pick<Clause, "heading" | "text" | "edited">, title: string): string {
+  const name = clause.heading.trim() || "untitled";
+  const text = clause.text.trim();
+  const quoted = text.length > ASK_CLAUSE_TEXT_LIMIT ? `${text.slice(0, ASK_CLAUSE_TEXT_LIMIT).trimEnd()} […]` : text;
+  return `In my draft ${title}, the "${name}" clause${clause.edited ? ", as I have edited it," : ""} reads:\n\n"""\n${quoted}\n"""\n\nCan you explain what this wording means and whether it fits what the law says?`;
 }
 
 interface WorkspaceProps {
