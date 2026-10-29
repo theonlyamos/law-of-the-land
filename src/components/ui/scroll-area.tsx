@@ -11,7 +11,9 @@ const ScrollArea = React.forwardRef<
 >(({ className, children, ...props }, ref) => (
   <ScrollAreaPrimitive.Root
     ref={ref}
-    className={cn("relative overflow-hidden", className)}
+    // clip, not hidden: a hidden box can still be scrolled by the browser when
+    // something inside it takes focus, which shifts the whole thread out of view.
+    className={cn("relative overflow-clip", className)}
     {...props}
   >
     {/* Radix wraps children in a display:table div that grows to fit content,

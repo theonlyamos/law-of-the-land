@@ -418,7 +418,7 @@ function OptionGroup<T extends string>({ legend, name, value, onChange, options 
       <legend className="mb-2 p-0 text-[13px] font-medium">{legend}</legend>
       <div className="grid grid-cols-2 gap-2">
         {options.map((option) => (
-          <label key={option.id} className={cn("flex min-h-11 cursor-pointer flex-col justify-center rounded-lg border px-3 py-2 text-sm transition-colors",
+          <label key={option.id} className={cn("relative flex min-h-11 cursor-pointer flex-col justify-center rounded-lg border px-3 py-2 text-sm transition-colors",
             "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring",
             option.disabled ? "cursor-not-allowed opacity-50" : "",
             value === option.id ? "border-primary bg-secondary" : "border-border hover:bg-muted")}>
