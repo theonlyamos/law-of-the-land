@@ -28,6 +28,12 @@ it("accepts document review source proxies with a bounded citation index", () =>
     expect(privateCitationSourceUrl(input)).toBeNull();
   }
 });
+it("accepts document draft source proxies the same way", () => {
+  expect(privateCitationSourceUrl("/api/document-drafts/draft_1/sources/clause_1/2#page=3")).toEqual({ url: "/api/document-drafts/draft_1/sources/clause_1/2", pageNumber: 3 });
+  for (const input of ["/api/document-drafts/draft_1/sources/clause_1/4", "/api/document-drafts/draft_1/sources/clause_1/0?x=1", "/api/document-draft/draft_1/sources/clause_1/0"]) {
+    expect(privateCitationSourceUrl(input)).toBeNull();
+  }
+});
 it("opens an accessible preview, fetches privately and jumps to the source page", async () => {
   render(<CitationSourcePreview source={{ label: "Employment Act", originalUrl: url }} onClose={vi.fn()} />);
   expect(screen.getByRole("dialog", { name: "Employment Act" })).toBeVisible();
