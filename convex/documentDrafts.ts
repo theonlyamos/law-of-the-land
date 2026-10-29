@@ -13,8 +13,13 @@ import {
   DEFAULT_DRAFT_REQUEST,
   DOCUMENT_DRAFT_LIMITS as LIMITS,
   NOT_SURE_SIDE,
+  blankValueFor,
+  cleanBlankValue,
   countBases,
   countPlaceholders,
+  fillBlanks,
+  splitBlanks,
+  type BlankValue,
 } from "../shared/document-draft";
 import { researchSnapshotValidator } from "./lib/documentReviewContracts";
 import {
@@ -45,6 +50,8 @@ const reviseRef = makeFunctionReference<"action">("documentDraftActions:revise")
 const deleteBatchRef = makeFunctionReference<"mutation">("documentDrafts:deleteForSessionBatch");
 const DELETE_BATCH_SIZE = 50;
 const MAX_CLAUSE_ROWS = LIMITS.maxSections + 1;
+/** Every distinct blank once for the whole draft, plus a few per-clause values. */
+const MAX_BLANK_ROWS = 500;
 
 function unavailable(): never {
   throw new ConvexError("DOCUMENT_DRAFT_UNAVAILABLE");
@@ -62,6 +69,11 @@ async function currentClauses(ctx: DraftCtx, draft: Doc<"documentDrafts">): Prom
   return await ctx.db.query("documentDraftClauses")
     .withIndex("by_draftId_and_attempt_and_ordinal", (q) => q.eq("draftId", draft._id).eq("attempt", draft.attempt))
     .take(MAX_CLAUSE_ROWS);
+}
+
+async function draftBlanks(ctx: DraftCtx, draftId: Id<"documentDrafts">): Promise<BlankValue[]> {
+  const rows = await ctx.db.query("documentDraftBlanks").withIndex("by_draftId_and_key", (q) => q.eq("draftId", draftId)).take(MAX_BLANK_ROWS);
+  return rows.map((row) => ({ key: row.key, value: row.value, ...(row.clauseId ? { clauseId: row.clauseId } : {}) }));
 }
 
 const basisCountsValidator = v.object({ required: v.number(), protects: v.number(), common: v.number(), choice: v.number() });
@@ -107,7 +119,8 @@ async function summarize(ctx: DraftCtx, draft: Doc<"documentDrafts">): Promise<I
       .map((clause) => ({ heading: clause.heading, basis: clause.basis }));
     if (draft.status === "completed") {
       counts = countBases(clauses);
-      placeholderCount = countPlaceholders(clauses.map((clause) => clause.text));
+      const blanks = await draftBlanks(ctx, draft._id);
+      placeholderCount = countPlaceholders(clauses.map((clause) => fillBlanks(clause.text, clause._id, blanks)));
     }
   }
   const attachment = draft.attachmentId ? await ctx.db.get("chatAttachments", draft.attachmentId) : null;
@@ -165,7 +178,13 @@ const clauseValidator = v.object({
   ordinal: v.number(),
   kind: draftSectionValidator.fields.kind,
   heading: v.string(),
+  /** The wording with filled blanks written in. */
   text: v.string(),
+  /** The wording split around its blanks, each with the value it shows in this clause. */
+  parts: v.array(v.union(
+    v.object({ kind: v.literal("text"), text: v.string() }),
+    v.object({ kind: v.literal("blank"), key: v.string(), placeholder: v.string(), value: v.optional(v.string()), own: v.boolean() }),
+  )),
   basis: clauseBasisValidator,
   why: v.string(),
   lawSummary: v.string(),
@@ -193,6 +212,7 @@ export const get = query({
     try { owned = await ownedDraft(ctx, args.draftId, userId); } catch { return null; }
     const { draft } = owned;
     const clauses = await currentClauses(ctx, draft);
+    const blanks = await draftBlanks(ctx, draft._id);
     // A source opens only when its original is a published PDF; this is rechecked on open.
     const previewable = new Map<string, Promise<boolean>>();
     const canPreview = (versionId: Id<"documentVersions">, resourceId: Id<"legalResources">) => {
@@ -216,7 +236,12 @@ export const get = query({
         ordinal: clause.ordinal,
         kind: draft.sections?.[clause.ordinal]?.kind ?? "clause",
         heading: clause.heading,
-        text: clause.text,
+        text: fillBlanks(clause.text, clause._id, blanks),
+        parts: splitBlanks(clause.text).map((part) => {
+          if (part.kind === "text") return part;
+          const { value, own } = blankValueFor(part.key, clause._id, blanks);
+          return { ...part, ...(value === undefined ? {} : { value }), own };
+        }),
         basis: clause.basis,
         why: clause.why,
         lawSummary: clause.lawSummary,
@@ -443,6 +468,45 @@ export const updateClause = mutation({
   },
 });
 
+/**
+ * Fills one blank. With `everywhere`, the value fills that blank in every
+ * clause and replaces any clause's own value; without it, only this clause
+ * changes. An empty value opens the blank again.
+ */
+export const setBlank = mutation({
+  args: { clauseId: v.id("documentDraftClauses"), key: v.string(), value: v.string(), everywhere: v.boolean() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const { clause, draft } = await ownedClause(ctx, args.clauseId, userId);
+    if (!splitBlanks(clause.text).some((part) => part.kind === "blank" && part.key === args.key)) {
+      throw new ConvexError("DOCUMENT_DRAFT_UNKNOWN_BLANK");
+    }
+    const value = cleanBlankValue(args.value);
+    const rows = await ctx.db.query("documentDraftBlanks")
+      .withIndex("by_draftId_and_key", (q) => q.eq("draftId", draft._id).eq("key", args.key))
+      .take(MAX_CLAUSE_ROWS + 1);
+    const insert = async (clauseId?: Id<"documentDraftClauses">) => {
+      const total = await ctx.db.query("documentDraftBlanks").withIndex("by_draftId_and_key", (q) => q.eq("draftId", draft._id)).take(MAX_BLANK_ROWS);
+      if (total.length >= MAX_BLANK_ROWS) throw new ConvexError("DOCUMENT_DRAFT_TOO_MANY_BLANKS");
+      await ctx.db.insert("documentDraftBlanks", { draftId: draft._id, key: args.key, value, ...(clauseId ? { clauseId } : {}) });
+    };
+    if (args.everywhere) {
+      for (const row of rows) if (row.clauseId) await ctx.db.delete("documentDraftBlanks", row._id);
+      const shared = rows.find((row) => !row.clauseId);
+      if (shared && !value) await ctx.db.delete("documentDraftBlanks", shared._id);
+      else if (shared) await ctx.db.patch("documentDraftBlanks", shared._id, { value });
+      else if (value) await insert();
+    } else {
+      const own = rows.find((row) => row.clauseId === clause._id);
+      if (own) await ctx.db.patch("documentDraftBlanks", own._id, { value });
+      else await insert(clause._id);
+    }
+    await ctx.db.patch("documentDrafts", draft._id, { updatedAt: Date.now() });
+    return null;
+  },
+});
+
 /** Removes one clause from the document. */
 export const removeClause = mutation({
   args: { clauseId: v.id("documentDraftClauses") },
@@ -454,6 +518,8 @@ export const removeClause = mutation({
     const remaining = await currentClauses(ctx, draft);
     if (remaining.length <= 1) throw new ConvexError("DOCUMENT_DRAFT_LAST_CLAUSE");
     await ctx.db.delete("documentDraftClauses", clause._id);
+    const blanks = await ctx.db.query("documentDraftBlanks").withIndex("by_draftId_and_key", (q) => q.eq("draftId", draft._id)).take(MAX_BLANK_ROWS);
+    for (const row of blanks) if (row.clauseId === clause._id) await ctx.db.delete("documentDraftBlanks", row._id);
     await ctx.db.patch("documentDrafts", draft._id, { version: (draft.version ?? 1) + 1, updatedAt: Date.now() });
     return null;
   },
@@ -897,8 +963,12 @@ export const deleteForSessionBatch = internalMutation({
       .withIndex("by_draftId_and_attempt_and_ordinal", (q) => q.eq("draftId", draft._id))
       .take(DELETE_BATCH_SIZE);
     for (const row of clauses) await ctx.db.delete("documentDraftClauses", row._id);
-    // Delete the draft once its clauses are gone, so a running step stops on its next check.
-    if (clauses.length < DELETE_BATCH_SIZE) {
+    const blanks = clauses.length < DELETE_BATCH_SIZE
+      ? await ctx.db.query("documentDraftBlanks").withIndex("by_draftId_and_key", (q) => q.eq("draftId", draft._id)).take(DELETE_BATCH_SIZE)
+      : [];
+    for (const row of blanks) await ctx.db.delete("documentDraftBlanks", row._id);
+    // Delete the draft once its clauses and blanks are gone, so a running step stops on its next check.
+    if (clauses.length < DELETE_BATCH_SIZE && blanks.length < DELETE_BATCH_SIZE) {
       const research = await ctx.db.query("documentDraftResearch").withIndex("by_draftId", (q) => q.eq("draftId", draft._id)).unique();
       if (research) await ctx.db.delete("documentDraftResearch", research._id);
       await ctx.db.delete("documentDrafts", draft._id);

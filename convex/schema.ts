@@ -1245,6 +1245,15 @@ export default defineSchema({
     revising: v.optional(v.boolean()),
     revisionFailed: v.optional(v.boolean()),
   }).index("by_draftId_and_attempt_and_ordinal", ["draftId", "attempt", "ordinal"]),
+  // What the person typed into a draft's [blanks]. A row without a clause
+  // fills that blank in every clause; a clause's own row wins there.
+  documentDraftBlanks: defineTable({
+    draftId: v.id("documentDrafts"),
+    /** The blank's matching key, from blankKey(). */
+    key: v.string(),
+    clauseId: v.optional(v.id("documentDraftClauses")),
+    value: v.string(),
+  }).index("by_draftId_and_key", ["draftId", "key"]),
   // A question whose answer failed. Kept apart from `messages` so it is shown
   // after reload but never becomes legal-answer context or transcript history.
   failedChatTurns: defineTable({

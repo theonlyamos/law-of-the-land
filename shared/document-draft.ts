@@ -129,6 +129,60 @@ export function countPlaceholders(texts: readonly string[]): number {
   return texts.reduce((total, text) => total + placeholdersIn(text).length, 0);
 }
 
+/** One blank's value, either for every clause (no clauseId) or for one clause only. */
+export type BlankValue = { key: string; value: string; clauseId?: string };
+export type BlankPart = { kind: "text"; text: string } | { kind: "blank"; key: string; placeholder: string };
+
+export const MAX_BLANK_VALUE_CHARACTERS = 200;
+
+/** Matches a blank wherever it appears, so [Tenant's full name] and [tenant’s full name] are the same blank. */
+export function blankKey(placeholder: string): string {
+  return placeholder.normalize("NFKC").replace(/^\[|\]$/gu, "").replace(/[‘’]/gu, "'").replace(/[“”]/gu, "\"")
+    .trim().replace(/\s+/gu, " ").toLowerCase().slice(0, 100);
+}
+
+/** "[tenant's full name]" becomes "Tenant's full name". */
+export function blankLabel(placeholder: string): string {
+  const inner = placeholder.replace(/^\[|\]$/gu, "").trim().replace(/\s+/gu, " ");
+  return inner.charAt(0).toLocaleUpperCase() + inner.slice(1);
+}
+
+/** Splits wording into plain text and blanks. */
+export function splitBlanks(text: string): BlankPart[] {
+  const parts: BlankPart[] = [];
+  let last = 0;
+  for (const match of text.matchAll(new RegExp(PLACEHOLDER_PATTERN.source, "gu"))) {
+    const index = match.index ?? 0;
+    if (index > last) parts.push({ kind: "text", text: text.slice(last, index) });
+    parts.push({ kind: "blank", key: blankKey(match[0]), placeholder: match[0] });
+    last = index + match[0].length;
+  }
+  if (last < text.length) parts.push({ kind: "text", text: text.slice(last) });
+  return parts;
+}
+
+/** A value as it can be written into a document: one line, no brackets, bounded. */
+export function cleanBlankValue(value: string): string {
+  return value.replace(/[[\]]/gu, "").replace(/\s+/gu, " ").trim().slice(0, MAX_BLANK_VALUE_CHARACTERS);
+}
+
+/**
+ * The value a blank shows in one clause. A clause's own value wins, and an
+ * empty one keeps the blank open there; otherwise the value used everywhere applies.
+ */
+export function blankValueFor(key: string, clauseId: string, values: readonly BlankValue[]): { value?: string; own: boolean } {
+  const own = values.find((entry) => entry.key === key && entry.clauseId === clauseId);
+  if (own) return own.value ? { value: own.value, own: true } : { own: true };
+  const shared = values.find((entry) => entry.key === key && entry.clauseId === undefined);
+  return shared?.value ? { value: shared.value, own: false } : { own: false };
+}
+
+/** The wording with every filled blank written in. */
+export function fillBlanks(text: string, clauseId: string, values: readonly BlankValue[]): string {
+  if (!values.length) return text;
+  return splitBlanks(text).map((part) => part.kind === "text" ? part.text : blankValueFor(part.key, clauseId, values).value ?? part.placeholder).join("");
+}
+
 export function countBases(clauses: readonly Pick<DraftClause, "basis">[]): Record<ClauseBasis, number> {
   const counts: Record<ClauseBasis, number> = { required: 0, protects: 0, common: 0, choice: 0 };
   for (const clause of clauses) counts[clause.basis] += 1;

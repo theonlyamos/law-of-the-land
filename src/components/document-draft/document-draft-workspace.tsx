@@ -16,10 +16,11 @@ import {
   countPlaceholders,
   documentDraftSourceUrl,
 } from "../../../shared/document-draft";
-import { clauseHeadingLine, clauseParagraphs, numberClauses, textRuns, type ExportPaper, type ExportStyle } from "@/lib/document-export/model";
+import { clauseHeadingLine, numberClauses, type ExportPaper, type ExportStyle } from "@/lib/document-export/model";
 import { CLAUSE_BASIS_MARKER_CLASSES, ClauseBasisBadge } from "./draft-status";
 import { useDraftAction } from "./document-draft-card";
 import { exportDraft, type DraftData, type ExportFormat } from "./draft-export";
+import { BlankFields, ClauseParts, restoreBlanks, uniqueBlanks, type ActiveBlank } from "./draft-blanks";
 
 type Clause = DraftData["clauses"][number];
 
@@ -102,6 +103,7 @@ function DraftLayout({ data, titleId, onClose, onAsk }: { data: DraftData; title
   const [mobilePane, setMobilePane] = useState<"document" | "details">("document");
   const [exportOpen, setExportOpen] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<CitationPreviewSource | null>(null);
+  const [activeBlank, setActiveBlank] = useState<ActiveBlank | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const paperRef = useRef<HTMLDivElement>(null);
 
@@ -114,11 +116,16 @@ function DraftLayout({ data, titleId, onClose, onAsk }: { data: DraftData; title
   const blanks = useMemo(() => countPlaceholders(data.clauses.map((clause) => clause.text)), [data.clauses]);
   const title = draft.title ?? "Document";
 
-  const select = (clause: Clause) => {
+  const select = (clause: Clause, blankKey?: string) => {
     setSelectedId(clause.id);
     setPanel("clause");
     setMobilePane("details");
-    window.requestAnimationFrame(() => detailRef.current?.focus({ preventScroll: false }));
+    window.requestAnimationFrame(() => {
+      const field = blankKey === undefined ? undefined
+        : [...(detailRef.current?.querySelectorAll<HTMLInputElement>("input[data-blank-input]") ?? [])]
+          .find((input) => input.getAttribute("data-blank-input") === blankKey);
+      (field ?? detailRef.current)?.focus({ preventScroll: false });
+    });
   };
   const showInDocument = (clause: Clause) => {
     setMobilePane("document");
@@ -163,7 +170,8 @@ function DraftLayout({ data, titleId, onClose, onAsk }: { data: DraftData; title
             {numbered.map(({ clause, line }) => {
               const active = clause.id === selected?.id;
               return (
-                <button key={clause.id} type="button" data-clause={clause.id} onClick={() => select(clause)} aria-current={active ? "true" : undefined}
+                <button key={clause.id} type="button" data-clause={clause.id} aria-current={active ? "true" : undefined}
+                  onClick={(event) => select(clause, (event.target as Element).closest?.("[data-blank]")?.getAttribute("data-blank") ?? undefined)}
                   className={cn("group -mx-2 mb-3 block w-[calc(100%+1rem)] scroll-my-24 rounded-md px-2 py-1.5 text-left transition-colors",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     active ? "bg-muted ring-1 ring-border" : "hover:bg-muted/50")}>
@@ -174,7 +182,7 @@ function DraftLayout({ data, titleId, onClose, onAsk }: { data: DraftData; title
                       {clause.revising && <Spinner className="size-3.5" />}
                     </span>
                   )}
-                  <ClauseText text={clause.text} />
+                  <ClauseParts clause={clause} active={activeBlank} />
                 </button>
               );
             })}
@@ -193,6 +201,7 @@ function DraftLayout({ data, titleId, onClose, onAsk }: { data: DraftData; title
             selected ? (
               <div ref={detailRef} tabIndex={-1} className="focus:outline-none" aria-live="polite">
                 <ClauseDetail key={selected.id} clause={selected} line={selectedLine} draftId={draft.id} canRemove={data.clauses.length > 1}
+                  numbered={numbered} activeBlank={activeBlank} onPreviewBlank={setActiveBlank} onSelect={select}
                   onSource={setSourcePreview} onShowInDocument={() => showInDocument(selected)}
                   onAsk={() => onAsk(askAboutClausePrompt(selected, title))} />
               </div>
@@ -224,25 +233,15 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
-function ClauseText({ text }: { text: string }) {
-  return (
-    <span className="block">
-      {clauseParagraphs(text).map((part, index) => (
-        <span key={index} className={cn("mb-1.5 block whitespace-pre-wrap [overflow-wrap:anywhere] last:mb-0", part.indent && "pl-6")}>
-          {textRuns(part.text).map((run, runIndex) => run.placeholder
-            ? <mark key={runIndex} className="rounded-sm bg-amber-100 px-0.5 text-amber-950 dark:bg-amber-900/50 dark:text-amber-100">{run.text}</mark>
-            : <span key={runIndex}>{run.text}</span>)}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-function ClauseDetail({ clause, line, draftId, canRemove, onSource, onShowInDocument, onAsk }: {
+function ClauseDetail({ clause, line, draftId, canRemove, numbered, activeBlank, onPreviewBlank, onSelect, onSource, onShowInDocument, onAsk }: {
   clause: Clause;
   line: string;
   draftId: Id<"documentDrafts">;
   canRemove: boolean;
+  numbered: { clause: Clause; line: string }[];
+  activeBlank: ActiveBlank | null;
+  onPreviewBlank: (active: ActiveBlank | null) => void;
+  onSelect: (clause: Clause, blankKey?: string) => void;
   onSource: (source: CitationPreviewSource) => void;
   onShowInDocument: () => void;
   onAsk: () => void;
@@ -266,6 +265,13 @@ function ClauseDetail({ clause, line, draftId, canRemove, onSource, onShowInDocu
         <h3 className="min-w-0 flex-1 text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{line || clause.heading || "Untitled part"}</h3>
         <ClauseBasisBadge basis={clause.basis} />
       </div>
+      {mode !== "edit" && uniqueBlanks(clause).length > 0 && (
+        <>
+          {/* The document is a separate pane on phones, so the wording shows here as it is filled in. */}
+          <div className="rounded-lg bg-muted/70 p-3 text-sm leading-6 md:hidden"><ClauseParts clause={clause} active={activeBlank} /></div>
+          <BlankFields clause={clause} numbered={numbered} onPreview={onPreviewBlank} onSelect={onSelect} />
+        </>
+      )}
       <p className="text-xs leading-5 text-muted-foreground">{CLAUSE_BASIS_DESCRIPTIONS[clause.basis]}</p>
       {clause.why && <p className="text-sm leading-6">{clause.why}</p>}
 
@@ -306,7 +312,7 @@ function ClauseDetail({ clause, line, draftId, canRemove, onSource, onShowInDocu
       {mode === "edit" ? (
         <form className="flex flex-col gap-2.5 rounded-lg border p-3" onSubmit={(event) => {
           event.preventDefault();
-          void action.run(() => updateClause({ clauseId: clause.id, heading, text })).then((ok) => { if (ok) setMode("view"); });
+          void action.run(() => updateClause({ clauseId: clause.id, heading, text: restoreBlanks(clause, text) })).then((ok) => { if (ok) setMode("view"); });
         }}>
           <label htmlFor={headingId} className="text-xs font-medium">Heading</label>
           <input id={headingId} value={heading} onChange={(event) => setHeading(event.target.value)} maxLength={DOCUMENT_DRAFT_LIMITS.maxClauseHeading}
