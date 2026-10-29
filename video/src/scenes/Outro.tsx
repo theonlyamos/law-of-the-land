@@ -2,7 +2,8 @@ import React from "react";
 import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
 import { ArrowRight } from "lucide-react";
 import { prog, rise, useLayout } from "../anim";
-import { Eyebrow, Logo, MaskLine, Paper, SectionGlyph } from "../components/ui";
+import { Eyebrow, MaskLine, Paper, SectionGlyph } from "../components/ui";
+import { LogoMark } from "../components/LogoMark";
 import { C, F } from "../theme";
 
 export const Outro: React.FC = () => {
@@ -16,7 +17,7 @@ export const Outro: React.FC = () => {
       <SectionGlyph size={1300} style={{ left: vertical ? -300 : -180, top: vertical ? 500 : -260 }} color="oklch(93% 0.03 82)" />
       <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", textAlign: "center", padding: 80 }}>
         <div style={rise(frame, 0, 20)}>
-          <Logo width={vertical ? 240 : 190} />
+          <LogoMark size={vertical ? 260 : 230} reveal={prog(frame, 0, 44)} style={{ margin: "-40px 0 -30px" }} />
         </div>
         <div
           style={{
@@ -30,7 +31,7 @@ export const Outro: React.FC = () => {
         >
           <MaskLine start={8}>Begin with the jurisdiction</MaskLine>
           <MaskLine start={18}>
-            <span style={{ fontStyle: "italic", color: C.brass }}>whose law applies.</span>
+            <span style={{ fontStyle: "italic", color: C.copper }}>whose law applies.</span>
           </MaskLine>
         </div>
         <div

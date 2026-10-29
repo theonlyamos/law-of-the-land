@@ -109,7 +109,7 @@ export const DocReview: React.FC = () => {
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 24, fontWeight: 700 }}>Tenancy-Agreement.pdf</div>
                 <div style={{ marginTop: 8, height: 6, borderRadius: 3, background: C.paperDeep, overflow: "hidden" }}>
-                  <div style={{ width: `${upload * 100}%`, height: "100%", background: upload >= 1 ? C.fine : C.brass }} />
+                  <div style={{ width: `${upload * 100}%`, height: "100%", background: upload >= 1 ? C.fine : C.copper }} />
                 </div>
               </div>
               <div style={{ fontSize: 20, color: C.inkSoft, width: 150, textAlign: "right" }}>
@@ -164,8 +164,8 @@ export const DocReview: React.FC = () => {
                   top: `${8 + scan * 90}%`,
                   height: 90,
                   marginTop: -90,
-                  background: "linear-gradient(180deg, transparent, oklch(76% 0.075 78 / 0.28))",
-                  borderBottom: `3px solid ${C.brass}`,
+                  background: "linear-gradient(180deg, transparent, rgb(239 154 92 / 0.24))",
+                  borderBottom: `3px solid ${C.copper}`,
                   opacity: scanning ? 1 : 0,
                 }}
               />
@@ -206,7 +206,7 @@ export const DocReview: React.FC = () => {
                     Clause {c.n} · {c.title}
                   </div>
                   <div style={{ marginTop: 4, fontSize: 22, color: C.inkSoft }}>{c.note}</div>
-                  <div style={{ marginTop: 6, fontSize: 17, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: C.brass }}>
+                  <div style={{ marginTop: 6, fontSize: 17, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: C.copper }}>
                     {c.cite}
                   </div>
                 </div>
