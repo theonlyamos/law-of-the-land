@@ -98,8 +98,9 @@ export const submitTicket = mutation({
   handler: async (ctx, args) => {
     const user = await authComponent.safeGetAuthUser(ctx);
 
+    // Never delete the submitted storage ID here: it is caller-supplied and
+    // could belong to any file. Unattached uploads are cleared by retention.
     if (args.website) {
-      if (args.screenshotId) await ctx.storage.delete(args.screenshotId);
       return { reference: supportReference(crypto.randomUUID().replaceAll("-", "")) };
     }
 

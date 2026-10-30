@@ -807,7 +807,8 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_status_and_createdAt", ["status", "createdAt"])
     .index("by_category_and_createdAt", ["category", "createdAt"])
-    .index("by_status_and_category_and_createdAt", ["status", "category", "createdAt"]),
+    .index("by_status_and_category_and_createdAt", ["status", "category", "createdAt"])
+    .index("by_screenshotId", ["screenshotId"]),
   supportTicketNotes: defineTable({
     ticketId: v.id("supportTickets"),
     kind: v.union(v.literal("note"), v.literal("status")),

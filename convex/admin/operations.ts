@@ -331,7 +331,8 @@ export const runRetentionBatch = internalMutation({
           const attached = await ctx.db.query("documentVersions").withIndex("by_originalStorageId", (q) => q.eq("originalStorageId", blob._id)).take(1);
           const exportArtifact = await ctx.db.query("adminExports").withIndex("by_storageId", (q) => q.eq("storageId", blob._id)).take(1);
           const chatAttachment = await ctx.db.query("chatAttachments").withIndex("by_storageId", (q) => q.eq("storageId", blob._id)).take(1);
-          if (attached.length === 0 && exportArtifact.length === 0 && chatAttachment.length === 0) { await ctx.storage.delete(blob._id); deleted += 1; }
+          const supportScreenshot = await ctx.db.query("supportTickets").withIndex("by_screenshotId", (q) => q.eq("screenshotId", blob._id)).take(1);
+          if (attached.length === 0 && exportArtifact.length === 0 && chatAttachment.length === 0 && supportScreenshot.length === 0) { await ctx.storage.delete(blob._id); deleted += 1; }
         }
       }
       if (deleted > before || phaseBlocked) {

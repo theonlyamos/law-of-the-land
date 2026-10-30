@@ -116,6 +116,13 @@ describe("submitTicket", () => {
     expect(await t.run((ctx) => ctx.db.query("supportTickets").take(1))).toHaveLength(0);
   });
 
+  it("never deletes a caller-supplied file on the bot path", async () => {
+    const t = createBackend();
+    const someoneElsesFile = await t.run((ctx) => ctx.storage.store(new Blob(["original document"])));
+    await t.mutation(api.support.submitTicket, { ...guestMessage, website: "x", screenshotId: someoneElsesFile });
+    expect(await t.run((ctx) => ctx.db.system.get("_storage", someoneElsesFile))).not.toBeNull();
+  });
+
   it("limits how often one guest email can write", async () => {
     const t = createBackend();
     for (let index = 0; index < SUPPORT_RATE_LIMITS.perGuestEmailPerHour; index++) {
@@ -160,6 +167,34 @@ describe("submitTicket", () => {
     const t = createBackend();
     const image = await t.run((ctx) => ctx.storage.store(new Blob([new Uint8Array([1])], { type: "image/png" })));
     await expect(t.mutation(api.support.submitTicket, { ...guestMessage, screenshotId: image })).rejects.toThrow();
+  });
+});
+
+describe("storage retention", () => {
+  it("keeps screenshots attached to messages and clears unattached uploads", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = createBackend();
+      const { attached, orphan } = await t.run(async (ctx) => {
+        const attached = await ctx.storage.store(new Blob(["png"]));
+        const orphan = await ctx.storage.store(new Blob(["png"]));
+        await ctx.db.insert("supportTickets", {
+          category: "bug", subject: "Broken", message: "Something broke today.", status: "new",
+          email: "a@example.com", screenshotId: attached, createdAt: Date.now(), updatedAt: Date.now(),
+        });
+        await ctx.db.insert("retentionState", {
+          key: "default", phase: "storage", cycleHadChanges: false, storagePassHadChanges: false,
+          deletedTotal: 0, lastStartedAt: Date.now(), updatedAt: Date.now(),
+        });
+        return { attached, orphan };
+      });
+      vi.setSystemTime(Date.now() + 2 * 24 * 60 * 60_000);
+      await t.mutation(internal.admin.operations.runRetentionBatch, { cursor: null });
+      expect(await t.run((ctx) => ctx.db.system.get("_storage", attached))).not.toBeNull();
+      expect(await t.run((ctx) => ctx.db.system.get("_storage", orphan))).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
