@@ -28,6 +28,7 @@ const NAV_GROUPS: ReadonlyArray<{
         href: "/admin/conversations",
         permissions: [["conversation", "read_content"]],
       },
+      { label: "Feedback", href: "/admin/feedback", permissions: [["user", "read"]] },
     ],
   },
   {
