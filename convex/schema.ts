@@ -778,6 +778,43 @@ export default defineSchema({
     summary: v.string(),
     createdAt: v.number(),
   }).index("by_incidentId_and_createdAt", ["incidentId", "createdAt"]),
+  supportTickets: defineTable({
+    category: v.union(
+      v.literal("bug"),
+      v.literal("feature_request"),
+      v.literal("complaint"),
+      v.literal("support"),
+      v.literal("other"),
+    ),
+    subject: v.string(),
+    message: v.string(),
+    status: v.union(
+      v.literal("new"),
+      v.literal("in_progress"),
+      v.literal("resolved"),
+      v.literal("closed"),
+    ),
+    userId: v.optional(v.string()),
+    name: v.optional(v.string()),
+    email: v.string(),
+    pagePath: v.optional(v.string()),
+    userAgent: v.optional(v.string()),
+    screenshotId: v.optional(v.id("_storage")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"])
+    .index("by_category_and_createdAt", ["category", "createdAt"])
+    .index("by_status_and_category_and_createdAt", ["status", "category", "createdAt"]),
+  supportTicketNotes: defineTable({
+    ticketId: v.id("supportTickets"),
+    kind: v.union(v.literal("note"), v.literal("status")),
+    actorId: v.string(),
+    body: v.string(),
+    createdAt: v.number(),
+  }).index("by_ticketId_and_createdAt", ["ticketId", "createdAt"]),
   retentionState: defineTable({
     key: v.literal("default"),
     phase: v.string(),
