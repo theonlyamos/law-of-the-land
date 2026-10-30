@@ -329,6 +329,7 @@ export function LandingSections({
         <nav aria-label="Footer navigation">
           <Link href="#jurisdictions">Coverage</Link>
           <Link href="#legal-information-notice">Legal notice</Link>
+          <Link href="/support">Contact &amp; feedback</Link>
         </nav>
       </footer>
     </>

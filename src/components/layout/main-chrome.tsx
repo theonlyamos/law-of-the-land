@@ -28,7 +28,8 @@ export function MainChrome({ children }: Readonly<{ children: React.ReactNode }>
         </nav>
         <div className="flex min-h-0 flex-1 flex-col">{children}</div>
         <footer className="border-t border-border/70 px-5 py-4 text-center text-xs leading-relaxed text-muted-foreground">
-          General legal information, not legal advice. For decisions that affect your rights, talk to a qualified attorney.
+          General legal information, not legal advice. For decisions that affect your rights, talk to a qualified attorney.{" "}
+          <Link href={`/support?from=${encodeURIComponent(pathname)}`} className="underline underline-offset-4 hover:text-foreground">Contact &amp; feedback</Link>
         </footer>
       </EditorialTheme>
     );
@@ -50,7 +51,10 @@ export function MainChrome({ children }: Readonly<{ children: React.ReactNode }>
       <div className="flex min-h-0 flex-1 flex-col">{children}</div>
       <div className="border-t px-4 py-3 text-center text-xs text-muted-foreground">
         General information from public legal sources, not legal advice for your case. For decisions
-        that affect your rights or obligations, talk to a qualified attorney.
+        that affect your rights or obligations, talk to a qualified attorney.{" "}
+        {pathname !== "/support" && (
+          <Link href={`/support?from=${encodeURIComponent(pathname)}`} className="underline underline-offset-4 hover:text-foreground">Contact &amp; feedback</Link>
+        )}
       </div>
     </>
   );

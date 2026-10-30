@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import { Brain, Building2, ChevronDown, CreditCard, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
+import { Brain, Building2, ChevronDown, CreditCard, LifeBuoy, LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
 import Link from "next/link";
 import { useTheme } from "@/components/providers/theme-provider";
 import { Button } from "./button";
@@ -23,9 +23,11 @@ export function ProfileMenu({ name, image, caption, collapsed = false, onNavigat
   const panel = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const { theme, setTheme } = useTheme();
+  const [supportHref, setSupportHref] = useState("/support");
 
   useEffect(() => {
     if (!open) return;
+    setSupportHref(`/support?from=${encodeURIComponent(window.location.pathname)}`);
     panel.current?.querySelector<HTMLAnchorElement>("a")?.focus();
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
     const escape = (event: KeyboardEvent) => {
@@ -62,6 +64,9 @@ export function ProfileMenu({ name, image, caption, collapsed = false, onNavigat
             <Link href="/settings/memory" onClick={navigate}><Brain className="size-4 text-muted-foreground" />Memory</Link>
           </Button>
           <Button asChild variant="ghost" className="h-10 w-full justify-start gap-3 px-3"><Link href="/organizations" onClick={navigate}><Building2 className="size-4 text-muted-foreground" />Organizations</Link></Button>
+          <Button asChild variant="ghost" className="h-10 w-full justify-start gap-3 px-3">
+            <Link href={supportHref} onClick={navigate}><LifeBuoy className="size-4 text-muted-foreground" />Contact &amp; feedback</Link>
+          </Button>
           <div className="mx-1 my-1.5 border-t" />
           <div className="px-3 py-2">
             <p className="mb-2 text-xs text-muted-foreground" id={`${panelId}-theme`}>Appearance</p>
