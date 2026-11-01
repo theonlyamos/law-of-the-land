@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   reject: vi.fn(),
   correct: vi.fn(),
   publish: vi.fn(),
+  rollback: vi.fn(),
   refresh: vi.fn(),
 }));
 
@@ -16,7 +17,7 @@ vi.mock("../../../convex/_generated/api", () => ({
     publishVersion: "publish", unpublishVersion: "unpublish", rollbackVersion: "rollback",
   } } },
 }));
-vi.mock("convex/react", () => ({ useMutation: (reference: string) => reference === "approve" ? mocks.approve : reference === "reject" ? mocks.reject : reference === "correct" ? mocks.correct : reference === "publish" ? mocks.publish : vi.fn() }));
+vi.mock("convex/react", () => ({ useMutation: (reference: string) => reference === "approve" ? mocks.approve : reference === "reject" ? mocks.reject : reference === "correct" ? mocks.correct : reference === "publish" ? mocks.publish : reference === "rollback" ? mocks.rollback : vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -25,6 +26,7 @@ beforeEach(() => {
   mocks.reject.mockReset().mockResolvedValue({});
   mocks.correct.mockReset().mockResolvedValue({});
   mocks.publish.mockReset().mockResolvedValue({});
+  mocks.rollback.mockReset().mockResolvedValue({});
   mocks.refresh.mockReset();
 });
 
@@ -294,6 +296,53 @@ describe("document review workbench", () => {
     render(<DocumentReview items={[{ ...item, status: "unpublished", sourceVerifications: [unresolved] }]} />);
     expect(screen.getByText(/Reproduction - verification unresolved/)).toBeVisible();
     expect(screen.queryByText(/Independently corroborated reproduction/)).toBeNull();
+  });
+
+  it.each([["document:review"], ["document:rollback"]])("hides superseded correction without both review and rollback permissions: %j", (...permissions) => {
+    render(<AdminPermissionProvider permissions={permissions}><DocumentReview items={[{ ...item, status: "superseded" }]} /></AdminPermissionProvider>);
+    expect(screen.queryByRole("button", { name: "Record source correction" })).toBeNull();
+    expect(mocks.correct).not.toHaveBeenCalled();
+  });
+
+  it("records verified superseded evidence without rolling back or replacing prior history", async () => {
+    const oldRecord = { sourceClass: "official_hosted" as const, sourceUrl: item.sourceUrl, verificationNotes: "Prior source evidence must remain in the history.", corroboratingUrls: [], completeOriginal: true, citationChecked: true, laterTreatmentChecked: true, kind: "approval" as const, assessment: "verified" as const, reviewerId: "earlier-reviewer", reason: "Earlier source review", createdAt: 1_700_000_000_000 };
+    const superseded = { ...item, status: "superseded" as const, sourceUrl: "https://example-lawfirm.com/case.pdf", sourceVerifications: [oldRecord] };
+    const permissions = ["document:review", "document:rollback"];
+    const { rerender } = render(<AdminPermissionProvider permissions={permissions}><DocumentReview items={[superseded]} /></AdminPermissionProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Record source correction" }));
+    expect(screen.getByText(/Use the separate guarded rollback action after the evidence is recorded/)).toBeVisible();
+    expect(screen.getByLabelText("Correction assessment")).toHaveValue("");
+    expect(screen.queryByRole("option", { name: /Unresolved/ })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Correction assessment"), { target: { value: "verified" } });
+    fillSource("corroborated_reproduction");
+    fireEvent.change(screen.getByLabelText("Correction reason"), { target: { value: "Record verified source before considering rollback" } });
+    fireEvent.click(screen.getByRole("button", { name: "Append source correction" }));
+    await waitFor(() => expect(mocks.correct).toHaveBeenCalledTimes(1));
+    expect(mocks.correct).toHaveBeenCalledWith(expect.objectContaining({ versionId: item.id, assessment: "verified", sourceVerification: expect.objectContaining({ completeOriginal: true, citationChecked: true, laterTreatmentChecked: true, sourceClass: "corroborated_reproduction" }) }));
+    const correction = { ...oldRecord, ...mocks.correct.mock.calls[0][0].sourceVerification, kind: "correction" as const, reviewerId: "correcting-reviewer", reason: "Record verified source before considering rollback", createdAt: 1_700_000_100_000 };
+    rerender(<AdminPermissionProvider permissions={permissions}><DocumentReview items={[{ ...superseded, sourceVerifications: [correction, oldRecord] }]} /></AdminPermissionProvider>);
+    expect(screen.getByText("Prior source evidence must remain in the history.")).toBeVisible();
+    expect(screen.getByText("Citation mismatch")).toBeVisible();
+    expect(screen.getByText(verificationNotes)).toBeVisible();
+    expect(screen.getByText("superseded", { exact: true })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Roll back to version" })).toBeVisible();
+    expect(mocks.rollback).not.toHaveBeenCalled(); expect(mocks.approve).not.toHaveBeenCalled(); expect(mocks.publish).not.toHaveBeenCalled();
+  });
+
+  it("blocks incomplete superseded source corrections before calling a mutation", async () => {
+    render(<AdminPermissionProvider permissions={["document:review", "document:rollback"]}><DocumentReview items={[{ ...item, status: "superseded" }]} /></AdminPermissionProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Record source correction" }));
+    fireEvent.change(screen.getByLabelText("Correction assessment"), { target: { value: "verified" } });
+    fillSource("official_hosted", false);
+    fireEvent.change(screen.getByLabelText("Correction reason"), { target: { value: "Verification remains incomplete" } });
+    fireEvent.click(screen.getByRole("button", { name: "Append source correction" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Verify the complete original, citation, and later treatment");
+    expect(mocks.correct).not.toHaveBeenCalled(); expect(mocks.rollback).not.toHaveBeenCalled();
+  });
+
+  it("keeps superseded correction hidden for scoped actions without an authorized correction operation", () => {
+    render(<AdminPermissionProvider permissions={["document:review", "document:rollback"]}><DocumentReview items={[{ ...item, status: "superseded" }]} canReview actions={{ approve: mocks.approve, reject: mocks.reject, publish: mocks.publish, unpublish: vi.fn(), rollback: mocks.rollback }} /></AdminPermissionProvider>);
+    expect(screen.queryByRole("button", { name: "Record source correction" })).toBeNull();
   });
 
 });

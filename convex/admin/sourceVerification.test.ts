@@ -107,6 +107,27 @@ async function setup(status: "published" | "approved" | "unpublished" | "rejecte
 }
 
 describe("append-only source verification history", () => {
+  it("attaches verified superseded evidence without changing the original or legacy decision", async () => {
+    const { t, reviewer, versionId, decisionId, args } = await setup("superseded");
+    const before = await t.run(async ctx => ({ version: await ctx.db.get(versionId), decision: await ctx.db.get(decisionId) }));
+    await expect(reviewer.client.mutation(recordCorrection, { ...args, sourceVerification: { ...reproduction, completeOriginal: false } })).rejects.toThrow("DOCUMENT_SOURCE_CHECKS_INCOMPLETE");
+    const id = await reviewer.client.mutation(recordCorrection, args);
+    expect(await reviewer.client.mutation(recordCorrection, args)).toBe(id);
+    const after = await t.run(async ctx => ({ version: await ctx.db.get(versionId), decision: await ctx.db.get(decisionId), evidence: await ctx.db.get(id as Id<"documentSourceVerifications">) }));
+    expect(after.version).toEqual(before.version); expect(after.decision).toEqual(before.decision);
+    expect(after.evidence).toMatchObject({ assessment: "verified", kind: "correction", sourceClass: "corroborated_reproduction" });
+  });
+  it("denies superseded corrections without assured review and rollback authorization", async () => {
+    const { t, args } = await setup("superseded");
+    for (const role of ["content_manager", "auditor", "billing_manager"]) {
+      const actor = await admin(t, role);
+      await expect(actor.client.mutation(recordCorrection, args)).rejects.toThrow("ADMIN_FORBIDDEN");
+    }
+    const unassured = await admin(t, "content_reviewer", false);
+    await expect(unassured.client.mutation(recordCorrection, args)).rejects.toThrow();
+    await expect(t.mutation(recordCorrection, args)).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+    expect(await t.run(ctx => ctx.db.query("documentSourceVerifications").take(1))).toHaveLength(0);
+  });
   it("adds a verified published correction while preserving the original review and version", async () => {
     const { t, reviewer, versionId, decisionId, args } = await setup();
     const before = await t.run(async ctx => ({ version: await ctx.db.get(versionId), decision: await ctx.db.get(decisionId) }));

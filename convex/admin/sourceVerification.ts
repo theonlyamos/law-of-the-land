@@ -74,10 +74,11 @@ export const recordCorrection = mutation({
     const version = await ctx.db.get(args.versionId);
     if (!version) throw new ConvexError("DOCUMENT_VERSION_NOT_FOUND");
     if (version.status === "published") await requireEnabledAdminPermission(ctx, "document", "publish");
+    if (version.status === "superseded") await requireEnabledAdminPermission(ctx, "document", "rollback");
     if (args.assessment === "unresolved") {
       if (!["approved", "unpublished", "rejected", "ready_for_review"].includes(version.status)) throw new ConvexError(UNRESOLVED_SOURCE_GUIDANCE);
-    } else if (version.status !== "approved" && version.status !== "published") {
-      throw new ConvexError("DOCUMENT_SOURCE_CORRECTION_REQUIRES_APPROVED_OR_PUBLISHED_VERSION");
+    } else if (!["approved", "published", "superseded"].includes(version.status)) {
+      throw new ConvexError("DOCUMENT_SOURCE_CORRECTION_STATE_INVALID");
     }
     const replay = await ctx.db.query("documentSourceVerifications").withIndex("by_reviewerId_and_idempotencyKey", q =>
       q.eq("reviewerId", actor.userId).eq("idempotencyKey", args.idempotencyKey)).take(1);

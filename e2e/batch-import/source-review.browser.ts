@@ -8,6 +8,7 @@ type ReviewLedger = {
   approvals: Array<{ sourceVerification: SourceInput; checklistAnswers: Record<string, boolean>; evaluationRunId: string }>;
   corrections: Array<{ assessment: string; sourceVerification: SourceInput }>;
   decisions: unknown[]; history: Array<{ verificationNotes: string }>; status: string;
+  mutations: string[];
 };
 async function ledger(page: Page) {
   return page.evaluate(() => JSON.parse(localStorage.getItem("batch-import-fixture-review") ?? "null") as ReviewLedger | null);
@@ -114,4 +115,52 @@ test("source review records unresolved approved evidence with the unresolved ass
   expect(result.decisions).toHaveLength(1);
   await expect(page.getByText("Earlier review decision retained verbatim.", { exact: true })).toBeVisible();
   await expect(page.getByText("Earlier source assertion retained verbatim.", { exact: true })).toBeVisible();
+});
+
+test("superseded source correction requires both review and rollback permission", async ({ page }) => {
+  await page.goto("/?review=1&reviewSource=reproduction&reviewStatus=superseded");
+  await expect(page.getByText("superseded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Record source correction", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Roll back to version", exact: true })).toHaveCount(0);
+  expect(await ledger(page)).toBeNull();
+});
+
+test("superseded source correction records verified evidence only and preserves lifecycle and history", async ({ page }) => {
+  const externalRequests: string[] = [];
+  page.on("request", (request) => { if (!request.url().startsWith("http://127.0.0.1:4181/")) externalRequests.push(request.url()); });
+  await page.goto("/?review=1&reviewSource=reproduction&reviewStatus=superseded&reviewRollback=1");
+  await correctionEvidence(page, "verified");
+  await expect(page.getByText(/Use the separate guarded rollback action after the evidence is recorded/)).toBeVisible();
+  await expect(page.getByRole("option", { name: /Unresolved/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Append source correction", exact: true }).click();
+  await expect(page.getByText(/Source correction recorded. Prior assertions and audit records are preserved/)).toBeVisible();
+  await expect(page.getByText("superseded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Roll back to version", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByText("Earlier review decision retained verbatim.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Earlier source assertion retained verbatim.", { exact: true })).toBeVisible();
+  const result = (await ledger(page))!;
+  expect(result.status).toBe("superseded");
+  expect(result.approvals).toHaveLength(0);
+  expect(result.corrections).toHaveLength(1);
+  expect(result.corrections[0]).toMatchObject({ assessment: "verified", sourceVerification: { sourceClass: "corroborated_reproduction", completeOriginal: true, citationChecked: true, laterTreatmentChecked: true } });
+  expect(result.mutations).toEqual(["admin/sourceVerification:recordCorrection"]);
+  expect(result.history).toHaveLength(2);
+  expect(result.decisions).toHaveLength(1);
+  expect(externalRequests).toEqual([]);
+});
+
+test("superseded source correction blocks incomplete evidence before any mutation", async ({ page }) => {
+  await page.goto("/?review=1&reviewSource=reproduction&reviewStatus=superseded&reviewRollback=1");
+  await page.getByRole("button", { name: "Record source correction", exact: true }).click();
+  await page.getByRole("combobox", { name: "Correction assessment", exact: true }).selectOption("verified");
+  await page.getByRole("combobox", { name: "Source classification", exact: true }).selectOption("corroborated_reproduction");
+  await page.getByLabel("Verification notes", { exact: true }).fill("The superseded original still needs a complete-text and later-treatment check before its evidence can be verified.");
+  await page.getByLabel("Corroborating URLs (one per line)", { exact: true }).fill("https://judicial.gov.gh/decisions/comparison.pdf");
+  await page.getByLabel("Correction reason", { exact: true }).fill("Evidence remains incomplete.");
+  await expect(page.getByRole("checkbox", { checked: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Append source correction", exact: true }).click();
+  await expect(page.getByText(/Verify the complete original, citation, and later treatment/)).toBeVisible();
+  await expect(page.getByText("superseded", { exact: true })).toBeVisible();
+  expect(await ledger(page)).toBeNull();
 });

@@ -37,4 +37,6 @@ Open the document's targeted review link, then **Record source correction**. For
 
 An unresolved correction on an approved document explicitly invalidates that approval and returns it to review. For an already published document, first use the existing **Unpublish version** action, including password verification and confirmation, and wait for unpublication to complete. Then record unresolved evidence. Published unresolved corrections are rejected; the correction endpoint cannot bypass unpublication. A later approval must contain new complete verification evidence. No production correction or migration is executed by installing this code or opening these screens.
 
+For a legacy superseded judgment, a reviewer with rollback permission can append complete verified source evidence while the version remains superseded. The existing review decision, active version and audit history are preserved. The correction does not initiate rollback: the separate rollback action still requires its password proof, confirmation and all publication guards. Incomplete or unresolved superseded evidence cannot authorize rollback.
+
 Clear saved batch removes only this browser's progress metadata. It does not delete resources, files, reviews, audit records, or publication jobs.

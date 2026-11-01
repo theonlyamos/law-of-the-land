@@ -153,6 +153,27 @@ afterEach(() => {
 });
 
 describe("governed document publication", () => {
+  it("recovers legacy judgment rollback through verified superseded evidence and existing step-up", async () => {
+    const t = createBackend(); await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager", ["superseded", "published"]);
+    await t.run(ctx => ctx.db.patch(resourceId, { type: "judgment" }));
+    const oldVersion = await t.run(ctx => ctx.db.get(ids[0]));
+    const request = { versionId: ids[0], confirmation: `ROLLBACK ${ids[0]}`, reason: "Restore the reviewed court original", idempotencyKey: "legacy-rollback-recovery" };
+    await expect(reviewer.client.mutation(rollbackVersion, request)).rejects.toThrow("DOCUMENT_SOURCE_VERIFICATION_REQUIRED");
+    const correction = makeFunctionReference<"mutation">("admin/sourceVerification:recordCorrection");
+    const sourceVerification = { sourceClass: "corroborated_reproduction", sourceUrl: "https://laws.example.gov/act-843", verificationNotes: "Compared complete court text with independent archive; verified citation and recorded later treatment.", corroboratingUrls: ["https://independent.example/judgment"], completeOriginal: true, citationChecked: true, laterTreatmentChecked: true };
+    await expect(reviewer.client.mutation(correction, { versionId: ids[0], sourceVerification: { ...sourceVerification, laterTreatmentChecked: false }, reason: "Record rollback verification evidence", idempotencyKey: "legacy-rollback-evidence", assessment: "verified" })).rejects.toThrow("DOCUMENT_SOURCE_CHECKS_INCOMPLETE");
+    await reviewer.client.mutation(correction, { versionId: ids[0], sourceVerification, reason: "Record rollback verification evidence", idempotencyKey: "legacy-rollback-evidence", assessment: "verified" });
+    expect(await t.run(ctx => ctx.db.get(ids[0]))).toEqual(oldVersion);
+    expect(await t.run(ctx => ctx.db.get(resourceId))).toMatchObject({ activeVersionId: ids[1] });
+    await expect(reviewer.client.mutation(rollbackVersion, request)).rejects.toThrow("ADMIN_STEP_UP_REQUIRED");
+    await addStepUp(t, reviewer, "document_rollback", ids[0], request.idempotencyKey);
+    const result = await reviewer.client.mutation(rollbackVersion, request);
+    expect(result.type).toBe("gemini_index");
+    expect(await t.run(ctx => ctx.db.get(ids[0]))).toMatchObject({ status: "publishing" });
+    expect(await t.run(ctx => ctx.db.get(resourceId))).toMatchObject({ activeVersionId: ids[1] });
+  });
   it("requires source evidence for judgment approval and retains the original review gates", async () => {
     const t = createBackend(); await enablePanel(t);
     const reviewer = await asAdmin(t, "content_reviewer");

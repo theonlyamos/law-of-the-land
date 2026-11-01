@@ -6,6 +6,7 @@ type SourceRecord = NonNullable<ReviewItem["sourceVerifications"]>[number];
 type ReviewState = {
   approvals: Record<string, unknown>[];
   corrections: Record<string, unknown>[];
+  mutations: string[];
   status: ReviewItem["status"];
   decisions: ReviewItem["decisions"];
   history: SourceRecord[];
@@ -20,10 +21,12 @@ export function reviewSourceUrl() {
 
 export function reviewState(): ReviewState {
   const saved = localStorage.getItem(reviewKey);
-  if (saved) return JSON.parse(saved) as ReviewState;
-  const corrected = new URLSearchParams(window.location.search).get("reviewStatus") === "approved";
+  if (saved) return { mutations: [], ...JSON.parse(saved) } as ReviewState;
+  const requestedStatus = new URLSearchParams(window.location.search).get("reviewStatus");
+  const status = requestedStatus === "approved" || requestedStatus === "superseded" ? requestedStatus : "ready_for_review";
+  const corrected = status !== "ready_for_review";
   return {
-    approvals: [], corrections: [], status: corrected ? "approved" : "ready_for_review",
+    approvals: [], corrections: [], mutations: [], status,
     decisions: corrected ? [{ decision: "approve", reviewerId: "earlier-reviewer", reason: "Earlier review decision retained verbatim.", evaluationRunId: "fixture-prior-evaluation", createdAt: 1000 }] : [],
     history: corrected ? [{
       kind: "approval", assessment: "verified", sourceClass: "official_hosted", sourceUrl: reviewSourceUrl(),
@@ -36,6 +39,7 @@ export function reviewState(): ReviewState {
 
 export function recordReviewFixtureMutation(name: string, args: Record<string, unknown>) {
   const state = reviewState();
+  state.mutations.push(name);
   const source = args.sourceVerification as Omit<SourceRecord, "kind" | "assessment" | "createdAt" | "reviewerId" | "reason">;
   if (name === "admin/reviews:approveVersion") {
     state.approvals.push(args);
@@ -73,7 +77,8 @@ export function ReviewFixture() {
     requiresSourceVerification: true, status: state.status, submittedBy: "fixture-uploader",
     decisions: state.decisions, sourceVerifications: state.history,
   };
-  return <AdminPermissionProvider permissions={["document:review", "document:publish"]}>
+  const permissions = ["document:review", "document:publish", ...(new URLSearchParams(window.location.search).get("reviewRollback") === "1" ? ["document:rollback"] : [])];
+  return <AdminPermissionProvider permissions={permissions}>
     <DocumentReview items={[item]} />
   </AdminPermissionProvider>;
 }
