@@ -30,6 +30,7 @@ const runGeminiJob = makeFunctionReference<"action">("admin/geminiActions:runGem
 const recordAdminStepUpProof = makeFunctionReference<"mutation">("admin/users:recordAdminStepUpProof");
 const expireLifecycleLock = makeFunctionReference<"mutation">("admin/publication:expireLifecycleLock");
 const listReviewQueue = makeFunctionReference<"query">("admin/reviews:listReviewQueue");
+const getReviewItem = makeFunctionReference<"query">("admin/reviews:getReviewItem");
 const getReviewCounts = makeFunctionReference<"query">("admin/reviews:getReviewCounts");
 const backfillReviewCounts = makeFunctionReference<"mutation">("admin/reviewCounts:backfill");
 
@@ -152,6 +153,62 @@ afterEach(() => {
 });
 
 describe("governed document publication", () => {
+  it("requires source evidence for judgment approval and retains the original review gates", async () => {
+    const t = createBackend(); await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const { resourceId, ids } = await seedCatalog(t, "manager", ["ready_for_review"]);
+    await t.run(ctx => ctx.db.patch(resourceId, { type: "judgment" }));
+    const request = { versionId: ids[0], checklistAnswers: checklist, evaluationRunId: "real-evaluation-record", reason: "Compared original and verified source evidence", idempotencyKey: "source-review-integration" };
+    await expect(reviewer.client.mutation(approveVersion, request)).rejects.toThrow("DOCUMENT_SOURCE_CLASS_REQUIRED");
+    const sourceVerification = { sourceClass: "official_hosted", sourceUrl: "https://laws.example.gov/act-843", verificationNotes: "Official court text compared for completeness and citation; later treatment checked.", corroboratingUrls: [], completeOriginal: true, citationChecked: true, laterTreatmentChecked: true };
+    await expect(reviewer.client.mutation(approveVersion, { ...request, sourceVerification: { ...sourceVerification, completeOriginal: false } })).rejects.toThrow("DOCUMENT_SOURCE_CHECKS_INCOMPLETE");
+    await expect(reviewer.client.mutation(approveVersion, { ...request, sourceVerification, checklistAnswers: { ...checklist, evaluationPassed: false } })).rejects.toThrow("DOCUMENT_CHECKLIST_INCOMPLETE");
+    await reviewer.client.mutation(approveVersion, { ...request, sourceVerification });
+    await reviewer.client.mutation(approveVersion, { ...request, sourceVerification });
+    const records = await t.run(async ctx => ({ decisions: await ctx.db.query("reviewDecisions").collect(), sources: await ctx.db.query("documentSourceVerifications").collect() }));
+    expect(records.decisions).toHaveLength(1); expect(records.sources).toHaveLength(1);
+    expect(records.decisions[0].sourceVerificationId).toBe(records.sources[0]._id);
+    expect(records.sources[0]).toMatchObject({ sourceClass: "official_hosted", assessment: "verified", kind: "approval" });
+  });
+
+  it("blocks publish and rollback without verified judgment provenance and permits corrected evidence", async () => {
+    const t = createBackend(); await enablePanel(t);
+    const actor = await asAdmin(t, "super_admin");
+    const { resourceId, ids } = await seedCatalog(t, "manager", ["approved", "published", "superseded"]);
+    await t.run(ctx => ctx.db.patch(resourceId, { type: "judgment" }));
+    const publishRequest = { versionId: ids[0], confirmation: `PUBLISH ${ids[0]}`, reason: "Publish verified court original", idempotencyKey: "source-publish-integration" };
+    await expect(actor.client.mutation(publishVersion, publishRequest)).rejects.toThrow("DOCUMENT_SOURCE_VERIFICATION_REQUIRED");
+    await expect(actor.client.mutation(rollbackVersion, { ...publishRequest, versionId: ids[2], confirmation: `ROLLBACK ${ids[2]}` })).rejects.toThrow("DOCUMENT_SOURCE_VERIFICATION_REQUIRED");
+    const correction = makeFunctionReference<"mutation">("admin/sourceVerification:recordCorrection");
+    const sourceVerification = { sourceClass: "corroborated_reproduction", sourceUrl: "https://laws.example.gov/act-843", verificationNotes: "Compared the reproduced complete court text against independent archive; citation and later treatment reviewed.", corroboratingUrls: ["https://independent.example/judgment"], completeOriginal: true, citationChecked: true, laterTreatmentChecked: true };
+    await actor.client.mutation(correction, { versionId: ids[0], sourceVerification, reason: "Correct earlier official-host assertion transparently", idempotencyKey: "source-correction-integration", assessment: "verified" });
+    const result = await actor.client.mutation(publishVersion, publishRequest);
+    expect(result.type).toBe("gemini_index");
+    const review = await actor.client.query(getReviewItem, { versionId: ids[0] });
+    expect(review.sourceVerifications[0]).toMatchObject({ kind: "correction", sourceClass: "corroborated_reproduction" });
+  });
+
+  it("loads one review version with the queue projection and preserves the admin gate", async () => {
+    const t = createBackend();
+    await enablePanel(t);
+    const reviewer = await asAdmin(t, "content_reviewer");
+    const billing = await asAdmin(t, "billing_manager");
+    const { jurisdictionId, resourceId, ids } = await seedCatalog(t, "manager", ["draft", "ready_for_review", "approved"]);
+    const sourceProvenance = "Public law-firm reproduction of the court judgment; not a government-hosted source.";
+    await t.run(async (ctx) => {
+      await ctx.db.insert("batchImportEvidence", { jurisdictionId, resourceId, versionId: ids[1], sourceUrl: "https://laws.example.gov/act-843", sourceProvenance, caseAliases: ["Example v Example"], importedBy: "manager", createdAt: Date.now() });
+    });
+    await expect(t.query(getReviewItem, { versionId: ids[1] })).rejects.toThrow("ADMIN_AUTH_REQUIRED");
+    await expect(billing.client.query(getReviewItem, { versionId: ids[1] })).rejects.toThrow("ADMIN_FORBIDDEN");
+    expect(await reviewer.client.query(getReviewItem, { versionId: ids[0] })).toBeNull();
+    const page = await reviewer.client.query(listReviewQueue, { status: "ready_for_review", paginationOpts: { cursor: null, numItems: 10 } });
+    expect(await reviewer.client.query(getReviewItem, { versionId: ids[1] })).toEqual(page.page[0]);
+    expect(page.page[0]).toMatchObject({ sourceProvenance, sourceUrl: "https://laws.example.gov/act-843", caseAliases: ["Example v Example"] });
+    expect(await reviewer.client.query(getReviewItem, { versionId: ids[2] })).toMatchObject({ id: ids[2], status: "approved" });
+    await t.run(async (ctx) => { await ctx.db.delete(ids[0]); });
+    expect(await reviewer.client.query(getReviewItem, { versionId: ids[0] })).toBeNull();
+  });
+
   it("maintains authorized totals during bounded backfill and interleaved version writes", async () => {
     const t = createBackend();
     await enablePanel(t);

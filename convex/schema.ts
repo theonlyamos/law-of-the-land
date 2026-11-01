@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { citationProvenanceValidator } from "./lib/citationProvenance";
+import { sourceVerificationInputValidator } from "./lib/sourceVerification";
 import { v } from "convex/values";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
@@ -252,6 +253,8 @@ export default defineSchema({
     issuer: v.string(),
     officialCitation: v.string(),
     officialCitationKey: v.string(),
+    batchTitleKey: v.optional(v.string()),
+    batchCitationKey: v.optional(v.string()),
     sourceUrl: v.string(),
     topics: v.array(v.string()),
     effectiveDate: v.optional(v.string()),
@@ -285,8 +288,11 @@ export default defineSchema({
       "jurisdictionId",
       "officialCitationKey",
     ])
+    .index("by_jurisdictionId_and_batchTitleKey", ["jurisdictionId", "batchTitleKey"])
+    .index("by_jurisdictionId_and_batchCitationKey", ["jurisdictionId", "batchCitationKey"])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
     .searchIndex("search_title", { searchField: "title", filterFields: ["status", "jurisdictionId", "catalogPublished"] })
+    .searchIndex("search_officialCitation", { searchField: "officialCitation", filterFields: ["jurisdictionId"] })
     .index("by_catalogPublished", ["catalogPublished"])
     .index("by_status_and_catalogPublished", ["status", "catalogPublished"])
     .index("by_jurisdictionId_and_status_and_catalogPublished", ["jurisdictionId", "status", "catalogPublished"])
@@ -366,10 +372,30 @@ export default defineSchema({
     .index("by_resourceId_and_versionNumber", ["resourceId", "versionNumber"])
     .index("by_status_and_updatedAt", ["status", "updatedAt"])
     .index("by_resourceId_and_sha256", ["resourceId", "sha256"])
+    .index("by_sha256", ["sha256"])
     .index("by_resourceId_and_status", ["resourceId", "status"])
     .index("by_originalStorageId", ["originalStorageId"]),
+  batchImportEvidence: defineTable({
+    jurisdictionId: v.id("jurisdictions"), resourceId: v.id("legalResources"),
+    versionId: v.id("documentVersions"), sourceUrl: v.string(),
+    sourceProvenance: v.string(), caseAliases: v.array(v.string()),
+    importedBy: v.string(), createdAt: v.number(),
+  }).index("by_versionId", ["versionId"]),
+  batchImportIdentities: defineTable({
+    jurisdictionId: v.id("jurisdictions"), key: v.string(), resourceId: v.id("legalResources"),
+  }).index("by_jurisdictionId_and_key", ["jurisdictionId", "key"]),
+  documentSourceVerifications: defineTable({
+    ...sourceVerificationInputValidator.fields,
+    versionId: v.id("documentVersions"), reviewerId: v.string(),
+    kind: v.union(v.literal("approval"), v.literal("correction")),
+    assessment: v.union(v.literal("verified"), v.literal("unresolved")),
+    previousVerificationId: v.optional(v.id("documentSourceVerifications")),
+    reason: v.string(), createdAt: v.number(), idempotencyKey: v.optional(v.string()),
+  }).index("by_versionId_and_createdAt", ["versionId", "createdAt"])
+    .index("by_reviewerId_and_idempotencyKey", ["reviewerId", "idempotencyKey"]),
   reviewDecisions: defineTable({
     documentVersionId: v.id("documentVersions"),
+    sourceVerificationId: v.optional(v.id("documentSourceVerifications")),
     reviewerId: v.string(),
     decision: v.union(v.literal("approve"), v.literal("reject")),
     notes: v.string(),
