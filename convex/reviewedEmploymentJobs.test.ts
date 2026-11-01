@@ -12,6 +12,9 @@ import * as jobContracts from "../shared/reviewed-employment-jobs";
 import { createOpaqueTelemetryToken, createTelemetryServiceProof } from "./lib/telemetryProof";
 import { completeGovernedInteractionProofParts } from "./chats";
 import type { ReviewedEmploymentCommitInput } from "./reviewedEmploymentCompletion";
+import { worker as capacityWorker } from "./reviewedEmploymentJobs";
+import type { MutationCtx } from "./_generated/server";
+import { createPublicationFilterBinding } from "../shared/gemini-publication-filter";
 
 const policy = vi.hoisted(() => ({ jurisdictionId: "", resourceId: "", versionId: "", expectedSha256: "", expectedByteSize: 0 }));
 vi.mock("../shared/reviewed-employment-policy", async importOriginal => {
@@ -39,8 +42,8 @@ function productionEnvironment(admission = true, execution = true) {
   vi.stubEnv("REVIEWED_EMPLOYMENT_PRODUCTION_ADMISSION_ENABLED", admission ? "1" : undefined);
   vi.stubEnv("REVIEWED_EMPLOYMENT_PRODUCTION_EXECUTION_ENABLED", execution ? "1" : undefined);
 }
-async function fixture() {
-  const t = convexTest(schema, modules);
+async function fixture(enforceLimits = false) {
+  const t = convexTest({ schema, modules, transactionLimits: enforceLimits ? { databaseQueries: 4096 } : false });
   t.registerComponent("betterAuth", authSchema, authModules);
   t.registerComponent("polar", polarSchema, polarModules);
   const ids = await t.run(async ctx => {
@@ -538,3 +541,77 @@ describe("persisted reviewed employment jobs", () => {
     await f.t.finishAllScheduledFunctions(vi.runAllTimers);
   });
 });
+
+it("keeps every reviewed-job phase within one read budget with 900 published sources and 900 drafts", async () => {
+  const f = await fixture(true), job = await f.submit();
+  await f.t.run(async ctx => {
+    const { _id: _r, _creationTime: _rc, ...resource } = (await ctx.db.get(f.ids.resourceId))!;
+    const { _id: _v, _creationTime: _vc, ...version } = (await ctx.db.get(f.ids.versionId))!;
+    for (let index = 0; index < 900; index++) {
+      if (index > 0) {
+        const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined });
+        const versionId = await ctx.db.insert("documentVersions", { ...version, resourceId, geminiDocumentName: `${f.ids.storeName}/documents/capacity${index}` });
+        await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      }
+      const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined, catalogPublished: false });
+      await ctx.db.insert("documentVersions", { ...version, resourceId, status: "draft", geminiDocumentName: undefined });
+    }
+  });
+  const measuredWorker = async (operation: jobContracts.ReviewedEmploymentJobOperation, value: unknown = {}) => {
+    const input = { jobId: job.jobId, workerId: "capacity-worker", operation, body: JSON.stringify(value), issuedAt: Date.now(), publicationFilterProtocol: "published-v1" as const };
+    const args = { ...input, serviceProof: await createTelemetryServiceProof(await jobContracts.reviewedEmploymentJobProofParts(input)) };
+    return f.t.run(async ctx => {
+      let reads = 0;
+      const reader = <T extends object>(db: T): T => new Proxy(db, {
+        get(target, property, receiver) {
+          const method = Reflect.get(target, property, receiver);
+          if (property === "system") return reader(ctx.db.system);
+          if ((property !== "get" && property !== "query") || typeof method !== "function") return typeof method === "function" ? method.bind(target) : method;
+          return (...params: unknown[]) => {
+            if (++reads >= 4096) throw new Error("CAPACITY_TEST_TRANSACTION_READ_LIMIT");
+            return Reflect.apply(method, target, params);
+          };
+        },
+      });
+      const handler = (capacityWorker as unknown as { _handler: (ctx: MutationCtx, input: typeof args) => Promise<{ status: string; payload: string | null }> })._handler;
+      const runQuery: MutationCtx["runQuery"] = (query, ...queryArgs) => {
+        // Native auth adapter calls use a conservative eight-range allowance.
+        reads += 8;
+        if (reads >= 4096) throw new Error("CAPACITY_TEST_TRANSACTION_READ_LIMIT");
+        return ctx.runQuery(query, ...queryArgs);
+      };
+      const result = await handler({ ...ctx, db: reader(ctx.db), runQuery }, args);
+      expect(reads).toBeLessThan(4000);
+      expect(result.status).toBe("ok");
+      return JSON.parse(result.payload!);
+    });
+  };
+  await measuredWorker("claim");
+  const authority = await measuredWorker("authority");
+  expect(authority.manifest.stores[0].publicationFilter.documents).toHaveLength(900);
+  const sourceBinding = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",
+    new TextEncoder().encode(jobContracts.reviewedEmploymentSourceBundleCanonicalJson(authority)))))
+    .map(byte => byte.toString(16).padStart(2, "0")).join("");
+  const answer = "This reviewed edition requires written consent before the arrangement.";
+  const answerSha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(answer))))
+    .map(byte => byte.toString(16).padStart(2, "0")).join("");
+  for (const stage of ["draft", "inventory", "consent", "overtime"]) {
+    const reservation = { stage, requestSha256, candidateSha256: stage === "draft" ? null : answerSha, sourceBinding };
+    await measuredWorker("reserve", reservation);
+    await measuredWorker("passed", { ...reservation, candidateSha256: answerSha });
+  }
+  const input: ReviewedEmploymentCommitInput = {
+    completion: { routeNonce: f.payload.routeNonce, externalId: f.args.externalId, jurisdictionId: f.ids.jurisdictionId,
+      assistantClientId: f.args.assistantClientId, finalAnswer: answer, answerKind: "legal", outcome: "success",
+      citations: [{ jurisdictionId: f.ids.jurisdictionId, resourceId: f.ids.resourceId, versionId: f.ids.versionId,
+        providerStoreName: f.ids.storeName, pageNumber: 11 }], model: "reviewed-background-fixture", elapsedMs: 1000,
+      authorizedScopeSize: 1, readyStoreCount: 1, partialCoverage: false,
+      publicationFilterProtocol: "published-v1", publicationFilterBinding: await createPublicationFilterBinding(authority.manifest.stores),
+      jurisdictionCoverage: [{ ordinal: 0, relation: "selected", coverage: "evidence" }], attachmentIds: [] },
+    source: { jurisdictionId: f.ids.jurisdictionId, resourceId: f.ids.resourceId, versionId: f.ids.versionId,
+      expectedSha256: f.ids.expectedSha256, expectedByteSize: f.ids.expectedByteSize, asOfDate: new Date().toISOString().slice(0, 10) },
+    user: { clientId: f.args.userClientId, content: f.payload.query, attachmentIds: [] },
+  };
+  expect(await measuredWorker("commit", input)).toMatchObject({ status: "completed", outcome: "success", persisted: true });
+  expect((await f.t.run(ctx => ctx.db.query("messages").take(3))).map(message => message.content)).toEqual([f.payload.query, answer]);
+}, 120000);

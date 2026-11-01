@@ -4,7 +4,27 @@ import { isGeminiDocumentName, isGeminiFileSearchStoreName, isGeminiUploadOperat
 import { PUBLICATION_FILTER_PROTOCOL, MAX_PUBLISHED_FILTER_DOCUMENTS, parsePublicationFilter,
   buildPublicationMetadataFilter, isPublicationEnvironment, isPublicationMetadataId, type PublicationFilter } from "../../shared/gemini-publication-filter";
 
-const MAX_RESOURCES = 400;
+// Publication identities are bounded by the provider filter protocol. Drafts have
+// an independent audit budget: importing drafts must not consume source capacity.
+const MAX_UNPUBLISHED_RESOURCES = 1024;
+// Shared across all readiness checks in one scope, leaving transaction headroom
+// for access checks and response construction (Convex allows 4,096 index ranges).
+const MAX_READINESS_READS = 3800;
+type ReadBudget = { remaining: number };
+class ReadinessReadBudgetExceeded extends Error {}
+function boundedReadContext(ctx: ReadContext, budget: ReadBudget): ReadContext {
+  return { db: new Proxy(ctx.db, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property !== "get" && property !== "query") return value;
+      return (...args: unknown[]) => {
+        if (budget.remaining <= 0) throw new ReadinessReadBudgetExceeded();
+        budget.remaining--;
+        return Reflect.apply(value, target, args);
+      };
+    },
+  }) };
+}
 // Picker display counts have a separate budget from authoritative readiness.
 const MAX_DISPLAY_RESOURCES = 32;
 const MAX_DISPLAY_FAILED_VERSIONS = 32;
@@ -13,12 +33,23 @@ const CURRENT_STATUSES = ["queued", "running", "waiting_provider", "manual_revie
 const GEMINI_JOB_TYPES = ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"] as const;
 type ReadContext = Pick<QueryCtx, "db">;
 export type ResearchReadState = {
+  readBudget?: ReadBudget;
   jobs: readonly Doc<"integrationJobs">[];
   legacyLocks: readonly Doc<"documentLifecycleLocks">[];
 };
 
 /** Invocation-local snapshot, shared by all libraries in one research scope. */
 export async function currentGeminiResearchState(ctx: ReadContext): Promise<ResearchReadState | null> {
+  const readBudget = { remaining: MAX_READINESS_READS };
+  try {
+    const state = await currentGeminiResearchStateImpl(boundedReadContext(ctx, readBudget));
+    return state ? { ...state, readBudget } : null;
+  } catch (error) {
+    if (error instanceof ReadinessReadBudgetExceeded) return null;
+    throw error;
+  }
+}
+async function currentGeminiResearchStateImpl(ctx: ReadContext): Promise<ResearchReadState | null> {
   const jobs: Doc<"integrationJobs">[] = [];
   for (const status of CURRENT_STATUSES) for (const type of GEMINI_JOB_TYPES) {
     const batch = await ctx.db.query("integrationJobs").withIndex("by_status_and_type_and_createdAt", q => q.eq("status", status).eq("type", type)).take(MAX_CURRENT_JOBS + 1);
@@ -67,7 +98,20 @@ export async function unpublishedDocumentCount(ctx: ReadContext, row: Doc<"juris
 
 /** Read policy only. Never changes provider state, job recovery, locks, or publication pointers. */
 export async function publishedResearchReadiness(ctx: ReadContext, jurisdictionId: Id<"jurisdictions">, filterCapable = false,
-  currentState?: ResearchReadState | null): Promise<{
+  currentState?: ResearchReadState | null) {
+  const state = currentState === undefined ? await currentGeminiResearchState(ctx) : currentState;
+  if (!state) return null;
+  const budget = state.readBudget ??= { remaining: MAX_READINESS_READS };
+  try {
+    return await publishedResearchReadinessImpl(boundedReadContext(ctx, budget), jurisdictionId, filterCapable, state);
+  } catch (error) {
+    // Never truncate a source manifest or retry without its positive filter.
+    if (error instanceof ReadinessReadBudgetExceeded) return null;
+    throw error;
+  }
+}
+async function publishedResearchReadinessImpl(ctx: ReadContext, jurisdictionId: Id<"jurisdictions">, filterCapable: boolean,
+  currentState: ResearchReadState): Promise<{
   storeName: string; publicationFilter?: PublicationFilter; documents: PublicationFilter["documents"]; requiresFilter: boolean;
 } | null> {
   const row = await ctx.db.get(jurisdictionId);
@@ -86,8 +130,14 @@ export async function publishedResearchReadiness(ctx: ReadContext, jurisdictionI
     const resource = version ? await ctx.db.get(version.resourceId) : null;
     if (!version || !resource || resource.jurisdictionId !== row._id || version.status !== "failed") return null;
   }
-  const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", row._id)).take(MAX_RESOURCES + 1);
-  if (resources.length > MAX_RESOURCES) return null;
+  const [activeResources, unpublishedResources] = await Promise.all([
+    ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_activeVersionId", q =>
+      q.eq("jurisdictionId", row._id).gt("activeVersionId", undefined)).take(MAX_PUBLISHED_FILTER_DOCUMENTS + 1),
+    ctx.db.query("legalResources").withIndex("by_jurisdictionId_and_activeVersionId", q =>
+      q.eq("jurisdictionId", row._id).eq("activeVersionId", undefined)).take(MAX_UNPUBLISHED_RESOURCES + 1),
+  ]);
+  if (activeResources.length > MAX_PUBLISHED_FILTER_DOCUMENTS || unpublishedResources.length > MAX_UNPUBLISHED_RESOURCES) return null;
+  const resources = [...activeResources, ...unpublishedResources];
   const documents: PublicationFilter["documents"] = [];
   let unpublishedAddition = false;
   const documentNames = new Set<string>();
@@ -100,11 +150,13 @@ export async function publishedResearchReadiness(ctx: ReadContext, jurisdictionI
     resourceLocks.set(resource._id, locks);
     if (resource.activeVersionId === undefined) {
       if (resource.catalogPublished === true || published.length) return null;
-      const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", q => q.eq("resourceId", resource._id)).take(1);
-      if (versions.length) unpublishedAddition = true;
+      if (!unpublishedAddition) {
+        const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", q => q.eq("resourceId", resource._id)).take(1);
+        if (versions.length) unpublishedAddition = true;
+      }
       continue;
     }
-    const version = await ctx.db.get(resource.activeVersionId);
+    const version = published[0];
     if (resource.status !== "active" || resource.catalogPublished !== true || resource.geminiPublicationBlock || locks.length
       || published.length !== 1 || published[0]._id !== resource.activeVersionId || !version || version.resourceId !== resource._id
       || version.status !== "published" || failedVersions.has(version._id) || !version.geminiDocumentName
@@ -117,9 +169,7 @@ export async function publishedResearchReadiness(ctx: ReadContext, jurisdictionI
   if (!documents.length) return null;
 
   // Complete bounded current-job scan: unattributable work cannot explain store drift safely.
-  const state = currentState === undefined ? await currentGeminiResearchState(ctx) : currentState;
-  if (!state) return null;
-  const { jobs } = state;
+  const { jobs } = currentState;
   const additions = new Set<Id<"integrationJobs">>();
   const explainedLocks = new Set<Id<"documentLifecycleLocks">>();
   for (const job of jobs) {
