@@ -687,6 +687,23 @@ describe("GeminiFileSearchChat", () => {
     expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 12, canonicalReadCompleted: false });
   });
 
+  it("gives a focused retry a smaller search budget and tells the model what to leave unverified", async () => {
+    const focused = input({ researchFocus: "verified-only" });
+    const six = researchedAnswer(6);
+    const { client, result } = await run(six.events, six.final, focused);
+    expect(result.citations).toHaveLength(1);
+    expect(client.requests[0].system_instruction).toContain("FOCUSED RETRY");
+    expect(client.requests[0].system_instruction).toContain("at most 4 File Search calls");
+    expect(client.requests[0].system_instruction).toContain("Not yet verified:");
+    expect(client.requests[0].system_instruction!.indexOf("FOCUSED RETRY")).toBeLessThan(client.requests[0].system_instruction!.indexOf("JURISDICTION CONTEXT"));
+    const seven = researchedAnswer(7);
+    await expect(run(seven.events, seven.final, focused)).rejects.toThrow("file_search_budget_exhausted");
+
+    const { client: plain } = await run(undefined, undefined, input());
+    expect(plain.requests[0].system_instruction).not.toContain("FOCUSED RETRY");
+    await expect(run(undefined, undefined, input({ researchFocus: "other" as never }))).rejects.toThrow("GOVERNED_CHAT_REQUEST_INVALID");
+  });
+
   it("bounds total canonical steps separately from the unchanged content-block limit", async () => {
     const { events, final } = researchedAnswer(12);
     // 40 steps; pad with search-result steps (outside the non-search allowance) past 56.

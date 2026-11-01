@@ -1294,6 +1294,24 @@ describe("unified chat client", () => {
       .toEqual(["How much paid time off can I take?", "Verified narrower answer"]);
   });
 
+  it("offers a focused retry of the same question after the search limit", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(ndjsonResponse([{ type: "error", reason: "file_search_budget_exhausted", error: "Generic fallback" }]))
+      .mockResolvedValueOnce(ndjsonResponse([
+        { type: "done", result: "Verified main issue. Not yet verified: the rest.", citations: [citation], citationClaim, partialCoverage: false },
+      ])));
+    render(<ChatWorkspace chatId={chatId} initialQuery="Have Ghana's courts dealt with situations like this?" initialJurisdiction={jurisdiction.id} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("get a shorter answer");
+    const firstBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
+    expect(firstBody).not.toHaveProperty("researchFocus");
+
+    fireEvent.click(screen.getByRole("button", { name: "Get a shorter answer" }));
+    expect(await screen.findByText("Verified main issue. Not yet verified: the rest.")).toBeVisible();
+    const retryBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
+    expect(retryBody).toMatchObject({ query: "Have Ghana's courts dealt with situations like this?", researchFocus: "verified-only" });
+    expect(screen.queryByRole("button", { name: "Get a shorter answer" })).not.toBeInTheDocument();
+  });
+
   it.each([
     ["file_search_budget_exhausted", /search limit/i],
     ["deadline_exceeded", /took too long/i],

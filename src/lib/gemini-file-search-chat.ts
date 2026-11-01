@@ -30,6 +30,13 @@ export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
 // a little grace above it so a slight overrun still completes instead of failing.
 const FILE_SEARCH_CALL_TARGET = 8;
 const MAX_FILE_SEARCH_CALLS = 12;
+// A focused retry after a search-limit failure: fewer searches, verified findings only.
+const FOCUSED_FILE_SEARCH_CALL_TARGET = 4;
+const MAX_FOCUSED_FILE_SEARCH_CALLS = 6;
+export const FOCUSED_RESEARCH_INSTRUCTION = `FOCUSED RETRY
+An earlier attempt at this question used up its search limit before an answer could be verified. For this answer the application permits at most ${FOCUSED_FILE_SEARCH_CALL_TARGET} File Search calls; this overrides the budget in FOCUSED RESEARCH. Search first for the provision that most directly answers the main issue, then answer. Do not try to cover every sub-issue.
+In "What is uncertain or missing", add a bullet list headed "Not yet verified:" naming each part of the question you did not research or could not confirm, so the user can ask about it separately. A part you did not research is unresolved, not answered in either direction. All source restrictions, material conditions, and qualifications still apply.`;
+export type ResearchFocus = "verified-only";
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
 
 LEGAL-ONLY SCOPE
@@ -201,6 +208,8 @@ export type GovernedChatInput = {
   selectedJurisdiction?: { name: string; kind: "geographic" | "organizational" };
   /** Confirmed profile-memory facts. Shapes framing only; never evidence. */
   profile?: ChatUserProfile;
+  /** Set when the user retries after a search-limit failure. */
+  researchFocus?: ResearchFocus;
 };
 
 type GeminiInteractionRequestOptions = NonNullable<Parameters<GoogleGenAI["interactions"]["create"]>[1]>;
@@ -436,7 +445,8 @@ function validateInput(input: GovernedChatInput): void {
   const documentMode = input.answerKind === "document";
   if (typeof input.query !== "string" || !input.query.trim() || input.query.length > MAX_QUERY_LENGTH
     || (!documentMode && input.stores.length === 0) || input.stores.length > MAX_STORES
-    || (input.answerKind !== undefined && input.answerKind !== "legal" && !documentMode)) {
+    || (input.answerKind !== undefined && input.answerKind !== "legal" && !documentMode)
+    || (input.researchFocus !== undefined && (input.researchFocus !== "verified-only" || documentMode))) {
     throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
   }
   if (documentMode && (!input.attachments?.length || (input.stores.length === 0 && (
@@ -549,7 +559,7 @@ function requestFor(
     model,
     stream: true,
     input: parts.length ? [...parts, question] : question,
-    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}${profile ? `\n\n${USER_PROFILE_INSTRUCTION}` : ""}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
+    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}${!documentMode && input.researchFocus === "verified-only" ? `\n\n${FOCUSED_RESEARCH_INSTRUCTION}` : ""}${profile ? `\n\n${USER_PROFILE_INSTRUCTION}` : ""}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
       selectedJurisdiction: { name: selectedJurisdiction.name, kind: selectedJurisdiction.kind },
       relatedSourceScopes: input.stores.slice(1).map(({ name, kind, relation }) => ({ name, kind, relation })),
     })}`,
@@ -1010,7 +1020,9 @@ export class GeminiFileSearchChat {
             if (type === "file_search_call") {
               if (!validFileSearchCallId(event.step.id)) return invalidResponse("file_search_call_id");
               if (calls.has(event.step.id)) return invalidResponse("file_search_call_duplicate");
-              if (calls.size >= MAX_FILE_SEARCH_CALLS) return invalidResponse("file_search_budget_exhausted");
+              if (calls.size >= (input.researchFocus === "verified-only" ? MAX_FOCUSED_FILE_SEARCH_CALLS : MAX_FILE_SEARCH_CALLS)) {
+                return invalidResponse("file_search_budget_exhausted");
+              }
               calls.add(event.step.id);
               count("searchCallCount", 1);
             }

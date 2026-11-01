@@ -21,6 +21,7 @@ import {
   DEFAULT_FILE_SEARCH_CHAT_MODEL,
   GeminiFileSearchChat,
   type ChatStore,
+  type ResearchFocus,
   type GovernedChatResult,
 } from "@/lib/gemini-file-search-chat";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
@@ -68,6 +69,7 @@ type ChatBody = {
   historyComplete?: boolean;
   attachmentIds?: string[];
   streaming?: "provisional-v1";
+  researchFocus?: ResearchFocus;
 };
 type ResearchManifest = {
   authorizedScopeSize: number;
@@ -268,8 +270,10 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(Object.hasOwn(value, "historyComplete") ? ["historyComplete"] : []),
     ...(Object.hasOwn(value, "attachmentIds") ? ["attachmentIds"] : []),
     ...(Object.hasOwn(value, "streaming") ? ["streaming"] : []),
+    ...(Object.hasOwn(value, "researchFocus") ? ["researchFocus"] : []),
   ])) return null;
   if (Object.hasOwn(value, "streaming") && value.streaming !== "provisional-v1") return null;
+  if (Object.hasOwn(value, "researchFocus") && value.researchFocus !== "verified-only") return null;
   if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds)
     || value.attachmentIds.length > MAX_CHAT_FILES
     || value.attachmentIds.some(id => !boundedIdentifier(id, 128))
@@ -308,6 +312,7 @@ function parseBody(bytes: Uint8Array): ChatBody | null {
     ...(value.historyComplete === undefined ? {} : { historyComplete: value.historyComplete as boolean }),
     ...(value.attachmentIds === undefined ? {} : { attachmentIds: value.attachmentIds as string[] }),
     ...(value.streaming === undefined ? {} : { streaming: value.streaming as "provisional-v1" }),
+    ...(value.researchFocus === undefined ? {} : { researchFocus: value.researchFocus as ResearchFocus }),
   };
 }
 
@@ -742,6 +747,7 @@ function streamResponse(input: {
               stores: input.manifest.stores,
               history: input.body.messages,
               ...(input.profile && input.answerMode !== "document" ? { profile: input.profile } : {}),
+              ...(input.body.researchFocus && input.answerMode !== "document" ? { researchFocus: input.body.researchFocus } : {}),
               ...(input.attachmentContext?.attachments.length ? {
                 attachments: input.attachmentContext.attachments,
                 answerKind: input.answerMode ?? "legal",
