@@ -556,7 +556,8 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
         ? wantsDraft ? DEFAULT_DRAFT_REQUEST : wantsReview ? DEFAULT_REVIEW_QUESTION : "Summarize these files."
         : "");
       if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
-      const submittedFiles = files;
+      // A focused retry repeats the failed question only; files in the composer belong to the next question.
+      const submittedFiles = options?.focus ? [] : files;
 
       const submissionChatId = chatId ?? allocatedNewChatIdRef.current ?? crypto.randomUUID();
       const request = requests.start(submissionChatId);

@@ -1305,10 +1305,14 @@ describe("unified chat client", () => {
     const firstBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
     expect(firstBody).not.toHaveProperty("researchFocus");
 
+    // A file chosen for the next question stays in the composer and is not sent with the retry.
+    fireEvent.change(screen.getByLabelText("Choose files to attach"), { target: { files: [new File(["next"], "next.txt", { type: "text/plain" })] } });
     fireEvent.click(screen.getByRole("button", { name: "Get a shorter answer" }));
     expect(await screen.findByText("Verified main issue. Not yet verified: the rest.")).toBeVisible();
+    expect(fetch).toHaveBeenCalledTimes(2);
     const retryBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
-    expect(retryBody).toMatchObject({ query: "Have Ghana's courts dealt with situations like this?", researchFocus: "verified-only" });
+    expect(retryBody).toMatchObject({ query: "Have Ghana's courts dealt with situations like this?", researchFocus: "verified-only", attachmentIds: [] });
+    expect(screen.getByRole("button", { name: "Remove next.txt" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Get a shorter answer" })).not.toBeInTheDocument();
   });
 
