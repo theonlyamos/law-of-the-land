@@ -1,8 +1,10 @@
 /// <reference types="vite/client" />
-import { convexTest } from "convex-test";
+import { convexTest, type TestConvex } from "convex-test";
 import { makeFunctionReference } from "convex/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import schema from "../schema";
+import authSchema from "../betterAuth/schema";
+import { components } from "../_generated/api";
 import { getIndexDiagnosticTarget } from "./geminiDiagnostics";
 
 const modules = Object.fromEntries(Object.entries(import.meta.glob("../**/*.ts"))
@@ -11,6 +13,7 @@ const targetRef = makeFunctionReference<"query">("admin/geminiDiagnostics:getInd
 
 async function fixture() {
   const t = convexTest(schema, modules);
+  t.registerComponent("betterAuth", authSchema, Object.fromEntries(Object.entries(import.meta.glob("../betterAuth/**/*.ts")).map(([p, load]) => [`./${p.slice("../betterAuth/".length)}`, load])));
   vi.stubEnv("ADMIN_ENVIRONMENT", "production");
   const ids = await t.run(async (ctx) => {
     const now = Date.now();
@@ -172,5 +175,54 @@ describe("Gemini diagnostic target binding", () => {
     vi.stubEnv("ADMIN_ENVIRONMENT", "");
     await expect(t.query(targetRef, { jobId })).rejects.toThrow("GEMINI_DIAGNOSTIC_ENVIRONMENT_INVALID");
     await expect(t.query(targetRef, { jobId, operationName: "arbitrary" })).rejects.toThrow();
+  });
+});
+
+const adminInspectRef = makeFunctionReference<"action">("admin/geminiDiagnosticActions:inspectIndexJobForAdmin");
+async function diagnosticAdmin(t: TestConvex<typeof schema>, role = "super_admin", assured = true) {
+  vi.stubEnv("ADMIN_PANEL_ENABLED", "true");
+  await t.run(ctx => ctx.db.insert("featureFlags", { key: "admin_panel", environment: "production", enabled: true, updatedAt: Date.now() }));
+  const identity = await t.run(async ctx => {
+    const now = Date.now();
+    const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: {
+      name: "Diagnostic admin", email: "diagnostic@example.com", emailVerified: true, createdAt: now, updatedAt: now,
+      role, banned: false, twoFactorEnabled: true,
+    } } });
+    const session = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "session", data: {
+      token: "diagnostic-session", userId: user._id, expiresAt: now + 60000, createdAt: now, updatedAt: now,
+      ...(assured ? { adminTwoFactorVerifiedAt: now } : {}),
+    } } });
+    return { subject: user._id, sessionId: session._id };
+  });
+  return t.withIdentity(identity);
+}
+
+describe("assured administrator read-only inspection", () => {
+  it.each(["anonymous", "member", "disabled", "unassured"])("rejects %s before provider reads", async scenario => {
+    const { t, jobId } = await fixture();
+    const client = scenario === "anonymous" ? t : await diagnosticAdmin(t, scenario === "member" ? "user" : "super_admin", scenario !== "unassured");
+    if (scenario === "disabled") vi.stubEnv("ADMIN_PANEL_ENABLED", "false");
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    await expect(client.action(adminInspectRef, { jobId })).rejects.toThrow(/ADMIN_/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("returns exact bound target and sanitized evidence with no lifecycle changes", async () => {
+    const { t, jobId, versionId, resourceId, jurisdictionId, lockId } = await fixture();
+    const client = await diagnosticAdmin(t);
+    vi.stubEnv("GOOGLE_AI_API_KEY", "private-key-never-return");
+    const snapshot = () => t.run(async ctx => Promise.all([jobId, versionId, resourceId, jurisdictionId, lockId].map(id => ctx.db.get(id))));
+    const before = await snapshot();
+    const methods: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      methods.push(init?.method ?? (input instanceof Request ? input.method : "GET"));
+      return new Response(JSON.stringify(url.includes("/upload/operations/") ? { name: "fileSearchStores/diagnostic-ohada/upload/operations/retained", done: false } : { documents: [] }), { headers: { "content-type": "application/json" } });
+    }));
+    const result = await client.action(adminInspectRef, { jobId });
+    expect(result.detail).toEqual({ jobId, versionId, resourceId, recoveryKind: "poll_operation", providerOperationName: "fileSearchStores/diagnostic-ohada/upload/operations/retained", lastErrorKind: "timeout" });
+    expect(result.provider.documents).toMatchObject({ scanComplete: true, pagesScanned: 1, documentsScanned: 0 });
+    expect(methods).toEqual(["GET", "GET"]);
+    expect(await snapshot()).toEqual(before);
+    expect(JSON.stringify(result)).not.toMatch(/private-key-never-return|leaseToken|originalStorageId|sourceUrl|payload/);
   });
 });

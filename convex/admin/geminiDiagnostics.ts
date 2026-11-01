@@ -1,4 +1,5 @@
 import { ConvexError, v, type Infer } from "convex/values";
+import { requireEnabledAdminPermission } from "./featureFlags";
 import { internalQuery } from "../_generated/server";
 import { isGeminiFileSearchStoreName, isGeminiUploadOperationForStore } from "../lib/geminiFileSearchNames";
 
@@ -86,5 +87,33 @@ export const getIndexDiagnosticTarget = internalQuery({
         version_id: version._id, version_number: String(version.versionNumber), sha256: version.sha256,
       } },
     };
+  },
+});
+
+export const adminIndexDiagnosticDetailValidator = v.object({
+  jobId: v.id("integrationJobs"), versionId: v.id("documentVersions"), resourceId: v.id("legalResources"),
+  recoveryKind: v.union(v.literal("poll_operation"), v.null()),
+  providerOperationName: v.string(),
+  lastErrorKind: v.union(v.string(), v.null()),
+});
+
+/** Reuses the assured operations read gate; contains no provider call or write. */
+export const authorizeIndexInspection = internalQuery({
+  args: { jobId: v.id("integrationJobs") },
+  returns: adminIndexDiagnosticDetailValidator,
+  handler: async (ctx, { jobId }) => {
+    await requireEnabledAdminPermission(ctx, "operations", "read");
+    const job = await ctx.db.get(jobId);
+    const versionId = job?.targetType === "documentVersion" ? ctx.db.normalizeId("documentVersions", job.targetId) : null;
+    const version = versionId ? await ctx.db.get(versionId) : null;
+    const resource = version ? await ctx.db.get(version.resourceId) : null;
+    const jurisdiction = resource ? await ctx.db.get(resource.jurisdictionId) : null;
+    const storeName = jurisdiction?.geminiFileSearchStoreName;
+    if (!job || job.type !== "gemini_index_document" || !version || !resource || !storeName ||
+      !job.providerOperationName || !isGeminiUploadOperationForStore(job.providerOperationName, storeName) ||
+      (job.recoveryKind !== undefined && job.recoveryKind !== "poll_operation")) invalidTarget();
+    return { jobId, versionId: version._id, resourceId: resource._id,
+      recoveryKind: job.recoveryKind ?? null, providerOperationName: job.providerOperationName,
+      lastErrorKind: job.lastErrorKind ?? null };
   },
 });

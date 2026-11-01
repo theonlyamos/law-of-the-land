@@ -2,8 +2,8 @@ import { GoogleGenAI, UploadToFileSearchStoreOperation } from "@google/genai";
 import { v, type Infer } from "convex/values";
 import { isGeminiFileSearchStoreName, isGeminiUploadOperationForStore, parseGeminiDocumentName } from "../../lib/geminiFileSearchNames";
 
-const PAGE_SIZE = 20;
-const MAX_PAGES = 20;
+import { GEMINI_DOCUMENT_PAGE_SIZE as PAGE_SIZE, MAX_GEMINI_DOCUMENT_PAGES as MAX_PAGES,
+  MAX_GEMINI_INVENTORY_DOCUMENTS as MAX_DOCUMENTS } from "./geminiDocumentInventoryLimits";
 const REQUEST_TIMEOUT_MS = 10_000;
 const METADATA_KEYS = ["environment", "jurisdiction_id", "resource_id", "version_id", "version_number", "sha256"] as const;
 
@@ -58,6 +58,7 @@ export const geminiDiagnosticResultValidator = v.object({
   }),
   documents: v.object({
     scanComplete: v.boolean(), pagesScanned: v.number(), documentsScanned: v.number(),
+    scanLimit: v.optional(v.union(v.literal("pages"), v.literal("documents"))),
     stateCounts: v.object({ pending: v.number(), active: v.number(), failed: v.number(), unspecified: v.number(), unknown: v.number() }),
     matchingCount: v.number(), duplicateMatches: v.boolean(), matches: v.array(documentValidator),
     requestError: v.union(requestErrorValidator, v.null()),
@@ -226,7 +227,7 @@ async function inspectDocuments(target: DiagnosticTarget, apiKey: string, client
   const matchedNames = new Set<string>();
   try {
     const pager = await client.fileSearchStores.documents.list({ parent: target.storeName, config: { pageSize: PAGE_SIZE } });
-    for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
+    pages: for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
       const page = pageNumber === 0 ? pager.page : await pager.nextPage();
       if (!Array.isArray(page) || page.length > PAGE_SIZE) {
         result.requestError = invalidResponse();
@@ -234,6 +235,11 @@ async function inspectDocuments(target: DiagnosticTarget, apiKey: string, client
       }
       result.pagesScanned += 1;
       for (const raw of page) {
+        if (result.documentsScanned >= MAX_DOCUMENTS) {
+          result.scanLimit = "documents";
+          result.requestError = invalidResponse();
+          break pages;
+        }
         result.documentsScanned += 1;
         const item = record(raw);
         const parsed = typeof item?.name === "string" ? parseGeminiDocumentName(item.name) : null;
@@ -251,10 +257,13 @@ async function inspectDocuments(target: DiagnosticTarget, apiKey: string, client
           result.matches.push(match);
         }
       }
-      if (!pager.hasNextPage()) {
+      const more = pager.hasNextPage();
+      if (typeof more !== "boolean") { result.requestError = invalidResponse(); break; }
+      if (!more) {
         result.scanComplete = result.requestError === null;
         break;
       }
+      if (pageNumber === MAX_PAGES - 1) result.scanLimit = "pages";
     }
   } catch (error) { result.requestError = requestError(error); }
   result.matchingCount = result.matches.length;

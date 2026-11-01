@@ -1,3 +1,4 @@
+import { MAX_GEMINI_DOCUMENT_PAGES } from "./geminiDocumentInventoryLimits";
 import { describe, expect, it, vi } from "vitest";
 import { observeFailedGeminiDocument, verifyCompletedGeminiDocument, verifyRecoveredGeminiDocument } from "./geminiFailedDocumentObservation";
 import type { DiagnosticTarget, GeminiDiagnosticClient } from "./geminiDiagnostic";
@@ -72,9 +73,9 @@ describe("failed Gemini document observation", () => {
   it("rejects malformed metadata and incomplete scans", async () => {
     const duplicate = client([[document({ customMetadata: [...metadata(), { key: "version_id", stringValue: target.metadata.version_id }] })]]);
     expect(await observeFailedGeminiDocument(target, SECRET, duplicate.sdk)).toBeNull();
-    const incomplete = client(Array.from({ length: 21 }, (_, index) => index === 0 ? [document()] : []));
+    const incomplete = client(Array.from({ length: MAX_GEMINI_DOCUMENT_PAGES + 1 }, (_, index) => index === 0 ? [document()] : []));
     expect(await observeFailedGeminiDocument(target, SECRET, incomplete.sdk)).toBeNull();
-    expect(incomplete.pager.nextPage).toHaveBeenCalledTimes(19);
+    expect(incomplete.pager.nextPage).toHaveBeenCalledTimes(MAX_GEMINI_DOCUMENT_PAGES - 1);
     expect(incomplete.sdk.fileSearchStores.documents.get).not.toHaveBeenCalled();
   });
 
