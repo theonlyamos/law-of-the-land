@@ -55,7 +55,7 @@ const proofModes = ["completed", "active", "failed", "coverage"] as const;
 type ProofMode = typeof proofModes[number];
 function proofFixture(count: number, mode: ProofMode) { return inventory(count, mode === "failed" || mode === "coverage", mode === "completed"); }
 async function prove(f: ReturnType<typeof inventory>, mode: ProofMode) {
-  if (mode === "completed") return verifyCompletedGeminiDocument(f.target, f.rows.at(-1)!.name, "test-key", f.sdk);
+  if (mode === "completed") return verifyCompletedGeminiDocument(f.target, f.rows[f.rows.length - 1]!.name, "test-key", f.sdk);
   if (mode === "active") return verifyActiveGeminiDocument(f.target, "test-key", f.sdk);
   if (mode === "coverage") return verifyFailedGeminiDocumentCoverage(f.coverage, "test-key", f.sdk);
   if (await observeFailedGeminiDocument(f.target, "test-key", f.sdk) === null) throw new Error("FAILED_OBSERVATION_NOT_PROVED");
