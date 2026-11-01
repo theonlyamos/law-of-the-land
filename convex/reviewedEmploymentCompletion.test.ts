@@ -45,8 +45,8 @@ function productionEnvironment(admission = true, execution = true) {
 }
 type Backend = TestConvex<typeof schema>;
 
-async function fixture() {
-  const t = convexTest(schema, modules);
+async function fixture(enforceReadLimit = false) {
+  const t = convexTest({ schema, modules, transactionLimits: enforceReadLimit ? { databaseQueries: 4096 } : false });
   t.registerComponent("betterAuth", authSchema, authModules);
   const ids = await t.run(async ctx => {
     const now = Date.now();
@@ -509,3 +509,38 @@ describe("reviewed employment atomic commit", () => {
     },
   );
 });
+
+it("reuses one complete manifest for synchronous reviewed completion at 900 published plus 900 drafts", async () => {
+  const f = await fixture(true);
+  await f.t.run(async ctx => {
+    const { _id: _r, _creationTime: _rc, ...resource } = (await ctx.db.get(f.ids.resourceId))!;
+    const { _id: _v, _creationTime: _vc, ...version } = (await ctx.db.get(f.ids.versionId))!;
+    for (let index = 0; index < 900; index++) {
+      if (index > 0) {
+        const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined });
+        const versionId = await ctx.db.insert("documentVersions", { ...version, resourceId, geminiDocumentName: `${f.ids.storeName}/documents/capacity${index}` });
+        await ctx.db.patch(resourceId, { activeVersionId: versionId });
+      }
+      const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined, catalogPublished: false });
+      await ctx.db.insert("documentVersions", { ...version, resourceId, status: "draft", geminiDocumentName: undefined });
+    }
+  });
+  f.input.completion.publicationFilterProtocol = "published-v1";
+  const manifest = await f.owner.run(ctx => resolveChatResearchStoresForJurisdiction(ctx, f.ids.jurisdictionId, "published-v1"));
+  f.input.completion.publicationFilterBinding = await createPublicationFilterBinding(manifest.stores);
+  const signed = await f.signed();
+  const result = await f.owner.run(async ctx => {
+    const query = vi.spyOn(ctx.db, "query"), get = vi.spyOn(ctx.db, "get"), system = vi.spyOn(ctx.db.system, "get");
+    try {
+      const handler = (reviewedCompletion.commit as unknown as { _handler: (context: typeof ctx, args: typeof signed) => Promise<unknown> })._handler;
+      const completion = await handler(ctx, signed);
+      return { completion, reads: query.mock.calls.length + get.mock.calls.length + system.mock.calls.length };
+    } finally { query.mockRestore(); get.mockRestore(); system.mockRestore(); }
+  });
+  // Leave over 296 ranges for the bounded native auth and two-message append.
+  expect(result.reads).toBeLessThan(3800);
+  expect(result.completion).toMatchObject({ status: "completed", persisted: true });
+  const saved = await state(f.t);
+  expect(saved.messages).toHaveLength(2);
+  expect(saved.messages[1].reviewedOriginalSource?.versionId).toBe(f.ids.versionId);
+}, 60_000);

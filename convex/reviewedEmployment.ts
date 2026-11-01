@@ -39,8 +39,9 @@ export type ReviewedEmploymentSourceAuthorizationInput = {
   externalId: string; jurisdictionId: Id<"jurisdictions">; resourceId: Id<"legalResources">;
   versionId: Id<"documentVersions">; expectedSha256: string; expectedByteSize: number; asOfDate: string;
 };
-async function authorizeSourceHandler(
+export async function authorizeSourceHandler(
   ctx: QueryCtx, args: ReviewedEmploymentSourceAuthorizationInput, jobPrincipal?: VerifiedReviewedEmploymentJobPrincipal,
+  stores?: readonly import("./jurisdictions").ChatResearchStore[],
 ) {
 if (args.externalId.length > 256 || !args.externalId.trim() || args.externalId !== args.externalId.trim()
   || !/^[a-f0-9]{64}$/.test(args.expectedSha256) || !Number.isSafeInteger(args.expectedByteSize)
@@ -52,7 +53,7 @@ try {
   const session = verified?.session ?? await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>
     q.eq("userId", userId).eq("externalId", args.externalId)).unique();
   if (!session || session.jurisdictionId !== args.jurisdictionId || !(await canAccessSession(ctx, session))) return unavailable();
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId, args.publicationFilterProtocol);
+  const resolution = stores ? { stores } : await resolveChatResearchStoresForJurisdiction(ctx, args.jurisdictionId, args.publicationFilterProtocol);
   const selected = resolution.stores[0];
   if (!selected || selected.jurisdictionId !== args.jurisdictionId || selected.relation !== "selected"
     || selected.kind !== "geographic") return unavailable();
@@ -84,8 +85,9 @@ try {
 
 export async function authorizeSourceForJobPrincipal(
   ctx: QueryCtx, args: ReviewedEmploymentSourceAuthorizationInput, principal: VerifiedReviewedEmploymentJobPrincipal,
+  stores?: readonly import("./jurisdictions").ChatResearchStore[],
 ) {
-  return await authorizeSourceHandler(ctx, args, principal);
+  return await authorizeSourceHandler(ctx, args, principal, stores);
 }
 
 export const authorizeSource = query({
@@ -103,7 +105,6 @@ export const authorizeSource = query({
   handler: authorizeSourceHandler,
 });
 
-const authorizeSourceRef = makeFunctionReference<"query">("reviewedEmployment:authorizeSource");
 const citationFileArgs = { externalId: v.string(), messageId: v.id("messages"), citationIndex: v.number() };
 const citationFileResult = v.union(v.null(), v.object({ url: v.string(), filename: v.string(), mimeType: v.literal("application/pdf"), byteSize: v.number() }));
 const citationFileAtDateRef = makeFunctionReference<"query">("reviewedEmployment:resolveCitationFileAtDate");
@@ -124,10 +125,11 @@ export const resolveCitationFile = action({
  * message/index select server-owned provenance, never an arbitrary catalog file.
  * Current publication, scope, hash, storage and lifecycle checks still apply.
  */
-export const resolveCitationFileAtDate = internalQuery({
-  args: { ...citationFileArgs, asOfDate: v.string() },
-  returns: citationFileResult,
-  handler: async (ctx, args) => {
+export async function resolveCitationFileAtDateForHistory(
+  ctx: QueryCtx,
+  args: { externalId: string; messageId: Id<"messages">; citationIndex: number; asOfDate: string },
+  stores?: readonly import("./jurisdictions").ChatResearchStore[],
+) {
     if (!args.externalId.trim() || args.externalId !== args.externalId.trim() || args.externalId.length > 200
       || !Number.isSafeInteger(args.citationIndex) || args.citationIndex < 0 || args.citationIndex > 3) return null;
     try {
@@ -151,13 +153,18 @@ export const resolveCitationFileAtDate = internalQuery({
         || !policy || (policyId === "act651-s55-prod-v1" && source.pageNumbers.some(number => number !== 18))
         || !Object.entries(policy).every(([key, value]) => source[key as keyof typeof policy] === value)) return null;
       const { pageNumbers: _pages, ...identity } = source;
-      const grant: { status: "authorized" | "unavailable" } = await ctx.runQuery(authorizeSourceRef,
-        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL });
+      const grant: { status: "authorized" | "unavailable" } = await authorizeSourceHandler(ctx,
+        { ...identity, externalId: args.externalId, asOfDate: args.asOfDate, publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL }, undefined, stores);
       if (grant.status !== "authorized") return null;
       const version = await ctx.db.get(source.versionId);
       if (!version || version.mimeType !== "application/pdf") return null;
       const url = await ctx.storage.getUrl(version.originalStorageId);
       return url ? { url, filename: version.filename, mimeType: "application/pdf" as const, byteSize: version.byteSize } : null;
     } catch { return null; }
-  },
+}
+
+export const resolveCitationFileAtDate = internalQuery({
+  args: { ...citationFileArgs, asOfDate: v.string() },
+  returns: citationFileResult,
+  handler: (ctx, args) => resolveCitationFileAtDateForHistory(ctx, args),
 });

@@ -111,9 +111,10 @@ async function sourceAuthority(ctx: MutationCtx, job: Doc<"reviewedEmploymentJob
   if (!policy || !reviewedEmploymentBackendJobPolicyMatches(process.env, job.policyId)
     || job.jurisdictionId !== policy.jurisdictionId) return null;
   const principal = await currentPrincipal(ctx, job);
-  const source = await authorizeSourceForJobPrincipal(ctx, sourceArgs(job, publicationFilterProtocol), principal);
-  if (source.status !== "authorized") return null;
+  // Reuse one same-transaction manifest throughout source checks and commit.
   const manifest = await resolveChatResearchStoresForJurisdiction(ctx, job.jurisdictionId, publicationFilterProtocol);
+  const source = await authorizeSourceForJobPrincipal(ctx, sourceArgs(job, publicationFilterProtocol), principal, manifest.stores);
+  if (source.status !== "authorized") return null;
   return { principal, source, manifest };
 }
 
@@ -302,7 +303,7 @@ export const worker = mutation({
       const serviceProof = await createTelemetryServiceProof(await reviewedEmploymentCommitProofParts(input));
       // Let errors escape: failed atomic completion must roll back its telemetry,
       // claim, both messages and provenance, as well as the terminal job update.
-      const completion = await commitReviewedEmploymentForJobPrincipal(ctx, { ...input, serviceProof }, principal, job._id);
+      const completion = await commitReviewedEmploymentForJobPrincipal(ctx, { ...input, serviceProof }, principal, job._id, authority.manifest);
       await ctx.db.patch(job._id, { status: "succeeded", progress: "complete", updatedAt: now });
       return ok(completion);
     }

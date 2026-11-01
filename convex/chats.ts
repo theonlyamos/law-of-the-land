@@ -1,6 +1,7 @@
-import { makeFunctionReference, paginationOptsValidator } from "convex/server";
+import { getFunctionAddress, makeFunctionReference, paginationOptsValidator } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import { authComponent } from "./auth";
+import { resolveCitationFileAtDateForHistory } from "./reviewedEmployment";
 import { citationSourceUserId } from "./lib/citationSourceAccess";
 import { citationPassageValidator, citationPreviewValidator } from "./lib/citationProvenance";
 import { citationPassageProofParts, validCitationPassages, type CitationPassage, type CitationPreview } from "../shared/citation-source-preview";
@@ -856,6 +857,8 @@ async function snapshotCitationProvenance(ctx: MutationCtx, citations: readonly 
   }));
 }
 
+export type ChatResearchResolution = Awaited<ReturnType<typeof resolveChatResearchStoresForJurisdiction>>;
+
 async function resolveGovernedCompletionAuthority(
   ctx: MutationCtx,
   session: Doc<"chatSessions">,
@@ -864,8 +867,9 @@ async function resolveGovernedCompletionAuthority(
   notSearched = false,
   publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL,
   publicationFilterBinding?: string,
+  currentResolution?: ChatResearchResolution,
 ): Promise<GovernedCompletionAuthority> {
-  const resolution = await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, publicationFilterProtocol);
+  const resolution = currentResolution ?? await resolveChatResearchStoresForJurisdiction(ctx, jurisdictionId, publicationFilterProtocol);
   if (!notSearched && publicationFilterBinding !== await createPublicationFilterBinding(resolution.stores)) {
     throw new ConvexError("GOVERNED_INTERACTION_SCOPE_CHANGED");
   }
@@ -937,8 +941,9 @@ type GovernedCompletionArgs = Omit<GovernedCompletionProofInput, "citations" | "
   attachmentIds?: string[];
   serviceProof: string;
 };
-async function completeGovernedInteractionHandler(
+export async function completeGovernedInteractionHandler(
   ctx: MutationCtx, args: GovernedCompletionArgs, jobPrincipal?: VerifiedReviewedEmploymentJobPrincipal,
+  currentResolution?: ChatResearchResolution,
 ) {
 const input: GovernedCompletionProofInput = args;
 validateGovernedCompletionInput(input);
@@ -1015,6 +1020,7 @@ if (args.outcome === "success") {
     args.answerKind === "policy" && args.model === "app-policy-v1",
     args.publicationFilterProtocol,
     args.publicationFilterBinding,
+    currentResolution,
   );
   if (!(args.answerKind === "policy" && args.model === "app-policy-v1")
     && !matchesCurrentScope(input, authority)) {
@@ -1097,10 +1103,11 @@ return {
 
 export async function completeGovernedInteractionForJobPrincipal(
   ctx: MutationCtx, args: GovernedCompletionArgs, principal: VerifiedReviewedEmploymentJobPrincipal,
+  currentResolution?: ChatResearchResolution,
 ) {
   const verified = await revalidateReviewedEmploymentJobPrincipal(ctx, principal,
     { externalId: args.externalId, jurisdictionId: args.jurisdictionId });
-  return await completeGovernedInteractionHandler(ctx, args, verified);
+  return await completeGovernedInteractionHandler(ctx, args, verified, currentResolution);
 }
 
 export const completeGovernedInteraction = mutation({
@@ -1250,6 +1257,59 @@ export const getByExternalId = query({
   },
 });
 
+/** One snapshot-local cache and budget for optional history source previews.
+ * Reserve 96 of Convex's 4096 read ranges for framework/auth overhead. Required
+ * history/attachment reads finish first; exhaustion only removes preview grants,
+ * never message content or citation labels. Source opening reauthorizes separately.
+ */
+function historyPreviewReadContext(ctx: QueryCtx) {
+  let reads = 0;
+  let optional = false;
+  const spend = (cost: number) => {
+    if (optional && reads + cost > 4000) throw new Error("CHAT_PREVIEW_READ_BUDGET");
+    reads += cost;
+  };
+  const reader = <T extends object>(db: T): T => {
+    const gets = new Map<string, unknown>();
+    return new Proxy(db, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (property === "system") return system;
+        if ((property !== "get" && property !== "query") || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (...args: unknown[]) => {
+          const key = JSON.stringify(args);
+          if (property === "get" && gets.has(key)) return gets.get(key);
+          spend(1);
+          const result = Reflect.apply(value, target, args);
+          if (property === "get") gets.set(key, result);
+          return result;
+        };
+      },
+    });
+  };
+  const system = reader(ctx.db.system);
+  // Native auth adapter reads are pure within this snapshot too. Reuse them
+  // across reviewed citations instead of spending the reserved auth headroom
+  // once for every citation. All callers still perform their authorization.
+  const queries = new Map<string, ReturnType<QueryCtx["runQuery"]>>();
+  const runQuery: QueryCtx["runQuery"] = (query, ...args) => {
+    const key = JSON.stringify([getFunctionAddress(query), args]);
+    let result = queries.get(key);
+    if (!result) {
+      // Only native auth adapter reads remain nested in this endpoint. Charge
+      // eight ranges conservatively per uncached call, including session expiry
+      // predicates, rather than assuming child queries cost no database reads.
+      spend(8);
+      result = ctx.runQuery(query, ...args);
+      queries.set(key, result);
+    }
+    return result;
+  };
+  return { ctx: { ...ctx, db: reader(ctx.db), runQuery }, beginPreviews: () => { optional = true; } };
+}
+
 export const listMessages = query({
   args: {
     externalId: v.string(),
@@ -1260,7 +1320,9 @@ export const listMessages = query({
     isDone: v.boolean(),
     continueCursor: v.string(),
   }),
-  handler: async (ctx, args) => {
+  handler: async (originalCtx, args) => {
+    const budget = historyPreviewReadContext(originalCtx);
+    const ctx = budget.ctx;
     const userId = await optionalUserId(ctx);
     if (!userId) return { page: [], isDone: true, continueCursor: "" };
 
@@ -1284,6 +1346,28 @@ export const listMessages = query({
         numItems: normalizePageSize(args.paginationOpts.numItems, MAX_MESSAGE_PAGE_SIZE),
       });
 
+    // Finish required page data before optional preview work can spend the budget.
+    const required = new Map(await Promise.all(result.page.map(async message => {
+      let timing: { completedAt: number; durationMs: number } | undefined;
+      if (message.role === "assistant" && message.clientId && process.env.TELEMETRY_INGEST_SECRET) {
+        const { assistantClientIdBinding } = await createCitationClaimBindings(message.clientId, "", []);
+        const run = await ctx.db.query("queryRuns")
+          .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>
+            q.eq("chatSessionId", session._id).eq("assistantClientIdBinding", assistantClientIdBinding))
+          .unique();
+        if (run?.outcome === "success") {
+          timing = { completedAt: run.completedAt, durationMs: run.totalLatencyMs };
+        }
+      }
+      const attachments = message.attachmentIds?.length ? await Promise.all(message.attachmentIds.map(async id => {
+        const row = await ctx.db.get("chatAttachments", id);
+        if (!row || row.sessionId !== session._id || row.status !== "ready") throw new ConvexError("CHAT_ATTACHMENT_UNAVAILABLE");
+        return attachmentMetadata(row);
+      })) : undefined;
+      return [message._id, { timing, attachments }] as const;
+    })));
+    budget.beginPreviews();
+
     let sourceStores: Promise<readonly import("./jurisdictions").ChatResearchStore[]> | undefined;
     const currentStores = () => sourceStores ??= session.jurisdictionId
       ? resolveChatResearchStoresForJurisdiction(ctx, session.jurisdictionId, PUBLICATION_FILTER_PROTOCOL)
@@ -1291,16 +1375,18 @@ export const listMessages = query({
       : Promise.resolve([]);
     const previewGrants = new Map<string, Promise<boolean>>();
     let sourceReader: Promise<boolean> | undefined;
+    let previewQueue: Promise<unknown> = Promise.resolve();
     const previewAllowed = (message: Doc<"messages">, index: number): Promise<boolean> => {
       const key = `${message._id}:${index}`;
       const existing = previewGrants.get(key);
       if (existing) return existing;
-      sourceReader ??= citationSourceUserId(ctx).then(id => id === session.userId);
-      const grant = sourceReader.then(allowed => !allowed ? false : message.reviewedOriginalSource
-        ? ctx.runQuery(makeFunctionReference<"query">("reviewedEmployment:resolveCitationFileAtDate"), {
+      sourceReader ??= citationSourceUserId(ctx).then(id => id === session.userId).catch(() => false);
+      const grant = previewQueue.then(() => sourceReader!).then(allowed => !allowed ? false : message.reviewedOriginalSource
+        ? currentStores().then(stores => resolveCitationFileAtDateForHistory(ctx, {
           externalId: session.externalId, messageId: message._id, citationIndex: index, asOfDate: new Date().toISOString().slice(0, 10),
-        }).then(Boolean).catch(() => false)
+        }, stores)).then(Boolean).catch(() => false)
         : currentStores().then(stores => authorizeCitationProvenance(ctx, session, message, index, stores)).then(Boolean));
+      previewQueue = grant.catch(() => false);
       previewGrants.set(key, grant);
       return grant;
     };
@@ -1308,17 +1394,7 @@ export const listMessages = query({
       // The database query reads newest-first so the cursor continues into
       // older history; each page itself remains chronological for consumers.
       page: await Promise.all(result.page.reverse().map(async (message) => {
-        let timing: { completedAt: number; durationMs: number } | undefined;
-        if (message.role === "assistant" && message.clientId && process.env.TELEMETRY_INGEST_SECRET) {
-          const { assistantClientIdBinding } = await createCitationClaimBindings(message.clientId, "", []);
-          const run = await ctx.db.query("queryRuns")
-            .withIndex("by_chatSessionId_and_assistantClientIdBinding", (q) =>
-              q.eq("chatSessionId", session._id).eq("assistantClientIdBinding", assistantClientIdBinding))
-            .unique();
-          if (run?.outcome === "success") {
-            timing = { completedAt: run.completedAt, durationMs: run.totalLatencyMs };
-          }
-        }
+        const { timing, attachments } = required.get(message._id)!;
         const provenance = message.role === "assistant" && message.answerKind === "legal"
           && message.citationProvenance?.length === message.citations?.length ? message.citationProvenance : undefined;
         const sources: readonly CitationPreview[] | undefined = provenance ?? (
@@ -1348,11 +1424,7 @@ export const listMessages = query({
               : ""),
           } : {}),
           answerKind: message.answerKind,
-          ...(message.attachmentIds?.length ? { attachments: await Promise.all(message.attachmentIds.map(async id => {
-            const row = await ctx.db.get("chatAttachments", id);
-            if (!row || row.sessionId !== session._id || row.status !== "ready") throw new ConvexError("CHAT_ATTACHMENT_UNAVAILABLE");
-            return attachmentMetadata(row);
-          })) } : {}),
+          ...(attachments ? { attachments } : {}),
           ...timing,
         };
       })),

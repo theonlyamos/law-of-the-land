@@ -3,10 +3,11 @@ import { ConvexError, v, type Infer } from "convex/values";
 import type { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { mutation, type MutationCtx } from "./_generated/server";
-import { completeGovernedInteractionProofParts, completeGovernedInteractionForJobPrincipal,
+import { completeGovernedInteractionProofParts, completeGovernedInteractionForJobPrincipal, completeGovernedInteractionHandler,
   appendMessagesForJobPrincipal, revalidateReviewedEmploymentJobPrincipal,
-  type VerifiedReviewedEmploymentJobPrincipal } from "./chats";
-import { authorizeSourceForJobPrincipal } from "./reviewedEmployment";
+  type ChatResearchResolution, type VerifiedReviewedEmploymentJobPrincipal } from "./chats";
+import { resolveChatResearchStoresForJurisdiction } from "./jurisdictions";
+import { authorizeSourceForJobPrincipal, authorizeSourceHandler } from "./reviewedEmployment";
 import { MAX_CONTEXT_ATTACHMENTS, MAX_MESSAGE_ATTACHMENTS } from "./lib/chatAttachmentContracts";
 import { citationPassageValidator } from "./lib/citationProvenance";
 import { chatCitationValidator } from "./lib/jurisdictionDomain";
@@ -40,10 +41,6 @@ type ReviewedEmploymentCommitResult = Extract<
   Awaited<ReturnType<typeof completeGovernedInteractionForJobPrincipal>>,
   { status: "completed"; outcome: "success" }
 > & { answerKind: "legal"; persisted: true };
-const authorizeRef = makeFunctionReference<"query", Infer<typeof sourceValidator> & { externalId: string; publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL },
-  { status: "authorized" | "unavailable" }>("reviewedEmployment:authorizeSource");
-const completeRef = makeFunctionReference<"mutation", FunctionArgs<typeof api.chats.completeGovernedInteraction>,
-  FunctionReturnType<typeof api.chats.completeGovernedInteraction>>("chats:completeGovernedInteraction");
 const appendRef = makeFunctionReference<"mutation", FunctionArgs<typeof api.chats.appendMessages>,
   FunctionReturnType<typeof api.chats.appendMessages>>("chats:appendMessages");
 
@@ -90,6 +87,7 @@ async function commitHandler(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   jobPrincipal?: VerifiedReviewedEmploymentJobPrincipal,
   jobCreatedAt?: number,
+  currentResolution?: ChatResearchResolution,
 ): Promise<ReviewedEmploymentCommitResult> {
 validateBounds(args);
 if (!(await verifyTelemetryServiceProof(args.serviceProof, await reviewedEmploymentCommitProofParts(args))))
@@ -106,14 +104,19 @@ if (!policy || !reviewedEmploymentBackendExecutionAllowed(process.env)
   || completion.citations.some(citation => citation.jurisdictionId !== source.jurisdictionId
     || citation.resourceId !== source.resourceId || citation.versionId !== source.versionId)
   || user.attachmentIds.some(id => !completion.attachmentIds.includes(id))) invalid();
-// runQuery is within the mutation's transactional snapshot, establishing read
-// dependencies for catalog publication, original hash/storage, dates and locks.
+// Resolve once in this mutation snapshot and pass only server-derived authority
+// through the helpers. All principal, policy, proof and citation checks still run.
 const verified = jobPrincipal ? await revalidateReviewedEmploymentJobPrincipal(ctx, jobPrincipal,
   { externalId: completion.externalId, jurisdictionId: source.jurisdictionId }) : null;
+let resolution = currentResolution;
+if (!resolution) {
+  try { resolution = await resolveChatResearchStoresForJurisdiction(ctx, source.jurisdictionId, completion.publicationFilterProtocol); }
+  catch { throw new ConvexError("REVIEWED_EMPLOYMENT_AUTHORITY_UNAVAILABLE"); }
+}
 const grant = verified
-  ? await authorizeSourceForJobPrincipal(ctx, { externalId: completion.externalId, ...source, publicationFilterProtocol: completion.publicationFilterProtocol }, verified)
-  : await ctx.runQuery(authorizeRef, { externalId: completion.externalId, ...source,
-    ...(completion.publicationFilterProtocol ? { publicationFilterProtocol: completion.publicationFilterProtocol } : {}) });
+  ? await authorizeSourceForJobPrincipal(ctx, { externalId: completion.externalId, ...source, publicationFilterProtocol: completion.publicationFilterProtocol }, verified, resolution.stores)
+  : await authorizeSourceHandler(ctx, { externalId: completion.externalId, ...source,
+    ...(completion.publicationFilterProtocol ? { publicationFilterProtocol: completion.publicationFilterProtocol } : {}) }, undefined, resolution.stores);
 if (grant.status !== "authorized") throw new ConvexError("REVIEWED_EMPLOYMENT_AUTHORITY_UNAVAILABLE");
 const userId = verified?.ownerId ?? await requireUserId(ctx);
 const session = verified?.session ?? await ctx.db.query("chatSessions").withIndex("by_user_externalId", q =>
@@ -121,8 +124,8 @@ const session = verified?.session ?? await ctx.db.query("chatSessions").withInde
 if (!session || session.jurisdictionId !== source.jurisdictionId) invalid();
 const governedProof = await createTelemetryServiceProof(await completeGovernedInteractionProofParts(completion));
 const result = verified
-  ? await completeGovernedInteractionForJobPrincipal(ctx, { ...completion, serviceProof: governedProof }, verified)
-  : await ctx.runMutation(completeRef, { ...completion, serviceProof: governedProof });
+  ? await completeGovernedInteractionForJobPrincipal(ctx, { ...completion, serviceProof: governedProof }, verified, resolution)
+  : await completeGovernedInteractionHandler(ctx, { ...completion, serviceProof: governedProof }, undefined, resolution);
 if (result.status === "replayed") throw new ConvexError("REVIEWED_EMPLOYMENT_REPLAY_UNAVAILABLE");
 if (result.status !== "completed" || result.outcome !== "success" || result.answerKind !== "legal") invalid();
 // The durable submission time keeps a delayed background pair in its original
@@ -161,6 +164,7 @@ export async function commitReviewedEmploymentForJobPrincipal(
   ctx: MutationCtx, args: ReviewedEmploymentCommitInput & { serviceProof: string },
   principal: VerifiedReviewedEmploymentJobPrincipal,
   jobId?: Id<"reviewedEmploymentJobs">,
+  currentResolution?: ChatResearchResolution,
 ): Promise<ReviewedEmploymentCommitResult> {
   const verified = await revalidateReviewedEmploymentJobPrincipal(ctx, principal,
     { externalId: args.completion.externalId, jurisdictionId: args.source.jurisdictionId });
@@ -176,7 +180,7 @@ export async function commitReviewedEmploymentForJobPrincipal(
       || !Number.isSafeInteger(job.createdAt) || job.createdAt < 0 || job.createdAt > Date.now()) invalid();
     jobCreatedAt = job.createdAt;
   }
-  return await commitHandler(ctx, args, verified, jobCreatedAt);
+  return await commitHandler(ctx, args, verified, jobCreatedAt, currentResolution);
 }
 
 export const commit = mutation({
