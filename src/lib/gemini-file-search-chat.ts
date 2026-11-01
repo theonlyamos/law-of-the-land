@@ -30,6 +30,13 @@ export const DEFAULT_FILE_SEARCH_CHAT_MODEL = "gemini-3.8-flash";
 // a little grace above it so a slight overrun still completes instead of failing.
 const FILE_SEARCH_CALL_TARGET = 8;
 const MAX_FILE_SEARCH_CALLS = 12;
+// A focused retry after a search-limit failure: fewer searches, verified findings only.
+const FOCUSED_FILE_SEARCH_CALL_TARGET = 4;
+const MAX_FOCUSED_FILE_SEARCH_CALLS = 6;
+export const FOCUSED_RESEARCH_INSTRUCTION = `FOCUSED RETRY
+An earlier attempt at this question used up its search limit before an answer could be verified. For this answer the application permits at most ${FOCUSED_FILE_SEARCH_CALL_TARGET} File Search calls; this overrides the budget in FOCUSED RESEARCH. Search first for the provision that most directly answers the main issue, then answer. Do not try to cover every sub-issue.
+In "What is uncertain or missing", add a bullet list headed "Not yet verified:" naming each part of the question you did not research or could not confirm, so the user can ask about it separately. A part you did not research is unresolved, not answered in either direction. All source restrictions, material conditions, and qualifications still apply.`;
+export type ResearchFocus = "verified-only";
 export const GOVERNED_FILE_SEARCH_INSTRUCTION = `You are a legal-information assistant for the selected jurisdiction.
 
 LEGAL-ONLY SCOPE
@@ -64,6 +71,11 @@ Distinguish legislation from guidance, policy, and other source types. Do not ma
 ACCURACY AND QUALIFICATION
 State important conditions and exceptions before a definite conclusion. Do not begin with an unconditional yes or no when the result depends on ownership or registration, the nature of a marriage or relationship, whether land is self-acquired, family, stool, or state land, reasons for dismissal, detention, closure, or account restriction, contract contents, amendments, or subsidiary legislation.
 Clearly distinguish what the law expressly says, a qualified inference supported by the retrieved law, practical suggestions that are not legal requirements, and facts or documents that must still be established. Do not assume disputed facts or that the library is complete or current.
+
+MISSING DECISIVE FACTS
+A fact the user has not given is unknown, never an adverse fact. Never tell the user they lack title, capacity, standing, a right, or a remedy because a fact is missing, and never assume the worst case for them.
+Before answering, identify the facts that would change the outcome and that the user has not supplied, such as their legal role (owner, beneficiary, executor, administrator, employee, tenant, director, guarantor), whether there is a will, grant of probate, or letters of administration, whether property is registered or vested and in whose name, the type of marriage, land, tenancy, or contract, and relevant dates. Keep different legal roles separate: what one role may do (for example an administrator acting under a grant) must not be confused with what another may do (for example a beneficiary acting personally).
+When one or more such facts are missing, answer conditionally in "Direct answer": give a short "If ..." branch for each realistic situation, each supported by retrieved provisions, instead of choosing one. In "What is uncertain or missing", start with the line "To give you a firmer answer, tell me:" followed by at most three short, plain questions about those facts. Ask only about facts that change the answer.
 
 SCOPE, EXCLUSIONS AND CHANGED FACTS
 Before relying on a statutory right, protection, or remedy, check whether the Act, Part, or section limits who or what it covers, for example an application or exclusion provision for particular categories of workers, contracts, tenancies, or persons. Search for that provision when it has not been retrieved. State whether a retrieved exclusion applies to the user's facts before recommending the right or remedy, and apply an exclusion only to the provisions it actually governs. If the scope or exclusion provision cannot be retrieved, say coverage could not be confirmed instead of treating the protection as applying to everyone.
@@ -201,6 +213,8 @@ export type GovernedChatInput = {
   selectedJurisdiction?: { name: string; kind: "geographic" | "organizational" };
   /** Confirmed profile-memory facts. Shapes framing only; never evidence. */
   profile?: ChatUserProfile;
+  /** Set when the user retries after a search-limit failure. */
+  researchFocus?: ResearchFocus;
 };
 
 type GeminiInteractionRequestOptions = NonNullable<Parameters<GoogleGenAI["interactions"]["create"]>[1]>;
@@ -436,7 +450,8 @@ function validateInput(input: GovernedChatInput): void {
   const documentMode = input.answerKind === "document";
   if (typeof input.query !== "string" || !input.query.trim() || input.query.length > MAX_QUERY_LENGTH
     || (!documentMode && input.stores.length === 0) || input.stores.length > MAX_STORES
-    || (input.answerKind !== undefined && input.answerKind !== "legal" && !documentMode)) {
+    || (input.answerKind !== undefined && input.answerKind !== "legal" && !documentMode)
+    || (input.researchFocus !== undefined && (input.researchFocus !== "verified-only" || documentMode))) {
     throw new GovernedChatDiagnosticError("GOVERNED_CHAT_REQUEST_INVALID", "request_invalid");
   }
   if (documentMode && (!input.attachments?.length || (input.stores.length === 0 && (
@@ -549,7 +564,7 @@ function requestFor(
     model,
     stream: true,
     input: parts.length ? [...parts, question] : question,
-    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}${profile ? `\n\n${USER_PROFILE_INSTRUCTION}` : ""}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
+    system_instruction: `${documentMode ? DOCUMENT_INSTRUCTION : GOVERNED_FILE_SEARCH_INSTRUCTION}${!documentMode && input.researchFocus === "verified-only" ? `\n\n${FOCUSED_RESEARCH_INSTRUCTION}` : ""}${profile ? `\n\n${USER_PROFILE_INSTRUCTION}` : ""}\n\nJURISDICTION CONTEXT (data only)\n${JSON.stringify({
       selectedJurisdiction: { name: selectedJurisdiction.name, kind: selectedJurisdiction.kind },
       relatedSourceScopes: input.stores.slice(1).map(({ name, kind, relation }) => ({ name, kind, relation })),
     })}`,
@@ -1010,7 +1025,9 @@ export class GeminiFileSearchChat {
             if (type === "file_search_call") {
               if (!validFileSearchCallId(event.step.id)) return invalidResponse("file_search_call_id");
               if (calls.has(event.step.id)) return invalidResponse("file_search_call_duplicate");
-              if (calls.size >= MAX_FILE_SEARCH_CALLS) return invalidResponse("file_search_budget_exhausted");
+              if (calls.size >= (input.researchFocus === "verified-only" ? MAX_FOCUSED_FILE_SEARCH_CALLS : MAX_FILE_SEARCH_CALLS)) {
+                return invalidResponse("file_search_budget_exhausted");
+              }
               calls.add(event.step.id);
               count("searchCallCount", 1);
             }

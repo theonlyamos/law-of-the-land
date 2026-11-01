@@ -544,18 +544,20 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
   }, [chatId, chatResearchJurisdiction, ensureSession, isCurrentChatDeleted, isDeletingCurrentChat, sessionData]);
 
   const handleSearch = useCallback(
-    async (searchQuery: string, options?: { review?: boolean; draft?: boolean }) => {
+    async (searchQuery: string, options?: { review?: boolean; draft?: boolean; focus?: "verified-only" }) => {
       // Drafting needs a signed-in owner; a file attached to a draft request is background for it.
-      const wantsDraft = isAuthenticated
+      // A focused retry is always a plain legal question.
+      const wantsDraft = !options?.focus && isAuthenticated
         && (options?.draft ?? draftOverride ?? (isDocumentDraftRequest(searchQuery) && (options?.review ?? reviewOverride) !== true));
       // A document review needs a signed-in owner and a file to read.
-      const wantsReview = !wantsDraft && files.length > 0 && isAuthenticated
+      const wantsReview = !options?.focus && !wantsDraft && files.length > 0 && isAuthenticated
         && (options?.review ?? reviewOverride ?? isDocumentReviewRequest(searchQuery));
       const trimmed = searchQuery.trim() || (files.length
         ? wantsDraft ? DEFAULT_DRAFT_REQUEST : wantsReview ? DEFAULT_REVIEW_QUESTION : "Summarize these files."
         : "");
       if (!trimmed || isLoading || attachmentBlocked || !selectionReady) return;
-      const submittedFiles = files;
+      // A focused retry repeats the failed question only; files in the composer belong to the next question.
+      const submittedFiles = options?.focus ? [] : files;
 
       const submissionChatId = chatId ?? allocatedNewChatIdRef.current ?? crypto.randomUUID();
       const request = requests.start(submissionChatId);
@@ -769,6 +771,7 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
           assistantClientId: assistantMessage.clientId,
           userClientId: userMessage.clientId,
           attachmentIds: uploadedAttachments.map((file) => file.id),
+          ...(options?.focus ? { researchFocus: options.focus } : {}),
         }, (text) => {
           if (!isCurrentRequest()) return;
           if (!request.state.canStop) requests.update(submissionChatId, request, { canStop: true });
@@ -963,6 +966,13 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
 
     window.setTimeout(() => void handleSearch(q), 0);
   }, [background.checking, background.job, background.uncertain, chatId, handleSearch, initialQuery, persistedMessages.length, requests, router, selectionReady, sessionData]);
+
+  // The question whose answer hit the search limit, offered for a focused retry.
+  const searchLimitRetryQuestion = useMemo(() => {
+    if (errorReason !== "file_search_budget_exhausted") return null;
+    const lastUser = [...displayMessages].reverse().find((message) => message.role === "user");
+    return lastUser?.content.trim() || null;
+  }, [displayMessages, errorReason]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1362,11 +1372,21 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
               </p>
             )}
             {errorReason && (
-              <p id="chat-request-error" role="alert" className="mb-2 text-sm text-destructive">
-                {errorReason === "file_search_budget_exhausted"
-                  ? "That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, or start a new chat."
-                  : "This answer took too long. You can ask a more focused question or try again later."}
-              </p>
+              <div id="chat-request-error" role="alert" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-destructive">
+                <span>
+                  {errorReason === "file_search_budget_exhausted"
+                    ? `That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, ${searchLimitRetryQuestion
+                      ? "or get a shorter answer that covers the main issue and lists what still needs checking."
+                      : "or start a new chat."}`
+                    : "This answer took too long. You can ask a more focused question or try again later."}
+                </span>
+                {errorReason === "file_search_budget_exhausted" && searchLimitRetryQuestion && (
+                  <Button type="button" variant="outline" size="sm" disabled={isLoading || !selectionReady}
+                    onClick={() => void handleSearch(searchLimitRetryQuestion, { focus: "verified-only" })}>
+                    Get a shorter answer
+                  </Button>
+                )}
+              </div>
             )}
             {reviewError && reviewError.chatId === chatId && (
               <div role="alert" className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-destructive">
