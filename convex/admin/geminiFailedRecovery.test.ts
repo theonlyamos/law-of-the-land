@@ -18,9 +18,9 @@ const publishRef = makeFunctionReference<"mutation">("admin/publication:publishV
 const retentionRef = makeFunctionReference<"mutation">("admin/operations:runRetentionBatch");
 const STORE = "fileSearchStores/failed-recovery";
 async function reference(value: string) { return `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))), b => b.toString(16).padStart(2, "0")).join("")}`; }
-async function fixture(two = false) {
+async function fixture(two = false, publishedCount = 1, draftCount = 0) {
   vi.stubEnv("ADMIN_PANEL_ENABLED", "true"); vi.stubEnv("ADMIN_ENVIRONMENT", "test");
-  const t = convexTest(schema, modules); t.registerComponent("betterAuth", authSchema, authModules);
+  const t = convexTest({ schema, modules, transactionLimits: { databaseQueries: 4096 } }); t.registerComponent("betterAuth", authSchema, authModules);
   const ids = await t.run(async ctx => {
     const now = Date.now(); await ctx.db.insert("featureFlags", { key: "admin_panel", environment: "test", enabled: true, updatedAt: now });
     const user = await ctx.runMutation(components.betterAuth.adapter.create, { input: { model: "user", data: { name: "Reviewer", email: "reviewer@example.invalid", emailVerified: true, role: "super_admin", banned: false, twoFactorEnabled: true, createdAt: now, updatedAt: now } } });
@@ -38,10 +38,16 @@ async function fixture(two = false) {
       const lockId = await ctx.db.insert("documentLifecycleLocks", { jurisdictionId, resourceId, versionId, operation: "publish", actorId: user._id, idempotencyKey: `original-${i}`, jobId, expiresAt: now + 60 * 60_000, createdAt: now, updatedAt: now });
       targets.push({ resourceId, versionId, jobId, lockId, operationName });
     }
-    const resourceId = await ctx.db.insert("legalResources", { jurisdictionId, type: "act", title: "Published", issuer: "Fixture", officialCitation: "Published", officialCitationKey: "published", sourceUrl: "https://example.invalid/law", topics: [], status: "active", createdBy: user._id, updatedBy: user._id, createdAt: now, updatedAt: now });
-    const versionId = await insertDocumentVersion(ctx, { resourceId, versionNumber: 1, originalStorageId, filename: "law.pdf", mimeType: "application/pdf", byteSize: 3, sha256, sourceUrl: "https://example.invalid/law", status: "published", submittedBy: user._id, geminiDocumentName: `${STORE}/documents/published`, createdAt: now, updatedAt: now });
+    let publishedVersionId;
+    for (let index = 0; index < publishedCount + draftCount; index++) {
+    const resourceId = await ctx.db.insert("legalResources", { jurisdictionId, type: "act", title: "Published", issuer: "Fixture", officialCitation: "Published", officialCitationKey: `published-${index}`, sourceUrl: "https://example.invalid/law", topics: [], status: "active", createdBy: user._id, updatedBy: user._id, createdAt: now, updatedAt: now });
+    if (index >= publishedCount) continue;
+    const versionId = await insertDocumentVersion(ctx, { resourceId, versionNumber: 1, originalStorageId, filename: "law.pdf", mimeType: "application/pdf", byteSize: 3, sha256, sourceUrl: "https://example.invalid/law", status: "published", submittedBy: user._id, geminiDocumentName: `${STORE}/documents/published-${index}`, createdAt: now, updatedAt: now });
     await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
-    return { userId: user._id, sessionId: session._id, jurisdictionId, targets, publishedVersionId: versionId, sha256, originalStorageId };
+    publishedVersionId ??= versionId;
+    }
+    if (!publishedVersionId) throw new Error("fixture needs a published version");
+    return { userId: user._id, sessionId: session._id, jurisdictionId, targets, publishedVersionId, sha256, originalStorageId };
   });
   return { t, ...ids };
 }
@@ -57,6 +63,57 @@ async function attempt(f: Fixture, index = 0, idempotencyKey = `reconcile-${inde
 async function state(f: Fixture) { return await f.t.run(async ctx => ({ jobs: await ctx.db.query("integrationJobs").take(10), resources: await ctx.db.query("legalResources").take(10), versions: await ctx.db.query("documentVersions").take(10), jurisdiction: await ctx.db.get(f.jurisdictionId), locks: await ctx.db.query("documentLifecycleLocks").take(10), receipts: await ctx.db.query("adminOperations").take(10), schedules: await ctx.db.system.query("_scheduled_functions").take(10) })); }
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 describe("guarded failed document reconciliation", () => {
+  it.each([[401, 0], [900, 0], [400, 500]])("proves all %i published documents alongside %i drafts within the transaction query limit", async (count, drafts) => {
+    const f = await fixture(false, count, drafts); const a = await attempt(f);
+    expect(a.coverage.published).toHaveLength(count);
+    expect(new Set(a.coverage.published.map((entry: { documentName: string }) => entry.documentName)).size).toBe(count);
+    expect(await f.t.mutation(completeRef, { ...a.owned, ...a.proof })).toMatchObject({ status: "succeeded" });
+    expect((await state(f)).jurisdiction?.providerSyncState).toBe("synced");
+  });
+  it.each(["incomplete count", "wrong lease", "wrong binding", "wrong operation"])("fails closed with 900 documents and %s", async change => {
+    const f = await fixture(false, 900); const a = await attempt(f);
+    const args = { ...a.owned, ...a.proof };
+    if (change === "incomplete count") args.publishedCount--;
+    if (change === "wrong lease") args.leaseToken = "incorrect-lease";
+    if (change === "wrong binding") args.binding = "incorrect-binding";
+    if (change === "wrong operation") args.operationReference = `sha256:${"f".repeat(64)}`;
+    const before = await state(f);
+    await expect(f.t.mutation(completeRef, args)).rejects.toThrow();
+    expect(await state(f)).toEqual(before);
+  });
+  it("fails closed before exceeding the shared query budget and rolls back the lease", async () => {
+    const f = await fixture(false, 900, 900); const before = await state(f);
+    await expect(attempt(f)).rejects.toThrow("GEMINI_FAILED_DOCUMENT_RECOVERY_CAPACITY_EXCEEDED");
+    expect(await state(f)).toEqual(before);
+  });
+  it("rejects an incomplete resource inventory rather than using the first 2048 rows", async () => {
+    const f = await fixture(false, 1, 2048); const before = await state(f);
+    await expect(attempt(f)).rejects.toThrow("GEMINI_FAILED_DOCUMENT_RECOVERY_CAPACITY_EXCEEDED");
+    expect(await state(f)).toEqual(before);
+  });
+  it.each(["hash", "legacy lock"])("checks the final published source in a 900-document inventory for changed %s", async change => {
+    const f = await fixture(false, 900); const a = await attempt(f);
+    await f.t.run(async ctx => {
+      const versions = await ctx.db.query("documentVersions").take(901);
+      const last = versions.filter(version => version.status === "published")[899];
+      if (change === "hash") await ctx.db.patch(last._id, { sha256: "b".repeat(64) });
+      else await ctx.db.insert("documentLifecycleLocks", { resourceId: last.resourceId, versionId: last._id,
+        operation: "unpublish", actorId: f.userId, idempotencyKey: "legacy-tail-lock", jobId: f.targets[0].jobId,
+        expiresAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now() });
+    });
+    const before = await state(f);
+    await expect(f.t.mutation(completeRef, { ...a.owned, ...a.proof })).rejects.toThrow();
+    expect(await state(f)).toEqual(before);
+  });
+  it("rejects duplicate provider document names in a 900-document inventory", async () => {
+    const f = await fixture(false, 900);
+    await f.t.run(async ctx => {
+      const versions = await ctx.db.query("documentVersions").take(901);
+      const published = versions.filter(version => version.status === "published");
+      await ctx.db.patch(published[899]._id, { geminiDocumentName: published[0].geminiDocumentName });
+    });
+    await expect(attempt(f)).rejects.toThrow();
+  });
   it("fails and excludes publication while preserving operation and prior timeout evidence", async () => {
     const f = await fixture(); const a = await attempt(f);
     expect(await f.t.mutation(completeRef, { ...a.owned, ...a.proof })).toMatchObject({ status: "succeeded", jobId: f.targets[0].jobId });

@@ -7,6 +7,7 @@ vi.mock("@/lib/admin/server", () => ({ authorizeAdminPage: mocks.authorizeAdminP
 vi.mock("@/lib/auth-server", () => ({ fetchAuthQuery: mocks.fetchAuthQuery }));
 vi.mock("next/navigation", () => ({ redirect: mocks.redirect }));
 vi.mock("@/components/admin/job-actions", () => ({ JobActions: () => <span>Authoritative controls</span> }));
+vi.mock("@/components/admin/job-diagnostics", () => ({ JobDiagnostics: () => <span>Read-only inspection</span> }));
 import OperationsPage from "./page";
 
 beforeEach(() => {
@@ -33,6 +34,7 @@ describe("operations register", () => {
     expect(screen.getByRole("heading", { name: "Operations" })).toBeVisible();
     const jobsTable = screen.getByRole("table", { name: "Provider jobs" });
     expect(jobsTable).toBeVisible();
+    expect(within(jobsTable).getByText("review-target")).toBeVisible();
     expect(within(jobsTable).getAllByText("Index document")).toHaveLength(2);
     expect(within(jobsTable).getByText("Waiting for Gemini")).toBeVisible();
     expect(within(jobsTable).getByText("Next check in 5 seconds")).toBeVisible();
@@ -94,4 +96,13 @@ describe("operations register", () => {
       "Check provider work", "Waiting for provider",
     ]) expect(screen.queryByText(retiredLabel)).toBeNull();
   });
+});
+
+it("keeps available jobs visible when integration health cannot load", async () => {
+  const original = mocks.fetchAuthQuery.getMockImplementation()!;
+  mocks.fetchAuthQuery.mockImplementation((reference: unknown, ...args: unknown[]) => getFunctionName(reference as never).endsWith("listIntegrationHealth") ? Promise.reject(new Error("private failure")) : original(reference, ...args));
+  render(await OperationsPage({ searchParams: Promise.resolve({ status: "manual_review" }) }));
+  expect(screen.getByText("review-target")).toBeVisible();
+  expect(screen.getByText(/These records could not be loaded/)).toBeVisible();
+  expect(document.body.textContent).not.toContain("private failure");
 });

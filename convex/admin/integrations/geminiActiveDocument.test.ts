@@ -1,3 +1,4 @@
+import { MAX_GEMINI_DOCUMENT_PAGES } from "./geminiDocumentInventoryLimits";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { verifyActiveGeminiDocument } from "./geminiActiveDocument";
 import type { DiagnosticTarget, GeminiDiagnosticClient } from "./geminiDiagnostic";
@@ -104,9 +105,9 @@ describe("active Gemini document proof", () => {
   });
 
   it("fails closed after twenty pages when more pages remain", async () => {
-    const { sdk, pager } = client(Array.from({ length: 21 }, (_, index) => index === 0 ? [document()] : []));
+    const { sdk, pager } = client(Array.from({ length: MAX_GEMINI_DOCUMENT_PAGES + 1 }, (_, index) => index === 0 ? [document()] : []));
     await expect(verifyActiveGeminiDocument(target, SECRET, sdk)).rejects.toThrow(FAILURE);
-    expect(pager.nextPage).toHaveBeenCalledTimes(19);
+    expect(pager.nextPage).toHaveBeenCalledTimes(MAX_GEMINI_DOCUMENT_PAGES - 1);
     expect(sdk.fileSearchStores.documents.get).not.toHaveBeenCalled();
   });
 

@@ -1,10 +1,10 @@
 "use node";
 
 import { makeFunctionReference } from "convex/server";
-import { ConvexError, v } from "convex/values";
-import { internalAction } from "../_generated/server";
+import { ConvexError, v, type Infer } from "convex/values";
+import { action, internalAction } from "../_generated/server";
 import { resolveE2EProviderIsolation } from "./e2eProviderIsolation";
-import { indexDiagnosticJobValidator, type IndexDiagnosticContext } from "./geminiDiagnostics";
+import { adminIndexDiagnosticDetailValidator, indexDiagnosticJobValidator, type IndexDiagnosticContext } from "./geminiDiagnostics";
 import { geminiDiagnosticResultValidator, inspectGeminiProvider } from "./integrations/geminiDiagnostic";
 
 const targetRef = makeFunctionReference<"query">("admin/geminiDiagnostics:getIndexDiagnosticTarget");
@@ -31,5 +31,27 @@ export const inspectIndexJob = internalAction({
       // Never send SDK exception bodies, request URLs, or credentials to callers/logs.
       throw new ConvexError("GEMINI_DIAGNOSTIC_READ_FAILED");
     }
+  },
+});
+
+const authorizeInspectionRef = makeFunctionReference<"query">("admin/geminiDiagnostics:authorizeIndexInspection");
+const inspectIndexJobRef = makeFunctionReference<"action">("admin/geminiDiagnosticActions:inspectIndexJob");
+
+const adminInspectionResultValidator = v.object({
+  observedAt: v.number(), job: indexDiagnosticJobValidator,
+  detail: adminIndexDiagnosticDetailValidator, provider: geminiDiagnosticResultValidator,
+});
+
+/** Explicit operator inspection. No job transitions, provider writes, or scheduled work. */
+export const inspectIndexJobForAdmin = action({
+  args: { jobId: v.id("integrationJobs") },
+  returns: adminInspectionResultValidator,
+  handler: async (ctx, { jobId }): Promise<Infer<typeof adminInspectionResultValidator>> => {
+    const before = await ctx.runQuery(authorizeInspectionRef, { jobId });
+    const result = await ctx.runAction(inspectIndexJobRef, { jobId });
+    // A slow provider scan must not disclose results after access or target changes.
+    const detail = await ctx.runQuery(authorizeInspectionRef, { jobId });
+    if (JSON.stringify(before) !== JSON.stringify(detail)) throw new ConvexError("GEMINI_DIAGNOSTIC_TARGET_CHANGED");
+    return { observedAt: result.observedAt, job: result.job, provider: result.provider, detail };
   },
 });

@@ -88,3 +88,24 @@ describe("internal Gemini diagnostic action", () => {
     await expect(invoke(actionContext())).rejects.toThrow("GEMINI_DIAGNOSTIC_READ_FAILED");
   });
 });
+
+// Public access is checked both before provider access and before returning observations.
+describe("public indexing diagnostic wrapper", () => {
+  it("rejects revoked access after the read and never mutates or schedules", async () => {
+    const { inspectIndexJobForAdmin } = await import("./geminiDiagnosticActions");
+    const publicHandler = (inspectIndexJobForAdmin as unknown as { _handler: (ctx: ActionCtx, args: { jobId: Id<"integrationJobs"> }) => Promise<unknown> })._handler;
+    const ctx = { runQuery: vi.fn().mockResolvedValueOnce({ jobId }).mockRejectedValueOnce(new Error("ADMIN_FORBIDDEN")),
+      runAction: vi.fn().mockResolvedValue({ observedAt: 1, job: {}, provider: {} }),
+      runMutation: vi.fn(), scheduler: { runAfter: vi.fn() } };
+    await expect(publicHandler(ctx as unknown as ActionCtx, { jobId })).rejects.toThrow("ADMIN_FORBIDDEN");
+    expect(ctx.runAction).toHaveBeenCalledExactlyOnceWith(makeFunctionReference<"action">("admin/geminiDiagnosticActions:inspectIndexJob"), { jobId });
+    expect(ctx.runMutation).not.toHaveBeenCalled();
+    expect(ctx.scheduler.runAfter).not.toHaveBeenCalled();
+  });
+  it("rejects a changed target after the read", async () => {
+    const { inspectIndexJobForAdmin } = await import("./geminiDiagnosticActions");
+    const publicHandler = (inspectIndexJobForAdmin as unknown as { _handler: (ctx: ActionCtx, args: { jobId: Id<"integrationJobs"> }) => Promise<unknown> })._handler;
+    const ctx = { runQuery: vi.fn().mockResolvedValueOnce({ versionId: "before" }).mockResolvedValueOnce({ versionId: "after" }), runAction: vi.fn().mockResolvedValue({}) };
+    await expect(publicHandler(ctx as unknown as ActionCtx, { jobId })).rejects.toThrow("GEMINI_DIAGNOSTIC_TARGET_CHANGED");
+  });
+});

@@ -19,7 +19,15 @@ const ACTOR = "gemini_recovery";
 const ACTION = "gemini_failed_document_recovery";
 const MAX_PROOF_AGE_MS = 30_000;
 const MIN_CONFIRMATION_AGE_MS = 5 * 60_000;
-const MAX_RESOURCES = 400;
+// Catalog rows include drafts; the published-only filter retains its separate 1024 bound.
+const MAX_RESOURCES = 2048;
+// Shared across both claim snapshots, leaving headroom below Convex's 4096 query limit.
+const MAX_CONTEXT_QUERIES = 3800;
+type ContextBudget = { remaining: number };
+function spend(budget: ContextBudget, queries = 1): void {
+  if (budget.remaining < queries) throw new ConvexError("GEMINI_FAILED_DOCUMENT_RECOVERY_CAPACITY_EXCEEDED");
+  budget.remaining -= queries;
+}
 const MAX_UNRESOLVED_JOBS = 128;
 const MAX_LOCKS = 128;
 const RECOVERY_LEASE_MS = 15 * 60_000;
@@ -65,9 +73,11 @@ function identity(environment: string, jurisdictionId: Id<"jurisdictions">, vers
   return { environment, jurisdiction_id: jurisdictionId, resource_id: version.resourceId,
     version_id: version._id, version_number: String(version.versionNumber), sha256: version.sha256 };
 }
-async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number) {
+async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number, budget: ContextBudget) {
   if (job.type !== "gemini_index_document" || job.targetType !== "documentVersion" || job.recoveryKind !== "poll_operation" ||
       !job.providerOperationName || job.knownStoreResult !== undefined || job.failedDocumentEvidence?.coverageVerifiedAt !== undefined) invalid();
+  // Includes workflow resolution, original-storage validation and optional prior version.
+  spend(budget, 16);
   const workflow = await resolveGeminiPublicationWorkflow(ctx, job, { kind: "active" }, now);
   if (workflow.kind !== "index" || workflow.payload.operation !== "publish" || workflow.previous !== null ||
       workflow.resource.activeVersionId !== undefined || workflow.resource.catalogPublished === true ||
@@ -80,13 +90,16 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
   if (!isPublicationEnvironment(environment)) invalid();
   const target: DiagnosticTarget = { storeName: workflow.storeName, operationName: job.providerOperationName,
     metadata: identity(environment, workflow.jurisdiction._id, workflow.version) };
+  spend(budget);
   const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", workflow.jurisdiction._id)).take(MAX_RESOURCES + 1);
-  if (resources.length > MAX_RESOURCES) invalid();
+  if (resources.length > MAX_RESOURCES) throw new ConvexError("GEMINI_FAILED_DOCUMENT_RECOVERY_CAPACITY_EXCEEDED");
+  spend(budget);
   const jurisdictionLocks = await ctx.db.query("documentLifecycleLocks").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", workflow.jurisdiction._id)).take(MAX_LOCKS + 1);
   if (jurisdictionLocks.length > MAX_LOCKS) invalid();
   const lockMap = new Map(jurisdictionLocks.map(lock => [lock._id, lock]));
   // Older locks can omit jurisdictionId; bind every resource-scoped lock too.
   for (const resource of resources) {
+    spend(budget);
     const resourceLocks = await ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", q => q.eq("resourceId", resource._id)).take(2);
     if (resourceLocks.length > 1) invalid();
     for (const lock of resourceLocks) lockMap.set(lock._id, lock);
@@ -99,6 +112,7 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
   const blockedVersionIds = new Set<Id<"documentVersions">>();
   for (const resource of resources) {
     if (resource.activeVersionId !== undefined) {
+      spend(budget);
       const version = await ctx.db.get(resource.activeVersionId);
       if (resource.status !== "active" || resource.catalogPublished !== true || !version || version.resourceId !== resource._id || version.status !== "published" ||
           !version.geminiDocumentName || !isGeminiDocumentName(version.geminiDocumentName) ||
@@ -109,6 +123,7 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
     } else if (resource.catalogPublished === true) invalid();
     const block = resource.geminiPublicationBlock;
     if (block !== undefined) {
+      spend(budget, 2);
       const version = await ctx.db.get(block.versionId); const excludedJob = await ctx.db.get(block.jobId);
       if (!version || !excludedJob || excludedJob.status !== "failed" || excludedJob.targetId !== version._id ||
           excludedJob.targetType !== "documentVersion" || excludedJob.type !== "gemini_index_document" ||
@@ -134,6 +149,7 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
   for (const status of ["queued", "running", "waiting_provider", "manual_review"] as const) {
     // Legacy provider jobs cannot affect this store or consume its Gemini scan budget.
     for (const type of ["gemini_create_store", "gemini_index_document", "gemini_delete_document", "gemini_delete_store"] as const) {
+      spend(budget);
       const rows = await ctx.db.query("integrationJobs").withIndex("by_status_and_type_and_createdAt", q =>
         q.eq("status", status).eq("type", type)).take(MAX_UNRESOLVED_JOBS + 1 - candidates.length);
       candidates.push(...rows); if (candidates.length > MAX_UNRESOLVED_JOBS) invalid();
@@ -146,6 +162,7 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
     if (candidate.targetType === "jurisdictionGeminiStore") {
       const id = ctx.db.normalizeId("jurisdictions", candidate.targetId); if (!id) invalid(); jurisdictionId = id;
     } else if (candidate.targetType === "documentVersion") {
+      spend(budget, 2);
       const id = ctx.db.normalizeId("documentVersions", candidate.targetId); const version = id ? await ctx.db.get(id) : null;
       const resource = version ? await ctx.db.get(version.resourceId) : null; if (!version || !resource) invalid(); jurisdictionId = resource.jurisdictionId;
       if (jurisdictionId === workflow.jurisdiction._id) versions.set(version._id, version);
@@ -155,6 +172,7 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
     otherUnresolved++;
     if (candidate.type !== "gemini_index_document" || candidate.status !== "manual_review" || candidate.recoveryKind !== "poll_operation" ||
         !candidate.providerOperationName || !isGeminiUploadOperationForStore(candidate.providerOperationName, workflow.storeName)) invalid();
+    spend(budget, 16);
     const other = await resolveGeminiPublicationWorkflow(ctx, candidate, { kind: "active" }, now);
     if (other.kind !== "index" || other.payload.operation !== "publish" || other.previous !== null || other.resource.activeVersionId !== undefined) invalid();
     await assertGeminiOriginal(ctx, other.version);
@@ -162,7 +180,8 @@ async function context(ctx: MutationCtx, job: GeminiIntegrationJob, now: number)
     coverage.excluded.push({ metadata: identity(environment, workflow.jurisdiction._id, other.version),
       ...(documentReference ? { documentReference } : {}) });
   }
-  if (coverage.published.length < 1 || coverage.published.length > MAX_PUBLISHED_FILTER_DOCUMENTS ||
+  if (new Set(coverage.published.map(entry => entry.documentName)).size !== coverage.published.length ||
+      coverage.published.length < 1 || coverage.published.length > MAX_PUBLISHED_FILTER_DOCUMENTS ||
       coverage.excluded.length + 1 > MAX_PUBLISHED_FILTER_DOCUMENTS ||
       coverage.published.length + coverage.excluded.length + 1 > MAX_RESOURCES) invalid();
   try {
@@ -237,9 +256,10 @@ export const claimFailedDocumentRecovery = internalMutation({
       const result = terminal(operation, job._id); if (result) return { kind: "completed", result }; throw new ConvexError("ADMIN_OPERATION_IN_PROGRESS");
     }
     if (job.status !== "manual_review" || job.leaseToken !== undefined || job.leaseExpiresAt !== undefined) invalid();
-    const initial = await context(ctx, job, Date.now());
+    const budget: ContextBudget = { remaining: MAX_CONTEXT_QUERIES };
+    const initial = await context(ctx, job, Date.now(), budget);
     const claim = await claimRecoveryLease(ctx, job, initial.workflow.jurisdiction);
-    const current = await context(ctx, claim.job, Date.now());
+    const current = await context(ctx, claim.job, Date.now(), budget);
     const attempt = { leaseToken: claim.leaseToken, binding: current.binding, jurisdictionId: current.workflow.jurisdiction._id };
     const correlationId = await correlation(attempt); const now = Date.now();
     const operationId = await ctx.db.insert("adminOperations", { actorId: ACTOR, action: ACTION, targetId: job._id, idempotencyKey: args.idempotencyKey,
@@ -259,7 +279,7 @@ export const completeFailedDocumentRecovery = internalMutation({
         args.coverageVerifiedAt !== args.confirmedAt || !Number.isSafeInteger(args.publishedCount)) invalid();
     const job = await ctx.db.get(jobId); if (!job || !isGeminiJobDocument(job)) invalid();
     assertCurrentLease(job, args.leaseToken, now); const permitJurisdiction = await assertGeminiExecutionPermit(ctx, job, now); await assertPublisherAuthority(ctx, job);
-    const current = await context(ctx, job, now);
+    const current = await context(ctx, job, now, { remaining: MAX_CONTEXT_QUERIES });
     if (current.binding !== args.binding || current.workflow.jurisdiction._id !== args.jurisdictionId || permitJurisdiction?._id !== args.jurisdictionId ||
         args.publishedCount !== current.coverage.published.length || args.operationReference !== await reference(current.coverage.target.operationName)) invalid();
     const prior = job.failedDocumentObservation ?? (job.failedDocumentEvidence ? { documentReference: job.failedDocumentEvidence.documentReference,
