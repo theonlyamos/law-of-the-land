@@ -11,6 +11,10 @@ it("lets organization members view reviewed files without exposing storage URLs"
     const list = makeFunctionReference<"query">("organizationContent:listVersions");
     const versions = await member.client.query(list, { organizationId: own.organizationId, jurisdictionId: own.jurisdictionId, resourceId: own.resourceId, paginationOpts: { numItems: 10, cursor: null } });
     expect(versions.page[0]).not.toHaveProperty("originalUrl");
+    expect(versions.page[0]).toMatchObject({ sourceUrl: expect.stringMatching(/^https:/), requiresSourceVerification: false, sourceVerifications: [] });
+    await t.run(ctx => ctx.db.patch(own.resourceId, { type: "judgment" }));
+    const judgments = await member.client.query(list, { organizationId: own.organizationId, jurisdictionId: own.jurisdictionId, resourceId: own.resourceId, paginationOpts: { numItems: 10, cursor: null } });
+    expect(judgments.page[0].requiresSourceVerification).toBe(true);
     const issuedAt = Date.now();
     const fetchFile = async (versionId: string) => member.client.fetch("/private/admin-review-file", {
       method: "POST",

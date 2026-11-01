@@ -1,12 +1,14 @@
 import { patchDocumentVersion, getReviewCountState } from "./reviewCounts";
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
-import type { Id } from "../_generated/dataModel";
-import { internalQuery, mutation, query, type MutationCtx } from "../_generated/server";
+import type { Doc, Id } from "../_generated/dataModel";
+import { internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
 import { writeAudit, validateAuditReason } from "./audit";
 import { requireEnabledAdminPermission } from "./featureFlags";
 import { organizationAccessForUser, requireOrganizationResource } from "../lib/organizationAccess";
+import { sourceVerificationInputValidator, type SourceVerificationInput } from "../lib/sourceVerification";
+import { recordSourceVerificationForActor, sourceVerificationRecordValidator } from "./sourceVerification";
 
 const MIN_KEY = 8;
 const MAX_KEY = 128;
@@ -175,7 +177,7 @@ export const submitForReview = mutation({
 });
 export async function decideForActor(
   ctx: MutationCtx,
-  args: { versionId: Id<"documentVersions">; checklistAnswers: Checklist; evaluationRunId: string; reason: string; idempotencyKey: string },
+  args: { versionId: Id<"documentVersions">; checklistAnswers: Checklist; evaluationRunId: string; reason: string; idempotencyKey: string; sourceVerification?: SourceVerificationInput },
   decision: "approve" | "reject",
   actor: Actor,
 ) {
@@ -183,7 +185,7 @@ export async function decideForActor(
   const action = decision === "approve" ? "document_approve" : "document_reject";
   const operation = await beginReviewOperation(ctx, actor, {
     action, versionId: args.versionId, reason: args.reason, idempotencyKey: args.idempotencyKey,
-    payload: { versionId: args.versionId, reason: args.reason, evaluationRunId, checklistAnswers: args.checklistAnswers },
+    payload: { versionId: args.versionId, reason: args.reason, evaluationRunId, checklistAnswers: args.checklistAnswers, ...(args.sourceVerification ? { sourceVerification: args.sourceVerification } : {}) },
   });
   if (operation.replay) return operation.result;
   const version = await ctx.db.get(args.versionId);
@@ -200,6 +202,15 @@ export async function decideForActor(
   if (decision === "approve" && Object.values(args.checklistAnswers).some((answer) => !answer)) {
     throw new ConvexError("DOCUMENT_CHECKLIST_INCOMPLETE");
   }
+  let sourceVerificationId: Id<"documentSourceVerifications"> | undefined;
+  if (decision === "approve") {
+    const imported = await ctx.db.query("batchImportEvidence").withIndex("by_versionId", q => q.eq("versionId", version._id)).take(1);
+    if ((resource?.type === "judgment" || imported.length > 0) && !args.sourceVerification) throw new ConvexError("DOCUMENT_SOURCE_CLASS_REQUIRED");
+    if (args.sourceVerification) sourceVerificationId = await recordSourceVerificationForActor(ctx, actor, {
+      versionId: version._id, sourceVerification: args.sourceVerification, reason: args.reason,
+      kind: "approval", idempotencyKey: args.idempotencyKey,
+    });
+  }
   const now = Date.now();
   await ctx.db.insert("reviewDecisions", {
     documentVersionId: version._id,
@@ -210,6 +221,7 @@ export async function decideForActor(
     evaluationRunId,
     reason: args.reason,
     correlationId: operation.correlationId,
+    ...(sourceVerificationId ? { sourceVerificationId } : {}),
     createdAt: now,
   });
   const status = decision === "approve" ? "approved" as const : "rejected" as const;
@@ -223,6 +235,7 @@ export const decisionArgs = {
   evaluationRunId: v.string(),
   reason: v.string(),
   idempotencyKey: v.string(),
+  sourceVerification: v.optional(sourceVerificationInputValidator),
 };
 
 export const approveVersion = mutation({
@@ -248,9 +261,14 @@ const queueRowValidator = v.object({
   byteSize: v.number(),
   sha256: v.string(),
   sourceHost: v.string(),
+  sourceProvenance: v.optional(v.string()),
+  sourceUrl: v.optional(v.string()),
+  caseAliases: v.optional(v.array(v.string())),
+  sourceVerifications: v.optional(v.array(sourceVerificationRecordValidator)),
+  requiresSourceVerification: v.boolean(),
   effectiveDate: v.optional(v.string()),
   repealDate: v.optional(v.string()),
-  status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded")),
+  status: v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded"), v.literal("unpublished"), v.literal("rejected")),
   failureSummary: v.optional(v.string()),
   submittedBy: v.string(),
   submittedAt: v.optional(v.number()),
@@ -273,6 +291,65 @@ export const getReviewCounts = query({
   },
 });
 
+type ReviewStatus = "ready_for_review" | "approved" | "publishing" | "published" | "superseded" | "unpublished" | "rejected";
+
+function isReviewStatus(status: string): status is ReviewStatus {
+  return ["ready_for_review", "approved", "publishing", "published", "superseded", "unpublished", "rejected"].includes(status);
+}
+
+async function projectReviewItem(ctx: QueryCtx, version: Doc<"documentVersions">, status: ReviewStatus) {
+  const [resource, previous, decisions, evidence, sourceVerifications] = await Promise.all([
+    ctx.db.get(version.resourceId),
+    version.versionNumber > 1
+      ? ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", version.resourceId).eq("versionNumber", version.versionNumber - 1)).unique()
+      : null,
+    ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).order("desc").take(20),
+    ctx.db.query("batchImportEvidence").withIndex("by_versionId", (q) => q.eq("versionId", version._id)).take(1),
+    ctx.db.query("documentSourceVerifications").withIndex("by_versionId_and_createdAt", q => q.eq("versionId", version._id)).order("desc").take(25),
+  ]);
+  if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
+  return {
+    id: version._id,
+    resourceId: version.resourceId,
+    resourceTitle: resource.title,
+    officialCitation: resource.officialCitation,
+    versionNumber: version.versionNumber,
+    filename: version.filename,
+    mimeType: version.mimeType,
+    byteSize: version.byteSize,
+    sha256: version.sha256,
+    sourceHost: new URL(version.sourceUrl).host,
+    sourceUrl: version.sourceUrl,
+    sourceVerifications,
+    requiresSourceVerification: resource.type === "judgment" || evidence.length > 0,
+    ...(evidence[0] ? { sourceProvenance: evidence[0].sourceProvenance, caseAliases: evidence[0].caseAliases } : {}),
+    effectiveDate: version.effectiveDate,
+    status,
+    failureSummary: version.failureSummary,
+    submittedBy: version.submittedBy,
+    submittedAt: version.submittedAt,
+    ...(previous ? { previousVersion: { versionNumber: previous.versionNumber, filename: previous.filename, sha256: previous.sha256, effectiveDate: previous.effectiveDate } } : {}),
+    decisions: decisions.map((decision) => ({
+      decision: decision.decision,
+      reviewerId: decision.reviewerId,
+      reason: decision.reason,
+      evaluationRunId: decision.evaluationRunId,
+      createdAt: decision.createdAt,
+    })),
+  };
+}
+
+export const getReviewItem = query({
+  args: { versionId: v.id("documentVersions") },
+  returns: v.union(queueRowValidator, v.null()),
+  handler: async (ctx, { versionId }) => {
+    await requireEnabledAdminPermission(ctx, "document", "read");
+    const version = await ctx.db.get(versionId);
+    if (!version || !isReviewStatus(version.status)) return null;
+    return await projectReviewItem(ctx, version, version.status);
+  },
+});
+
 export const listReviewQueue = query({
   args: {
     status: v.optional(v.union(v.literal("ready_for_review"), v.literal("approved"), v.literal("publishing"), v.literal("published"), v.literal("superseded"))),
@@ -286,41 +363,7 @@ export const listReviewQueue = query({
       .withIndex("by_status_and_updatedAt", (q) => q.eq("status", status))
       .order("desc")
       .paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(1, args.paginationOpts.numItems), 50) });
-    const page = await Promise.all(result.page.map(async (version) => {
-      const [resource, previous, decisions] = await Promise.all([
-        ctx.db.get(version.resourceId),
-        version.versionNumber > 1
-          ? ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", (q) => q.eq("resourceId", version.resourceId).eq("versionNumber", version.versionNumber - 1)).unique()
-          : null,
-        ctx.db.query("reviewDecisions").withIndex("by_documentVersionId_and_createdAt", (q) => q.eq("documentVersionId", version._id)).order("desc").take(20),
-      ]);
-      if (!resource) throw new ConvexError("RESOURCE_NOT_FOUND");
-      return {
-        id: version._id,
-        resourceId: version.resourceId,
-        resourceTitle: resource.title,
-        officialCitation: resource.officialCitation,
-        versionNumber: version.versionNumber,
-        filename: version.filename,
-        mimeType: version.mimeType,
-        byteSize: version.byteSize,
-        sha256: version.sha256,
-        sourceHost: new URL(version.sourceUrl).host,
-        effectiveDate: version.effectiveDate,
-        status,
-        failureSummary: version.failureSummary,
-        submittedBy: version.submittedBy,
-        submittedAt: version.submittedAt,
-        ...(previous ? { previousVersion: { versionNumber: previous.versionNumber, filename: previous.filename, sha256: previous.sha256, effectiveDate: previous.effectiveDate } } : {}),
-        decisions: decisions.map((decision) => ({
-          decision: decision.decision,
-          reviewerId: decision.reviewerId,
-          reason: decision.reason,
-          evaluationRunId: decision.evaluationRunId,
-          createdAt: decision.createdAt,
-        })),
-      };
-    }));
+    const page = await Promise.all(result.page.map((version) => projectReviewItem(ctx, version, status)));
     return { ...result, page };
   },
 });

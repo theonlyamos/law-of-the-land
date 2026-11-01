@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { usePaginatedQuery, useQuery } from "convex/react";
+import { usePaginatedQuery, useQuery, useQuery_experimental as useQueryState } from "convex/react";
 import { api } from "../../../convex/_generated/api";
-import { DocumentReview, type ReviewItem } from "./document-review";
+import type { Id } from "../../../convex/_generated/dataModel";
+import { DocumentReview } from "./document-review";
 
 const stages = [
   ["ready_for_review", "Unapproved"],
@@ -13,8 +14,24 @@ const stages = [
   ["superseded", "Superseded"],
 ] as const;
 
-export function ReviewDocket() {
-  const [stage, setStage] = useState<ReviewItem["status"]>("ready_for_review");
+export function ReviewDocket({ versionId }: { versionId?: string } = {}) {
+  return versionId ? <TargetedReview versionId={versionId} /> : <FullReviewDocket />;
+}
+
+function TargetedReview({ versionId }: { versionId: string }) {
+  const [attempt, setAttempt] = useState(true);
+  const result = useQueryState({ query: api.admin.reviews.getReviewItem, args: attempt ? { versionId: versionId as Id<"documentVersions"> } : "skip" });
+  return <div className="space-y-6">
+    <a href="/admin/review" className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4">View full publication docket</a>
+    {result.status === "error" ? <div role="alert" className="space-y-3"><p>This review could not be loaded. Check the document link and your access.</p><button type="button" onClick={() => { setAttempt(false); window.setTimeout(() => setAttempt(true), 0); }} className="min-h-11 border px-4 font-semibold">Retry review</button></div>
+      : result.status !== "success" ? <p role="status">Loading document review.</p>
+      : result.data ? <DocumentReview items={[result.data]} />
+      : <p role="status">This version is unavailable in the review docket. Open its resource record for the current lifecycle state.</p>}
+  </div>;
+}
+
+function FullReviewDocket() {
+  const [stage, setStage] = useState<(typeof stages)[number][0]>("ready_for_review");
   const counts = useQuery(api.admin.reviews.getReviewCounts, {});
   const { results, status, loadMore } = usePaginatedQuery(
     api.admin.reviews.listReviewQueue,

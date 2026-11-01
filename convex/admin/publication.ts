@@ -157,6 +157,11 @@ export async function queuePublication(ctx: MutationCtx, actor: Actor, args: { v
   await assertNoStoreTeardown(ctx, jurisdiction._id);
   const requiredState = operation === "publish" ? "approved" : operation === "rollback" ? "superseded" : "published";
   if (version.status !== requiredState) throw new ConvexError("DOCUMENT_TRANSITION_INVALID");
+  if (operation !== "unpublish") {
+    const verification = await ctx.db.query("documentSourceVerifications").withIndex("by_versionId_and_createdAt", q => q.eq("versionId", version._id)).order("desc").take(1);
+    const imported = await ctx.db.query("batchImportEvidence").withIndex("by_versionId", q => q.eq("versionId", version._id)).take(1);
+    if (verification[0]?.assessment === "unresolved" || ((resource.type === "judgment" || imported.length > 0) && verification[0]?.assessment !== "verified")) throw new ConvexError("DOCUMENT_SOURCE_VERIFICATION_REQUIRED");
+  }
   const previousVersionId = resource.activeVersionId;
   if (operation === "unpublish" && (previousVersionId !== version._id || !version.geminiDocumentName || !isGeminiDocumentName(version.geminiDocumentName) || !version.geminiDocumentName.startsWith(`${storeName}/documents/`))) throw new ConvexError("DOCUMENT_ACTIVE_POINTER_INVALID");
   if (operation === "rollback" && (!previousVersionId || previousVersionId === version._id)) throw new ConvexError("DOCUMENT_ROLLBACK_TARGET_INVALID");

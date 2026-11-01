@@ -1,4 +1,5 @@
 import { bumpContentRevision } from "../lib/widgetAuthority";
+import { batchIdentityKey } from "../../shared/batch-identity";
 import { makeFunctionReference, paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v, type Infer } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -61,6 +62,7 @@ const resourceDocValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
+  batchTitleKey: v.optional(v.string()), batchCitationKey: v.optional(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   geminiPublicationBlock: geminiPublicationBlockValidator,
@@ -85,6 +87,7 @@ const resourceDetailValidator = v.object({
   _id: v.id("legalResources"), _creationTime: v.number(), jurisdictionId: v.id("jurisdictions"),
   type: resourceTypeValidator, title: v.string(), issuer: v.string(), officialCitation: v.string(),
   officialCitationKey: v.string(), sourceUrl: v.string(), topics: v.array(v.string()),
+  batchTitleKey: v.optional(v.string()), batchCitationKey: v.optional(v.string()),
   effectiveDate: v.optional(v.string()), repealDate: v.optional(v.string()), status: resourceStatusValidator,
   activeVersionId: v.optional(v.id("documentVersions")), catalogPublished: v.optional(v.boolean()), createdBy: v.string(), updatedBy: v.string(),
   geminiPublicationBlock: geminiPublicationBlockValidator,
@@ -632,11 +635,14 @@ async function resourceInput(
   if (citations.some((row) => row._id !== input.exceptId)) {
     throw new ConvexError("RESOURCE_CITATION_EXISTS");
   }
+  const title = requiredText(input.title, "RESOURCE_TITLE");
   return {
-    title: requiredText(input.title, "RESOURCE_TITLE"),
+    title,
     issuer: requiredText(input.issuer, "RESOURCE_ISSUER"),
     officialCitation,
     officialCitationKey,
+    batchTitleKey: batchIdentityKey(title),
+    batchCitationKey: batchIdentityKey(officialCitation),
     sourceUrl: validateSourceUrl(input.sourceUrl),
     topics: validateTopics(input.topics),
     effectiveDate: input.effectiveDate === undefined || input.effectiveDate === "" ? undefined : validateDate(input.effectiveDate, "EFFECTIVE_DATE"),
