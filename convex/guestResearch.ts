@@ -118,7 +118,9 @@ async function sessionTurns(ctx: MutationCtx, session: Doc<"guestResearchSession
   return turns;
 }
 async function view(ctx: MutationCtx, tokenHash: string, publicationFilterProtocol?: typeof PUBLICATION_FILTER_PROTOCOL): Promise<GuestSessionView> {
-  const { session, manifest } = await sessionFor(ctx, tokenHash, publicationFilterProtocol);
+  return await boundView(ctx, await sessionFor(ctx, tokenHash, publicationFilterProtocol));
+}
+async function boundView(ctx: MutationCtx, { session, manifest }: Awaited<ReturnType<typeof sessionFor>>): Promise<GuestSessionView> {
   const turns = await sessionTurns(ctx, session);
   for (const turn of turns) if (turn.status === "completed") await validateGovernedCitations(ctx, manifest.stores, turn.citations ?? []);
   const selected = manifest.stores[0];
@@ -142,8 +144,13 @@ export const createSession = internalMutation({
       const retry = await consumeRateBucket(ctx, "guest-sessions", args.ipKey, 5, 60 * 60_000);
       if (retry) return { error: error("RATE_LIMITED", retry) };
       const now = Date.now();
-      await ctx.db.insert("guestResearchSessions", { tokenHash: args.tokenHash, jurisdictionId, scopeBinding: scope.binding, createdAt: now, expiresAt: now + GUEST_RESEARCH_LIFETIME_MS, attempts: 0 });
-      return await view(ctx, args.tokenHash, args.publicationFilterProtocol);
+      const sessionId = await ctx.db.insert("guestResearchSessions", { tokenHash: args.tokenHash, jurisdictionId, scopeBinding: scope.binding, createdAt: now, expiresAt: now + GUEST_RESEARCH_LIFETIME_MS, attempts: 0 });
+      // The newly inserted session is bound to this invocation's server-derived scope.
+      // Rendering it must not resolve the same published manifest a second time.
+      const session = await ctx.db.get(sessionId);
+      if (!session) fail("SESSION_INVALID");
+      if (session.expiresAt <= Date.now()) fail("SESSION_EXPIRED");
+      return await boundView(ctx, { session, manifest: scope.manifest });
     } catch (caught) { return failure(caught); }
   },
 });

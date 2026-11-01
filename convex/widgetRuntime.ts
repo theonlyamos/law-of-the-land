@@ -40,6 +40,11 @@ async function boundSession(ctx: MutationCtx, input: { publicId: string; tokenHa
   if (!session || session.revokedAt !== undefined) throw new ConvexError("SESSION_INVALID");
   if (session.expiresAt <= Date.now() || session.deleteAfter <= Date.now()) throw new ConvexError("SESSION_EXPIRED");
   const authority = await resolveWidgetAuthority(ctx, input.publicId, session.parentOrigin);
+  return await validateSessionAuthority(ctx, session, authority);
+}
+async function validateSessionAuthority(ctx: MutationCtx, session: Doc<"widgetSessions">, authority: Authority) {
+  if (session.revokedAt !== undefined) throw new ConvexError("SESSION_INVALID");
+  if (session.expiresAt <= Date.now() || session.deleteAfter <= Date.now()) throw new ConvexError("SESSION_EXPIRED");
   if (authority.widget._id !== session.widgetId || authority.organizationId !== session.organizationId || (!authority.organizationId && authority.jurisdictionId !== session.jurisdictionId)) throw new ConvexError("SESSION_INVALID");
   if (session.contentRevision !== authority.contentRevision || session.accessVersion !== authority.accessVersion) {
     await ctx.db.patch(session._id, { revokedAt: Date.now() });
@@ -57,8 +62,10 @@ export const createSession = internalMutation({ args: { ...sessionArgs, parentOr
     const authority = await resolveWidgetAuthority(ctx, args.publicId, args.parentOrigin);
     const existing = await ctx.db.query("widgetSessions").withIndex("by_tokenHash", q => q.eq("tokenHash", args.tokenHash)).unique();
     if (existing) {
-      const binding = await boundSession(ctx, args);
-      if (binding.session.parentOrigin !== args.parentOrigin) return { error: error("SESSION_INVALID") };
+      if (args.publicId.length > 100 || existing.parentOrigin !== args.parentOrigin) return { error: error("SESSION_INVALID") };
+      // Authority was resolved for this exact origin in this mutation, not supplied
+      // by the caller or cached between requests. Keep all session binding checks.
+      await validateSessionAuthority(ctx, existing, authority);
       return { expiresAt: existing.expiresAt };
     }
     const scope = widgetQuotaScope(authority.organizationId ? { organizationId: authority.organizationId } : { jurisdictionId: authority.jurisdictionId });

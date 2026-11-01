@@ -1,8 +1,8 @@
 import {afterEach,expect,it,vi} from "vitest";
 import {makeFunctionReference} from "convex/server";
 import {createWidgetBackend,seedGeographicWidget,addAssuredOrganizationUser} from "./widgetTestHelpers.fixture";
-import {readyStoreName} from "./jurisdictions";
-import { unpublishedDocumentCount } from "./lib/publishedResearchReadiness";
+import {readyStoreName, resolveChatResearchStoresForJurisdiction} from "./jurisdictions";
+import { publishedResearchReadiness, unpublishedDocumentCount } from "./lib/publishedResearchReadiness";
 import { MAX_SELECTOR_PAGE_SIZE } from "./lib/jurisdictionDomain";
 import type { Id } from "./_generated/dataModel";
 const resolve=makeFunctionReference<"query">("jurisdictions:resolveChatResearchStores");
@@ -187,3 +187,112 @@ it("bounds restriction display lookups independently without changing authoritat
   expect(selection.coverageWarning).toEqual({ excludedDocumentCount: null });
   expect((await manifest(input)).stores[0].publicationFilter.documents).toHaveLength(1);
 });
+
+async function capacityFixture(publishedCount: number, draftCount: number, existing?: Awaited<ReturnType<typeof fixture>>) {
+  const input = existing ?? await fixture();
+  await input.t.run(async ctx => {
+    const { _id: _r, _creationTime: _rc, ...resource } = (await ctx.db.get(input.f.resourceId))!;
+    const { _id: _v, _creationTime: _vc, ...version } = (await ctx.db.get(input.f.versionId))!;
+    for (let index = 1; index < publishedCount + draftCount; index++) {
+      const published = index < publishedCount;
+      const resourceId = await ctx.db.insert("legalResources", { ...resource, activeVersionId: undefined, catalogPublished: false });
+      const versionId = await ctx.db.insert("documentVersions", { ...version, resourceId,
+        status: published ? "published" : "draft",
+        geminiDocumentName: published ? `${input.f.storeName}/documents/capacity${index}` : undefined });
+      if (published) await ctx.db.patch(resourceId, { activeVersionId: versionId, catalogPublished: true });
+    }
+  });
+  return input;
+}
+
+it("keeps all 900 published identities available beside 900 drafts within the read budget", async () => {
+  const input = await capacityFixture(900, 900);
+  const result = await manifest(input);
+  expect(result.partialCoverage).toBe(false);
+  expect(result.stores[0].publicationFilter.documents).toHaveLength(900);
+  await input.t.run(async ctx => {
+    for (const identity of result.stores[0].publicationFilter.documents) {
+      const version = await ctx.db.get(identity.versionId as Id<"documentVersions">);
+      expect(version?.status).toBe("published");
+      expect(version?.resourceId).toBe(identity.resourceId);
+      expect(version?.sha256).toBe(identity.sha256);
+    }
+  });
+  const budget = await input.t.run(async ctx => {
+    const query = vi.spyOn(ctx.db, "query"), get = vi.spyOn(ctx.db, "get");
+    try {
+      expect((await resolveChatResearchStoresForJurisdiction(ctx, input.f.jurisdictionId, "published-v1")).stores[0].publicationFilter?.documents).toHaveLength(900);
+      return query.mock.calls.length + get.mock.calls.length;
+    } finally { query.mockRestore(); get.mockRestore(); }
+  });
+  expect(budget).toBeLessThan(3900);
+  expect(await input.t.run(ctx => readyStoreName(ctx, input.f.jurisdictionId))).toBeNull();
+}, 30000);
+
+it("retains clean legacy readiness for 900 published sources", async () => {
+  const input = await capacityFixture(900, 0);
+  expect(await input.t.run(ctx => readyStoreName(ctx, input.f.jurisdictionId))).toBe(input.f.storeName);
+  expect((await manifest(input)).stores[0].publicationFilter.documents).toHaveLength(900);
+}, 30000);
+
+it("still pauses research during a withdrawal in a large library", async () => {
+  const input = await capacityFixture(900, 900);
+  await input.t.run(ctx => ctx.db.insert("documentLifecycleLocks", {
+    resourceId: input.f.resourceId, versionId: input.f.versionId, jurisdictionId: input.f.jurisdictionId,
+    operation: "unpublish", actorId: "fixture", idempotencyKey: "capacity-withdrawal",
+    expiresAt: Date.now() + 3600000, createdAt: Date.now(), updatedAt: Date.now(),
+  }));
+  await expect(manifest(input)).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
+}, 30000);
+
+
+it.each(["published overflow", "draft overflow", "shared read budget"])("fails closed without truncation at the %s boundary", async scenario => {
+  const input = await capacityFixture(scenario === "published overflow" ? 1025 : 1024,
+    scenario === "draft overflow" ? 1025 : scenario === "shared read budget" ? 1024 : 0);
+  await input.t.run(async ctx => {
+    const query = vi.spyOn(ctx.db, "query"), get = vi.spyOn(ctx.db, "get");
+    try {
+      expect(await publishedResearchReadiness(ctx, input.f.jurisdictionId, true)).toBeNull();
+      expect(query.mock.calls.length + get.mock.calls.length).toBeLessThanOrEqual(3800);
+    } finally { query.mockRestore(); get.mockRestore(); }
+  });
+}, 30000);
+
+it.each(["missing active pointer", "wrong-scope lock"])("still rejects a late %s beyond the former 400-resource cutoff", async scenario => {
+  const input = await capacityFixture(401, 1);
+  const foreign = await seedGeographicWidget(input.t);
+  await input.t.run(async ctx => {
+    const resources = await ctx.db.query("legalResources").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", input.f.jurisdictionId)).take(403);
+    const last = resources[resources.length - 2];
+    if (scenario === "missing active pointer") await ctx.db.patch(last._id, { activeVersionId: undefined, catalogPublished: false });
+    else {
+      await ctx.db.insert("documentLifecycleLocks", { resourceId: last._id, versionId: last.activeVersionId!,
+        jurisdictionId: foreign.jurisdictionId, operation: "unpublish", actorId: "fixture", idempotencyKey: "wrong-scope",
+        expiresAt: Date.now() + 3600000, createdAt: Date.now(), updatedAt: Date.now() });
+    }
+  });
+  await expect(manifest(input)).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
+}, 30000);
+
+it.each([false, true])("shares the read budget across selected and ancestor libraries (exhausted=%s)", async exhausted => {
+  const input = await capacityFixture(exhausted ? 900 : 700, exhausted ? 900 : 700);
+  const parent = await seedGeographicWidget(input.t);
+  await capacityFixture(200, exhausted ? 0 : 200, { ...input, f: parent });
+  await input.t.run(async ctx => {
+    const childProfile = await ctx.db.query("geographicJurisdictions").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", input.f.jurisdictionId)).unique();
+    const parentProfile = await ctx.db.query("geographicJurisdictions").withIndex("by_jurisdictionId", q => q.eq("jurisdictionId", parent.jurisdictionId)).unique();
+    await ctx.db.patch(childProfile!._id, { parentJurisdictionId: parent.jurisdictionId });
+    await ctx.db.patch(parentProfile!._id, { level: "state" });
+    const query = vi.spyOn(ctx.db, "query"), get = vi.spyOn(ctx.db, "get");
+    try {
+      const result = resolveChatResearchStoresForJurisdiction(ctx, input.f.jurisdictionId, "published-v1");
+      if (exhausted) await expect(result).rejects.toThrow("CHAT_RESEARCH_STORE_NOT_READY");
+      else {
+        const ready = await result;
+        expect(ready.partialCoverage).toBe(false);
+        expect(ready.stores.map(store => store.publicationFilter?.documents.length)).toEqual([700, 200]);
+      }
+      expect(query.mock.calls.length + get.mock.calls.length).toBeLessThan(3900);
+    } finally { query.mockRestore(); get.mockRestore(); }
+  });
+}, 30000);
