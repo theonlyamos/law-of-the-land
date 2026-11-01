@@ -256,6 +256,19 @@ it("adds confirmed profile memory to the answer request", async () => {
   expect(sent.system_instruction).toContain("USER PROFILE");
 });
 
+it("sends a focused retry after a search-limit failure to the model", async () => {
+  const response = await POST(request({ researchFocus: "verified-only" }));
+  expect((await events(response)).at(-1)).toMatchObject({ type: "done", answerKind: "legal" });
+  expect(interactionMocks.create.mock.calls[0][0].system_instruction).toContain("FOCUSED RETRY");
+});
+
+it.each(["focused", "", null, true, {}])("rejects an invalid research focus %j before billing or generation", async researchFocus => {
+  const response = await POST(request({ researchFocus }));
+  expect(response.status).toBe(400);
+  expect(authMocks.fetchAuthMutation).not.toHaveBeenCalled();
+  expect(interactionMocks.create).not.toHaveBeenCalled();
+});
+
 it("answers without profile memory when the lookup fails", async () => {
   authMocks.fetchAuthQuery.mockRejectedValue(new Error("unavailable"));
   const fallback = await POST(request());
