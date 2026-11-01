@@ -687,6 +687,14 @@ describe("GeminiFileSearchChat", () => {
     expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 12, canonicalReadCompleted: false });
   });
 
+  it("tells the model to treat missing facts as unknown and ask about the decisive ones", async () => {
+    const { client } = await run();
+    const instruction = client.requests[0].system_instruction!;
+    expect(instruction).toContain("A fact the user has not given is unknown, never an adverse fact.");
+    expect(instruction).toContain("To give you a firmer answer, tell me:");
+    expect(instruction).toContain("at most three short, plain questions");
+  });
+
   it("gives a focused retry a smaller search budget and tells the model what to leave unverified", async () => {
     const focused = input({ researchFocus: "verified-only" });
     const six = researchedAnswer(6);

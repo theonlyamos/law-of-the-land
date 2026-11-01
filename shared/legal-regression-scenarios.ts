@@ -263,6 +263,8 @@ export const COMPARISON_REGRESSION_SCENARIOS: readonly LegalRegressionScenario[]
         run: a => /administrator|executor|personal representative/iu.test(a) ? null : "Does not mention the estate representative's role." },
       { id: "grant-status", description: "Raises will, probate or letters of administration status.",
         run: a => /probate|letters of administration|grant|\bwill\b/iu.test(a) ? null : "Does not raise grant or will status." },
+      { id: "asks-decisive-facts", description: "Asks the user about the facts that decide the answer.",
+        run: a => /(firmer answer|tell me|let me know|can you (tell|confirm))[\s\S]{0,400}\?/iu.test(a) ? null : "Does not ask about the missing decisive facts." },
     ],
   },
 ];

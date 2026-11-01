@@ -76,8 +76,8 @@ describe("legal regression scenarios", () => {
       "I could not verify any such Act in the retrieved sources. Section 32 of the Rent Act deals with advances paid before the commencement of the Act, so it does not create a general refund today."],
     ["comparison-q12-inherited-land",
       "You do not have title to the land now. You must first obtain a vesting assent.",
-      ["no-adverse-capacity-finding", "representative-role", "grant-status"],
-      "It depends on your role. If you are the administrator under letters of administration, you may sell for the estate; if you are a beneficiary, you need the land vested in you first."],
+      ["no-adverse-capacity-finding", "representative-role", "grant-status", "asks-decisive-facts"],
+      "It depends on your role. If you are the administrator under letters of administration, you may sell for the estate; if you are a beneficiary, you need the land vested in you first. To give you a firmer answer, tell me: did your father leave a will?"],
   ];
 
   it.each(comparisonCases)("flags the observed defect and passes the fix for %s", (id, observed, failing, fixed) => {
