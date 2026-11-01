@@ -2,8 +2,8 @@ import { GoogleGenAI, UploadToFileSearchStoreOperation } from "@google/genai";
 import { isGeminiFileSearchStoreName, isGeminiUploadOperationForStore, parseGeminiDocumentName } from "../../lib/geminiFileSearchNames";
 import type { DiagnosticTarget, GeminiDiagnosticClient } from "./geminiDiagnostic";
 
-const PAGE_SIZE = 20;
-const MAX_PAGES = 20;
+import { GEMINI_DOCUMENT_PAGE_SIZE as PAGE_SIZE, MAX_GEMINI_DOCUMENT_PAGES as MAX_PAGES,
+  MAX_GEMINI_INVENTORY_DOCUMENTS as MAX_DOCUMENTS } from "./geminiDocumentInventoryLimits";
 const METADATA_KEYS = ["environment", "jurisdiction_id", "resource_id", "version_id", "version_number", "sha256"] as const;
 const DOCUMENT_STATES = new Set(["STATE_UNSPECIFIED", "STATE_PENDING", "STATE_ACTIVE", "STATE_FAILED"]);
 
@@ -89,7 +89,7 @@ async function findUniqueDocument(target: DiagnosticTarget, client: GeminiDiagno
     for (const raw of page) {
       const document = readDocument(raw, target.storeName);
       // Repeated rows make completeness uncertain, even if their names match.
-      if (seenNames.has(document.name)) throw failure();
+      if (seenNames.has(document.name) || seenNames.size >= MAX_DOCUMENTS) throw failure();
       seenNames.add(document.name);
       if (metadataMatches(document.customMetadata, target.metadata)) {
         if (matchName !== null || document.state !== "STATE_ACTIVE") throw failure();

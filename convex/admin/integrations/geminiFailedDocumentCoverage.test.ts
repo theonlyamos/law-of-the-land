@@ -1,3 +1,4 @@
+import { MAX_GEMINI_DOCUMENT_PAGES } from "./geminiDocumentInventoryLimits";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { verifyFailedGeminiDocumentCoverage, type FailedDocumentCoverageInput } from "./geminiFailedDocumentCoverage";
 import type { GeminiDiagnosticClient } from "./geminiDiagnostic";
@@ -73,7 +74,7 @@ describe("failed document and published coverage proof", () => {
     await expect(verifyFailedGeminiDocumentCoverage(input, SECRET, sdk)).rejects.toThrow("GEMINI_FAILED_DOCUMENT_PROOF_FAILED");
   });
   it("rejects an incomplete twenty-page inventory", async () => {
-    await expect(verifyFailedGeminiDocumentCoverage(input, SECRET, client([Array.from({ length: 21 }, (_, i) => i ? [] : [row(FAILED, "STATE_FAILED"), row(ACTIVE, "STATE_ACTIVE")])]))).rejects.toThrow();
+    await expect(verifyFailedGeminiDocumentCoverage(input, SECRET, client([Array.from({ length: MAX_GEMINI_DOCUMENT_PAGES + 1 }, (_, i) => i ? [] : [row(FAILED, "STATE_FAILED"), row(ACTIVE, "STATE_ACTIVE")])]))).rejects.toThrow();
   });
   it("permits only explicitly bound failed extras", async () => {
     const extra = `${STORE}/documents/excluded`; const sdk = client([[[row(FAILED, "STATE_FAILED"), row(ACTIVE, "STATE_ACTIVE"), row(extra, "STATE_FAILED", metadata("extra"))]]]);

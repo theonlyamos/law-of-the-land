@@ -2,9 +2,8 @@ import { GoogleGenAI, UploadToFileSearchStoreOperation } from "@google/genai";
 import { isGeminiFileSearchStoreName, isGeminiUploadOperationForStore, parseGeminiDocumentName } from "../../lib/geminiFileSearchNames";
 import type { DiagnosticTarget, GeminiDiagnosticClient } from "./geminiDiagnostic";
 
-const PAGE_SIZE = 20;
-const MAX_PAGES = 20;
-const MAX_DOCUMENTS = PAGE_SIZE * MAX_PAGES;
+import { GEMINI_DOCUMENT_PAGE_SIZE as PAGE_SIZE, MAX_GEMINI_DOCUMENT_PAGES as MAX_PAGES,
+  MAX_GEMINI_INVENTORY_DOCUMENTS as MAX_DOCUMENTS } from "./geminiDocumentInventoryLimits";
 const METADATA_KEYS = ["environment", "jurisdiction_id", "resource_id", "version_id", "version_number", "sha256"] as const;
 type Metadata = DiagnosticTarget["metadata"];
 export type FailedDocumentCoverageInput = {
@@ -95,7 +94,7 @@ async function scan(input: FailedDocumentCoverageInput, client: GeminiDiagnostic
       const document = readDocument(raw, input.target.storeName); const identity = key(document.metadata); const entry = expected.get(identity);
       if (!entry || entry.state !== document.state || (entry.name !== undefined && entry.name !== document.name) ||
           (entry.reference !== undefined && entry.reference !== await reference(document.name)) ||
-          names.has(document.name) || identities.has(identity)) throw failure();
+          names.has(document.name) || identities.has(identity) || documents.length >= MAX_DOCUMENTS) throw failure();
       names.add(document.name); identities.add(identity); documents.push(document);
     }
     const more = pager.hasNextPage(); if (typeof more !== "boolean") throw failure();

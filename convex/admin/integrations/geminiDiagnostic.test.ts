@@ -1,3 +1,4 @@
+import { MAX_GEMINI_DOCUMENT_PAGES } from "./geminiDocumentInventoryLimits";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { inspectGeminiProvider, type DiagnosticTarget, type GeminiDiagnosticClient } from "./geminiDiagnostic";
 
@@ -70,10 +71,10 @@ describe("read-only Gemini diagnostic", () => {
   });
 
   it("stops after twenty pages and explicitly reports an incomplete scan", async () => {
-    const { sdk, pager } = client(Array.from({ length: 21 }, () => Array.from({ length: 20 }, () => document({ customMetadata: [] }))));
+    const { sdk, pager } = client(Array.from({ length: MAX_GEMINI_DOCUMENT_PAGES + 1 }, () => []));
     const result = await inspectGeminiProvider(target, SECRET, sdk);
-    expect(result.documents).toMatchObject({ scanComplete: false, pagesScanned: 20, documentsScanned: 400, matchingCount: 0 });
-    expect(pager.nextPage).toHaveBeenCalledTimes(19);
+    expect(result.documents).toMatchObject({ scanComplete: false, pagesScanned: MAX_GEMINI_DOCUMENT_PAGES, documentsScanned: 0, scanLimit: "pages", matchingCount: 0 });
+    expect(pager.nextPage).toHaveBeenCalledTimes(MAX_GEMINI_DOCUMENT_PAGES - 1);
   });
 
   it("reports distinct exact matches as ambiguous and ignores repeated names", async () => {
