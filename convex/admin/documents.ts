@@ -93,6 +93,21 @@ function storedSha256Hex(value: string): string {
   }
 }
 
+export async function verifyStoredOriginal(
+  ctx: MutationCtx,
+  args: { storageId: Id<"_storage">; byteSize: number; mimeType: string; sha256: string },
+): Promise<void> {
+  const metadata = await ctx.db.system.get("_storage", args.storageId);
+  if (!metadata) throw new ConvexError("DOCUMENT_STORAGE_NOT_FOUND");
+  if (metadata.size !== args.byteSize) throw new ConvexError("DOCUMENT_SIZE_MISMATCH");
+  if (metadata.contentType !== undefined && metadata.contentType.toLowerCase() !== args.mimeType) {
+    throw new ConvexError("DOCUMENT_MIME_MISMATCH");
+  }
+  if (storedSha256Hex(metadata.sha256) !== args.sha256) {
+    throw new ConvexError("DOCUMENT_CHECKSUM_MISMATCH");
+  }
+}
+
 function validatedDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     throw new ConvexError("INVALID_EFFECTIVE_DATE");
@@ -189,23 +204,7 @@ export async function createDocumentVersionForActor(ctx: MutationCtx, actor: { o
       throw new ConvexError("DOCUMENT_EFFECTIVE_DATE_BEFORE_RESOURCE");
     }
 
-    const metadata = await ctx.db.system.get("_storage", args.storageId);
-    if (!metadata) throw new ConvexError("DOCUMENT_STORAGE_NOT_FOUND");
-    if (metadata.size !== byteSize) {
-      throw new ConvexError("DOCUMENT_SIZE_MISMATCH");
-    }
-    // Convex may omit contentType (and convex-test currently always does).
-    // When present it is authoritative; otherwise the exact extension/MIME
-    // allowlist above remains the fail-closed type check.
-    if (
-      metadata.contentType !== undefined &&
-      metadata.contentType.toLowerCase() !== mimeType
-    ) {
-      throw new ConvexError("DOCUMENT_MIME_MISMATCH");
-    }
-    if (storedSha256Hex(metadata.sha256) !== sha256) {
-      throw new ConvexError("DOCUMENT_CHECKSUM_MISMATCH");
-    }
+    await verifyStoredOriginal(ctx, { storageId: args.storageId, byteSize, mimeType, sha256 });
 
     const duplicate = await ctx.db
       .query("documentVersions")

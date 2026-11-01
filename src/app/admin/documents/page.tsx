@@ -101,6 +101,7 @@ export default async function DocumentsPage({ searchParams }: { searchParams: Pr
       </header>
       {canWrite ? (
         <section className="mt-8" aria-labelledby="new-resource-heading">
+          {hasRolePermission(access.currentAdmin.roles, "document", "write") ? <Link href="/admin/documents/import" className="mb-6 inline-flex min-h-11 items-center border border-[oklch(48%_0.045_252)] px-4 text-sm font-semibold underline underline-offset-4">Import judgment batch</Link> : null}
           <h2 id="new-resource-heading" className="mb-4 text-xl font-semibold tracking-[-0.025em]">Create canonical legal resource</h2>
           <ResourceEditor
             jurisdictionIds={jurisdictionOptions.map((row) => row.id)}

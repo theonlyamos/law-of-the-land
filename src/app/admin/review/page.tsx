@@ -3,7 +3,9 @@ import { ReviewDocket } from "@/components/admin/review-docket";
 import { authorizeAdminPage } from "@/lib/admin/server";
 import { redirect } from "next/navigation";
 
-export default async function ReviewQueuePage() {
+export default async function ReviewQueuePage({ searchParams }: { searchParams?: Promise<{ versionId?: string | string[] }> }) {
+  const parameters = await searchParams;
+  const versionId = typeof parameters?.versionId === "string" ? parameters.versionId : undefined;
   const access = await authorizeAdminPage();
   if (
     access.status === "denied" ||
@@ -23,7 +25,7 @@ export default async function ReviewQueuePage() {
         <p className="text-sm leading-6 text-[oklch(40%_0.035_252)]">Inspect the immutable original metadata, record a legal decision, then publish the approved version through Gemini.</p>
       </header>
       <div className="mt-10">
-        <ReviewDocket />
+        <ReviewDocket versionId={versionId} />
       </div>
     </article>
   );

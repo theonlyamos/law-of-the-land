@@ -13,6 +13,8 @@ import type * as admin_audit from "../admin/audit.js";
 import type * as admin_billing from "../admin/billing.js";
 import type * as admin_conversations from "../admin/conversations.js";
 import type * as admin_documents from "../admin/documents.js";
+import type * as admin_batchImports from "../admin/batchImports.js";
+import type * as admin_sourceVerification from "../admin/sourceVerification.js";
 import type * as admin_e2eAccessMatrix from "../admin/e2eAccessMatrix.js";
 import type * as admin_e2eFixtures from "../admin/e2eFixtures.js";
 import type * as admin_e2eProviderIsolation from "../admin/e2eProviderIsolation.js";
@@ -122,6 +124,8 @@ declare const fullApi: ApiFromModules<{
   "admin/billing": typeof admin_billing;
   "admin/conversations": typeof admin_conversations;
   "admin/documents": typeof admin_documents;
+  "admin/batchImports": typeof admin_batchImports;
+  "admin/sourceVerification": typeof admin_sourceVerification;
   "admin/e2eAccessMatrix": typeof admin_e2eAccessMatrix;
   "admin/e2eFixtures": typeof admin_e2eFixtures;
   "admin/e2eProviderIsolation": typeof admin_e2eProviderIsolation;
