@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { buildPublicationMetadataFilter, parsePublicationFilter, PUBLICATION_FILTER_PROTOCOL,
-  MAX_PUBLICATION_FILTER_BYTES, createPublicationFilterBinding, type PublicationFilter } from "../../shared/gemini-publication-filter";
+  MAX_PUBLICATION_FILTER_BYTES, MAX_ALLOWLIST_FILTER_DOCUMENTS, MAX_EXCLUDED_FILTER_VERSIONS, createPublicationFilterBinding, type PublicationFilter } from "../../shared/gemini-publication-filter";
 
 function restriction(count = 1, idSize = 1): PublicationFilter {
   return { protocol: PUBLICATION_FILTER_PROTOCOL, environment: "production", documents: Array.from({ length: count }, (_, index) => ({
@@ -13,9 +13,10 @@ function restriction(count = 1, idSize = 1): PublicationFilter {
 // parentheses explicitly so precedence mistakes cannot let another store's
 // broad branch admit a failed document in a restricted store.
 function matches(filter: string, metadata: Record<string, string>): boolean {
-  const tokens = filter.match(/[()]|AND|OR|[a-z_0-9]+="[A-Za-z0-9._-]+"/gu)!;
+  const tokens = filter.match(/[()]|AND|OR|NOT|[a-z_0-9]+="[A-Za-z0-9._-]+"/gu)!;
   let index = 0;
   function term(): boolean {
+    if (tokens[index] === "NOT") { index++; return !term(); }
     if (tokens[index] === "(") {
       index++; const value = expression();
       if (tokens[index++] !== ")") throw new Error("Unbalanced filter");
@@ -166,4 +167,56 @@ it("canonically binds the exact filter tuples and all stores while preserving he
     { ...restricted, publicationFilter: { ...published, documents: [published.documents[0], { ...published.documents[1], versionId: "replacement" }] } },
   ]) expect(await createPublicationFilterBinding([change, healthy])).not.toBe(binding);
   expect(await createPublicationFilterBinding([restricted, { ...healthy, jurisdictionId: "another" }])).not.toBe(binding);
+});
+
+function withExclusions(count: number, excluded: string[]): PublicationFilter {
+  return { ...restriction(count, 4), excludedVersionIds: excluded };
+}
+
+it("keeps the exact allowlist while the whole scope is small", () => {
+  const filter = buildPublicationMetadataFilter([{ jurisdictionId: "j1", publicationFilter: withExclusions(MAX_ALLOWLIST_FILTER_DOCUMENTS, ["x1"]) }])!;
+  expect(filter).not.toContain("NOT");
+  expect(matches(filter, { jurisdiction_id: "j1", environment: "production", resource_id: "r0000", version_id: "v0000", sha256: "a".repeat(64) })).toBe(true);
+});
+
+it("searches a large library by exclusion so Gemini does not time out", () => {
+  const filter = buildPublicationMetadataFilter([
+    { jurisdictionId: "j1", publicationFilter: withExclusions(809, ["x1", "x2"]) },
+    { jurisdictionId: "j2" },
+  ])!;
+  expect(filter).not.toContain("sha256");
+  expect(new TextEncoder().encode(filter).byteLength).toBeLessThan(512);
+  const doc = (jurisdiction: string, version: string, environment = "production") => ({ jurisdiction_id: jurisdiction, environment, version_id: version });
+  expect(matches(filter, doc("j1", "v0808"))).toBe(true);
+  expect(matches(filter, doc("j1", "x1"))).toBe(false);
+  expect(matches(filter, doc("j1", "x2"))).toBe(false);
+  expect(matches(filter, doc("j1", "v0001", "staging"))).toBe(false);
+  expect(matches(filter, doc("j3", "v0001"))).toBe(false);
+  // An unrestricted related store keeps its plain jurisdiction branch.
+  expect(matches(filter, doc("j2", "anything", "staging"))).toBe(true);
+  expect(buildPublicationMetadataFilter([{ jurisdictionId: "j1", publicationFilter: withExclusions(809, []) }]))
+    .toBe('((jurisdiction_id="j1" AND environment="production"))');
+});
+
+it("keeps the allowlist for a large library whose unpublished uploads are not accounted for", () => {
+  const filter = buildPublicationMetadataFilter([{ jurisdictionId: "j1", publicationFilter: restriction(200, 4) }])!;
+  expect(filter).not.toContain("NOT");
+  expect(filter).toContain('version_id="v0199"');
+});
+
+it("rejects malformed exclusion lists", () => {
+  const base = restriction(2);
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: ["x1", "x1"] })).toBeNull();
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: ["v0"] })).toBeNull();
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: ['x" OR version_id="v'] })).toBeNull();
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: "x1" })).toBeNull();
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: Array.from({ length: MAX_EXCLUDED_FILTER_VERSIONS + 1 }, (_, i) => `x${i}`) })).toBeNull();
+  expect(parsePublicationFilter({ ...base, excludedVersionIds: Array.from({ length: MAX_EXCLUDED_FILTER_VERSIONS }, (_, i) => `x${i}`) })).not.toBeNull();
+});
+
+it("does not bind the exclusion list, which only grows while the bound published set is unchanged", async () => {
+  const stores = (excluded?: string[]) => [{ jurisdictionId: "j1", storeName: "fileSearchStores/s1",
+    publicationFilter: excluded === undefined ? restriction(2) : { ...restriction(2), excludedVersionIds: excluded } }];
+  expect(await createPublicationFilterBinding(stores(["x1"]))).toBe(await createPublicationFilterBinding(stores()));
+  expect(await createPublicationFilterBinding(stores(["x1", "x2"]))).toBe(await createPublicationFilterBinding(stores(["x1"])));
 });

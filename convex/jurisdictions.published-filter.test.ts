@@ -86,3 +86,38 @@ it("requires the explicit protocol on private manifest requests", async () => {
   expect((await response.json()).stores[0].publicationFilter.documents).toHaveLength(1);
   expect((await post({ jurisdictionId: f.jurisdictionId, publicationFilterProtocol: "unknown" })).status).toBe(400);
 });
+
+it("lists every catalogue version that may be in the store but is not published as an exclusion", async () => {
+  const { t, f, user, failed } = await fixture();
+  const ids = await t.run(async ctx => {
+    const version = (await ctx.db.get(f.versionId))!;
+    const { _id: vid, _creationTime: vc, ...versionFields } = version;
+    // An older version of the published resource that once had a provider document.
+    const superseded = await ctx.db.insert("documentVersions", { ...versionFields, versionNumber: 0, status: "superseded",
+      geminiDocumentName: `${f.storeName}/documents/old` });
+    // A draft that never left the app is not in the store and is not listed.
+    const draft = await ctx.db.insert("documentVersions", { ...versionFields, resourceId: failed.resourceId, versionNumber: 3, status: "draft",
+      geminiDocumentName: undefined });
+    return { superseded, draft };
+  });
+  const result = await user.client.query(resolve, { jurisdictionId: f.jurisdictionId, publicationFilterProtocol: "published-v1" });
+  const excluded = result.stores[0].publicationFilter.excludedVersionIds;
+  expect(excluded).toEqual([failed.versionId, ids.superseded].sort());
+  expect(excluded).not.toContain(ids.draft);
+  expect(excluded).not.toContain(f.versionId);
+});
+
+it("omits the exclusion list when a resource's version history is too long to account for", async () => {
+  const { t, f, user } = await fixture();
+  await t.run(async ctx => {
+    const version = (await ctx.db.get(f.versionId))!;
+    const { _id: vid, _creationTime: vc, ...versionFields } = version;
+    for (let index = 0; index < 16; index++) {
+      await ctx.db.insert("documentVersions", { ...versionFields, versionNumber: 100 + index, status: "superseded", geminiDocumentName: undefined });
+    }
+  });
+  const result = await user.client.query(resolve, { jurisdictionId: f.jurisdictionId, publicationFilterProtocol: "published-v1" });
+  // The published version is still found exactly; only the exclusion form is withheld.
+  expect(result.stores[0].publicationFilter.documents).toEqual([{ resourceId: f.resourceId, versionId: f.versionId, sha256: "0".repeat(64) }]);
+  expect(result.stores[0].publicationFilter).not.toHaveProperty("excludedVersionIds");
+});
