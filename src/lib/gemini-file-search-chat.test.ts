@@ -715,6 +715,11 @@ describe("GeminiFileSearchChat", () => {
     expect(instruction).toContain("at most three short, plain questions");
   });
 
+  it("tells the model not to keep searching for a figure the retrieved law leaves to discretion", async () => {
+    const { client } = await run();
+    expect(client.requests[0].system_instruction).toContain("do not keep searching for that figure");
+  });
+
   it("gives a focused retry a smaller search budget and tells the model what to leave unverified", async () => {
     const focused = input({ researchFocus: "verified-only" });
     const six = researchedAnswer(6);
