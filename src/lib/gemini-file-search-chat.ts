@@ -850,13 +850,6 @@ export class GeminiFileSearchChat {
       onResumeUnavailable?: (cause: ResumeUnavailableCause) => void;
       allowStreamFileCitations?: boolean;
       singleAttempt?: boolean;
-      /**
-       * A search that starts at or after this time cannot finish and leave room
-       * to write the answer before streamDeadlineAt. The run stops there as a
-       * timeout instead of waiting for the cutoff that is certain to follow.
-       */
-      researchCutoffAt?: number;
-      onResearchCutoff?: () => void;
     },
   ): Promise<GovernedChatResult> {
     const execution = emptyQueryDiagnosticExecution();
@@ -1034,10 +1027,6 @@ export class GeminiFileSearchChat {
               if (calls.has(event.step.id)) return invalidResponse("file_search_call_duplicate");
               if (calls.size >= (input.researchFocus === "verified-only" ? MAX_FOCUSED_FILE_SEARCH_CALLS : MAX_FILE_SEARCH_CALLS)) {
                 return invalidResponse("file_search_budget_exhausted");
-              }
-              if (options.researchCutoffAt !== undefined && Date.now() >= options.researchCutoffAt) {
-                try { options.onResearchCutoff?.(); } catch { /* Optional tracing must not alter the outcome. */ }
-                throw new GovernedChatDiagnosticError("GOVERNED_CHAT_RESEARCH_DEADLINE_REACHED", "deadline_exceeded");
               }
               calls.add(event.step.id);
               count("searchCallCount", 1);

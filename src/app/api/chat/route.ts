@@ -158,11 +158,6 @@ const REQUESTS_PER_MINUTE = 15;
 // 300-second host limit for recording a failure.
 const MODEL_WINDOW_MS = 270_000;
 const TERMINAL_WINDOW_MS = 290_000;
-// A File Search call takes about 10 seconds and writing the six-heading answer
-// needs most of a minute more. A search that starts with less than this left in
-// the generation window would time out anyway, so research stops there and the
-// user is offered a shorter answer about 80 seconds sooner.
-const RESEARCH_WRITING_RESERVE_MS = 80_000;
 const REVIEWED_MODEL_WINDOW_MS = 90_000;
 const REVIEWED_TERMINAL_WINDOW_MS = 110_000;
 const CHAT_FAILURE = "We couldn't process your request. Please try again.";
@@ -783,8 +778,6 @@ function streamResponse(input: {
                 }
               },
               onResumeUnavailable: (cause) => timing.resumeUnavailable(cause),
-              researchCutoffAt: input.modelDeadlineAt - RESEARCH_WRITING_RESERVE_MS,
-              onResearchCutoff: () => timing.researchCutoff(),
               onStreamComplete: () => {
                 timing.streamComplete();
                 phase = "canonical_read";

@@ -967,9 +967,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
     window.setTimeout(() => void handleSearch(q), 0);
   }, [background.checking, background.job, background.uncertain, chatId, handleSearch, initialQuery, persistedMessages.length, requests, router, selectionReady, sessionData]);
 
-  // The question whose answer hit the search or time limit, offered for a focused retry.
+  // The question whose answer hit the search limit, offered for a focused retry.
   const searchLimitRetryQuestion = useMemo(() => {
-    if (errorReason !== "file_search_budget_exhausted" && errorReason !== "deadline_exceeded") return null;
+    if (errorReason !== "file_search_budget_exhausted") return null;
     const lastUser = [...displayMessages].reverse().find((message) => message.role === "user");
     return lastUser?.content.trim() || null;
   }, [displayMessages, errorReason]);
@@ -1378,11 +1378,9 @@ export function ChatWorkspace({ chatId, initialQuery, initialJurisdiction }: Cha
                     ? `That answer reached its search limit. This limit applies only to that answer. Ask about one issue at a time, ${searchLimitRetryQuestion
                       ? "or get a shorter answer that covers the main issue and lists what still needs checking."
                       : "or start a new chat."}`
-                    : `This answer took too long. ${searchLimitRetryQuestion
-                      ? "You can get a shorter answer that covers the main issue and lists what still needs checking, or ask a more focused question."
-                      : "You can ask a more focused question or try again later."}`}
+                    : "This answer took too long. You can ask a more focused question or try again later."}
                 </span>
-                {searchLimitRetryQuestion && (
+                {errorReason === "file_search_budget_exhausted" && searchLimitRetryQuestion && (
                   <Button type="button" variant="outline" size="sm" disabled={isLoading || !selectionReady}
                     onClick={() => void handleSearch(searchLimitRetryQuestion, { focus: "verified-only" })}>
                     Get a shorter answer

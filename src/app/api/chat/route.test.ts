@@ -1715,30 +1715,6 @@ describe("POST /api/chat streamed governed interaction", () => {
     }
   });
 
-  it("stops research that starts too late to leave time for writing, before the model deadline", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
-    let streamSignal: AbortSignal | undefined;
-    interactionMocks.create.mockImplementation(async (_input, options) => {
-      streamSignal = options.signal;
-      return (async function* () {
-        await new Promise((resolve) => setTimeout(resolve, 190_000));
-        for await (const event of successfulStream()) yield event;
-      })();
-    });
-    const response = await POST(request());
-    const streamEventsPromise = events(response);
-    await vi.advanceTimersByTimeAsync(191_000);
-    const streamEvents = await streamEventsPromise;
-    expect(streamEvents.at(-1)).toMatchObject({ type: "error", reason: "deadline_exceeded" });
-    expect(streamSignal?.aborted).toBe(true);
-    expect(interactionMocks.get).not.toHaveBeenCalled();
-    expect(authMocks.fetchAuthMutation.mock.calls.at(-1)?.[1]).toMatchObject({
-      outcome: "failure", failureCategory: "timeout", elapsedMs: 190_000,
-      diagnostics: { reason: "deadline_exceeded", searchCallCount: 0 },
-    });
-  });
-
   it("uses the terminal reserve for the canonical read after the stream completes near 180 seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
@@ -1747,12 +1723,8 @@ describe("POST /api/chat streamed governed interaction", () => {
     interactionMocks.create.mockImplementation(async (_input, options) => {
       streamSignal = options.signal;
       return (async function* () {
-        // Research ends early; writing runs until just before the model deadline.
-        let index = 0;
-        for await (const event of successfulStream()) {
-          if (index++ === 5) await new Promise((resolve) => setTimeout(resolve, 269_900));
-          yield event;
-        }
+        await new Promise((resolve) => setTimeout(resolve, 269_900));
+        for await (const event of successfulStream()) yield event;
       })();
     });
     interactionMocks.get.mockImplementation(async (_id, _params, options) => {

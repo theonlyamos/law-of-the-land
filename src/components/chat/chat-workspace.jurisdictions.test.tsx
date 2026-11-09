@@ -1316,20 +1316,6 @@ describe("unified chat client", () => {
     expect(screen.queryByRole("button", { name: "Get a shorter answer" })).not.toBeInTheDocument();
   });
 
-  it("offers a focused retry of the same question after a timeout", async () => {
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(ndjsonResponse([{ type: "error", reason: "deadline_exceeded", error: "Generic fallback" }]))
-      .mockResolvedValueOnce(ndjsonResponse([
-        { type: "done", result: "Verified bail answer. Not yet verified: the rest.", citations: [citation], citationClaim, partialCoverage: false },
-      ])));
-    render(<ChatWorkspace chatId={chatId} initialQuery="How much can bail be set for criminal charges?" initialJurisdiction={jurisdiction.id} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("took too long");
-    fireEvent.click(screen.getByRole("button", { name: "Get a shorter answer" }));
-    expect(await screen.findByText("Verified bail answer. Not yet verified: the rest.")).toBeVisible();
-    const retryBody = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as string);
-    expect(retryBody).toMatchObject({ query: "How much can bail be set for criminal charges?", researchFocus: "verified-only" });
-  });
-
   it.each([
     ["file_search_budget_exhausted", /search limit/i],
     ["deadline_exceeded", /took too long/i],
@@ -1382,8 +1368,7 @@ describe("unified chat client", () => {
 
     expect(await screen.findByText(timeoutMessage)).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent(/took too long/i);
-    expect(screen.getByRole("alert")).toHaveTextContent(/get a shorter answer/i);
-    expect(screen.getByRole("button", { name: "Get a shorter answer" })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/more focused question or try again later/i);
     expect(screen.getByRole("textbox")).toHaveAccessibleDescription(/took too long/i);
     expect(screen.getByRole("textbox")).toBeEnabled();
     expect(screen.queryByRole("status", { name: "Preparing answer" })).not.toBeInTheDocument();
