@@ -162,7 +162,10 @@ async function run(
   events = eventStream(),
   final = canonical(undefined, [citation()]),
   request = input(),
-  options: { allowStreamFileCitations?: boolean; singleAttempt?: boolean; onDiagnostics?: (snapshot: QueryDiagnostics) => void } = {},
+  options: {
+    allowStreamFileCitations?: boolean; singleAttempt?: boolean; onDiagnostics?: (snapshot: QueryDiagnostics) => void;
+    researchCutoffAt?: number; onResearchCutoff?: () => void;
+  } = {},
 ) {
   const client = new FakeInteractionsClient(events, final);
   const chat = new GeminiFileSearchChat(client, { GEMINI_AI_MODEL: "configured-model" });
@@ -685,6 +688,23 @@ describe("GeminiFileSearchChat", () => {
     const snapshots: QueryDiagnostics[] = [];
     await expect(run(events, final, input(), { onDiagnostics: snapshot => snapshots.push(snapshot) })).rejects.toThrow("file_search_budget_exhausted");
     expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 12, canonicalReadCompleted: false });
+  });
+
+  it("stops at a search that starts after the research cutoff instead of waiting for the model deadline", async () => {
+    const { events, final } = researchedAnswer(3);
+    const snapshots: QueryDiagnostics[] = [];
+    const onResearchCutoff = vi.fn();
+    const failure = run(events, final, input(), { researchCutoffAt: Date.now() - 1, onResearchCutoff,
+      onDiagnostics: snapshot => snapshots.push(snapshot) });
+    await expect(failure).rejects.toThrow("GOVERNED_CHAT_RESEARCH_DEADLINE_REACHED");
+    expect(onResearchCutoff).toHaveBeenCalledTimes(1);
+    expect(snapshots.at(-1)).toMatchObject({ searchCallCount: 0, reason: "deadline_exceeded", canonicalReadCompleted: false });
+
+    // Searches that start before the cutoff, and writing after it, are unaffected.
+    const later = researchedAnswer(3);
+    const { result } = await run(later.events, later.final, input(), { researchCutoffAt: Date.now() + 60_000, onResearchCutoff });
+    expect(result.citations).toHaveLength(1);
+    expect(onResearchCutoff).toHaveBeenCalledTimes(1);
   });
 
   it("tells the model to treat missing facts as unknown and ask about the decisive ones", async () => {

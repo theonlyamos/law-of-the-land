@@ -14,6 +14,8 @@ export type ChatTimingSnapshot = {
   /** Longest gap between consecutive search calls. */
   longestSearchGapMs?: number;
   resumeUnavailable?: ResumeUnavailableCause;
+  /** Research was stopped because no time was left to write the answer. */
+  researchCutoffMs?: number;
 };
 
 export function createChatTimingTrace(startedAt: number, now: () => number = Date.now) {
@@ -33,6 +35,7 @@ export function createChatTimingTrace(startedAt: number, now: () => number = Dat
     output() { state.firstOutputMs ??= elapsed(); },
     streamComplete() { state.streamCompleteMs ??= elapsed(); },
     resumeUnavailable(cause: ResumeUnavailableCause) { state.resumeUnavailable ??= cause; },
+    researchCutoff() { state.researchCutoffMs ??= elapsed(); },
     snapshot(): ChatTimingSnapshot { return { ...state }; },
   };
 }
