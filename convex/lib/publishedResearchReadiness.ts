@@ -1,12 +1,20 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import { isGeminiDocumentName, isGeminiFileSearchStoreName, isGeminiUploadOperationForStore } from "./geminiFileSearchNames";
-import { PUBLICATION_FILTER_PROTOCOL, MAX_PUBLISHED_FILTER_DOCUMENTS, parsePublicationFilter,
+import { PUBLICATION_FILTER_PROTOCOL, MAX_PUBLISHED_FILTER_DOCUMENTS, MAX_EXCLUDED_FILTER_VERSIONS, parsePublicationFilter,
   buildPublicationMetadataFilter, isPublicationEnvironment, isPublicationMetadataId, type PublicationFilter } from "../../shared/gemini-publication-filter";
 
 // Publication identities are bounded by the provider filter protocol. Drafts have
 // an independent audit budget: importing drafts must not consume source capacity.
 const MAX_UNPUBLISHED_RESOURCES = 1024;
+// Versions read per resource to account for uploads that may still be in the
+// store. A resource with more versions disables the exclusion form (fail closed).
+const MAX_VERSIONS_PER_RESOURCE = 16;
+// A version in one of these states may have reached the provider store, even
+// before a document name was recorded. Draft-stage versions never leave the app.
+const POSSIBLY_UPLOADED_STATUSES = new Set<Doc<"documentVersions">["status"]>([
+  "publishing", "published", "failed", "superseded", "unpublished", "archived",
+]);
 // Shared across all readiness checks in one scope, leaving transaction headroom
 // for access checks and response construction (Convex allows 4,096 index ranges).
 const MAX_READINESS_READS = 3800;
@@ -139,21 +147,34 @@ async function publishedResearchReadinessImpl(ctx: ReadContext, jurisdictionId: 
   if (activeResources.length > MAX_PUBLISHED_FILTER_DOCUMENTS || unpublishedResources.length > MAX_UNPUBLISHED_RESOURCES) return null;
   const resources = [...activeResources, ...unpublishedResources];
   const documents: PublicationFilter["documents"] = [];
+  // Every catalogue version that may be in the store but is not published.
+  const excludedVersionIds = new Set<string>();
+  let exclusionsComplete = true;
   let unpublishedAddition = false;
   const documentNames = new Set<string>();
   const resourceLocks = new Map<Id<"legalResources">, Doc<"documentLifecycleLocks">[]>();
   for (const resource of resources) {
-    const [published, locks] = await Promise.all([
-      ctx.db.query("documentVersions").withIndex("by_resourceId_and_status", q => q.eq("resourceId", resource._id).eq("status", "published")).take(2),
+    const [versions, locks] = await Promise.all([
+      ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", q => q.eq("resourceId", resource._id)).take(MAX_VERSIONS_PER_RESOURCE + 1),
       ctx.db.query("documentLifecycleLocks").withIndex("by_resourceId", q => q.eq("resourceId", resource._id)).take(2),
     ]);
     resourceLocks.set(resource._id, locks);
+    // Unread versions cannot be excluded, so a long history disables the
+    // exclusion form; the published version is still read exactly.
+    const overflow = versions.length > MAX_VERSIONS_PER_RESOURCE;
+    if (overflow) exclusionsComplete = false;
+    const published = overflow
+      ? await ctx.db.query("documentVersions").withIndex("by_resourceId_and_status", q => q.eq("resourceId", resource._id).eq("status", "published")).take(2)
+      : versions.filter(version => version.status === "published").slice(0, 2);
+    for (const version of versions) {
+      if (version._id === resource.activeVersionId && version.status === "published") continue;
+      if (version.geminiDocumentName === undefined && !POSSIBLY_UPLOADED_STATUSES.has(version.status)) continue;
+      if (!isPublicationMetadataId(version._id)) exclusionsComplete = false;
+      else excludedVersionIds.add(version._id);
+    }
     if (resource.activeVersionId === undefined) {
       if (resource.catalogPublished === true || published.length) return null;
-      if (!unpublishedAddition) {
-        const versions = await ctx.db.query("documentVersions").withIndex("by_resourceId_and_versionNumber", q => q.eq("resourceId", resource._id)).take(1);
-        if (versions.length) unpublishedAddition = true;
-      }
+      if (versions.length) unpublishedAddition = true;
       continue;
     }
     const version = published[0];
@@ -214,7 +235,14 @@ async function publishedResearchReadinessImpl(ctx: ReadContext, jurisdictionId: 
   const requiresFilter = restriction !== undefined || additions.size > 0 || unpublishedAddition;
   if (!requiresFilter && !filterCapable) return { storeName, documents, requiresFilter };
   if (!isPublicationEnvironment(environment)) return null;
-  const publicationFilter = parsePublicationFilter({ protocol: PUBLICATION_FILTER_PROTOCOL, environment, documents });
+  // Failed versions named by the restriction are already read above and belong to this jurisdiction.
+  for (const versionId of failedVersions) {
+    if (!isPublicationMetadataId(versionId)) exclusionsComplete = false;
+    else excludedVersionIds.add(versionId);
+  }
+  if (excludedVersionIds.size > MAX_EXCLUDED_FILTER_VERSIONS) exclusionsComplete = false;
+  const publicationFilter = parsePublicationFilter({ protocol: PUBLICATION_FILTER_PROTOCOL, environment, documents,
+    ...(exclusionsComplete ? { excludedVersionIds: [...excludedVersionIds].sort() } : {}) });
   if (!publicationFilter) return null;
   try { buildPublicationMetadataFilter([{ jurisdictionId, publicationFilter }]); } catch { return null; }
   return { storeName, documents, publicationFilter, requiresFilter };

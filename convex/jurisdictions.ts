@@ -386,6 +386,7 @@ export const searchAccessible = query({
 export const publicationFilterValidator = v.object({
   protocol: v.literal(PUBLICATION_FILTER_PROTOCOL), environment: v.string(),
   documents: v.array(v.object({ resourceId: v.string(), versionId: v.string(), sha256: v.string() })),
+  excludedVersionIds: v.optional(v.array(v.string())),
 });
 export const publicationFilterProtocolValidator = v.optional(v.literal(PUBLICATION_FILTER_PROTOCOL));
 const chatResearchStoreValidator = v.object({
