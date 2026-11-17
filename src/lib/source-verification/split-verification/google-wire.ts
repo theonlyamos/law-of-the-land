@@ -20,7 +20,7 @@ const step = z.union([
   z.strictObject({ type: z.literal("thought"), signature: z.string().optional(), summary: z.array(z.never()).optional() }),
   z.strictObject({ type: z.literal("model_output"), content: z.array(text).length(1) }),
 ]);
-const envelopeSchema = z.strictObject({ status: z.literal("completed"), model: z.literal("gemini-3.8-flash"),
+const envelopeSchema = z.strictObject({ status: z.literal("completed"), model: z.string().min(1).max(128),
   steps: z.array(step).min(1).max(128), usage: usageSchema, object: z.literal("interaction").optional(),
   id: z.string().min(1).max(256).optional(), created: z.union([z.string().max(128), count]).optional(),
   updated: z.union([z.string().max(128), count]).optional(), service_tier: z.string().max(64).optional(),
@@ -95,12 +95,12 @@ function providerSchema(value: unknown): Record<string, unknown> {
   return projected;
 }
 
-export function serializeGoogleBody(request: StageRequest, thinkingPolicy: SplitThinkingPolicy = "medium"): string {
+export function serializeGoogleBody(request: StageRequest, thinkingPolicy: SplitThinkingPolicy = "medium", model: string = GOOGLE_PROVIDER_SETTINGS.model): string {
   const expectedThinking = request.stage === "inventory" && thinkingPolicy === "inventory_low" ? "low" : "medium";
   if ((thinkingPolicy !== "medium" && thinkingPolicy !== "inventory_low")
     || request.generation_config.thinking_level !== expectedThinking || request.generation_config.max_output_tokens !== 8192
     || Object.keys(request.generation_config).length !== 2) fail("generation_settings_changed");
-  const body = JSON.stringify({ model: GOOGLE_PROVIDER_SETTINGS.model, input: JSON.stringify(request.data), system_instruction: request.systemInstruction,
+  const body = JSON.stringify({ model, input: JSON.stringify(request.data), system_instruction: request.systemInstruction,
     tools: [], store: false, stream: false,
     generation_config: { thinking_level: request.generation_config.thinking_level, thinking_summaries: "none", tool_choice: "none", max_output_tokens: 8192 },
     response_format: { type: "text", mime_type: "application/json", schema: providerSchema(request.responseSchema) } });
@@ -140,9 +140,10 @@ export function assertNoCredential(raw: string, credential: string): void {
   if (secretDetected(raw, credential)) fail("credential_echo");
 }
 
-export function parseProviderResponse(raw: string) {
+/** `model` is the model the request named; a response from any other model is rejected. */
+export function parseProviderResponse(raw: string, model: string = GOOGLE_PROVIDER_SETTINGS.model) {
   const parsed = envelopeSchema.safeParse(strictJson(raw));
-  if (!parsed.success) return fail("provider_envelope_rejected");
+  if (!parsed.success || parsed.data.model !== model) return fail("provider_envelope_rejected");
   const value = parsed.data, outputs = value.steps.filter(s => s.type === "model_output");
   if (outputs.length !== 1 || outputs[0].type !== "model_output") fail("ambiguous_model_output");
   const json = outputs[0].content[0].text;

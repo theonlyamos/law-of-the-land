@@ -18,7 +18,6 @@ import {
   isAuthenticated,
 } from "@/lib/auth-server";
 import {
-  DEFAULT_FILE_SEARCH_CHAT_MODEL,
   GeminiFileSearchChat,
   type ChatStore,
   type ResearchFocus,
@@ -41,6 +40,7 @@ import { createReviewedEmploymentChat, isLocalReviewedEmploymentRequest, project
   type ReviewedEmploymentDiagnostics, type ReviewedEmploymentSelection } from "@/lib/source-verification/reviewed-employment-chat";
 import { createReviewedPassageDraft } from "@/lib/source-verification/reviewed-passage-draft";
 import { createGeminiEvaluationVerifier } from "@/lib/source-verification/gemini-verifier";
+import { getAiModels } from "@/lib/ai-models";
 import { createReviewedSplitVerifier } from "@/lib/source-verification/reviewed-split-verifier";
 import { prepareSplitInput } from "@/lib/source-verification/split-verification/contracts";
 import { createStreamingStageExecutor } from "@/lib/source-verification/split-verification/streaming";
@@ -413,10 +413,6 @@ async function loadManifest(
   return bytes ? parseManifest(bytes, jurisdictionId) : null;
 }
 
-function safeModelName(): string {
-  return process.env.GEMINI_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
-}
-
 function classifyFailure(error: unknown): FailureCategory {
   const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const status = typeof record.status === "number" ? record.status : undefined;
@@ -568,6 +564,7 @@ function streamResponse(input: {
   publicationFilterBinding?: string;
   reply: string | null;
   model: string;
+  verificationModel: string;
   routeNonce: string;
   requestStartedAt: number;
   requestStartedMonotonic: number;
@@ -652,7 +649,7 @@ function streamResponse(input: {
           if (cancelled || input.providerSignal.aborted) throw new Error("CHAT_REQUEST_ABORTED");
           if (input.provisionalStreaming) send({ type: "draft_start" });
           if (input.reviewed) {
-            completionModel = "gemini-3.8-flash/reviewed-employment-local";
+            completionModel = `${input.verificationModel}/reviewed-employment-local`;
             // Admission is checked again immediately before constructing the provider client.
             if (!isLocalReviewedEmploymentRequest(input.request, reviewedEmploymentNextEnvironment())
               || process.env.LOCAL_REVIEWED_EMPLOYMENT_CALLS_APPROVED !== "1"
@@ -668,12 +665,12 @@ function streamResponse(input: {
               ? createReviewedSplitVerifier({ thinkingPolicy: "inventory_low", createExecutor: runInput => {
                 const prepared = prepareSplitInput(runInput);
                 if (!prepared) throw new Error("CHAT_REVIEWED_SPLIT_INPUT_INVALID");
-                return createStreamingStageExecutor({ prepared, credential, fetch: globalThis.fetch, thinkingPolicy: "inventory_low",
+                return createStreamingStageExecutor({ prepared, credential, fetch: globalThis.fetch, thinkingPolicy: "inventory_low", model: input.verificationModel,
                   entered: { wall: runInput.requestStartedAt, mono: runInput.requestStartedMonotonic } });
               } })
-              : createGeminiEvaluationVerifier(client);
+              : createGeminiEvaluationVerifier(client, input.verificationModel);
             const reviewed = await createReviewedEmploymentChat({ authority,
-              draft: createReviewedPassageDraft(client), verifier,
+              draft: createReviewedPassageDraft(client, input.verificationModel), verifier,
               commit: async ({ answer, citations, manifest, signal }) => {
                 // All model work has finished by its original cutoff. Retain the terminal reserve.
                 clearTimeout(input.modelTimer); phase = "completion";
@@ -738,7 +735,7 @@ function streamResponse(input: {
               if (diagnostics) diagnostics = { ...diagnostics, reason: "not_configured" };
               throw new Error("GOVERNED_CHAT_NOT_CONFIGURED");
             }
-            const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env);
+            const chat = new GeminiFileSearchChat(new GoogleGenAI({ apiKey }), process.env, input.model);
             if (input.answerMode !== "document") progress("searching");
             // Release the waiter even if generation ignores cancellation. Stream
             // completion clears its cutoff, preserving the canonical-read reserve.
@@ -937,6 +934,8 @@ function isProductionSection55Selection(selection: EmploymentEvidenceSelection):
 export async function POST(request: Request): Promise<Response> {
   const requestStartedAt = Date.now();
   const requestStartedMonotonic = performance.now();
+  // Started now so the settings lookup overlaps auth and admission. It never rejects.
+  const aiModelsPromise = getAiModels();
   let modelDeadlineAt = requestStartedAt + MODEL_WINDOW_MS;
   let terminalDeadlineAt = requestStartedAt + TERMINAL_WINDOW_MS;
   const clientAbort = new AbortController();
@@ -1113,7 +1112,7 @@ export async function POST(request: Request): Promise<Response> {
       ? loadChatProfile(body.externalId, researchSignal)
       : null;
     if (!coverageGap && !reviewed && !hasAttachments && (mode === "shadow" || (mode === "on" && reply === null))) {
-      const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode);
+      const choice = await classifyChatIntent(body.query, legacyHistory, providerSignal, mode, (await aiModelsPromise).intent_routing);
       if (mode === "on") reply = policyReply(choice);
     }
     // A fixed reply does not need the stores; stop the lookup instead of leaving it running.
@@ -1206,7 +1205,8 @@ export async function POST(request: Request): Promise<Response> {
       manifest,
       ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
       reply,
-      model: safeModelName(),
+      model: (await aiModelsPromise).chat,
+      verificationModel: (await aiModelsPromise).source_verification,
       routeNonce,
       requestStartedAt,
       requestStartedMonotonic,

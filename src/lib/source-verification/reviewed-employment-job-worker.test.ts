@@ -10,6 +10,11 @@ import { PRODUCTION_REVIEWED_EMPLOYMENT_POLICY, REVIEWED_EMPLOYMENT_POLICY, type
 import { caseInput } from "./test-fixtures/reviewed-request-catalog";
 import { authoredStage, FAKE_CREDENTIAL } from "./test-fixtures/reviewed-answer-fixtures";
 import type { StageRequest } from "./split-verification/contracts";
+
+vi.mock("../ai-models", async () => {
+  const actual = await vi.importActual<typeof import("../ai-models")>("../ai-models");
+  return { ...actual, getAiModel: async (feature: keyof ReturnType<typeof actual.aiModelsFromEnvironment>) => actual.aiModelsFromEnvironment()[feature] };
+});
 import * as module from "./reviewed-employment-job-worker";
 import { createPublicationFilterBinding } from "../../../shared/gemini-publication-filter";
 

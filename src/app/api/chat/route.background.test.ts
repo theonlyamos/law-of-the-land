@@ -6,6 +6,10 @@ const mocks = vi.hoisted(() => ({ isAuthenticated: vi.fn(), getToken: vi.fn(), f
   loadChatAttachmentContext: vi.fn(), after: vi.fn(), worker: vi.fn(), create: vi.fn() }));
 vi.mock("@/lib/auth-server", () => mocks);
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/ai-models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/ai-models")>("@/lib/ai-models");
+  return { ...actual, getAiModels: async () => actual.aiModelsFromEnvironment(), getAiModel: async (feature: keyof ReturnType<typeof actual.aiModelsFromEnvironment>) => actual.aiModelsFromEnvironment()[feature] };
+});
 vi.mock("next/server", () => ({ after: mocks.after }));
 vi.mock("@/lib/rate-limit", () => ({ clientKey: () => "background-route-test", rateLimit: () => ({ ok: true }) }));
 vi.mock("@/lib/source-verification/reviewed-employment-job-worker", () => ({ runReviewedEmploymentJob: mocks.worker }));

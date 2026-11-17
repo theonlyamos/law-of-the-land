@@ -56,11 +56,12 @@ export async function classifyChatIntent(
   messages: readonly Message[],
   signal: AbortSignal,
   mode: "shadow" | "on",
+  model: string = JEV_MODEL,
 ): Promise<Choice> {
   const startedAt = Date.now();
   const report = (choice: Choice, failure?: string, probability?: number): Choice => {
     console.info("chat_intent_route", JSON.stringify({
-      mode, branch: choice, model: JEV_MODEL, elapsedMs: Date.now() - startedAt,
+      mode, branch: choice, model, elapsedMs: Date.now() - startedAt,
       ...(failure ? { failure } : {}),
       ...(probability === undefined ? {} : { probabilityBand: probability >= 0.99 ? "99-100" : probability >= 0.95 ? "95-99" : "under-95" }),
     }));
@@ -86,7 +87,7 @@ export async function classifyChatIntent(
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: JEV_MODEL,
+        model,
         state: {
           query,
           selectedJurisdiction: "The user has selected a jurisdiction; every question is about its law unless it clearly asks for something else.",
@@ -124,7 +125,7 @@ export async function classifyChatIntent(
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-    if (!parsed || typeof parsed !== "object" || (parsed as { model?: unknown }).model !== JEV_MODEL) return report("legal", "validation");
+    if (!parsed || typeof parsed !== "object" || (parsed as { model?: unknown }).model !== model) return report("legal", "validation");
     const answer = (parsed as { answers?: { route?: unknown } }).answers?.route;
     if (!answer || typeof answer !== "object") return report("legal", "validation");
     const choice = answer as { type?: unknown; choice?: unknown; probabilities?: unknown };

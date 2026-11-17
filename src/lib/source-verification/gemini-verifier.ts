@@ -1,4 +1,5 @@
 import type { Interactions } from "@google/genai";
+import { GOOGLE_PROVIDER_SETTINGS } from "./split-verification/google-provider-settings";
 import { EVALUATION_LIMITS } from "./evidence";
 import { buildEvaluationVerifierInput, validateEvaluationVerdict,
   type EvaluationDecision, type EvaluationVerifierInput, type VerifierInputInvalidReason } from "./verdict";
@@ -89,7 +90,8 @@ function verdictText(response: unknown, status: unknown): { text: string } | { r
 }
 
 /** Single evaluation-only generation. No tools, persistence, retries, logs, or fresh deadline. */
-export function createGeminiEvaluationVerifier(client: GeminiEvaluationClient) {
+/** `model` is the admin-configured source-checking model. */
+export function createGeminiEvaluationVerifier(client: GeminiEvaluationClient, model: string = GOOGLE_PROVIDER_SETTINGS.model) {
   return Object.freeze({ async evaluate(input: EvaluationRunInput): Promise<EvaluationRunResult> {
     const startedAt = Date.now();
     // Capture the caller's original deadline once, before any input preparation.
@@ -123,7 +125,7 @@ export function createGeminiEvaluationVerifier(client: GeminiEvaluationClient) {
       if (prepared.status !== "ready") return finish(prepared.reason);
       segmentCount = prepared.segments.length;
       const request: Interactions.CreateModelInteractionParamsNonStreaming & { stream: false } = {
-        model: "gemini-3.8-flash", input: prepared.prompt, system_instruction: prepared.systemInstruction,
+        model, input: prepared.prompt, system_instruction: prepared.systemInstruction,
         tools: [], store: false, stream: false,
         generation_config: { thinking_level: "medium", thinking_summaries: "none", tool_choice: "none", max_output_tokens: EVALUATION_LIMITS.maxOutputTokens },
         response_format: { type: "text", mime_type: "application/json", schema: prepared.verdictSchema },

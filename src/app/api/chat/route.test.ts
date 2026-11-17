@@ -17,6 +17,10 @@ vi.mock("@/lib/rate-limit", () => ({
   rateLimit: rateLimitMocks.rateLimit,
 }));
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/ai-models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/ai-models")>("@/lib/ai-models");
+  return { ...actual, getAiModels: async () => actual.aiModelsFromEnvironment(), getAiModel: async (feature: keyof ReturnType<typeof actual.aiModelsFromEnvironment>) => actual.aiModelsFromEnvironment()[feature] };
+});
 vi.mock("@/lib/chat-attachment-server", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/chat-attachment-server")>(),
   loadChatAttachmentContext: attachmentMocks.loadChatAttachmentContext,

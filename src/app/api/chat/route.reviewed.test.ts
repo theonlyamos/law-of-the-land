@@ -5,6 +5,10 @@ const mocks = vi.hoisted(() => ({ isAuthenticated: vi.fn(), getToken: vi.fn(), f
   create: vi.fn(), get: vi.fn(), loadChatAttachmentContext: vi.fn(), streamFactory: vi.fn(), stage: vi.fn() }));
 vi.mock("@/lib/auth-server", () => mocks);
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/ai-models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/ai-models")>("@/lib/ai-models");
+  return { ...actual, getAiModels: async () => actual.aiModelsFromEnvironment(), getAiModel: async (feature: keyof ReturnType<typeof actual.aiModelsFromEnvironment>) => actual.aiModelsFromEnvironment()[feature] };
+});
 vi.mock("@/lib/rate-limit", () => ({ clientKey: () => "reviewed-test", rateLimit: () => ({ ok: true }) }));
 vi.mock("@/lib/chat-attachment-server", async original => ({ ...await original<typeof import("@/lib/chat-attachment-server")>(), loadChatAttachmentContext: mocks.loadChatAttachmentContext }));
 vi.mock("@google/genai", () => ({ GoogleGenAI: class { interactions = { create: mocks.create, get: mocks.get }; } }));

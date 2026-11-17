@@ -6,10 +6,10 @@ import {
   isGeminiUploadOperationForStore,
   parseGeminiUploadOperationName,
 } from "../../lib/geminiFileSearchNames";
+import { AI_MODEL_FEATURE_INFO, normalizeAiModelId } from "../../../shared/ai-models";
 
 export { isGeminiUploadOperationForStore } from "../../lib/geminiFileSearchNames";
 
-const EMBEDDING_MODEL = "models/gemini-embedding-2";
 const storeNameSchema = z.string().refine(isGeminiFileSearchStoreName);
 const documentNameSchema = z.string().refine(isGeminiDocumentName);
 const operationNameSchema = z.string().refine((value) => parseGeminiUploadOperationName(value) !== null);
@@ -212,16 +212,17 @@ export class GeminiFileSearchAdapter {
     this.sdk = options.sdk ?? defaultSdk(apiKey.data);
   }
 
-  async createStore(input: { displayName: string; embeddingModel: "models/gemini-embedding-2" }): Promise<{ name: string; embeddingModel: string }> {
+  async createStore(input: { displayName: string; embeddingModel: string }): Promise<{ name: string; embeddingModel: string }> {
     const displayName = valid(z.string().trim().min(1).max(200), input.displayName);
-    if (input.embeddingModel !== EMBEDDING_MODEL) throw invalidRequest();
+    const embeddingModel = input.embeddingModel;
+    if (typeof embeddingModel !== "string" || normalizeAiModelId("embedding", embeddingModel) !== embeddingModel) throw invalidRequest();
     try {
       const response = await this.sdk.fileSearchStores.create({
-        config: { displayName, embeddingModel: input.embeddingModel },
+        config: { displayName, embeddingModel },
       });
       const name = storeNameSchema.safeParse(response.name);
-      if (!name.success || response.embeddingModel !== EMBEDDING_MODEL) throw invalidResponse(true);
-      return { name: name.data, embeddingModel: EMBEDDING_MODEL };
+      if (!name.success || response.embeddingModel !== embeddingModel) throw invalidResponse(true);
+      return { name: name.data, embeddingModel };
     } catch (error) {
       throw translateError(error, true, "store_create");
     }
@@ -285,7 +286,8 @@ export class GeminiFileSearchAdapter {
     }
   }
 
-  async getStore(storeName: string): Promise<{ name: string; embeddingModel: string }> {
+  /** Confirms a store exists and was built with `embeddingModel`. */
+  async getStore(storeName: string, embeddingModel: string = AI_MODEL_FEATURE_INFO.embedding.defaultModel): Promise<{ name: string; embeddingModel: string }> {
     const name = valid(storeNameSchema, storeName);
     try {
       const response = await this.sdk.fileSearchStores.get({ name });
@@ -293,9 +295,9 @@ export class GeminiFileSearchAdapter {
       if (
         !responseName.success
         || responseName.data !== name
-        || response.embeddingModel !== EMBEDDING_MODEL
+        || response.embeddingModel !== embeddingModel
       ) throw invalidResponse();
-      return { name: responseName.data, embeddingModel: EMBEDDING_MODEL };
+      return { name: responseName.data, embeddingModel };
     } catch (error) {
       throw translateError(error, false, "store_get");
     }

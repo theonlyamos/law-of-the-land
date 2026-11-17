@@ -5,11 +5,11 @@ import { makeFunctionReference } from "convex/server";
 import { v, type Infer } from "convex/values";
 import { internalAction, type ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import type { AiModelFeature } from "../shared/ai-models";
 import { buildPublicationMetadataFilter } from "../shared/gemini-publication-filter";
 import { DOCUMENT_REVIEW_LIMITS as LIMITS, type DocumentReviewFailure } from "../shared/document-review";
 import {
   CHECK_INSTRUCTION,
-  DEFAULT_DOCUMENT_REVIEW_MODEL,
   GAPS_INSTRUCTION,
   READING_INSTRUCTION,
   READING_SCHEMA,
@@ -71,8 +71,10 @@ class BudgetExhausted extends Error {}
 type Client = Pick<GoogleGenAI, "interactions">;
 type CreateParams = Parameters<GoogleGenAI["interactions"]["create"]>[0];
 
-function model(): string {
-  return process.env.DOCUMENT_REVIEW_MODEL?.trim() || process.env.GEMINI_AI_MODEL?.trim() || DEFAULT_DOCUMENT_REVIEW_MODEL;
+const resolveModelRef = makeFunctionReference<"query", { feature: AiModelFeature }, string>("aiModels:resolve");
+
+async function model(ctx: ActionCtx): Promise<string> {
+  return await ctx.runQuery(resolveModelRef, { feature: "document_review" });
 }
 
 /** Status and a short message from a provider error, for logs. Never includes the request. */
@@ -111,6 +113,7 @@ export const read = internalAction({
   args: { reviewId: v.id("documentReviews"), attempt: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const modelId = await model(ctx);
     const startedAt = Date.now();
     const input = await ctx.runQuery(readingInputRef, args);
     if (!input) return null;
@@ -147,7 +150,7 @@ export const read = internalAction({
       if (timeout < MIN_REQUEST_MS) break;
       try {
         const response = await client.interactions.create({
-          model: model(),
+          model: modelId,
           input: parts,
           system_instruction: READING_INSTRUCTION,
           tools: [],
@@ -204,6 +207,7 @@ export const check = internalAction({
   args: { reviewId: v.id("documentReviews"), attempt: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const modelId = await model(ctx);
     const startedAt = Date.now();
     const input = await ctx.runQuery(checkingInputRef, args);
     if (!input) return null;
@@ -227,7 +231,7 @@ export const check = internalAction({
       const timeout = Math.min(CHECK_TIMEOUT_MS, remaining());
       if (timeout < MIN_REQUEST_MS) throw new BudgetExhausted();
       const response = await client.interactions.create({
-        model: model(),
+        model: modelId,
         input: { type: "text", text: prompt },
         system_instruction: instruction,
         tools: [tool],
@@ -321,7 +325,7 @@ export const check = internalAction({
     const summaryTimeout = Math.min(SUMMARY_TIMEOUT_MS, startedAt + ACTION_LIMIT_MS - Date.now());
     if (summaryTimeout >= 10_000) try {
       const response = await client.interactions.create({
-        model: model(),
+        model: modelId,
         input: { type: "text", text: summaryPrompt(summaryInput) },
         system_instruction: SUMMARY_INSTRUCTION,
         tools: [],

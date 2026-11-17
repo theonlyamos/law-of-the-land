@@ -45,7 +45,7 @@ export type GeminiExecutionTarget =
   | {
       kind: "create_store";
       displayName: string;
-      embeddingModel: "models/gemini-embedding-2";
+      embeddingModel: string;
     }
   | {
       kind: "index_document";

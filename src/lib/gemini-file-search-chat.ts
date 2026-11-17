@@ -832,8 +832,10 @@ export class GeminiFileSearchChat {
   constructor(
     private readonly client: GeminiInteractionsClient,
     environment: Record<string, string | undefined>,
+    /** The admin-configured model, when the caller has resolved one. */
+    model?: string,
   ) {
-    this.model = environment.GEMINI_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
+    this.model = model?.trim() || environment.GEMINI_AI_MODEL?.trim() || DEFAULT_FILE_SEARCH_CHAT_MODEL;
   }
 
   async run(
