@@ -1,7 +1,9 @@
 "use node";
 
 import { GoogleGenAI } from "@google/genai";
+import { makeFunctionReference } from "convex/server";
 import { v } from "convex/values";
+import type { AiModelFeature } from "../shared/ai-models";
 import { internal } from "./_generated/api";
 import { internalAction } from "./_generated/server";
 import {
@@ -12,7 +14,7 @@ import {
   profileExtractionPrompt,
 } from "./lib/profileMemoryExtraction";
 
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const resolveModelRef = makeFunctionReference<"query", { feature: AiModelFeature }, string>("aiModels:resolve");
 const TIMEOUT_MS = 30_000;
 
 /**
@@ -29,9 +31,10 @@ export const extract = internalAction({
     if (!input || !apiKey) return null;
     let text: string | null = null;
     try {
+      const model = await ctx.runQuery(resolveModelRef, { feature: "profile_memory" });
       const client = new GoogleGenAI({ apiKey });
       const response = await client.interactions.create({
-        model: process.env.PROFILE_MEMORY_MODEL?.trim() || DEFAULT_MODEL,
+        model,
         input: profileExtractionPrompt(input.question),
         system_instruction: PROFILE_EXTRACTION_INSTRUCTION,
         tools: [],

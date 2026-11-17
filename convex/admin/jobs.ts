@@ -4,6 +4,8 @@ import { makeFunctionReference, paginationOptsValidator } from "convex/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "../_generated/server";
 import type { AdminRole } from "../lib/adminPermissions";
+import { readAiModel } from "../lib/aiModels";
+import { normalizeAiModelId } from "../../shared/ai-models";
 import {
   isGeminiDocumentName,
   isGeminiFileSearchStoreName,
@@ -31,7 +33,16 @@ const GEMINI_POLL_DELAYS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const;
 const GEMINI_INDEX_SLOW_POLL_AFTER_MS = 2 * 60 * 60_000;
 const GEMINI_INDEX_SLOW_POLL_DELAY_MS = 5 * 60_000;
 const GEMINI_INDEX_REVIEW_AFTER_MS = 6 * 60 * 60_000;
-const GEMINI_EMBEDDING_MODEL = "models/gemini-embedding-2" as const;
+/** The embedding model a create-store job was queued with. Older jobs predate the setting and used the fixed default. */
+function createStoreEmbeddingModel(job: Doc<"integrationJobs">): string | null {
+  try {
+    const payload = JSON.parse(job.payload) as { embeddingModel?: unknown };
+    if (typeof payload.embeddingModel !== "string") return null;
+    return normalizeAiModelId("embedding", payload.embeddingModel) === payload.embeddingModel ? payload.embeddingModel : null;
+  } catch {
+    return null;
+  }
+}
 const PROVIDER_DIAGNOSTIC_RETENTION_MS = 24 * 60 * 60_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_TARGET_TYPE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
@@ -293,7 +304,7 @@ function knownStoreResultMatchesJob(
   if (!isGeminiFileSearchStoreName(result.storeName)) return false;
   if (result.kind === "store_created") {
     return job.type === "gemini_create_store" &&
-      result.embeddingModel === GEMINI_EMBEDDING_MODEL;
+      result.embeddingModel === createStoreEmbeddingModel(job);
   }
   if (job.type !== "gemini_delete_store") return false;
   try {
@@ -520,18 +531,19 @@ export async function queueGeminiStoreProvision(
   const active = await activeGeminiStoreJob(ctx, jurisdiction._id, "gemini_create_store");
   if (active) return { jobId: active._id, duplicate: true };
 
+  const embeddingModel = await readAiModel(ctx, "embedding");
   const queued = await persistJob(ctx, {
     type: "gemini_create_store",
     targetType: "jurisdictionGeminiStore",
     targetId: jurisdiction._id,
     payload: {
       displayName: geminiDisplayName(jurisdiction.slug),
-      embeddingModel: GEMINI_EMBEDDING_MODEL,
+      embeddingModel,
     },
     idempotencyKey,
   }, actor);
   await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
-    geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+    geminiEmbeddingModel: embeddingModel,
     providerSyncState: "pending",
     updatedBy: actor.id,
     updatedAt: Date.now(),
@@ -689,7 +701,7 @@ const geminiTargetValidator = v.union(
   v.object({
     kind: v.literal("create_store"),
     displayName: v.string(),
-    embeddingModel: v.literal("models/gemini-embedding-2"),
+    embeddingModel: v.string(),
   }),
   v.object({
     kind: v.literal("index_document"),
@@ -758,14 +770,12 @@ export const getGeminiJobTarget = internalQuery({
     const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     if (job.type === "gemini_create_store") {
       if (!executionJurisdiction) throw new ConvexError("JURISDICTION_NOT_FOUND");
-      let payload: { displayName?: unknown; embeddingModel?: unknown };
+      let payload: { displayName?: unknown };
       try { payload = JSON.parse(job.payload) as typeof payload; }
       catch { throw new ConvexError("INTEGRATION_PAYLOAD_INVALID"); }
-      if (
-        typeof payload.displayName !== "string" ||
-        payload.embeddingModel !== GEMINI_EMBEDDING_MODEL
-      ) throw new ConvexError("INTEGRATION_PAYLOAD_INVALID");
-      return { kind: "create_store" as const, displayName: payload.displayName, embeddingModel: GEMINI_EMBEDDING_MODEL };
+      const embeddingModel = createStoreEmbeddingModel(job);
+      if (typeof payload.displayName !== "string" || embeddingModel === null) throw new ConvexError("INTEGRATION_PAYLOAD_INVALID");
+      return { kind: "create_store" as const, displayName: payload.displayName, embeddingModel };
     }
     if (job.type === "gemini_delete_store") {
       const jurisdiction = executionJurisdiction;
@@ -900,7 +910,8 @@ export const applyGeminiProviderResult = internalMutation({
     const executionJurisdiction = await assertGeminiExecutionPermit(ctx, job, now);
     if (args.result.kind === "store_created") {
       const storeName = args.result.storeName;
-      if (job.type !== "gemini_create_store" || !isGeminiFileSearchStoreName(storeName) || args.result.embeddingModel !== GEMINI_EMBEDDING_MODEL) {
+      const embeddingModel = createStoreEmbeddingModel(job);
+      if (job.type !== "gemini_create_store" || !isGeminiFileSearchStoreName(storeName) || embeddingModel === null || args.result.embeddingModel !== embeddingModel) {
         throw new ConvexError("GEMINI_PROVIDER_RESULT_INVALID");
       }
       const jurisdiction = executionJurisdiction;
@@ -914,7 +925,7 @@ export const applyGeminiProviderResult = internalMutation({
       }
       await ctx.db.patch(jurisdiction._id, { contentRevision: (jurisdiction.contentRevision ?? 0) + 1,
         geminiFileSearchStoreName: storeName,
-        geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+        geminiEmbeddingModel: embeddingModel,
         providerSyncState: "synced",
         updatedBy: job.actorId,
         updatedAt: now,

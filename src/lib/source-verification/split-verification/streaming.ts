@@ -11,7 +11,9 @@ export type StreamingStageDiagnostic = Readonly<{ stage: Stage; phase: "event" |
 export type StreamingStageConfiguration = Readonly<{ prepared: PreparedSplitInput; credential: string; fetch: typeof fetch;
   entered: Readonly<{ wall: number; mono: number }>; clock?: Clock; timer?: (callback: () => void, milliseconds: number) => unknown;
   clearTimer?: (handle: unknown) => void; onDiagnostic?: (diagnostic: StreamingStageDiagnostic) => void; thinkingPolicy?: SplitThinkingPolicy;
-  timingPolicy?: TrustedTimingPolicy }>;
+  timingPolicy?: TrustedTimingPolicy;
+  /** The admin-configured source-checking model. Defaults to the fixed protocol model. */
+  model?: string }>;
 
 type JsonObject = Record<string, unknown>;
 type Decoded = ReturnType<typeof parseProviderResponse> & { verdict: Inventory | Audit; raw: Buffer; envelope: JsonObject; identityBinding: StreamingIdentityBinding };
@@ -79,7 +81,7 @@ function partialUsage(value: unknown) {
   }
 }
 function createDecoder(request: StageRequest, prepared: PreparedSplitInput, inventory: Inventory | undefined,
-  emit: (value: Omit<StreamingStageDiagnostic, "stage">) => void) {
+  emit: (value: Omit<StreamingStageDiagnostic, "stage">) => void, model: string = GOOGLE_PROVIDER_SETTINGS.model) {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }), raw: Uint8Array[] = [], steps = new Map<number, Step>(), ids = new Set<string>();
   let rawBytes = 0, eventCount = 0, eventOrdinal = 0, modelOutputs = 0, outputBytes = 0;
   let created: JsonObject | undefined, terminal: JsonObject | undefined, boundInteractionId: string | undefined;
@@ -113,7 +115,7 @@ function createDecoder(request: StageRequest, prepared: PreparedSplitInput, inve
       if (provisional) need(Object.keys(interaction).length === 2 && own(interaction, "model") && own(interaction, "object"), "SPARSE_CREATION_FIELDS");
       const id = metadata(interaction, provisional);
       need(!own(interaction, "status") || interaction.status === "in_progress", "CREATED_STATUS");
-      need(!own(interaction, "model") || interaction.model === GOOGLE_PROVIDER_SETTINGS.model, "CREATED_MODEL_MISMATCH");
+      need(!own(interaction, "model") || interaction.model === model, "CREATED_MODEL_MISMATCH");
       if (own(interaction, "steps")) need(Array.isArray(interaction.steps) && interaction.steps.length === 0, "CREATED_STEPS_UNSUPPORTED");
       if (own(interaction, "usage")) partialUsage(interaction.usage);
       created = interaction; sparseCreation = provisional; if (!provisional) boundInteractionId = id; return;
@@ -135,7 +137,7 @@ function createDecoder(request: StageRequest, prepared: PreparedSplitInput, inve
       const streamLocal = sparseCreation && boundInteractionId === undefined && !own(interaction, "id");
       const id = metadata(interaction, streamLocal);
       need(streamLocal || boundInteractionId === undefined || id === boundInteractionId, "TERMINAL_ID_MISMATCH"); need(interaction.status === "completed", "TERMINAL_STATUS");
-      need(!own(interaction, "model") || interaction.model === GOOGLE_PROVIDER_SETTINGS.model, "TERMINAL_MODEL_MISMATCH");
+      need(!own(interaction, "model") || interaction.model === model, "TERMINAL_MODEL_MISMATCH");
       need(own(created, "model") || own(interaction, "model"), "PROVIDER_MODEL_UNOBSERVED");
       if (own(created, "created") && own(interaction, "created")) need(same(created.created, interaction.created), "TERMINAL_CREATED_MISMATCH");
       need(steps.size > 0 && modelOutputs === 1, "TERMINAL_OUTPUT_COUNT"); need([...steps.values()].every(step => step.stopped), "TERMINAL_OPEN_STEPS");
@@ -211,7 +213,7 @@ function createDecoder(request: StageRequest, prepared: PreparedSplitInput, inve
     finish(): Decoded {
       need(!finished, "DECODER_ALREADY_FINISHED"); characters(checked(() => decoder.decode(), "UTF8_EOF")); if (pendingCR) { pendingCR = false; endLine(1); }
       need(!line.length && frameBytes === 0 && frame.data.length === 0, "EOF_PARTIAL_FRAME"); need(terminal, "EOF_MISSING_TERMINAL");
-      const envelope = terminal, parsed = checked(() => parseProviderResponse(JSON.stringify(envelope)), "TERMINAL_ENVELOPE_INVALID");
+      const envelope = terminal, parsed = checked(() => parseProviderResponse(JSON.stringify(envelope), model), "TERMINAL_ENVELOPE_INVALID");
       checked(() => strictJson(parsed.json), "MODEL_JSON_INVALID");
       const verdict = checked(() => request.stage === "inventory" ? validateInventory(parsed.json, prepared) : inventory && validateAudit(request.stage, parsed.json, prepared, inventory), "STAGE_VERDICT_INVALID");
       need(verdict, "STAGE_VERDICT_INVALID"); finished = true;
@@ -229,10 +231,11 @@ async function executeStream(configuration: CapturedStreamingConfiguration, requ
   const clear = configuration.clearTimer ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const duration = Math.min(configuration.verificationMs, request.deadlineAt - entered.wall), wallLimit = entered.wall + duration;
   const monoLimit = configuration.originalMonotonicLimit - (configuration.verificationMs - duration);
-  const body = checked(() => JSON.parse(serializeGoogleBody(request, configuration.thinkingPolicy)) as JsonObject, "REQUEST_SERIALIZATION_INVALID");
-  need(body.store === false && body.model === GOOGLE_PROVIDER_SETTINGS.model, "REQUEST_SETTINGS_INVALID"); body.stream = true;
+  const model = configuration.model ?? GOOGLE_PROVIDER_SETTINGS.model;
+  const body = checked(() => JSON.parse(serializeGoogleBody(request, configuration.thinkingPolicy, model)) as JsonObject, "REQUEST_SERIALIZATION_INVALID");
+  need(body.store === false && body.model === model, "REQUEST_SETTINGS_INVALID"); body.stream = true;
   const serialized = JSON.stringify(body); checked(() => assertNoCredential(serialized, configuration.credential), "REQUEST_CREDENTIAL_ECHO");
-  const decoder = createDecoder(request, configuration.prepared, inventory, emit), aborter = new AbortController();
+  const decoder = createDecoder(request, configuration.prepared, inventory, emit, model), aborter = new AbortController();
   let reason: string | undefined, handle: unknown, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, response: Response | undefined, successful = false, closed = false;
   let rejectCancellation!: (error: StreamingFailure) => void;
   const cancellation = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; }); void cancellation.catch(() => {});

@@ -2,6 +2,7 @@ import { defineSchema, defineTable } from "convex/server";
 import { citationProvenanceValidator } from "./lib/citationProvenance";
 import { sourceVerificationInputValidator } from "./lib/sourceVerification";
 import { v } from "convex/values";
+import { aiModelFeatureValidator } from "./lib/aiModels";
 import { queryDiagnosticsValidator } from "./lib/queryDiagnostics";
 import { organizationRoleValidator, widgetSettingsFields, widgetDoneValidator, widgetErrorValidator, widgetTurnStateValidator, widgetCitationIdentityValidator } from "./lib/widgetContracts";
 import { guestErrorValidator, guestResultValidator, guestSourceValidator } from "./lib/guestResearchContracts";
@@ -860,6 +861,12 @@ export default defineSchema({
     correlationId: v.string(),
     createdAt: v.number(),
   }).index("by_operationId", ["operationId"]),
+  aiModelSettings: defineTable({
+    feature: aiModelFeatureValidator,
+    model: v.string(),
+    updatedAt: v.number(),
+    updatedBy: v.string(),
+  }).index("by_feature", ["feature"]),
   featureFlags: defineTable({
     key: v.union(v.literal("admin_panel"), v.literal("unified_jurisdictions")),
     environment: v.string(),

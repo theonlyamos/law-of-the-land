@@ -1,4 +1,5 @@
 import type { EvaluationEvidence } from "./evidence";
+import { GOOGLE_PROVIDER_SETTINGS } from "./split-verification/google-provider-settings";
 import type { EvaluationProviderUsage, GeminiEvaluationClient } from "./gemini-verifier";
 import { segmentEvaluationCandidate, validateEvaluationEvidenceProjection } from "./verdict";
 import { CONDITION_DRAFT_INSTRUCTION, sourceConditions } from "./source-conditions";
@@ -104,7 +105,8 @@ function candidateFrom(response: unknown): { candidate: string } | { reason: Rev
 }
 
 /** Injected client only; authorization and original evidence integrity belong to the caller. */
-export function createReviewedPassageDraft(client: GeminiEvaluationClient) {
+/** `model` is the admin-configured source-checking model. */
+export function createReviewedPassageDraft(client: GeminiEvaluationClient, model: string = GOOGLE_PROVIDER_SETTINGS.model) {
   return Object.freeze({ async draft(input: ReviewedPassageDraftInput): Promise<ReviewedPassageDraftResult> {
     const enteredAt = Date.now(), enteredMonotonic = performance.now();
     let deadlineAt = 0, monotonicDeadline = 0, preparation = 0, provider = 0, validation = 0;
@@ -166,7 +168,7 @@ export function createReviewedPassageDraft(client: GeminiEvaluationClient) {
         ...(sourceDisplayTitle === undefined ? {} : { source_display_title: sourceDisplayTitle }),
         ...(conditions.length ? { source_conditions: conditions } : {}) };
       const instruction = sourceDisplayTitle === undefined ? SYSTEM_INSTRUCTION : DISPLAY_TITLE_SYSTEM_INSTRUCTION;
-      const request = { model: "gemini-3.8-flash", input: JSON.stringify(prompt),
+      const request = { model, input: JSON.stringify(prompt),
         system_instruction: conditions.length ? `${instruction}\n${CONDITION_DRAFT_INSTRUCTION}` : instruction,
         tools: [], store: false, stream: false as const,
         generation_config: { thinking_level: "medium" as const, thinking_summaries: "none" as const,

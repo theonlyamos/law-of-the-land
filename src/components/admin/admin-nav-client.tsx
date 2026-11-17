@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   ClipboardCheck,
+  Cpu,
   CreditCard,
   FileText,
   Inbox,
@@ -37,6 +38,7 @@ const NAV_ITEM_ICONS: Record<string, LucideIcon> = {
   "/admin/analytics": BarChart3,
   "/admin/operations": Settings2,
   "/admin/incidents": TriangleAlert,
+  "/admin/ai-models": Cpu,
   "/admin/audit": ScrollText,
 };
 

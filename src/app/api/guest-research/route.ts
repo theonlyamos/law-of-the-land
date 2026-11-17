@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { GeminiFileSearchChat } from "@/lib/gemini-file-search-chat";
+import { getAiModel } from "@/lib/ai-models";
 import {
   assertResearchRequest, callGuestBridge, guestError, guestFailure, guestJson,
   guestSessionHash, researchBody, researchIp,
@@ -71,7 +72,7 @@ export async function POST(request: Request) {
     const terminalSignal = AbortSignal.timeout(110_000), started = Date.now();
     let providerFinished = false;
     try {
-      const engine = new GeminiFileSearchChat(new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }), process.env);
+      const engine = new GeminiFileSearchChat(new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }), process.env, await getAiModel("chat"));
       const result = await untilAborted(engine.run({
         query: input.query.trim(), stores: admitted.manifest.stores, history: admitted.messages, maxOutputTokens: 4096,
       }, {

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createPublicationFilterBinding, PUBLICATION_FILTER_PROTOCOL } from "../../../shared/gemini-publication-filter";
 import type { Interactions } from "@google/genai";
 import { ConvexHttpClient } from "convex/browser";
+import { getAiModel } from "../ai-models";
 import { makeFunctionReference } from "convex/server";
 import type { Id } from "../../../convex/_generated/dataModel";
 import type { ReviewedEmploymentCommitInput } from "../../../convex/reviewedEmploymentCompletion";
@@ -29,6 +30,8 @@ export type ReviewedEmploymentJobWorkerDependencies = Readonly<{
   /** Native service proof adapter only; no user/browser token or admin client. */
   rpc(input: ReviewedEmploymentJobWorkerInput): Promise<Reply>;
   credential: string; fetch: typeof globalThis.fetch; workerId?: string; pollIntervalMs?: number;
+  /** The admin-configured source-checking model. Defaults to the fixed protocol model. */
+  model?: string;
 }>;
 type Submission = Readonly<{ query: string; messages: readonly { role: "user" | "assistant"; content: string }[];
   historyComplete: true; selection: ReviewedEmploymentSelection; facts: string; attachmentIds: string[];
@@ -103,6 +106,7 @@ async function boundedDraftResponse(response: Response, signal: AbortSignal, cre
  * deliberately absent. No uncertain stage is retried or resumed by this worker. */
 export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmploymentJobWorkerDependencies) {
   const { rpc, fetch, credential } = dependencies;
+  const model = dependencies.model ?? GOOGLE_PROVIDER_SETTINGS.model;
   const catalog = captureReviewedEmploymentPolicy(dependencies.catalog ?? REVIEWED_EMPLOYMENT_POLICY);
   const expectedPolicyId: ReviewedEmploymentPolicyId = catalog === PRODUCTION_REVIEWED_EMPLOYMENT_POLICY ? "act651-s55-prod-v1" : "act651-s55-dev-v1";
   const policyId = dependencies.policyId ?? expectedPolicyId;
@@ -187,7 +191,7 @@ export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmployme
         const response = await raceAbort(fetch(GOOGLE_PROVIDER_SETTINGS.endpoint, { method: "POST", body, redirect: "error",
           headers: { "content-type": "application/json", "x-goog-api-key": credential }, signal }), signal);
         return await boundedDraftResponse(response, signal, credential);
-      } } });
+      } } }, model);
       const verifier = createReviewedSplitVerifier({ thinkingPolicy: "inventory_low", timingPolicy: "background",
         createExecutor: runInput => {
           const prepared = prepareSplitInput(runInput); if (!prepared) throw new WorkerStopped("verification_blocked");
@@ -206,11 +210,11 @@ export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmployme
           // three stages. Exact wire hashes select each concurrent audit's own
           // binding without a mutable shared "current request" variable.
           const execute = createStreamingStageExecutor({ prepared, credential, fetch: reservedFetch,
-            thinkingPolicy: "inventory_low", timingPolicy: "background", entered: { wall: runInput.requestStartedAt,
+            thinkingPolicy: "inventory_low", timingPolicy: "background", model, entered: { wall: runInput.requestStartedAt,
               mono: runInput.requestStartedMonotonic } });
           return async (request, signal) => {
             failure = "verification_blocked";
-            const wire = JSON.parse(serializeGoogleBody(request, "inventory_low")); wire.stream = true;
+            const wire = JSON.parse(serializeGoogleBody(request, "inventory_low", model)); wire.stream = true;
             const hash = sha(JSON.stringify(wire)); if (dispatches.has(hash)) throw new WorkerStopped("verification_blocked");
             dispatches.set(hash, request);
             try { return await execute(request, signal); } finally { dispatches.delete(hash); }
@@ -243,7 +247,7 @@ export function createReviewedEmploymentJobWorker(dependencies: ReviewedEmployme
               publicationFilterProtocol: PUBLICATION_FILTER_PROTOCOL,
               ...(publicationFilterBinding === undefined ? {} : { publicationFilterBinding }),
               assistantClientId: claim!.assistantClientId, finalAnswer: answer, answerKind: "legal", citations: [...citations],
-              model: GOOGLE_PROVIDER_SETTINGS.model, elapsedMs: Math.min(270_000, Math.max(0, Math.round(Math.max(Date.now() - claim!.createdAt,
+              model, elapsedMs: Math.min(270_000, Math.max(0, Math.round(Math.max(Date.now() - claim!.createdAt,
                 queueAgeMs + performance.now() - entryMono)))), outcome: "success",
               authorizedScopeSize: manifest.authorizedScopeSize, readyStoreCount: manifest.stores.length, partialCoverage: manifest.partialCoverage,
               jurisdictionCoverage: manifest.stores.map((store, ordinal) => ({ ordinal, relation: store.relation,
@@ -285,7 +289,7 @@ export async function runReviewedEmploymentJob(jobId: string): Promise<void> {
   if (!credential || !url || !process.env.TELEMETRY_INGEST_SECRET) return;
   const client = new ConvexHttpClient(url);
   const reference = makeFunctionReference<"mutation", ReviewedEmploymentJobWorkerInput & { jobId: Id<"reviewedEmploymentJobs">; serviceProof: string }, Reply>("reviewedEmploymentJobs:worker");
-  await createReviewedEmploymentJobWorker({ credential, fetch: globalThis.fetch, catalog,
+  await createReviewedEmploymentJobWorker({ credential, fetch: globalThis.fetch, catalog, model: await getAiModel("source_verification"),
     policyId: catalog === PRODUCTION_REVIEWED_EMPLOYMENT_POLICY ? "act651-s55-prod-v1" : "act651-s55-dev-v1", rpc: async input => {
     const serviceProof = await createTelemetryServiceProof(await reviewedEmploymentJobProofParts(input));
     return await client.mutation(reference, { ...input, jobId: input.jobId as Id<"reviewedEmploymentJobs">, serviceProof });

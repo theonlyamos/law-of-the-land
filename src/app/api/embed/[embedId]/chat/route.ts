@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { GeminiFileSearchChat } from "@/lib/gemini-file-search-chat";
+import { getAiModel } from "@/lib/ai-models";
 import { assertGuestRequest, readWidgetBody, callWidgetBridge, trustedWidgetIp, guestTokenHash, widgetErrorResponse, widgetFailureResponse } from "@/lib/embed/server";
 import { parseWidgetChatBody, validWidgetRequestId } from "../../../../../../convex/lib/widgetContracts";
 
@@ -33,7 +34,7 @@ export async function POST(request: Request, context: Context) {
           send({ type: "status", status: "generating" });
           const key = process.env.GOOGLE_AI_API_KEY;
           if (!key) throw new Error("WIDGET_UNAVAILABLE");
-          const engine = new GeminiFileSearchChat(new GoogleGenAI({ apiKey: key }), process.env);
+          const engine = new GeminiFileSearchChat(new GoogleGenAI({ apiKey: key }), process.env, await getAiModel("chat"));
           const result = await untilAborted(engine.run({ query: input.query, stores: [admitted.authority.store], history: admitted.messages, maxOutputTokens: 4096 }, { signal: providerSignal, deadlineAt: started + 90000, streamSignal: providerSignal, streamDeadlineAt: started + 90000, onDelta: () => {}, onStreamComplete: () => { providerFinished = true; } }), providerSignal);
           providerFinished = true;
           send({ type: "status", status: "validating" });

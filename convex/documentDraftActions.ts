@@ -5,9 +5,10 @@ import { makeFunctionReference } from "convex/server";
 import { v, type Infer } from "convex/values";
 import { internalAction, type ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import type { AiModelFeature } from "../shared/ai-models";
 import { buildPublicationMetadataFilter } from "../shared/gemini-publication-filter";
 import { DOCUMENT_DRAFT_LIMITS as LIMITS, type DocumentDraftFailure } from "../shared/document-draft";
-import { DEFAULT_DOCUMENT_REVIEW_MODEL, interactionOutput, interactionPlainText } from "./lib/documentReviewModel";
+import { interactionOutput, interactionPlainText } from "./lib/documentReviewModel";
 import {
   FORMALITIES_INSTRUCTION,
   PLAN_INSTRUCTION,
@@ -70,8 +71,10 @@ class BudgetExhausted extends Error {}
 type Client = Pick<GoogleGenAI, "interactions">;
 type CreateParams = Parameters<GoogleGenAI["interactions"]["create"]>[0];
 
-function model(): string {
-  return process.env.DOCUMENT_DRAFT_MODEL?.trim() || process.env.DOCUMENT_REVIEW_MODEL?.trim() || process.env.GEMINI_AI_MODEL?.trim() || DEFAULT_DOCUMENT_REVIEW_MODEL;
+const resolveModelRef = makeFunctionReference<"query", { feature: AiModelFeature }, string>("aiModels:resolve");
+
+async function model(ctx: ActionCtx): Promise<string> {
+  return await ctx.runQuery(resolveModelRef, { feature: "document_draft" });
 }
 
 /** Status and a short message from a provider error, for logs. Never includes the request. */
@@ -122,6 +125,7 @@ export const plan = internalAction({
   args: { draftId: v.id("documentDrafts"), attempt: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const modelId = await model(ctx);
     const startedAt = Date.now();
     const input = await ctx.runQuery(planningInputRef, args);
     if (!input) return null;
@@ -159,7 +163,7 @@ export const plan = internalAction({
       if (timeout < MIN_REQUEST_MS) break;
       try {
         const response = await client.interactions.create({
-          model: model(),
+          model: modelId,
           input: parts,
           system_instruction: PLAN_INSTRUCTION,
           tools: [],
@@ -196,6 +200,7 @@ export const draft = internalAction({
   args: { draftId: v.id("documentDrafts"), attempt: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const modelId = await model(ctx);
     const startedAt = Date.now();
     const input = await ctx.runQuery(draftingInputRef, args);
     if (!input) return null;
@@ -210,7 +215,7 @@ export const draft = internalAction({
       const timeout = Math.min(DRAFT_TIMEOUT_MS, remaining());
       if (timeout < MIN_REQUEST_MS) throw new BudgetExhausted();
       const response = await client.interactions.create({
-        model: model(),
+        model: modelId,
         input: { type: "text", text: prompt },
         system_instruction: instruction,
         tools: [search.tool],
@@ -316,6 +321,7 @@ export const revise = internalAction({
   args: { clauseId: v.id("documentDraftClauses"), revision: v.number(), instruction: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const modelId = await model(ctx);
     const target = { clauseId: args.clauseId, revision: args.revision };
     const input = await ctx.runQuery(revisionInputRef, target);
     if (!input) return null;
@@ -328,7 +334,7 @@ export const revise = internalAction({
     for (let attempt = 0; attempt < 2 && !clause; attempt++) {
       try {
         const response = await client.interactions.create({
-          model: model(),
+          model: modelId,
           input: { type: "text", text: revisePrompt(input.context, input.clause, args.instruction) },
           system_instruction: reviseInstruction(input.context.audience),
           tools: [search.tool],

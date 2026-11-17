@@ -4,7 +4,8 @@ import { getToken } from "@/lib/auth-server";
 import { ChatAttachmentError, readAttachmentBody } from "@/lib/chat-attachment-server";
 import { applicationOrigin } from "@/lib/embed/server";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
-import { cleanTranscript, DEFAULT_TRANSCRIBE_MODEL, geminiAudioType, MAX_RECORDING_BYTES } from "@/lib/voice-transcription";
+import { cleanTranscript, geminiAudioType, MAX_RECORDING_BYTES } from "@/lib/voice-transcription";
+import { getAiModel } from "@/lib/ai-models";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -29,7 +30,7 @@ export async function POST(request: Request): Promise<Response> {
 
     const client = new GoogleGenAI({ apiKey });
     const interaction = await client.interactions.create({
-      model: process.env.GEMINI_TRANSCRIBE_MODEL?.trim() || DEFAULT_TRANSCRIBE_MODEL,
+      model: await getAiModel("transcription"),
       input: [{ type: "audio", data: Buffer.from(bytes).toString("base64"), mime_type: mimeType }],
       // Smart mode drops filler words and fixes punctuation, which suits typed questions.
       generation_config: { transcription_config: { mode: "smart" } },

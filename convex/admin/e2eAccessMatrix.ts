@@ -19,6 +19,7 @@ export const E2E_PROTECTED_ROUTES = [
   protectedRoute("/admin/analytics", [["analytics", "read"]]),
   protectedRoute("/admin/operations", [["operations", "read"]]),
   protectedRoute("/admin/incidents", [["operations", "read"]]),
+  protectedRoute("/admin/ai-models", [["operations", "read"]]),
   protectedRoute("/admin/audit", [["audit", "read_masked"]]),
   protectedRoute("/admin/jurisdictions", [["jurisdiction", "read"], ["jurisdiction", "write"]]),
   protectedRoute("/admin/users/:userId", [["user", "read"]]),
